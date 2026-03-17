@@ -52,7 +52,7 @@ class EmbeddingService:
 
     def _load_model_sync(self):
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        os.environ.setdefault("OMP_NUM_THREADS", "2")
+        os.environ.setdefault("OMP_NUM_THREADS", str(os.cpu_count() or 2))
 
         import torch
         from sentence_transformers import SentenceTransformer

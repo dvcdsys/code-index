@@ -1,6 +1,6 @@
 services:
   code-index-api:
-    image: dvcdsys/code-index:arm64
+    image: dvcdsys/code-index:latest
     container_name: code-index
     restart: unless-stopped
     ports:
@@ -17,8 +17,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
-          cpus: "2.0"
+          memory: 10G
+          cpus: "${CPUS:-2.0}"
         reservations:
           memory: 1G
     healthcheck:
