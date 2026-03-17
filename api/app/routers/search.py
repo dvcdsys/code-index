@@ -270,7 +270,7 @@ async def project_summary(project_path: str):
         for path, count in dir_counter.most_common(10)
     ]
 
-    # Recent symbols
+    # Recent symbols + accurate count directly from DB
     cursor = await db.execute(
         "SELECT name, kind, file_path, language FROM symbols WHERE project_path = ? LIMIT 20",
         (project_path,),
@@ -281,13 +281,20 @@ async def project_summary(project_path: str):
         for r in symbol_rows
     ]
 
+    cursor = await db.execute(
+        "SELECT COUNT(*) as cnt FROM symbols WHERE project_path = ?",
+        (project_path,),
+    )
+    row = await cursor.fetchone()
+    total_symbols = row["cnt"] if row else 0
+
     return ProjectSummary(
         host_path=project_path,
         status=project["status"],
         languages=languages,
         total_files=stats.get("total_files", 0),
         total_chunks=stats.get("total_chunks", 0),
-        total_symbols=stats.get("total_symbols", 0),
+        total_symbols=total_symbols,
         top_directories=top_dirs,
         recent_symbols=recent_symbols,
     )
