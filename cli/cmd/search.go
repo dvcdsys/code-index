@@ -134,12 +134,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("   %s\n", strings.Join(meta, " | "))
 
-		// Print content (truncated)
-		content := result.Content
-		if len(content) > 300 {
-			content = content[:300] + "\n   ..."
-		}
 		fmt.Printf("   ```%s\n", result.Language)
+		content := result.Content
 		for _, line := range strings.Split(content, "\n") {
 			fmt.Printf("   %s\n", line)
 		}

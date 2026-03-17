@@ -87,12 +87,8 @@ func runReferences(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%d. [%s] %s:%d-%d (%s)\n",
 			i+1, label, ref.FilePath, ref.StartLine, ref.EndLine, ref.Language)
 
-		// Content preview (truncated)
-		content := ref.Content
-		if len(content) > 200 {
-			content = content[:200] + "..."
-		}
 		// Indent content
+		content := ref.Content
 		for _, line := range strings.Split(content, "\n") {
 			fmt.Printf("   %s\n", line)
 		}
