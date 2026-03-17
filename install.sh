@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage: curl -fsSL https://raw.githubusercontent.com/<owner>/cix/main/install.sh | bash
 #   or:  ./install.sh [--version v1.0.0] [--bin-dir /usr/local/bin]
 
-REPO="<owner>/cix"
+REPO="dvcdsys/code-index"
 BINARY_NAME="cix"
 DEFAULT_BIN_DIR="/usr/local/bin"
 
