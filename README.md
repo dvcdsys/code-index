@@ -65,7 +65,7 @@ git clone <repo-url> && cd code-index
 ./setup.sh
 ```
 
-This generates `.env` with a random API key, creates `~/.cix/data/` for persistent storage, builds the image, and starts the container.
+This generates `.env` with a random API key, creates `~/.cix/data/` for persistent storage, pulls `dvcdsys/code-index:latest` from Docker Hub, and starts the container.
 
 ```bash
 curl http://localhost:21847/health   # → {"status": "ok"}
@@ -363,6 +363,16 @@ make docker-push-all DOCKER_USER=yourname VERSION=v1.0.0
 ```
 
 This pushes `yourname/code-index:latest` (or the specified version) to Docker Hub as a multi-arch image.
+
+### Pre-built images
+
+Ready-to-use images are available on Docker Hub:
+
+| Tag | Architecture | Use case |
+|-----|-------------|----------|
+| `dvcdsys/code-index:latest` | multi-arch | default, recommended |
+| `dvcdsys/code-index:arm64` | arm64 | Mac M1/M2/M3, Orange Pi, Raspberry Pi |
+| `dvcdsys/code-index:amd64` | amd64 | x86-64 servers, VMs |
 
 ### 4. Use your image
 

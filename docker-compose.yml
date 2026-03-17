@@ -1,8 +1,6 @@
 services:
   code-index-api:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
+    image: dvcdsys/code-index:latest
     container_name: code-index
     restart: unless-stopped
     ports:

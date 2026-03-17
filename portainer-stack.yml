@@ -1,6 +1,6 @@
 services:
   code-index-api:
-    image: yourname/code-index:arm64
+    image: dvcdsys/code-index:arm64
     container_name: code-index
     restart: unless-stopped
     ports:
