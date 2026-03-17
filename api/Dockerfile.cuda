@@ -1,0 +1,44 @@
+# Single-stage CUDA 12.6 on Ubuntu 22.04
+# Python 3.12 via deadsnakes + all deps installed natively (no glibc mismatch)
+FROM nvidia/cuda:12.6.3-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Install Python 3.12 via deadsnakes PPA
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common gpg-agent curl \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    python3.12 python3.12-dev python3.12-venv \
+    build-essential gcc \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
+
+# Install pip for Python 3.12
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
+
+# Install Python deps
+WORKDIR /build
+COPY api/requirements-cuda.txt requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Pre-download embedding model (~274MB)
+RUN python -c \
+    "from sentence_transformers import SentenceTransformer; SentenceTransformer('nomic-ai/CodeRankEmbed', trust_remote_code=True)"
+
+# Clean up build deps
+RUN apt-get purge -y build-essential gcc python3.12-dev && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /build
+
+WORKDIR /app
+COPY api/app/ ./app/
+RUN mkdir -p /data/chroma /data/sqlite
+
+EXPOSE 21847
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD curl -f http://localhost:21847/health || exit 1
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "21847"]

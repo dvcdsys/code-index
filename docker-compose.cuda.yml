@@ -1,0 +1,36 @@
+services:
+  code-index-api:
+    image: dvcdsys/code-index:cuda
+    build:
+      context: .
+      dockerfile: api/Dockerfile.cuda
+    container_name: code-index
+    restart: unless-stopped
+    ports:
+      - "${PORT:-21847}:21847"
+    environment:
+      - API_KEY=${API_KEY}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-ai/CodeRankEmbed}
+      - CHROMA_PERSIST_DIR=/data/chroma
+      - SQLITE_PATH=/data/sqlite/projects.db
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-524288}
+      - EXCLUDED_DIRS=${EXCLUDED_DIRS:-node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store}
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ${HOME}/.cix/data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:21847/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3

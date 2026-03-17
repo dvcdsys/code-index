@@ -471,6 +471,29 @@ Supported targets: `darwin-arm64`, `darwin-amd64`, `linux-arm64`, `linux-amd64`.
 
 ---
 
+## Experimental
+
+### GPU Acceleration (CUDA)
+
+A CUDA-enabled image is available for servers with NVIDIA GPUs. Inference runs on GPU automatically — no configuration needed.
+
+**Docker Hub:** [`dvcdsys/code-index:cuda`](https://hub.docker.com/r/dvcdsys/code-index/tags)
+
+**Host requirements:**
+
+- NVIDIA GPU with driver **≥ 525** (CUDA 12.6 compatible)
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host
+
+**Portainer:** use `portainer-stack-cuda.yml` — deploy as a new stack with `API_KEY` env variable set.
+
+**Docker Compose:**
+
+```bash
+docker compose -f docker-compose.cuda.yml up -d
+```
+
+---
+
 ## License
 
 MIT

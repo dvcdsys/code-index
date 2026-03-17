@@ -1,3 +1,6 @@
+# CUDA build deps — mirrors requirements.txt
+# torch 2.6+ PyPI wheels include CUDA on linux/amd64 by default
+# Add CUDA-specific packages here if needed (e.g. cupy, triton extras)
 fastapi>=0.115
 uvicorn[standard]>=0.34
 sentence-transformers>=3.3
