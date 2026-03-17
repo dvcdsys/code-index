@@ -1,0 +1,8 @@
+[project]
+name = "code-index-mcp"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.7",
+    "httpx>=0.27",
+]
