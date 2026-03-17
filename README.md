@@ -61,7 +61,7 @@ The API server does the heavy lifting (ML model, ~400MB RAM). The CLI is a thin 
 **Docker (recommended)**
 
 ```bash
-git clone <repo-url> && cd code-index
+git clone https://github.com/dvcdsys/code-index && cd code-index
 ./setup.sh
 ```
 
@@ -74,7 +74,7 @@ curl http://localhost:21847/health   # → {"status": "ok"}
 **Local (no Docker)**
 
 ```bash
-git clone <repo-url> && cd code-index
+git clone https://github.com/dvcdsys/code-index && cd code-index
 ./setup-local.sh
 # Installs deps, downloads model (~274MB), starts server, writes .env
 ```
@@ -96,7 +96,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 21847
 **Option A: one-line installer (macOS / Linux)**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/cix/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install.sh | bash
 ```
 
 **Option B: from source**
