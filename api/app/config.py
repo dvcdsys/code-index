@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     sqlite_path: str = "/data/sqlite/projects.db"
     max_file_size: int = 524288
     excluded_dirs: str = "node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store"
-    onnx_model_path: str = ""  # path to ONNX model file; empty = use sentence-transformers PyTorch
+
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(__file__), "../../.env"),

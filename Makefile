@@ -1,5 +1,6 @@
-.PHONY: server-stop server-docker server-local server-logs server-status \
-        docker-setup docker-push-arm64 docker-push-amd64 docker-push-all
+.PHONY: server-stop server-docker server-docker-cuda server-local server-logs server-status \
+        docker-setup docker-push-arm64 docker-push-amd64 docker-push-all \
+        docker-push-cuda docker-build-cuda
 
 PORT       ?= 21847
 DOCKER_USER ?= $(error DOCKER_USER is not set. Run: make docker-push-all DOCKER_USER=yourname)
@@ -50,6 +51,26 @@ server-docker:
 		sleep 2; \
 	done; \
 	echo "ERROR: Server failed to start. Run: docker compose logs"; exit 1
+
+# Start API server in Docker with CUDA GPU support
+server-docker-cuda:
+	@if [ ! -f .env ]; then \
+		echo "Generating .env..."; \
+		API_KEY="cix_$$(openssl rand -hex 32)"; \
+		printf "API_KEY=$$API_KEY\nPORT=$(PORT)\nEMBEDDING_MODEL=nomic-ai/CodeRankEmbed\nMAX_FILE_SIZE=524288\nEXCLUDED_DIRS=node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store\n" > .env; \
+		echo "Created .env"; \
+	fi
+	@mkdir -p "$$HOME/.cix/data/chroma" "$$HOME/.cix/data/sqlite"
+	docker compose -f docker-compose.cuda.yml up -d --build
+	@echo "Waiting for health (CUDA)..."
+	@for i in $$(seq 1 45); do \
+		if curl -sf http://localhost:$(PORT)/health > /dev/null 2>&1; then \
+			echo "Server healthy (CUDA): http://localhost:$(PORT)"; \
+			exit 0; \
+		fi; \
+		sleep 2; \
+	done; \
+	echo "ERROR: CUDA server failed to start. Run: docker compose -f docker-compose.cuda.yml logs"; exit 1
 
 # Start API server locally
 server-local:
@@ -114,6 +135,26 @@ docker-push-amd64:
 		--push \
 		.
 
+# Build CUDA image locally (linux/amd64 only — NVIDIA GPUs are x86-64)
+docker-build-cuda:
+	docker build \
+		--platform linux/amd64 \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):cuda \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):cuda-$(VERSION) \
+		--file api/Dockerfile.cuda \
+		.
+
+# Build and push CUDA image (linux/amd64 only)
+docker-push-cuda:
+	docker buildx build \
+		--builder cix-builder \
+		--platform linux/amd64 \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):cuda \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):cuda-$(VERSION) \
+		--file api/Dockerfile.cuda \
+		--push \
+		.
+
 # Build multi-arch manifest (arm64 + amd64) under :latest
 docker-push-all:
 	docker buildx build \
@@ -127,15 +168,18 @@ docker-push-all:
 help:
 	@echo "=== Claude Code Index ==="
 	@echo ""
-	@echo "  server-docker      Start API server in Docker"
-	@echo "  server-local       Start API server locally (Python 3.11+)"
-	@echo "  server-stop        Stop API server (any mode)"
-	@echo "  server-status      Check if server is running"
-	@echo "  server-logs        Tail server logs"
+	@echo "  server-docker       Start API server in Docker (CPU)"
+	@echo "  server-docker-cuda  Start API server in Docker (NVIDIA GPU)"
+	@echo "  server-local        Start API server locally (Python 3.11+)"
+	@echo "  server-stop         Stop API server (any mode)"
+	@echo "  server-status       Check if server is running"
+	@echo "  server-logs         Tail server logs"
 	@echo ""
 	@echo "  docker-setup        Create buildx builder (run once)"
 	@echo "  docker-push-arm64   Build & push :arm64  (Mac M3, Orange Pi 5)"
 	@echo "  docker-push-amd64   Build & push :amd64  (x86-64 servers)"
+	@echo "  docker-push-cuda    Build & push :cuda   (NVIDIA GPU servers)"
 	@echo "  docker-push-all     Build & push multi-arch manifest :latest"
+	@echo "  docker-build-cuda   Build CUDA image locally"
 	@echo ""
 	@echo "  Usage: make docker-push-arm64 DOCKER_USER=yourdockerhubname"
