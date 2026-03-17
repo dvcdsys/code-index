@@ -1,4 +1,4 @@
-> **Work in progress.** This project was largely vibe-coded. Use at your own risk.
+> **Work in progress.** This project was largely vibe-coded. Use at your own risk. **Require python 3.12**
 
 ```
  ██████╗██╗██╗  ██╗
