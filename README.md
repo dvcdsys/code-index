@@ -290,6 +290,8 @@ Supported languages: Python, TypeScript, JavaScript, Go, Rust, Java (+ 40+ other
 | `EMBEDDING_MODEL` | `nomic-ai/CodeRankEmbed` | HuggingFace model name |
 | `MAX_FILE_SIZE` | `524288` | Skip files larger than this (bytes) |
 | `EXCLUDED_DIRS` | `node_modules,.git,.venv,...` | Comma-separated dirs to skip |
+| `CPUS` | `2.0` | Number of CPU cores available to the container |
+| `OMP_NUM_THREADS` | all cores | OpenMP threads used by the embedding model (CPU inference) |
 | `CHROMA_PERSIST_DIR` | `~/.cix/data/chroma` (local) | ChromaDB storage path — **local mode only**, ignored in Docker |
 | `SQLITE_PATH` | `~/.cix/data/sqlite/projects.db` (local) | SQLite database path — **local mode only**, ignored in Docker |
 
@@ -301,7 +303,7 @@ In Docker mode, data is stored in `~/.cix/data/` on the host via bind mount — 
 |--|--------|-------|
 | Memory (idle) | 2–4GB | 2–4GB |
 | Memory (indexing) | up to 4–6GB | up to 4–6GB |
-| CPU | capped at 2 cores | no limit |
+| CPU | `CPUS` env var (default: 2) | no limit |
 | Disk | `~/.cix/data/` (~50–200MB/project) | `~/.cix/data/` (~50–200MB/project) |
 | Auto-restart | yes | no (use launchd/systemd) |
 
@@ -316,6 +318,10 @@ docker compose logs -f         # tail logs
 docker compose restart         # restart
 docker compose up -d --build   # rebuild after code changes
 docker compose down -v         # stop + delete all indexed data
+
+# Use more CPU cores (default: 2)
+CPUS=8 docker compose up -d
+CPUS=0 docker compose up -d   # 0 = no limit
 ```
 
 ---
