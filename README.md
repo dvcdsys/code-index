@@ -1,4 +1,4 @@
-> **Work in progress.** This project was largely vibe-coded. Use at your own risk. **Require python 3.12**
+> **Work in progress.** This project was largely vibe-coded. Use at your own risk.
 
 ```
  ██████╗██╗██╗  ██╗
@@ -58,37 +58,68 @@ The API server does the heavy lifting (ML model, ~400MB RAM). The CLI is a thin 
 
 ### 1. Start the API Server
 
-**Docker (recommended)**
+Three deployment options — pick the one that fits your setup:
+
+| Mode | Best for | GPU acceleration | Prerequisites |
+|------|----------|-----------------|---------------|
+| **Local** | macOS (Apple Silicon), development | MPS (Apple GPU) | none — `uv` installs Python automatically |
+| **Docker** | any OS, isolation, servers | CPU only | Docker |
+| **CUDA** | NVIDIA GPU servers | CUDA | Docker, NVIDIA Container Toolkit |
+
+#### Local (recommended for Mac)
+
+Native execution with automatic Apple MPS (Metal) GPU acceleration on Apple Silicon. No Python or Docker required — the setup script installs everything via [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/dvcdsys/code-index && cd code-index
-./setup.sh
+./setup-local.sh    # or: make server-local-setup
 ```
 
-This generates `.env` with a random API key, creates `~/.cix/data/` for persistent storage, pulls `dvcdsys/code-index:latest` from Docker Hub, and starts the container.
+This installs `uv` (if needed), downloads Python 3.12 automatically, installs dependencies, downloads the embedding model (~274MB), starts the server, and registers the MCP server in Claude Code.
 
 ```bash
 curl http://localhost:21847/health   # → {"status": "ok"}
 ```
 
-**Local (no Docker)**
+Daily usage after setup:
+
+```bash
+make server-local-start     # start server
+make server-local-stop      # stop server
+make server-local-restart   # restart server
+make server-local-status    # check status
+make server-local-logs      # tail logs
+```
+
+#### Docker (CPU)
 
 ```bash
 git clone https://github.com/dvcdsys/code-index && cd code-index
-./setup-local.sh
-# Installs deps, downloads model (~274MB), starts server, writes .env
+./setup.sh    # or: make server-docker-start
 ```
 
-Or manually:
+This generates `.env` with a random API key, creates `~/.cix/data/` for persistent storage, pulls `dvcdsys/code-index:latest` from Docker Hub, and starts the container.
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r api/requirements.txt
+make server-docker-start    # start
+make server-docker-stop     # stop
+make server-docker-restart  # restart
+make server-docker-status   # check status
+make server-docker-logs     # tail logs
+```
 
-# Create .env (see Configuration section)
+> **Note:** Docker Desktop on Mac runs a Linux VM — Apple Metal/MPS is not available inside containers. For GPU-accelerated inference on Mac, use the Local mode instead.
 
-source .env && cd api
-uvicorn app.main:app --host 0.0.0.0 --port 21847
+#### CUDA (NVIDIA GPU)
+
+See [GPU Acceleration (CUDA)](#gpu-acceleration-cuda) section below.
+
+```bash
+make server-cuda-start      # start
+make server-cuda-stop       # stop
+make server-cuda-restart    # restart
+make server-cuda-status     # check status
+make server-cuda-logs       # tail logs
 ```
 
 ### 2. Install the CLI
@@ -299,29 +330,43 @@ In Docker mode, data is stored in `~/.cix/data/` on the host via bind mount — 
 
 ### Resource Usage
 
-| | Docker | Local |
-|--|--------|-------|
-| Memory (idle) | 2–4GB | 2–4GB |
-| Memory (indexing) | up to 4–6GB | up to 4–6GB |
-| CPU | `CPUS` env var (default: 2) | no limit |
-| Disk | `~/.cix/data/` (~50–200MB/project) | `~/.cix/data/` (~50–200MB/project) |
-| Auto-restart | yes | no (use launchd/systemd) |
+| | Local (native) | Docker (CPU) | CUDA |
+|--|----------------|--------------|------|
+| Memory (idle) | 2-4GB | 2-4GB | 2-4GB |
+| Memory (indexing) | up to 4-6GB | up to 4-6GB | up to 4-6GB |
+| CPU | no limit | `CPUS` env var (default: 2) | unlimited |
+| GPU | MPS (Apple Silicon) | none | NVIDIA CUDA |
+| Disk | `~/.cix/data/` (~50-200MB/project) | same | same |
+| Auto-restart | no (use launchd/systemd) | yes | yes |
 
 ---
 
-## Docker Management
+## Server Management
+
+All commands follow the pattern `make server-{mode}-{action}`:
 
 ```bash
-docker compose up -d           # start
-docker compose down            # stop
-docker compose logs -f         # tail logs
-docker compose restart         # restart
-docker compose up -d --build   # rebuild after code changes
-docker compose down -v         # stop + delete all indexed data
+# Local (native, MPS on Apple Silicon)
+make server-local-setup     # first-time setup (installs uv, Python, deps)
+make server-local-start     # start server
+make server-local-stop      # stop server
+make server-local-restart   # restart server
+make server-local-status    # check status
+make server-local-logs      # tail logs
 
-# Use more CPU cores (default: 2)
-CPUS=8 docker compose up -d
-CPUS=0 docker compose up -d   # 0 = no limit
+# Docker (CPU)
+make server-docker-start    # start server
+make server-docker-stop     # stop server
+make server-docker-restart  # restart server
+make server-docker-status   # check status
+make server-docker-logs     # tail logs
+
+# CUDA (NVIDIA GPU)
+make server-cuda-start      # start server
+make server-cuda-stop       # stop server
+make server-cuda-restart    # restart server
+make server-cuda-status     # check status
+make server-cuda-logs       # tail logs
 ```
 
 ---
@@ -379,6 +424,7 @@ Ready-to-use images are available on Docker Hub:
 | `dvcdsys/code-index:latest` | multi-arch | default, recommended |
 | `dvcdsys/code-index:arm64` | arm64 | Mac M1/M2/M3, Orange Pi, Raspberry Pi |
 | `dvcdsys/code-index:amd64` | amd64 | x86-64 servers, VMs |
+| `dvcdsys/code-index:cuda` | amd64 | NVIDIA GPU servers |
 
 ### 4. Use your image
 
@@ -393,7 +439,7 @@ services:
 Then start as usual:
 
 ```bash
-docker compose up -d
+make server-docker-start
 ```
 
 ---
@@ -433,8 +479,9 @@ cix config set api.key $(grep API_KEY /path/to/code-index/.env | cut -d= -f2)
 **`connection refused`**
 ```bash
 curl http://localhost:21847/health   # check if server is up
-docker compose up -d                # Docker
-./setup-local.sh                    # local
+make server-local-start             # local
+make server-docker-start            # Docker
+make server-cuda-start              # CUDA
 ```
 
 **`project not found`**
@@ -471,9 +518,7 @@ Supported targets: `darwin-arm64`, `darwin-amd64`, `linux-arm64`, `linux-amd64`.
 
 ---
 
-## Experimental
-
-### GPU Acceleration (CUDA)
+## GPU Acceleration (CUDA)
 
 A CUDA-enabled image is available for servers with NVIDIA GPUs. Inference runs on GPU automatically — no configuration needed.
 
@@ -481,15 +526,24 @@ A CUDA-enabled image is available for servers with NVIDIA GPUs. Inference runs o
 
 **Host requirements:**
 
-- NVIDIA GPU with driver **≥ 525** (CUDA 12.6 compatible)
+- NVIDIA GPU with driver **>= 525** (CUDA 12.6 compatible)
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host
-
-**Portainer:** use `portainer-stack-cuda.yml` — deploy as a new stack with `API_KEY` env variable set.
 
 **Docker Compose:**
 
 ```bash
+make server-cuda-start
+# or manually:
 docker compose -f docker-compose.cuda.yml up -d
+```
+
+**Portainer:** use `portainer-stack-cuda.yml` — deploy as a new stack with `API_KEY` env variable set.
+
+```bash
+make server-cuda-stop       # stop
+make server-cuda-restart    # restart
+make server-cuda-status     # check status
+make server-cuda-logs       # tail logs
 ```
 
 ---

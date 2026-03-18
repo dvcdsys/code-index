@@ -66,11 +66,10 @@ fi
 if command -v claude &>/dev/null; then
     echo "Registering MCP server in Claude Code..."
     claude mcp remove code-index 2>/dev/null || true
-    claude mcp add \
+    claude mcp add code-index \
         --scope user \
         -e CODE_INDEX_API_URL="http://localhost:${PORT:-21847}" \
         -e CODE_INDEX_API_KEY="$API_KEY" \
-        code-index \
         -- uv run --directory "$PROJECT_DIR" python -m mcp_server
     echo "✓ MCP server registered"
 fi
