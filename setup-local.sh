@@ -7,25 +7,28 @@ DATA_DIR="$HOME/.cix/data"
 
 echo "=== Claude Code Index — Local Setup ==="
 
-# 1. Check Python
-if ! command -v python3 &>/dev/null; then
-    echo "ERROR: python3 is required. Install Python 3.11+ first."
-    exit 1
+# 1. Ensure uv is installed (manages Python automatically)
+if ! command -v uv &>/dev/null; then
+    echo "Installing uv (Python package manager)..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # Add to current session
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    if ! command -v uv &>/dev/null; then
+        echo "ERROR: uv installation failed. Install manually: https://docs.astral.sh/uv/"
+        exit 1
+    fi
 fi
+echo "uv: $(uv --version)"
 
-PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-echo "Python version: $PYTHON_VERSION"
-
-# 2. Create virtual environment
+# 2. Create virtual environment with Python 3.12 (auto-downloads if needed)
 if [ ! -d "$PROJECT_DIR/.venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv "$PROJECT_DIR/.venv"
+    echo "Creating virtual environment (Python 3.12)..."
+    uv venv --python 3.12 "$PROJECT_DIR/.venv"
 fi
-source "$PROJECT_DIR/.venv/bin/activate"
 
 # 3. Install API dependencies
 echo "Installing dependencies (first time downloads ~274MB embedding model)..."
-pip install -q -r "$PROJECT_DIR/api/requirements.txt"
+uv pip install --python "$PROJECT_DIR/.venv/bin/python" -r "$PROJECT_DIR/api/requirements.txt"
 
 # 4. Create data directories
 mkdir -p "$DATA_DIR/chroma" "$DATA_DIR/sqlite"
@@ -51,8 +54,9 @@ fi
 source "$ENV_FILE"
 
 # 6. Pre-download embedding model
+VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 echo "Ensuring embedding model is downloaded..."
-python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${EMBEDDING_MODEL:-nomic-ai/CodeRankEmbed}', trust_remote_code=True)" 2>/dev/null
+"$VENV_PYTHON" -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${EMBEDDING_MODEL:-nomic-ai/CodeRankEmbed}', trust_remote_code=True)" 2>/dev/null
 
 # 7. Start API server in background
 echo "Starting API server on port ${PORT:-21847}..."
@@ -92,11 +96,10 @@ done
 # 9. Register MCP server
 echo "Registering MCP server in Claude Code..."
 claude mcp remove code-index 2>/dev/null || true
-claude mcp add \
+claude mcp add code-index \
     --scope user \
     -e CODE_INDEX_API_URL="http://localhost:${PORT:-21847}" \
     -e CODE_INDEX_API_KEY="$API_KEY" \
-    code-index \
     -- uv run --directory "$PROJECT_DIR" python -m mcp_server
 
 # 10. Add instructions to global CLAUDE.md
