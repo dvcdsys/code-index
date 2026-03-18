@@ -1,8 +1,11 @@
 .PHONY: server-stop server-docker server-docker-cuda server-local server-logs server-status \
         docker-setup docker-push-arm64 docker-push-amd64 docker-push-all \
-        docker-push-cuda docker-build-cuda
+        docker-push-cuda docker-build-cuda \
+        test test-server test-client test-deps
 
 PORT       ?= 21847
+# Use venv python if present, otherwise fall back to python3
+PYTHON     ?= $(shell test -f .venv/bin/python && echo .venv/bin/python || echo python3)
 DOCKER_USER ?= $(error DOCKER_USER is not set. Run: make docker-push-all DOCKER_USER=yourname)
 IMAGE_NAME  ?= code-index
 VERSION     ?= latest
@@ -165,6 +168,21 @@ docker-push-all:
 		--push \
 		.
 
+# Install Python test dependencies (pytest, httpx)
+test-setup:
+	$(PYTHON) -m pip install -r api/requirements-dev.txt
+
+# Run all tests (server + client)
+test: test-server test-client
+
+# Run Python API server tests (exit code 5 = no tests collected, treated as ok)
+test-server:
+	$(PYTHON) -m pytest api/ -v; code=$$?; [ $$code -eq 5 ] && exit 0 || exit $$code
+
+# Run Go CLI client tests
+test-client:
+	cd cli && go test -v ./...
+
 help:
 	@echo "=== Claude Code Index ==="
 	@echo ""
@@ -174,6 +192,10 @@ help:
 	@echo "  server-stop         Stop API server (any mode)"
 	@echo "  server-status       Check if server is running"
 	@echo "  server-logs         Tail server logs"
+	@echo ""
+	@echo "  test                Run all tests (server + client)"
+	@echo "  test-server         Run Python API server tests"
+	@echo "  test-client         Run Go CLI client tests"
 	@echo ""
 	@echo "  docker-setup        Create buildx builder (run once)"
 	@echo "  docker-push-arm64   Build & push :arm64  (Mac M3, Orange Pi 5)"

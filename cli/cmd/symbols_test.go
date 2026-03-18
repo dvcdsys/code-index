@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -99,11 +101,19 @@ func TestRunSymbols_WithKindFilter(t *testing.T) {
 	proj := t.TempDir()
 	hash := projectHash(proj)
 
+	var receivedKinds []string
+
 	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/api/v1/projects"):
 			writeJSON(w, 200, map[string]any{"projects": []any{}, "total": 0})
 		case strings.Contains(r.URL.Path, hash+"/search/symbols"):
+			body, _ := io.ReadAll(r.Body)
+			var req map[string]json.RawMessage
+			_ = json.Unmarshal(body, &req)
+			if raw, ok := req["kinds"]; ok {
+				_ = json.Unmarshal(raw, &receivedKinds)
+			}
 			writeJSON(w, 200, map[string]any{
 				"results": []map[string]any{
 					{"name": "UserService", "kind": "class", "file_path": proj + "/service.go", "line": 1, "end_line": 50, "language": "go"},
@@ -131,6 +141,9 @@ func TestRunSymbols_WithKindFilter(t *testing.T) {
 	}
 	if !strings.Contains(out, "UserService") {
 		t.Errorf("expected symbol in output, got:\n%s", out)
+	}
+	if len(receivedKinds) != 1 || receivedKinds[0] != "class" {
+		t.Errorf("expected kinds=[\"class\"] in request body, got %v", receivedKinds)
 	}
 }
 
@@ -162,5 +175,8 @@ func TestRunSymbols_APIError(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "search failed") {
+		t.Errorf("expected 'search failed' in error, got: %v", err)
 	}
 }
