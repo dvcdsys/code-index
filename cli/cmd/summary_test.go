@@ -85,4 +85,7 @@ func TestRunSummary_APIError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	if !strings.Contains(err.Error(), "get summary") {
+		t.Errorf("expected 'get summary' in error, got: %v", err)
+	}
 }

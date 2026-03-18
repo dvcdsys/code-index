@@ -126,4 +126,7 @@ func TestRunDefinitions_APIError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	if !strings.Contains(err.Error(), "search failed") {
+		t.Errorf("expected 'search failed' in error, got: %v", err)
+	}
 }

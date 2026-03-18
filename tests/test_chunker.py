@@ -91,7 +91,8 @@ class TestChunkerPython:
         chunks = chunker.chunk_file("test.py", PYTHON_CODE, "python")
         method_chunks = [c for c in chunks if c.chunk_type == "method"]
         method_names = {c.symbol_name for c in method_chunks}
-        assert "add" in method_names or "__init__" in method_names
+        assert "add" in method_names
+        assert "__init__" in method_names
 
     def test_module_chunks(self):
         chunker = _make_chunker()

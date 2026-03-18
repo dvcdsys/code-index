@@ -172,8 +172,9 @@ func TestRunSearch_SubdirectoryResolvesToProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Output should show the resolved project root, not the subdirectory
-	if strings.Contains(out, sub) && !strings.Contains(out, proj) {
-		t.Errorf("expected output to reference project root %q, got:\n%s", proj, out)
+	// A successful response (not 404) confirms the correct project hash was used.
+	// With empty results the output should say "No results".
+	if !strings.Contains(out, "No results") {
+		t.Errorf("expected 'No results' confirming project root was resolved correctly, got:\n%s", out)
 	}
 }

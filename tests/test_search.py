@@ -71,7 +71,8 @@ def test_file_search(client, project_with_index):
     )
     assert r.status_code == 200
     data = r.json()
-    assert "results" in data
+    assert "files" in data
+    assert "total" in data
 
 
 def test_project_summary(client, project_with_index):
@@ -94,6 +95,10 @@ def test_search_with_filters(client, project_with_index):
         },
     )
     assert r.status_code == 200
+    data = r.json()
+    assert "results" in data
+    assert "total" in data
+    assert "query_time_ms" in data
 
 
 def test_search_nonexistent_project(client):
