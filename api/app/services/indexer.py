@@ -12,6 +12,7 @@ from ..database import get_db
 from .chunker import chunker_service
 from .embeddings import embedding_service
 from .file_discovery import file_discovery_service
+from .reference_index import reference_index_service
 from .symbol_index import SymbolInfo, symbol_index_service
 from .vector_store import vector_store_service
 
@@ -74,6 +75,7 @@ class IndexerService:
             vector_store_service.delete_collection(project_path)
             await db.execute("DELETE FROM file_hashes WHERE project_path = ?", (project_path,))
             await db.execute("DELETE FROM symbols WHERE project_path = ?", (project_path,))
+            await db.execute("DELETE FROM refs WHERE project_path = ?", (project_path,))
             await db.commit()
         else:
             cursor = await db.execute(
@@ -108,6 +110,7 @@ class IndexerService:
         files_accepted = 0
         batch_chunks = 0
         batch_symbols: list[SymbolInfo] = []
+        batch_references = []
 
         for file_payload in files:
             try:
@@ -118,7 +121,8 @@ class IndexerService:
                 language = file_payload.language or "text"
                 session.languages_seen.add(language)
 
-                chunks = chunker_service.chunk_file(file_payload.path, content, language)
+                result = chunker_service.chunk_file(file_payload.path, content, language)
+                chunks = result.chunks
                 if not chunks:
                     continue
 
@@ -139,12 +143,15 @@ class IndexerService:
                             )
                         )
 
+                batch_references.extend(result.references)
+
                 texts = [f"{c.chunk_type}: {c.content}" for c in chunks]
                 embeddings = await embedding_service.embed_texts(texts)
 
-                # Delete old chunks and symbols BEFORE inserting new ones
+                # Delete old chunks, symbols, and references BEFORE inserting new ones
                 await vector_store_service.delete_by_file(project_path, file_payload.path)
                 await symbol_index_service.delete_by_file(project_path, file_payload.path)
+                await reference_index_service.delete_by_file(project_path, file_payload.path)
 
                 await vector_store_service.upsert_chunks(project_path, chunks, embeddings)
                 batch_chunks += len(chunks)
@@ -163,6 +170,8 @@ class IndexerService:
 
         if batch_symbols:
             await symbol_index_service.upsert_symbols(project_path, batch_symbols)
+        if batch_references:
+            await reference_index_service.upsert_references(project_path, batch_references)
         await db.commit()
         gc.collect()
 
@@ -199,6 +208,7 @@ class IndexerService:
         for del_path in deleted_paths:
             await vector_store_service.delete_by_file(project_path, del_path)
             await symbol_index_service.delete_by_file(project_path, del_path)
+            await reference_index_service.delete_by_file(project_path, del_path)
             await db.execute(
                 "DELETE FROM file_hashes WHERE project_path = ? AND file_path = ?",
                 (project_path, del_path),
@@ -388,6 +398,7 @@ class IndexerService:
                 for del_path in deleted:
                     await vector_store_service.delete_by_file(project_path, del_path)
                     await symbol_index_service.delete_by_file(project_path, del_path)
+                    await reference_index_service.delete_by_file(project_path, del_path)
                     await db.execute(
                         "DELETE FROM file_hashes WHERE project_path = ? AND file_path = ?",
                         (project_path, del_path),
@@ -401,6 +412,9 @@ class IndexerService:
                 )
                 await db.execute(
                     "DELETE FROM symbols WHERE project_path = ?", (project_path,)
+                )
+                await db.execute(
+                    "DELETE FROM refs WHERE project_path = ?", (project_path,)
                 )
 
             progress.files_total = len(to_process)
@@ -422,6 +436,7 @@ class IndexerService:
             # Phase 2-4: Process files in batches to limit memory usage
             BATCH_COMMIT_SIZE = max(1, batch_size)  # commit DB and flush symbols every N files
             batch_symbols: list[SymbolInfo] = []
+            batch_references = []
             total_chunks = 0
             total_symbols = 0
             now = datetime.now(timezone.utc).isoformat()
@@ -452,9 +467,10 @@ class IndexerService:
                     languages_seen.add(language)
 
                     # Chunk
-                    chunks = chunker_service.chunk_file(
+                    result = chunker_service.chunk_file(
                         file_info.host_path, content, language
                     )
+                    chunks = result.chunks
                     if not chunks:
                         continue
 
@@ -476,6 +492,8 @@ class IndexerService:
                                 )
                             )
 
+                    batch_references.extend(result.references)
+
                     # Embed
                     progress.phase = "embedding"
                     texts = [
@@ -487,6 +505,7 @@ class IndexerService:
                     progress.phase = "storing"
                     await vector_store_service.delete_by_file(project_path, file_info.host_path)
                     await symbol_index_service.delete_by_file(project_path, file_info.host_path)
+                    await reference_index_service.delete_by_file(project_path, file_info.host_path)
 
                     # Store in vector DB
                     await vector_store_service.upsert_chunks(
@@ -508,20 +527,25 @@ class IndexerService:
                     logger.error("Error processing %s: %s", file_info.path, e)
                     continue
 
-                # Flush batch: commit DB, store symbols, free memory every N files
+                # Flush batch: commit DB, store symbols/refs, free memory every N files
                 if (i + 1) % BATCH_COMMIT_SIZE == 0:
                     if batch_symbols:
                         await symbol_index_service.upsert_symbols(project_path, batch_symbols)
                         total_symbols += len(batch_symbols)
                         batch_symbols = []
+                    if batch_references:
+                        await reference_index_service.upsert_references(project_path, batch_references)
+                        batch_references = []
                     await db.commit()
                     gc.collect()
                     logger.debug("Batch committed: %d/%d files", i + 1, len(to_process))
 
-            # Flush remaining symbols
+            # Flush remaining symbols and references
             if batch_symbols:
                 await symbol_index_service.upsert_symbols(project_path, batch_symbols)
                 total_symbols += len(batch_symbols)
+            if batch_references:
+                await reference_index_service.upsert_references(project_path, batch_references)
 
             # Update project stats
             progress.files_processed = len(to_process)

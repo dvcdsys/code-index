@@ -46,6 +46,20 @@ CREATE INDEX IF NOT EXISTS idx_symbols_project_name ON symbols(project_path, nam
 CREATE INDEX IF NOT EXISTS idx_symbols_project_kind ON symbols(project_path, kind);
 CREATE INDEX IF NOT EXISTS idx_symbols_project_file ON symbols(project_path, file_path);
 
+CREATE TABLE IF NOT EXISTS refs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    col INTEGER NOT NULL,
+    language TEXT NOT NULL,
+    FOREIGN KEY (project_path) REFERENCES projects(host_path) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_refs_project_name ON refs(project_path, name);
+CREATE INDEX IF NOT EXISTS idx_refs_project_file ON refs(project_path, file_path);
+
 CREATE TABLE IF NOT EXISTS index_runs (
     id TEXT PRIMARY KEY,
     project_path TEXT NOT NULL,
