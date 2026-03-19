@@ -28,6 +28,7 @@ from ..schemas.search import (
     SymbolSearchResponse,
 )
 from ..services.embeddings import embedding_service
+from ..services.reference_index import reference_index_service
 from ..services.symbol_index import symbol_index_service
 from ..services.vector_store import vector_store_service
 
@@ -197,47 +198,26 @@ async def definition_search(project_path: str, body: DefinitionRequest):
 
 @router.post("/{project_path}/search/references", response_model=ReferenceResponse)
 async def reference_search(project_path: str, body: ReferenceRequest):
-    """Find References — find all code chunks where a symbol is used."""
+    """Find References — find all places where a symbol is used (AST-based)."""
     project_path = await resolve_project_path(project_path)
     await _get_project(project_path)
 
-    collection = vector_store_service.get_or_create_collection(project_path)
+    refs = await reference_index_service.search(
+        project_path, body.symbol, file_path=body.file_path, limit=body.limit,
+    )
 
-    # Search ChromaDB for chunks containing the symbol name
-    where_doc = {"$contains": body.symbol}
-    where_filter = None
-    if body.file_path:
-        where_filter = {"file_path": body.file_path}
-
-    try:
-        query_result = collection.get(
-            where_document=where_doc,
-            where=where_filter,
-            include=["documents", "metadatas"],
-            limit=body.limit,
+    results = [
+        ReferenceItem(
+            file_path=ref.file_path,
+            start_line=ref.line,
+            end_line=ref.line,
+            content="",
+            chunk_type="reference",
+            symbol_name=ref.name,
+            language=ref.language,
         )
-    except Exception:
-        # Fallback: no results
-        return ReferenceResponse(results=[], total=0)
-
-    results = []
-    if query_result and query_result["ids"]:
-        for i in range(len(query_result["ids"])):
-            metadata = query_result["metadatas"][i]
-            content = query_result["documents"][i]
-
-            results.append(ReferenceItem(
-                file_path=metadata["file_path"],
-                start_line=metadata["start_line"],
-                end_line=metadata["end_line"],
-                content=content,
-                chunk_type=metadata["chunk_type"],
-                symbol_name=metadata.get("symbol_name", ""),
-                language=metadata.get("language", ""),
-            ))
-
-    # Sort: definitions first (where symbol_name matches), then by file_path
-    results.sort(key=lambda r: (r.symbol_name != body.symbol, r.file_path, r.start_line))
+        for ref in refs
+    ]
 
     return ReferenceResponse(results=results, total=len(results))
 

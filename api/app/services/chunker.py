@@ -39,6 +39,50 @@ LANGUAGE_NODES: dict[str, dict[str, list[str]]] = {
 
 MAX_CHUNK_SIZE = 6000  # chars (~1500 tokens); balances completeness vs memory
 
+# Identifier leaf-node types per language (for reference extraction)
+IDENTIFIER_NODES: dict[str, set[str]] = {
+    "python": {"identifier"},
+    "typescript": {"identifier", "type_identifier", "property_identifier"},
+    "javascript": {"identifier", "property_identifier"},
+    "go": {"identifier", "type_identifier", "field_identifier"},
+    "rust": {"identifier", "type_identifier", "field_identifier"},
+    "java": {"identifier", "type_identifier"},
+}
+
+# Names to skip when extracting references (keywords, builtins, noise)
+SKIP_NAMES: set[str] = {
+    # Python
+    "self", "cls", "None", "True", "False", "print", "len", "range", "type",
+    "list", "dict", "set", "tuple", "int", "str", "float", "bool", "bytes",
+    "object", "Exception", "isinstance", "hasattr", "getattr", "setattr",
+    # JS/TS
+    "undefined", "null", "true", "false", "console", "window", "document",
+    "Array", "Object", "String", "Number", "Boolean", "Promise", "Map", "Set",
+    # Go
+    "nil", "fmt", "err", "ctx",
+    # Rust
+    "Ok", "Err", "Some",
+    # Common
+    "this", "super", "void",
+}
+
+MIN_REF_NAME_LENGTH = 2
+
+
+@dataclass
+class ReferenceInfo:
+    name: str
+    file_path: str
+    line: int      # 1-based
+    col: int       # 0-based
+    language: str
+
+
+@dataclass
+class ChunkResult:
+    chunks: list["CodeChunk"]
+    references: list[ReferenceInfo]
+
 
 @dataclass
 class CodeChunk:
@@ -57,12 +101,15 @@ class ChunkerService:
     def __init__(self):
         self._parsers: dict[str, object] = {}
 
-    def chunk_file(self, file_path: str, content: str, language: str) -> list[CodeChunk]:
+    def chunk_file(self, file_path: str, content: str, language: str) -> ChunkResult:
         try:
             return self._chunk_with_treesitter(content, language, file_path)
         except Exception as e:
             logger.debug("Tree-sitter failed for %s (%s): %s, falling back to sliding window", file_path, language, e)
-            return self._chunk_sliding_window(content, file_path, language)
+            return ChunkResult(
+                chunks=self._chunk_sliding_window(content, file_path, language),
+                references=[],
+            )
 
     def _get_parser(self, language: str):
         if language not in self._parsers:
@@ -73,15 +120,21 @@ class ChunkerService:
                 return None
         return self._parsers[language]
 
-    def _chunk_with_treesitter(self, content: str, language: str, file_path: str) -> list[CodeChunk]:
+    def _chunk_with_treesitter(self, content: str, language: str, file_path: str) -> ChunkResult:
         parser = self._get_parser(language)
         if parser is None:
-            return self._chunk_sliding_window(content, file_path, language)
+            return ChunkResult(
+                chunks=self._chunk_sliding_window(content, file_path, language),
+                references=[],
+            )
 
         tree = parser.parse(content.encode("utf-8"))
         node_types = LANGUAGE_NODES.get(language, {})
         if not node_types:
-            return self._chunk_sliding_window(content, file_path, language)
+            return ChunkResult(
+                chunks=self._chunk_sliding_window(content, file_path, language),
+                references=[],
+            )
 
         # Build flat list of all target node types
         target_types = set()
@@ -98,6 +151,11 @@ class ChunkerService:
         self._extract_nodes(
             tree.root_node, target_types, type_to_kind, lines,
             file_path, language, chunks, covered_ranges, parent_name=None,
+        )
+
+        # Extract references from AST
+        references = self._extract_references(
+            tree.root_node, target_types, file_path, language,
         )
 
         # Collect gaps as module chunks
@@ -126,7 +184,13 @@ class ChunkerService:
             else:
                 final_chunks.append(chunk)
 
-        return final_chunks if final_chunks else self._chunk_sliding_window(content, file_path, language)
+        if not final_chunks:
+            return ChunkResult(
+                chunks=self._chunk_sliding_window(content, file_path, language),
+                references=[],
+            )
+
+        return ChunkResult(chunks=final_chunks, references=references)
 
     def _extract_nodes(
         self, node, target_types, type_to_kind, lines,
@@ -179,6 +243,57 @@ class ChunkerService:
                 file_path, language, chunks, covered_ranges,
                 parent_name=parent_name,
             )
+
+    def _extract_references(
+        self, root_node, target_types: set, file_path: str, language: str,
+    ) -> list[ReferenceInfo]:
+        """Walk AST and collect identifier nodes that are usages (not definitions)."""
+        id_node_types = IDENTIFIER_NODES.get(language)
+        if not id_node_types:
+            return []
+
+        refs: list[ReferenceInfo] = []
+        seen: set[tuple[str, int, int]] = set()
+
+        def _walk(node):
+            if node.type in id_node_types:
+                name = node.text.decode("utf-8") if isinstance(node.text, bytes) else node.text
+                if (
+                    name
+                    and len(name) >= MIN_REF_NAME_LENGTH
+                    and name not in SKIP_NAMES
+                ):
+                    # Skip if this identifier is the name child of a definition node
+                    parent = node.parent
+                    if parent and parent.type in target_types:
+                        # Check if this is the "name" child (first identifier)
+                        is_def_name = False
+                        for child in parent.children:
+                            if child.type in id_node_types:
+                                is_def_name = (child.id == node.id)
+                                break
+                        if is_def_name:
+                            return
+
+                    line = node.start_point[0] + 1  # 1-based
+                    col = node.start_point[1]        # 0-based
+                    key = (name, line, col)
+                    if key not in seen:
+                        seen.add(key)
+                        refs.append(ReferenceInfo(
+                            name=name,
+                            file_path=file_path,
+                            line=line,
+                            col=col,
+                            language=language,
+                        ))
+                return  # leaf node, no children to recurse
+
+            for child in node.children:
+                _walk(child)
+
+        _walk(root_node)
+        return refs
 
     @staticmethod
     def _extract_name(node) -> str | None:
