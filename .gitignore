@@ -43,5 +43,8 @@ cli/dist/
 # uv
 .python-version
 
+# Local docs
+docs/
+
 # Claude Code
 .claude/
