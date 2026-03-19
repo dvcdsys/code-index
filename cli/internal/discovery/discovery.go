@@ -1,13 +1,14 @@
 package discovery
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	ignore "github.com/sabhiram/go-gitignore"
 )
 
 // DiscoveredFile represents a file found during discovery.
@@ -48,8 +49,18 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 		excludeDirs[d] = true
 	}
 
-	// Load .gitignore patterns
-	gitignorePatterns := loadGitignore(filepath.Join(root, ".gitignore"))
+	// gitignoreMatchers holds a stack of matchers keyed by directory depth.
+	// Each entry corresponds to a .gitignore found at that directory level.
+	type gitignoreEntry struct {
+		dir     string // absolute path of the directory containing .gitignore
+		matcher *ignore.GitIgnore
+	}
+	var gitignoreStack []gitignoreEntry
+
+	// Load root .gitignore if present
+	if gi, err := ignore.CompileIgnoreFile(filepath.Join(root, ".gitignore")); err == nil {
+		gitignoreStack = append(gitignoreStack, gitignoreEntry{dir: root, matcher: gi})
+	}
 
 	var files []DiscoveredFile
 
@@ -79,12 +90,49 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 			if path != root && strings.HasPrefix(name, ".") && name != "." {
 				return filepath.SkipDir
 			}
+
+			// Pop gitignore entries that are no longer ancestors of current dir
+			for len(gitignoreStack) > 0 {
+				top := gitignoreStack[len(gitignoreStack)-1]
+				if top.dir == root || strings.HasPrefix(path, top.dir+string(filepath.Separator)) {
+					break
+				}
+				gitignoreStack = gitignoreStack[:len(gitignoreStack)-1]
+			}
+
+			// Check for .gitignore in this directory (skip root, already loaded)
+			if path != root {
+				giPath := filepath.Join(path, ".gitignore")
+				if gi, err := ignore.CompileIgnoreFile(giPath); err == nil {
+					gitignoreStack = append(gitignoreStack, gitignoreEntry{dir: path, matcher: gi})
+				}
+			}
+
+			// Check if this directory itself is ignored by any gitignore in the stack
+			if path != root {
+				for _, entry := range gitignoreStack {
+					entryRel, err := filepath.Rel(entry.dir, path)
+					if err != nil {
+						continue
+					}
+					if entry.matcher.MatchesPath(entryRel + "/") {
+						return filepath.SkipDir
+					}
+				}
+			}
+
 			return nil
 		}
 
-		// Skip by .gitignore
-		if matchesGitignore(gitignorePatterns, rel) {
-			return nil
+		// Skip by .gitignore — check all matchers in the stack
+		for _, entry := range gitignoreStack {
+			entryRel, err := filepath.Rel(entry.dir, path)
+			if err != nil {
+				continue
+			}
+			if entry.matcher.MatchesPath(entryRel) {
+				return nil
+			}
 		}
 
 		// Get file info
@@ -184,87 +232,3 @@ func isBinaryExtension(path string) bool {
 	return binaryExts[ext]
 }
 
-// --- Simple .gitignore support ---
-
-type gitignorePattern struct {
-	pattern string
-	negated bool
-	dirOnly bool
-}
-
-func loadGitignore(path string) []gitignorePattern {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	var patterns []gitignorePattern
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		p := gitignorePattern{}
-
-		if strings.HasPrefix(line, "!") {
-			p.negated = true
-			line = line[1:]
-		}
-
-		if strings.HasSuffix(line, "/") {
-			p.dirOnly = true
-			line = strings.TrimSuffix(line, "/")
-		}
-
-		p.pattern = line
-		patterns = append(patterns, p)
-	}
-
-	return patterns
-}
-
-func matchesGitignore(patterns []gitignorePattern, relPath string) bool {
-	if len(patterns) == 0 {
-		return false
-	}
-
-	matched := false
-	// Normalize to forward slashes for matching
-	relPath = filepath.ToSlash(relPath)
-
-	for _, p := range patterns {
-		var doesMatch bool
-		pattern := p.pattern
-
-		if strings.Contains(pattern, "/") {
-			// Path pattern — match against full path
-			doesMatch, _ = filepath.Match(pattern, relPath)
-			if !doesMatch {
-				// Try prefix match for directory patterns
-				doesMatch = strings.HasPrefix(relPath, pattern+"/") || relPath == pattern
-			}
-		} else {
-			// Name pattern — match against any path component
-			parts := strings.Split(relPath, "/")
-			for _, part := range parts {
-				if m, _ := filepath.Match(pattern, part); m {
-					doesMatch = true
-					break
-				}
-			}
-		}
-
-		if doesMatch {
-			if p.negated {
-				matched = false
-			} else {
-				matched = true
-			}
-		}
-	}
-
-	return matched
-}
