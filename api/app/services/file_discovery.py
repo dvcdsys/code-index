@@ -5,6 +5,7 @@ from pathlib import Path
 import pathspec
 
 from ..core.language import detect_language
+from .project_config import load_project_config, parse_submodule_paths
 
 
 @dataclass
@@ -27,12 +28,21 @@ class FileDiscoveryService:
         if not root.exists():
             return []
 
-        # Load .gitignore if present
-        gitignore_spec = None
-        gitignore_path = root / ".gitignore"
-        if gitignore_path.exists():
-            with open(gitignore_path, "r", errors="ignore") as f:
-                gitignore_spec = pathspec.PathSpec.from_lines("gitwildmatch", f)
+        # Load .gitignore and .cixignore if present (same format, merged)
+        ignore_patterns: list[str] = []
+        for ignore_file in (".gitignore", ".cixignore"):
+            ignore_path = root / ignore_file
+            if ignore_path.exists():
+                with open(ignore_path, "r", errors="ignore") as f:
+                    ignore_patterns.extend(f.readlines())
+
+        # Load .cixconfig.yaml — if ignore.submodules is true, exclude submodule paths
+        proj_cfg = load_project_config(project_container_path)
+        if proj_cfg.ignore.submodules:
+            for sp in parse_submodule_paths(project_container_path):
+                ignore_patterns.append(sp + "/\n")
+
+        ignore_spec = pathspec.PathSpec.from_lines("gitwildmatch", ignore_patterns) if ignore_patterns else None
 
         discovered = []
         exclude_set = set(exclude_patterns)
@@ -46,9 +56,9 @@ class FileDiscoveryService:
             if any(part in exclude_set for part in parts):
                 continue
 
-            # Check .gitignore
+            # Check .gitignore / .cixignore
             relative = str(file_path.relative_to(root))
-            if gitignore_spec and gitignore_spec.match_file(relative):
+            if ignore_spec and ignore_spec.match_file(relative):
                 continue
 
             # Check file size

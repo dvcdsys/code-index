@@ -306,7 +306,47 @@ Supported languages: Python, TypeScript, JavaScript, Go, Rust, Java (+ 40+ other
 
 **Incremental reindex** — uses SHA256 file hashes. Only new or changed files are re-embedded. Deleted files are removed from the index.
 
-**Filtering** — respects `.gitignore`, skips common dirs (`node_modules`, `.git`, `.venv`, etc.), skips files >512KB and empty files.
+**Filtering** — respects `.gitignore` and `.cixignore`, skips common dirs (`node_modules`, `.git`, `.venv`, etc.), skips files >512KB and empty files. Per-project configuration via `.cixconfig.yaml` (see below).
+
+---
+
+## Per-Project Configuration
+
+### `.cixignore` — exclude files from indexing
+
+Works exactly like `.gitignore` (same syntax, same nesting rules). Place it in the project root or any subdirectory. Patterns from `.cixignore` are merged with `.gitignore` — you don't need to duplicate rules.
+
+Use `.cixignore` when you want to exclude files from the index that are **not** excluded by `.gitignore` (e.g., vendored code, generated files, large test fixtures).
+
+```gitignore
+# .cixignore
+api/smart-contracts/
+generated/
+*.pb.go
+testdata/fixtures/
+```
+
+Nested `.cixignore` files work like nested `.gitignore` — they apply to their directory and below, without affecting sibling directories.
+
+The file watcher automatically triggers a full reindex when `.cixignore` is created, modified, or deleted.
+
+### `.cixconfig.yaml` — project-level settings
+
+Place this file in the project root. Currently supports automatic git submodule exclusion.
+
+```yaml
+# .cixconfig.yaml
+ignore:
+  submodules: true   # automatically exclude all git submodule paths
+```
+
+When `ignore.submodules` is `true`, cix reads `.gitmodules` and excludes all submodule paths from indexing. No git binary is required — the file is parsed directly.
+
+This is useful for projects with Foundry/Forge dependencies, vendored submodules, or any repo where submodules contain thousands of files you don't want indexed.
+
+**Example:** a project with 228 own files and 3,400+ files in nested submodules — after adding `ignore.submodules: true`, only the 228 project files are indexed.
+
+The file watcher triggers a full reindex when `.cixconfig.yaml` changes.
 
 ---
 
