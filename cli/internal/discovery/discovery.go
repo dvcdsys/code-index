@@ -80,6 +80,15 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 			return nil
 		}
 
+		// Pop gitignore entries that are no longer ancestors of current path
+		for len(gitignoreStack) > 0 {
+			top := gitignoreStack[len(gitignoreStack)-1]
+			if top.dir == root || strings.HasPrefix(path, top.dir+string(filepath.Separator)) {
+				break
+			}
+			gitignoreStack = gitignoreStack[:len(gitignoreStack)-1]
+		}
+
 		// Skip excluded directories
 		if d.IsDir() {
 			name := d.Name()
@@ -91,24 +100,7 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 				return filepath.SkipDir
 			}
 
-			// Pop gitignore entries that are no longer ancestors of current dir
-			for len(gitignoreStack) > 0 {
-				top := gitignoreStack[len(gitignoreStack)-1]
-				if top.dir == root || strings.HasPrefix(path, top.dir+string(filepath.Separator)) {
-					break
-				}
-				gitignoreStack = gitignoreStack[:len(gitignoreStack)-1]
-			}
-
-			// Check for .gitignore in this directory (skip root, already loaded)
-			if path != root {
-				giPath := filepath.Join(path, ".gitignore")
-				if gi, err := ignore.CompileIgnoreFile(giPath); err == nil {
-					gitignoreStack = append(gitignoreStack, gitignoreEntry{dir: path, matcher: gi})
-				}
-			}
-
-			// Check if this directory itself is ignored by any gitignore in the stack
+			// Check if this directory is ignored by any gitignore in the stack
 			if path != root {
 				for _, entry := range gitignoreStack {
 					entryRel, err := filepath.Rel(entry.dir, path)
@@ -121,6 +113,19 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 				}
 			}
 
+			// Check for .gitignore in this directory (skip root, already loaded)
+			if path != root {
+				giPath := filepath.Join(path, ".gitignore")
+				if gi, err := ignore.CompileIgnoreFile(giPath); err == nil {
+					gitignoreStack = append(gitignoreStack, gitignoreEntry{dir: path, matcher: gi})
+				}
+			}
+
+			return nil
+		}
+
+		// Skip .gitignore files themselves
+		if filepath.Base(path) == ".gitignore" {
 			return nil
 		}
 
