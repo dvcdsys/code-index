@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+title: "cix — Semantic Code Index"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - alias: dvcdsys
+repository-code: "https://github.com/dvcdsys/code-index"
+license: MIT
+keywords:
+  - code-search
+  - semantic-search
+  - embeddings
+  - tree-sitter
+  - developer-tools

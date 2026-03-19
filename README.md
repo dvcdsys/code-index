@@ -9,6 +9,10 @@
  ╚═════╝╚═╝╚═╝  ╚═╝  Code IndeX
 ```
 
+[![Release CLI](https://github.com/dvcdsys/code-index/actions/workflows/release-cli.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/release-cli.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker Hub](https://img.shields.io/docker/pulls/dvcdsys/code-index)](https://hub.docker.com/r/dvcdsys/code-index)
+
 Search your codebase by meaning, not just text. Self-hosted, embeddings-based, works with any agent or terminal.
 
 ```bash
