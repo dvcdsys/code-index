@@ -445,6 +445,78 @@ func TestHandleEvent_GitignoreChange_FullReindex(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_CixignoreChange_FullReindex(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644)
+
+	srv, calls := newIndexServer(t, dir)
+	w := newTestWatcher(t, dir, srv.URL)
+
+	// Simulate a .cixignore Write event.
+	cixPath := filepath.Join(dir, ".cixignore")
+	os.WriteFile(cixPath, []byte("vendor-ext/\n"), 0644)
+	w.handleEvent(fsnotify.Event{Name: cixPath, Op: fsnotify.Write})
+
+	calls.mu.Lock()
+	defer calls.mu.Unlock()
+	if calls.Begin < 1 {
+		t.Error("expected full reindex triggered by .cixignore change")
+	}
+}
+
+func TestHandleEvent_CixconfigChange_FullReindex(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644)
+
+	srv, calls := newIndexServer(t, dir)
+	w := newTestWatcher(t, dir, srv.URL)
+
+	cfgPath := filepath.Join(dir, ".cixconfig.yaml")
+	os.WriteFile(cfgPath, []byte("ignore:\n  submodules: true\n"), 0644)
+	w.handleEvent(fsnotify.Event{Name: cfgPath, Op: fsnotify.Write})
+
+	calls.mu.Lock()
+	defer calls.mu.Unlock()
+	if calls.Begin < 1 {
+		t.Error("expected full reindex triggered by .cixconfig.yaml change")
+	}
+}
+
+func TestHandleEvent_CixignoreCreate_FullReindex(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644)
+
+	srv, calls := newIndexServer(t, dir)
+	w := newTestWatcher(t, dir, srv.URL)
+
+	cixPath := filepath.Join(dir, ".cixignore")
+	os.WriteFile(cixPath, []byte("submodules/\n"), 0644)
+	w.handleEvent(fsnotify.Event{Name: cixPath, Op: fsnotify.Create})
+
+	calls.mu.Lock()
+	defer calls.mu.Unlock()
+	if calls.Begin < 1 {
+		t.Error("expected full reindex triggered by .cixignore creation")
+	}
+}
+
+func TestHandleEvent_CixignoreRemove_FullReindex(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644)
+
+	srv, calls := newIndexServer(t, dir)
+	w := newTestWatcher(t, dir, srv.URL)
+
+	cixPath := filepath.Join(dir, ".cixignore")
+	w.handleEvent(fsnotify.Event{Name: cixPath, Op: fsnotify.Remove})
+
+	calls.mu.Lock()
+	defer calls.mu.Unlock()
+	if calls.Begin < 1 {
+		t.Error("expected full reindex triggered by .cixignore removal")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Debounce — multiple rapid events produce a single flush
 // ---------------------------------------------------------------------------

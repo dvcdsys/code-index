@@ -167,8 +167,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// .gitignore changed → full reindex (filter rules changed)
-	if filepath.Base(path) == ".gitignore" {
+	// .gitignore, .cixignore, or .cixconfig.yaml changed → full reindex (filter rules changed)
+	baseName := filepath.Base(path)
+	if baseName == ".gitignore" || baseName == ".cixignore" || baseName == ".cixconfig.yaml" {
 		if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) || event.Has(fsnotify.Remove) {
 			w.triggerFullReindex()
 			return
@@ -214,7 +215,7 @@ func (w *Watcher) triggerFullReindex() {
 	w.pendingChanges = make(map[string]bool)
 	w.mu.Unlock()
 
-	w.logger.Println(".gitignore changed, triggering full reindex...")
+	w.logger.Println("Ignore rules changed (.gitignore/.cixignore), triggering full reindex...")
 
 	result, err := indexer.Run(w.apiClient, w.projectPath, true, 0)
 	if err != nil {

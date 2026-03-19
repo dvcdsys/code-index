@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	ignore "github.com/sabhiram/go-gitignore"
+
+	"github.com/anthropics/code-index/cli/internal/projectconfig"
 )
 
 // DiscoveredFile represents a file found during discovery.
@@ -49,17 +51,31 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 		excludeDirs[d] = true
 	}
 
-	// gitignoreMatchers holds a stack of matchers keyed by directory depth.
-	// Each entry corresponds to a .gitignore found at that directory level.
-	type gitignoreEntry struct {
-		dir     string // absolute path of the directory containing .gitignore
+	// ignoreMatchers holds a stack of matchers keyed by directory depth.
+	// Each entry corresponds to a .gitignore, .cixignore, or submodule rule.
+	type ignoreEntry struct {
+		dir     string // absolute path of the directory containing the ignore file
 		matcher *ignore.GitIgnore
 	}
-	var gitignoreStack []gitignoreEntry
+	var ignoreStack []ignoreEntry
 
-	// Load root .gitignore if present
-	if gi, err := ignore.CompileIgnoreFile(filepath.Join(root, ".gitignore")); err == nil {
-		gitignoreStack = append(gitignoreStack, gitignoreEntry{dir: root, matcher: gi})
+	// Load root .gitignore and .cixignore if present (same format)
+	for _, ignoreFile := range []string{".gitignore", ".cixignore"} {
+		if gi, err := ignore.CompileIgnoreFile(filepath.Join(root, ignoreFile)); err == nil {
+			ignoreStack = append(ignoreStack, ignoreEntry{dir: root, matcher: gi})
+		}
+	}
+
+	// Load .cixconfig.yaml — if ignore.submodules is true, exclude submodule paths
+	if projCfg, err := projectconfig.Load(root); err == nil && projCfg.Ignore.Submodules {
+		if subPaths, err := projectconfig.SubmodulePaths(root); err == nil && len(subPaths) > 0 {
+			patterns := make([]string, len(subPaths))
+			for i, sp := range subPaths {
+				patterns[i] = sp + "/"
+			}
+			gi := ignore.CompileIgnoreLines(patterns...)
+			ignoreStack = append(ignoreStack, ignoreEntry{dir: root, matcher: gi})
+		}
 	}
 
 	var files []DiscoveredFile
@@ -80,13 +96,13 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 			return nil
 		}
 
-		// Pop gitignore entries that are no longer ancestors of current path
-		for len(gitignoreStack) > 0 {
-			top := gitignoreStack[len(gitignoreStack)-1]
+		// Pop ignore entries that are no longer ancestors of current path
+		for len(ignoreStack) > 0 {
+			top := ignoreStack[len(ignoreStack)-1]
 			if top.dir == root || strings.HasPrefix(path, top.dir+string(filepath.Separator)) {
 				break
 			}
-			gitignoreStack = gitignoreStack[:len(gitignoreStack)-1]
+			ignoreStack = ignoreStack[:len(ignoreStack)-1]
 		}
 
 		// Skip excluded directories
@@ -100,9 +116,9 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 				return filepath.SkipDir
 			}
 
-			// Check if this directory is ignored by any gitignore in the stack
+			// Check if this directory is ignored by any ignore rule in the stack
 			if path != root {
-				for _, entry := range gitignoreStack {
+				for _, entry := range ignoreStack {
 					entryRel, err := filepath.Rel(entry.dir, path)
 					if err != nil {
 						continue
@@ -113,24 +129,27 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 				}
 			}
 
-			// Check for .gitignore in this directory (skip root, already loaded)
+			// Check for .gitignore and .cixignore in this directory (skip root, already loaded)
 			if path != root {
-				giPath := filepath.Join(path, ".gitignore")
-				if gi, err := ignore.CompileIgnoreFile(giPath); err == nil {
-					gitignoreStack = append(gitignoreStack, gitignoreEntry{dir: path, matcher: gi})
+				for _, ignoreFile := range []string{".gitignore", ".cixignore"} {
+					giPath := filepath.Join(path, ignoreFile)
+					if gi, err := ignore.CompileIgnoreFile(giPath); err == nil {
+						ignoreStack = append(ignoreStack, ignoreEntry{dir: path, matcher: gi})
+					}
 				}
 			}
 
 			return nil
 		}
 
-		// Skip .gitignore files themselves
-		if filepath.Base(path) == ".gitignore" {
+		// Skip ignore/config files themselves
+		baseName := filepath.Base(path)
+		if baseName == ".gitignore" || baseName == ".cixignore" || baseName == ".cixconfig.yaml" || baseName == ".gitmodules" {
 			return nil
 		}
 
-		// Skip by .gitignore — check all matchers in the stack
-		for _, entry := range gitignoreStack {
+		// Skip by ignore rules — check all matchers in the stack
+		for _, entry := range ignoreStack {
 			entryRel, err := filepath.Rel(entry.dir, path)
 			if err != nil {
 				continue

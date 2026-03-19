@@ -257,3 +257,292 @@ func TestDiscover_IgnoredDirOwnGitignoreDoesNotPreventSkip(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// .cixignore tests
+// ---------------------------------------------------------------------------
+
+func TestDiscover_RootCixignore(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, ".cixignore"), "vendor-ext/\n*.generated.go\n")
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+	writeFile(t, filepath.Join(root, "handler.generated.go"), "package main\n")
+	writeFile(t, filepath.Join(root, "vendor-ext", "lib.go"), "package lib\n")
+	writeFile(t, filepath.Join(root, "src", "app.go"), "package src\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(files)
+	expected := []string{"main.go", filepath.Join("src", "app.go")}
+	sort.Strings(expected)
+
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("expected %q at position %d, got %q", expected[i], i, got[i])
+		}
+	}
+}
+
+func TestDiscover_CixignoreAndGitignoreMerged(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, ".gitignore"), "*.log\n")
+	writeFile(t, filepath.Join(root, ".cixignore"), "*.tmp\n")
+
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+	writeFile(t, filepath.Join(root, "app.log"), "log\n")
+	writeFile(t, filepath.Join(root, "cache.tmp"), "temp\n")
+	writeFile(t, filepath.Join(root, "readme.txt"), "hello\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(files)
+	expected := []string{"main.go", "readme.txt"}
+	sort.Strings(expected)
+
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("expected %q at position %d, got %q", expected[i], i, got[i])
+		}
+	}
+}
+
+func TestDiscover_CixignoreDirectoryPattern(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, ".cixignore"), "submodules/\n")
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+	writeFile(t, filepath.Join(root, "submodules", "vendor", "lib.go"), "package lib\n")
+	writeFile(t, filepath.Join(root, "submodules", "contracts", "token.sol"), "contract\n")
+	writeFile(t, filepath.Join(root, "src", "app.go"), "package src\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(files)
+	expected := []string{"main.go", filepath.Join("src", "app.go")}
+	sort.Strings(expected)
+
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("expected %q at position %d, got %q", expected[i], i, got[i])
+		}
+	}
+}
+
+func TestDiscover_NestedCixignore(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, ".cixignore"), "*.dat\n")
+
+	sub := filepath.Join(root, "sub")
+	writeFile(t, filepath.Join(sub, ".cixignore"), "*.tmp\n")
+	writeFile(t, filepath.Join(sub, "code.go"), "package sub\n")
+	writeFile(t, filepath.Join(sub, "cache.tmp"), "temp\n")
+	writeFile(t, filepath.Join(sub, "data.dat"), "data\n")
+
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+	writeFile(t, filepath.Join(root, "info.dat"), "info\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(files)
+	expected := []string{"main.go", filepath.Join("sub", "code.go")}
+	sort.Strings(expected)
+
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("expected %q at position %d, got %q", expected[i], i, got[i])
+		}
+	}
+}
+
+func TestDiscover_CixignoreFileNotIndexed(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, ".cixignore"), "*.log\n")
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, f := range files {
+		if f.RelPath == ".cixignore" {
+			t.Error(".cixignore file itself should not be indexed")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// .cixconfig.yaml + submodules tests
+// ---------------------------------------------------------------------------
+
+func TestDiscover_CixconfigSubmodulesIgnored(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, ".cixconfig.yaml"), "ignore:\n  submodules: true\n")
+	writeFile(t, filepath.Join(root, ".gitmodules"), `[submodule "libs/vendor"]
+	path = libs/vendor
+	url = https://example.com/vendor.git
+[submodule "third_party/contracts"]
+	path = third_party/contracts
+	url = https://example.com/contracts.git
+`)
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+	writeFile(t, filepath.Join(root, "libs", "vendor", "lib.go"), "package vendor\n")
+	writeFile(t, filepath.Join(root, "libs", "vendor", "deep", "util.go"), "package deep\n")
+	writeFile(t, filepath.Join(root, "third_party", "contracts", "token.sol"), "contract\n")
+	writeFile(t, filepath.Join(root, "src", "app.go"), "package src\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(files)
+	expected := []string{"main.go", filepath.Join("src", "app.go")}
+	sort.Strings(expected)
+
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("expected %q at position %d, got %q", expected[i], i, got[i])
+		}
+	}
+}
+
+func TestDiscover_CixconfigSubmodulesFalse_NotIgnored(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, ".cixconfig.yaml"), "ignore:\n  submodules: false\n")
+	writeFile(t, filepath.Join(root, ".gitmodules"), `[submodule "libs/external"]
+	path = libs/external
+	url = https://example.com/external.git
+`)
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+	writeFile(t, filepath.Join(root, "libs", "external", "lib.go"), "package ext\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(files)
+	// Both files should be discovered since submodules: false
+	expected := []string{filepath.Join("libs", "external", "lib.go"), "main.go"}
+	sort.Strings(expected)
+
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("expected %q at position %d, got %q", expected[i], i, got[i])
+		}
+	}
+}
+
+func TestDiscover_CixconfigNoGitmodules(t *testing.T) {
+	root := t.TempDir()
+
+	// submodules: true but no .gitmodules file — should not break
+	writeFile(t, filepath.Join(root, ".cixconfig.yaml"), "ignore:\n  submodules: true\n")
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(files)
+	if len(got) != 1 || got[0] != "main.go" {
+		t.Fatalf("expected [main.go], got %v", got)
+	}
+}
+
+func TestDiscover_CixconfigWithCixignoreCombined(t *testing.T) {
+	root := t.TempDir()
+
+	// .cixconfig.yaml excludes submodules, .cixignore excludes *.tmp
+	writeFile(t, filepath.Join(root, ".cixconfig.yaml"), "ignore:\n  submodules: true\n")
+	writeFile(t, filepath.Join(root, ".gitmodules"), `[submodule "vendor"]
+	path = vendor
+	url = https://example.com/vendor.git
+`)
+	writeFile(t, filepath.Join(root, ".cixignore"), "*.tmp\n")
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+	writeFile(t, filepath.Join(root, "cache.tmp"), "temp\n")
+	writeFile(t, filepath.Join(root, "src", "lib.go"), "package src\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(files)
+	expected := []string{"main.go", filepath.Join("src", "lib.go")}
+	sort.Strings(expected)
+
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("expected %q at position %d, got %q", expected[i], i, got[i])
+		}
+	}
+}
+
+func TestDiscover_OnlyCixignoreNoGitignore(t *testing.T) {
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, ".cixignore"), "generated/\n*.bak\n")
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
+	writeFile(t, filepath.Join(root, "config.bak"), "old config\n")
+	writeFile(t, filepath.Join(root, "generated", "api.go"), "package gen\n")
+
+	files, err := Discover(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := relPaths(files)
+	expected := []string{"main.go"}
+
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Errorf("expected %q at position %d, got %q", expected[i], i, got[i])
+		}
+	}
+}
