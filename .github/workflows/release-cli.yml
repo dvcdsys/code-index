@@ -9,23 +9,15 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-linux:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - target: darwin-arm64
-            goos: darwin
-            goarch: arm64
-          - target: darwin-amd64
-            goos: darwin
-            goarch: amd64
           - target: linux-arm64
-            goos: linux
             goarch: arm64
           - target: linux-amd64
-            goos: linux
             goarch: amd64
 
     steps:
@@ -39,7 +31,7 @@ jobs:
       - name: Build
         working-directory: cli
         env:
-          GOOS: ${{ matrix.goos }}
+          GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
@@ -60,9 +52,52 @@ jobs:
           name: cix-${{ matrix.target }}
           path: cli/dist/cix-${{ matrix.target }}.*
 
+  build-darwin:
+    name: Build ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: darwin-arm64
+            goarch: arm64
+          - target: darwin-amd64
+            goarch: amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Build
+        working-directory: cli
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+        run: |
+          VERSION="${{ github.ref_name }}"
+          go build \
+            -ldflags="-s -w -X 'github.com/anthropics/code-index/cli/cmd.Version=${VERSION}'" \
+            -o "dist/cix" .
+
+      - name: Package
+        working-directory: cli
+        run: |
+          cd dist
+          tar -czf "cix-${{ matrix.target }}.tar.gz" cix
+          rm cix
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cix-${{ matrix.target }}
+          path: cli/dist/cix-${{ matrix.target }}.*
+
   release:
     name: Create Release
-    needs: build
+    needs: [build-linux, build-darwin]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
