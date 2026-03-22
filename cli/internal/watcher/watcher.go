@@ -10,18 +10,22 @@ import (
 	"time"
 
 	"github.com/anthropics/code-index/cli/internal/client"
+	"github.com/anthropics/code-index/cli/internal/fileutil"
 	"github.com/anthropics/code-index/cli/internal/indexer"
-	"github.com/fsnotify/fsnotify"
+	"github.com/rjeczalik/notify"
 )
 
 // Watcher watches a project directory for file changes and triggers reindexing.
+// Uses rjeczalik/notify which provides native OS file watching:
+//   - macOS: FSEvents (1 FD for the entire recursive watch tree)
+//   - Linux: inotify (1 FD per inotify instance)
 type Watcher struct {
 	projectPath    string
 	apiClient      *client.Client
 	debounceMS     int
 	excludeDirs    map[string]bool
 	excludeExts    map[string]bool
-	fsWatcher      *fsnotify.Watcher
+	eventCh        chan notify.EventInfo
 	logger         *log.Logger
 	stopCh         chan struct{}
 	mu             sync.Mutex
@@ -59,11 +63,6 @@ var DefaultExcludeExts = []string{
 
 // New creates a new file watcher for the given project path.
 func New(projectPath string, apiClient *client.Client, opts Options) (*Watcher, error) {
-	fsw, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, fmt.Errorf("create fsnotify watcher: %w", err)
-	}
-
 	if opts.DebounceMS <= 0 {
 		opts.DebounceMS = 5000
 	}
@@ -96,7 +95,7 @@ func New(projectPath string, apiClient *client.Client, opts Options) (*Watcher, 
 		debounceMS:     opts.DebounceMS,
 		excludeDirs:    excludeDirs,
 		excludeExts:    excludeExts,
-		fsWatcher:      fsw,
+		eventCh:        make(chan notify.EventInfo, 256),
 		logger:         opts.Logger,
 		stopCh:         make(chan struct{}),
 		pendingChanges: make(map[string]bool),
@@ -107,31 +106,25 @@ func New(projectPath string, apiClient *client.Client, opts Options) (*Watcher, 
 func (w *Watcher) Start() error {
 	w.logger.Printf("Watching %s (debounce: %dms)", w.projectPath, w.debounceMS)
 
-	// Add all existing directories recursively
-	count, err := w.addDirRecursive(w.projectPath)
-	if err != nil {
-		return fmt.Errorf("add watches: %w", err)
+	// Use "..." suffix for recursive watching.
+	// On macOS this uses FSEvents (1 FD for entire tree).
+	// On Linux this uses inotify (1 FD per inotify instance).
+	watchPath := filepath.Join(w.projectPath, "...")
+	if err := notify.Watch(watchPath, w.eventCh, notify.All); err != nil {
+		return fmt.Errorf("start watch: %w", err)
 	}
-	w.logger.Printf("Watching %d directories", count)
+	defer notify.Stop(w.eventCh)
 
-	// Process events
+	w.logger.Printf("Watching recursively via native OS events")
+
 	for {
 		select {
-		case event, ok := <-w.fsWatcher.Events:
-			if !ok {
-				return nil
-			}
-			w.handleEvent(event)
-
-		case err, ok := <-w.fsWatcher.Errors:
-			if !ok {
-				return nil
-			}
-			w.logger.Printf("Watcher error: %v", err)
+		case ei := <-w.eventCh:
+			w.handleEvent(ei)
 
 		case <-w.stopCh:
 			w.logger.Println("Stopping watcher")
-			return w.fsWatcher.Close()
+			return nil
 		}
 	}
 }
@@ -141,51 +134,38 @@ func (w *Watcher) Stop() {
 	close(w.stopCh)
 }
 
-// handleEvent processes a single fsnotify event.
-func (w *Watcher) handleEvent(event fsnotify.Event) {
-	path := event.Name
+// handleEvent processes a single notify event.
+func (w *Watcher) handleEvent(ei notify.EventInfo) {
+	path := ei.Path()
 
-	// Skip excluded paths
+	// Skip excluded directories
 	if w.isExcluded(path) {
 		return
 	}
 
-	// Handle directory creation — add watch
-	if event.Has(fsnotify.Create) {
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			count, err := w.addDirRecursive(path)
-			if err != nil {
-				w.logger.Printf("Failed to watch new dir %s: %v", path, err)
-			} else if count > 0 {
-				w.logger.Printf("Added %d new directories to watch", count)
-			}
-		}
+	// .gitignore, .cixignore, or .cixconfig.yaml changed → full reindex
+	baseName := filepath.Base(path)
+	if baseName == ".gitignore" || baseName == ".cixignore" || baseName == ".cixconfig.yaml" {
+		w.triggerFullReindex()
+		return
 	}
 
-	// Only track file changes (not directories)
+	// Skip directories (we only care about file changes for incremental reindex)
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		return
 	}
 
-	// .gitignore, .cixignore, or .cixconfig.yaml changed → full reindex (filter rules changed)
-	baseName := filepath.Base(path)
-	if baseName == ".gitignore" || baseName == ".cixignore" || baseName == ".cixconfig.yaml" {
-		if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) || event.Has(fsnotify.Remove) {
-			w.triggerFullReindex()
-			return
-		}
-	}
-
-	// Skip non-code files
+	// Skip non-code files by extension (fast path)
 	if w.isExcludedExt(path) {
 		return
 	}
 
-	// Track changes: Create, Write, Remove, Rename
-	if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) ||
-		event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-		w.trackChange(path)
+	// Skip binary files by content detection (catches extensionless binaries)
+	if fileutil.IsBinary(path) {
+		return
 	}
+
+	w.trackChange(path)
 }
 
 // trackChange records a file change and resets the debounce timer.
@@ -266,48 +246,6 @@ func (w *Watcher) flushChanges() {
 
 	w.logger.Printf("Reindex complete: %d files, %d chunks (run ID: %s)",
 		result.FilesProcessed, result.ChunksCreated, result.RunID)
-}
-
-// addDirRecursive adds watches to a directory and all its subdirectories.
-// Returns the number of directories added.
-func (w *Watcher) addDirRecursive(root string) (int, error) {
-	count := 0
-
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			// Skip inaccessible paths
-			if os.IsPermission(err) {
-				return filepath.SkipDir
-			}
-			return err
-		}
-
-		if !info.IsDir() {
-			return nil
-		}
-
-		// Skip excluded directories
-		dirName := filepath.Base(path)
-		if w.excludeDirs[dirName] {
-			return filepath.SkipDir
-		}
-
-		// Skip hidden directories (except the root itself)
-		if path != root && strings.HasPrefix(dirName, ".") {
-			return filepath.SkipDir
-		}
-
-		if err := w.fsWatcher.Add(path); err != nil {
-			// Non-fatal: log and continue
-			w.logger.Printf("Warning: cannot watch %s: %v", path, err)
-			return nil
-		}
-
-		count++
-		return nil
-	})
-
-	return count, err
 }
 
 // isExcluded checks if a path should be ignored based on directory exclusions.
