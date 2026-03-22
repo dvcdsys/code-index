@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,6 +201,8 @@ func Discover(root string, opts Options) ([]DiscoveredFile, error) {
 }
 
 // hashFile computes SHA-256 hash and detects binary content.
+// Uses http.DetectContentType on the first 512 bytes to determine if the file
+// is binary (MIME type not starting with "text/").
 // Returns (hash, isBinary, error).
 func hashFile(path string) (string, bool, error) {
 	f, err := os.Open(path)
@@ -215,13 +218,15 @@ func hashFile(path string) (string, bool, error) {
 	for {
 		n, err := f.Read(buf)
 		if n > 0 {
-			// Check first chunk for binary content (null bytes)
 			if firstChunk {
 				firstChunk = false
-				for i := 0; i < n; i++ {
-					if buf[i] == 0 {
-						return "", true, nil
-					}
+				sniffSize := n
+				if sniffSize > 512 {
+					sniffSize = 512
+				}
+				mime := http.DetectContentType(buf[:sniffSize])
+				if !strings.HasPrefix(mime, "text/") {
+					return "", true, nil
 				}
 			}
 			h.Write(buf[:n])

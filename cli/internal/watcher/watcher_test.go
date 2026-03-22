@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/anthropics/code-index/cli/internal/client"
-	"github.com/fsnotify/fsnotify"
+	"github.com/rjeczalik/notify"
 )
 
 // projectHash mirrors client.encodeProjectPath.
@@ -25,25 +25,29 @@ func projectHash(path string) string {
 	return fmt.Sprintf("%x", h)[:16]
 }
 
-// newTestWatcher creates a Watcher ready for unit testing.  The embedded
-// fsnotify.Watcher is real (needed for the struct) but is not started.
+// mockEventInfo implements notify.EventInfo for testing.
+type mockEventInfo struct {
+	path  string
+	event notify.Event
+}
+
+func (m mockEventInfo) Path() string        { return m.path }
+func (m mockEventInfo) Event() notify.Event { return m.event }
+func (m mockEventInfo) Sys() interface{}    { return nil }
+
+// newTestWatcher creates a Watcher ready for unit testing.
 func newTestWatcher(t *testing.T, projectPath, apiURL string) *Watcher {
 	t.Helper()
-	fsw, err := fsnotify.NewWatcher()
-	if err != nil {
-		t.Fatalf("create fsnotify watcher: %v", err)
-	}
-	t.Cleanup(func() { fsw.Close() })
 
 	return &Watcher{
-		projectPath: projectPath,
-		apiClient:   client.New(apiURL, "test-key"),
-		debounceMS:  50, // short for tests
-		excludeDirs: map[string]bool{"node_modules": true, ".git": true},
-		excludeExts: map[string]bool{".jpg": true, ".png": true, ".pyc": true},
-		fsWatcher:   fsw,
-		logger:      log.New(io.Discard, "", 0),
-		stopCh:      make(chan struct{}),
+		projectPath:    projectPath,
+		apiClient:      client.New(apiURL, "test-key"),
+		debounceMS:     50, // short for tests
+		excludeDirs:    map[string]bool{"node_modules": true, ".git": true},
+		excludeExts:    map[string]bool{".jpg": true, ".png": true, ".pyc": true},
+		eventCh:        make(chan notify.EventInfo, 256),
+		logger:         log.New(io.Discard, "", 0),
+		stopCh:         make(chan struct{}),
 		pendingChanges: make(map[string]bool),
 	}
 }
@@ -190,7 +194,7 @@ func TestHandleEvent_CreateFile_Tracked(t *testing.T) {
 	path := filepath.Join(dir, "new.go")
 	os.WriteFile(path, []byte("package main\n"), 0644)
 
-	w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Create})
+	w.handleEvent(mockEventInfo{path: path, event: notify.Create})
 
 	w.mu.Lock()
 	if w.timer != nil {
@@ -212,7 +216,7 @@ func TestHandleEvent_WriteFile_Tracked(t *testing.T) {
 	path := filepath.Join(dir, "existing.go")
 	os.WriteFile(path, []byte("package main\n"), 0644)
 
-	w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Write})
+	w.handleEvent(mockEventInfo{path: path, event: notify.Write})
 
 	w.mu.Lock()
 	if w.timer != nil {
@@ -234,7 +238,7 @@ func TestHandleEvent_RemoveFile_Tracked(t *testing.T) {
 	// For Remove events the file is gone from disk; path is still the event name.
 	path := filepath.Join(dir, "deleted.go")
 
-	w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Remove})
+	w.handleEvent(mockEventInfo{path: path, event: notify.Remove})
 
 	w.mu.Lock()
 	if w.timer != nil {
@@ -254,7 +258,7 @@ func TestHandleEvent_RenameFile_Tracked(t *testing.T) {
 	w := newTestWatcher(t, dir, srv.URL)
 	path := filepath.Join(dir, "renamed.go")
 
-	w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Rename})
+	w.handleEvent(mockEventInfo{path: path, event: notify.Rename})
 
 	w.mu.Lock()
 	if w.timer != nil {
@@ -275,7 +279,7 @@ func TestHandleEvent_ExcludedExtension_NotTracked(t *testing.T) {
 	path := filepath.Join(dir, "photo.jpg")
 	os.WriteFile(path, []byte("data"), 0644)
 
-	w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Write})
+	w.handleEvent(mockEventInfo{path: path, event: notify.Write})
 
 	w.mu.Lock()
 	tracked := w.pendingChanges[path]
@@ -292,7 +296,7 @@ func TestHandleEvent_ExcludedDir_NotTracked(t *testing.T) {
 
 	path := filepath.Join(dir, "node_modules", "lib.js")
 
-	w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Write})
+	w.handleEvent(mockEventInfo{path: path, event: notify.Write})
 
 	w.mu.Lock()
 	tracked := w.pendingChanges[path]
@@ -432,12 +436,10 @@ func TestHandleEvent_GitignoreChange_FullReindex(t *testing.T) {
 	srv, calls := newIndexServer(t, dir)
 	w := newTestWatcher(t, dir, srv.URL)
 
-	// Simulate a .gitignore Write event.
 	giPath := filepath.Join(dir, ".gitignore")
 	os.WriteFile(giPath, []byte("*.log\n"), 0644)
-	w.handleEvent(fsnotify.Event{Name: giPath, Op: fsnotify.Write})
+	w.handleEvent(mockEventInfo{path: giPath, event: notify.Write})
 
-	// triggerFullReindex is synchronous within handleEvent.
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
 	if calls.Begin < 1 {
@@ -452,10 +454,9 @@ func TestHandleEvent_CixignoreChange_FullReindex(t *testing.T) {
 	srv, calls := newIndexServer(t, dir)
 	w := newTestWatcher(t, dir, srv.URL)
 
-	// Simulate a .cixignore Write event.
 	cixPath := filepath.Join(dir, ".cixignore")
 	os.WriteFile(cixPath, []byte("vendor-ext/\n"), 0644)
-	w.handleEvent(fsnotify.Event{Name: cixPath, Op: fsnotify.Write})
+	w.handleEvent(mockEventInfo{path: cixPath, event: notify.Write})
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
@@ -473,7 +474,7 @@ func TestHandleEvent_CixconfigChange_FullReindex(t *testing.T) {
 
 	cfgPath := filepath.Join(dir, ".cixconfig.yaml")
 	os.WriteFile(cfgPath, []byte("ignore:\n  submodules: true\n"), 0644)
-	w.handleEvent(fsnotify.Event{Name: cfgPath, Op: fsnotify.Write})
+	w.handleEvent(mockEventInfo{path: cfgPath, event: notify.Write})
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
@@ -491,7 +492,7 @@ func TestHandleEvent_CixignoreCreate_FullReindex(t *testing.T) {
 
 	cixPath := filepath.Join(dir, ".cixignore")
 	os.WriteFile(cixPath, []byte("submodules/\n"), 0644)
-	w.handleEvent(fsnotify.Event{Name: cixPath, Op: fsnotify.Create})
+	w.handleEvent(mockEventInfo{path: cixPath, event: notify.Create})
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
@@ -508,7 +509,7 @@ func TestHandleEvent_CixignoreRemove_FullReindex(t *testing.T) {
 	w := newTestWatcher(t, dir, srv.URL)
 
 	cixPath := filepath.Join(dir, ".cixignore")
-	w.handleEvent(fsnotify.Event{Name: cixPath, Op: fsnotify.Remove})
+	w.handleEvent(mockEventInfo{path: cixPath, event: notify.Remove})
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()

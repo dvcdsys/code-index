@@ -258,5 +258,10 @@ func resolveProjectPath(args []string) (string, error) {
 		return "", fmt.Errorf("directory does not exist: %s", absPath)
 	}
 
-	return absPath, nil
+	// Resolve subdirectory to the registered project root
+	apiClient, err := getClient()
+	if err != nil {
+		return absPath, nil
+	}
+	return findProjectRoot(absPath, apiClient), nil
 }
