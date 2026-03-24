@@ -4,8 +4,7 @@
         server-docker-status server-docker-logs \
         server-cuda-start server-cuda-stop server-cuda-restart \
         server-cuda-status server-cuda-logs \
-        docker-setup docker-push-arm64 docker-push-amd64 docker-push-all \
-        docker-push-cuda docker-build-cuda \
+        docker-setup docker-push-all docker-push-cuda \
         test test-server test-client test-setup help
 
 PORT        ?= 21847
@@ -13,7 +12,6 @@ PYTHON      ?= $(shell test -f .venv/bin/python && echo .venv/bin/python || (com
 DOCKER_USER ?= $(error DOCKER_USER is not set. Run: make docker-push-all DOCKER_USER=yourname)
 IMAGE_NAME  ?= code-index
 VERSION     ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo latest)
-CUDA_TAG    ?= cu130
 DATA_DIR    ?= $(HOME)/.cix/data
 
 # ─── Server: Local (native, MPS on Mac) ─────────────────────────────
@@ -174,40 +172,12 @@ docker-setup:
 	docker buildx use cix-builder
 	@echo "Builder ready. Run: docker login"
 
-docker-push-arm64:
-	docker buildx build \
-		--builder cix-builder \
-		--platform linux/arm64 \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):arm64 \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):arm64-$(VERSION) \
-		--file api/Dockerfile \
-		--push \
-		.
-
-docker-push-amd64:
-	docker buildx build \
-		--builder cix-builder \
-		--platform linux/amd64 \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):amd64 \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):amd64-$(VERSION) \
-		--file api/Dockerfile \
-		--push \
-		.
-
-docker-build-cuda:
-	docker build \
-		--platform linux/amd64 \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(CUDA_TAG) \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(VERSION)-$(CUDA_TAG) \
-		--file api/Dockerfile.cuda \
-		.
-
 docker-push-cuda:
 	docker buildx build \
 		--builder cix-builder \
 		--platform linux/amd64 \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(CUDA_TAG) \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(VERSION)-$(CUDA_TAG) \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):latest-cu130 \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(VERSION)-cu130 \
 		--file api/Dockerfile.cuda \
 		--push \
 		.
@@ -216,6 +186,7 @@ docker-push-all:
 	docker buildx build \
 		--builder cix-builder \
 		--platform linux/arm64,linux/amd64 \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):latest \
 		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(VERSION) \
 		--file api/Dockerfile \
 		--push \
@@ -263,10 +234,8 @@ help:
 	@echo ""
 	@echo "Build & Push:"
 	@echo "  docker-setup          Create buildx builder (run once)"
-	@echo "  docker-push-arm64     Build & push :arm64"
-	@echo "  docker-push-amd64     Build & push :amd64"
-	@echo "  docker-push-cuda      Build & push :$(CUDA_TAG) + :$(VERSION)-$(CUDA_TAG)"
-	@echo "  docker-push-all       Build & push multi-arch :latest"
+	@echo "  docker-push-all       Build & push :latest + :$(VERSION) (multi-arch)"
+	@echo "  docker-push-cuda      Build & push :latest-cu130 + :$(VERSION)-cu130"
 	@echo ""
 	@echo "Tests:"
 	@echo "  test                  Run all tests"
