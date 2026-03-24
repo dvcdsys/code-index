@@ -1,5 +1,5 @@
 # Stage 1: builder — install deps + download model
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential gcc && rm -rf /var/lib/apt/lists/*
 COPY api/requirements.txt .
@@ -9,7 +9,7 @@ RUN PYTHONPATH=/install/lib/python3.12/site-packages python -c \
     "from sentence_transformers import SentenceTransformer; SentenceTransformer('nomic-ai/CodeRankEmbed', trust_remote_code=True)"
 
 # Stage 2: runtime
-FROM python:3.12-slim
+FROM python:3.14-slim
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /install /usr/local
 COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
