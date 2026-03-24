@@ -453,11 +453,17 @@ make docker-push-amd64 DOCKER_USER=yourname
 
 ```bash
 make docker-push-all DOCKER_USER=yourname
-# or with a specific version tag:
-make docker-push-all DOCKER_USER=yourname VERSION=v1.0.0
+# VERSION is auto-detected from the latest git tag
 ```
 
-This pushes `yourname/code-index:latest` (or the specified version) to Docker Hub as a multi-arch image.
+This pushes `yourname/code-index:<version>` to Docker Hub as a multi-arch image (version is auto-detected from git tags).
+
+**CUDA (NVIDIA GPU, amd64 only):**
+
+```bash
+make docker-push-cuda DOCKER_USER=yourname
+# Pushes :cu130 and :<version>-cu130 tags
+```
 
 ### Pre-built images
 
@@ -468,7 +474,7 @@ Ready-to-use images are available on Docker Hub:
 | `dvcdsys/code-index:latest` | multi-arch | default, recommended |
 | `dvcdsys/code-index:arm64` | arm64 | Mac M1/M2/M3, Orange Pi, Raspberry Pi |
 | `dvcdsys/code-index:amd64` | amd64 | x86-64 servers, VMs |
-| `dvcdsys/code-index:cuda` | amd64 | NVIDIA GPU servers |
+| `dvcdsys/code-index:cu130` | amd64 | NVIDIA GPU servers (CUDA 13.0) |
 
 ### 4. Use your image
 
@@ -566,11 +572,13 @@ Supported targets: `darwin-arm64`, `darwin-amd64`, `linux-arm64`, `linux-amd64`.
 
 A CUDA-enabled image is available for servers with NVIDIA GPUs. Inference runs on GPU automatically — no configuration needed.
 
-**Docker Hub:** [`dvcdsys/code-index:cuda`](https://hub.docker.com/r/dvcdsys/code-index/tags)
+**Docker Hub:** [`dvcdsys/code-index:cu130`](https://hub.docker.com/r/dvcdsys/code-index/tags)
+
+Image tags follow the convention `cu<version>` (e.g., `cu130` = CUDA 13.0). Versioned tags are also available: `0.2.2-cu130`.
 
 **Host requirements:**
 
-- NVIDIA GPU with driver **>= 525** (CUDA 12.6 compatible)
+- NVIDIA GPU with driver **>= 550** (CUDA 13.0 compatible)
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host
 
 **Docker Compose:**

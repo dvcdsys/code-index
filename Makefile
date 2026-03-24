@@ -12,7 +12,8 @@ PORT        ?= 21847
 PYTHON      ?= $(shell test -f .venv/bin/python && echo .venv/bin/python || (command -v uv >/dev/null 2>&1 && echo "uv run --python 3.12 python" || echo python3))
 DOCKER_USER ?= $(error DOCKER_USER is not set. Run: make docker-push-all DOCKER_USER=yourname)
 IMAGE_NAME  ?= code-index
-VERSION     ?= latest
+VERSION     ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo latest)
+CUDA_TAG    ?= cu130
 DATA_DIR    ?= $(HOME)/.cix/data
 
 # ─── Server: Local (native, MPS on Mac) ─────────────────────────────
@@ -196,8 +197,8 @@ docker-push-amd64:
 docker-build-cuda:
 	docker build \
 		--platform linux/amd64 \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):cuda \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):cuda-$(VERSION) \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(CUDA_TAG) \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(VERSION)-$(CUDA_TAG) \
 		--file api/Dockerfile.cuda \
 		.
 
@@ -205,8 +206,8 @@ docker-push-cuda:
 	docker buildx build \
 		--builder cix-builder \
 		--platform linux/amd64 \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):cuda \
-		--tag $(DOCKER_USER)/$(IMAGE_NAME):cuda-$(VERSION) \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(CUDA_TAG) \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):$(VERSION)-$(CUDA_TAG) \
 		--file api/Dockerfile.cuda \
 		--push \
 		.
@@ -264,7 +265,7 @@ help:
 	@echo "  docker-setup          Create buildx builder (run once)"
 	@echo "  docker-push-arm64     Build & push :arm64"
 	@echo "  docker-push-amd64     Build & push :amd64"
-	@echo "  docker-push-cuda      Build & push :cuda"
+	@echo "  docker-push-cuda      Build & push :$(CUDA_TAG) + :$(VERSION)-$(CUDA_TAG)"
 	@echo "  docker-push-all       Build & push multi-arch :latest"
 	@echo ""
 	@echo "Tests:"
