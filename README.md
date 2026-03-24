@@ -179,6 +179,7 @@ cix summary
 
 ### Project Management
 
+
 | Command | Description |
 |---------|-------------|
 | `cix init [path]` | Register + index + start file watcher |
@@ -437,32 +438,18 @@ This creates a multi-platform `buildx` builder named `cix-builder`.
 
 Replace `yourname` with your Docker Hub username.
 
-**arm64 only** (Mac M1/M2/M3, Orange Pi 5, Raspberry Pi 4+):
-
-```bash
-make docker-push-arm64 DOCKER_USER=yourname
-```
-
-**amd64 only** (x86-64 servers, VMs, most Linux):
-
-```bash
-make docker-push-amd64 DOCKER_USER=yourname
-```
-
-**Both architectures under one tag** (multi-arch manifest, recommended):
+**CPU (multi-arch: arm64 + amd64):**
 
 ```bash
 make docker-push-all DOCKER_USER=yourname
-# VERSION is auto-detected from the latest git tag
+# Pushes yourname/code-index:<version> (version auto-detected from git tags)
 ```
-
-This pushes `yourname/code-index:<version>` to Docker Hub as a multi-arch image (version is auto-detected from git tags).
 
 **CUDA (NVIDIA GPU, amd64 only):**
 
 ```bash
 make docker-push-cuda DOCKER_USER=yourname
-# Pushes :cu130 and :<version>-cu130 tags
+# Pushes :latest-cu130 and :<version>-cu130 tags
 ```
 
 ### Pre-built images
@@ -471,10 +458,10 @@ Ready-to-use images are available on Docker Hub:
 
 | Tag | Architecture | Use case |
 |-----|-------------|----------|
-| `dvcdsys/code-index:latest` | multi-arch | default, recommended |
-| `dvcdsys/code-index:arm64` | arm64 | Mac M1/M2/M3, Orange Pi, Raspberry Pi |
-| `dvcdsys/code-index:amd64` | amd64 | x86-64 servers, VMs |
-| `dvcdsys/code-index:cu130` | amd64 | NVIDIA GPU servers (CUDA 13.0) |
+| `dvcdsys/code-index:latest` | multi-arch (arm64 + amd64) | default, recommended |
+| `dvcdsys/code-index:<version>` | multi-arch (arm64 + amd64) | pinned version |
+| `dvcdsys/code-index:latest-cu130` | amd64 | NVIDIA GPU servers (CUDA 13.0) |
+| `dvcdsys/code-index:<version>-cu130` | amd64 | pinned CUDA version |
 
 ### 4. Use your image
 
@@ -572,9 +559,9 @@ Supported targets: `darwin-arm64`, `darwin-amd64`, `linux-arm64`, `linux-amd64`.
 
 A CUDA-enabled image is available for servers with NVIDIA GPUs. Inference runs on GPU automatically — no configuration needed.
 
-**Docker Hub:** [`dvcdsys/code-index:cu130`](https://hub.docker.com/r/dvcdsys/code-index/tags)
+**Docker Hub:** [`dvcdsys/code-index:latest-cu130`](https://hub.docker.com/r/dvcdsys/code-index/tags)
 
-Image tags follow the convention `cu<version>` (e.g., `cu130` = CUDA 13.0). Versioned tags are also available: `0.2.2-cu130`.
+Tags: `latest-cu130` (always latest build) and `<version>-cu130` (pinned, e.g., `0.2.3-cu130`).
 
 **Host requirements:**
 
