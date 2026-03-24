@@ -1,5 +1,5 @@
 # Stage 1: builder — compile deps in full devel image
-FROM nvidia/cuda:12.6.3-devel-ubuntu24.04 AS builder
+FROM nvidia/cuda:13.2.0-devel-ubuntu24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -26,7 +26,7 @@ RUN PYTHONPATH=/install/local/lib/python3.12/dist-packages python -c \
     "from sentence_transformers import SentenceTransformer; SentenceTransformer('nomic-ai/CodeRankEmbed', trust_remote_code=True)"
 
 # Stage 2: runtime — lightweight image without compilers
-FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
+FROM nvidia/cuda:13.2.0-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
