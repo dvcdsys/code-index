@@ -1,6 +1,6 @@
 services:
   code-index-api:
-    image: dvcdsys/code-index:cuda
+    image: dvcdsys/code-index:cu130
     build:
       context: .
       dockerfile: api/Dockerfile.cuda

@@ -1,6 +1,6 @@
 services:
   code-index-api:
-    image: dvcdsys/code-index:cuda
+    image: dvcdsys/code-index:cu130
     container_name: code-index
     restart: unless-stopped
     ports:
