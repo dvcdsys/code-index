@@ -27,7 +27,7 @@ jobs:
         run: pip install pip-audit
 
       - name: Audit Python dependencies
-        run: pip-audit -r api/requirements.txt --strict
+        run: pip-audit -r api/requirements.txt --strict --ignore-vuln CVE-2026-4539  # pygments: no fix yet (2.19.2 is latest)
 
   trivy:
     name: trivy (vuln, second opinion)
@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run Trivy
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           scan-ref: .
