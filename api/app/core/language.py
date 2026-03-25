@@ -1,9 +1,6 @@
 EXTENSION_MAP: dict[str, str] = {
+    # Systems / compiled
     ".py": "python",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".js": "javascript",
-    ".jsx": "javascript",
     ".go": "go",
     ".rs": "rust",
     ".java": "java",
@@ -14,48 +11,78 @@ EXTENSION_MAP: dict[str, str] = {
     ".cxx": "cpp",
     ".hpp": "cpp",
     ".cs": "c_sharp",
-    ".rb": "ruby",
-    ".php": "php",
     ".swift": "swift",
     ".kt": "kotlin",
     ".scala": "scala",
-    ".r": "r",
-    ".R": "r",
+    ".zig": "zig",
+    ".jl": "julia",
+    ".f90": "fortran",
+    ".f95": "fortran",
+    ".f03": "fortran",
+    ".f": "fortran",
+    ".m": "objc",
+    ".mm": "objc",
+    # Web / scripting
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".rb": "ruby",
+    ".php": "php",
     ".lua": "lua",
     ".sh": "bash",
     ".bash": "bash",
     ".zsh": "bash",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".json": "json",
-    ".toml": "toml",
-    ".xml": "xml",
-    ".html": "html",
-    ".css": "css",
-    ".scss": "scss",
-    ".sql": "sql",
-    ".md": "markdown",
-    ".rst": "rst",
-    ".tf": "hcl",
-    ".proto": "protobuf",
+    ".r": "r",
+    ".R": "r",
     ".dart": "dart",
     ".ex": "elixir",
     ".exs": "elixir",
     ".erl": "erlang",
     ".hs": "haskell",
     ".ml": "ocaml",
-    ".vue": "vue",
+    ".lisp": "commonlisp",
+    ".cl": "commonlisp",
     ".svelte": "svelte",
+    # Markup / config / data
+    ".html": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sql": "sql",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".json": "json",
+    ".toml": "toml",
+    ".xml": "xml",
+    ".md": "markdown",
+    ".graphql": "graphql",
+    ".gql": "graphql",
+    ".re": "regex",
+    # Infra / build
+    ".tf": "hcl",
+    ".hcl": "hcl",
+    ".cmake": "cmake",
+    "CMakeLists.txt": "cmake",
+    "Makefile": "make",
+    "Dockerfile": "dockerfile",
 }
 
-TREESITTER_SUPPORTED = {
-    "python", "typescript", "javascript", "go", "rust", "java",
-    "c", "cpp", "c_sharp", "ruby", "php", "swift", "kotlin",
-    "scala", "lua", "bash", "html", "css", "sql", "haskell", "ocaml",
+# Filename-based detection (no extension or special names)
+FILENAME_MAP: dict[str, str] = {
+    "CMakeLists.txt": "cmake",
+    "Makefile": "make",
+    "GNUmakefile": "make",
+    "Dockerfile": "dockerfile",
 }
 
 
 def detect_language(file_path: str) -> str | None:
     from pathlib import Path
-    ext = Path(file_path).suffix.lower()
+    p = Path(file_path)
+    # Check filename first (Makefile, Dockerfile, CMakeLists.txt)
+    name = p.name
+    lang = FILENAME_MAP.get(name)
+    if lang:
+        return lang
+    ext = p.suffix.lower()
     return EXTENSION_MAP.get(ext)
