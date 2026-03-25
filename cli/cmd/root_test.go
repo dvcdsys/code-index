@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/anthropics/code-index/cli/internal/config"
 )
 
 func TestFindProjectRoot(t *testing.T) {
@@ -131,6 +134,64 @@ func TestGetClient_ReturnsClient(t *testing.T) {
 	prev, prevKey := apiURL, apiKey
 	apiURL = "http://localhost:19999"
 	apiKey = "test-key"
+	defer func() { apiURL = prev; apiKey = prevKey }()
+
+	c, err := getClient()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestGetClient_NoAPIKey_ReturnsError(t *testing.T) {
+	// When neither --api-key nor a config file key is present, getClient must
+	// return a descriptive error rather than silently creating a keyless client.
+	// Isolate HOME so config.Load() reads an empty config with no key.
+	t.Setenv("HOME", t.TempDir())
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	prev, prevKey := apiURL, apiKey
+	apiURL = "http://localhost:19999"
+	apiKey = ""
+	defer func() { apiURL = prev; apiKey = prevKey }()
+
+	_, err := getClient()
+	if err == nil {
+		t.Fatal("expected error when api key is missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "API key") {
+		t.Errorf("expected 'API key' in error message, got: %v", err)
+	}
+}
+
+func TestGetClient_FlagURLOverridesConfig(t *testing.T) {
+	// --api-url flag must take priority over whatever is in the config file.
+	prev, prevKey := apiURL, apiKey
+	apiURL = "http://flag-url:9999"
+	apiKey = "flag-key"
+	defer func() { apiURL = prev; apiKey = prevKey }()
+
+	c, err := getClient()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected non-nil client")
+	}
+	// The client's base URL should reflect the flag value.
+	if !strings.Contains(c.BaseURL(), "flag-url:9999") {
+		t.Errorf("client base URL = %q, want to contain %q", c.BaseURL(), "flag-url:9999")
+	}
+}
+
+func TestGetClient_FlagKeyOverridesConfig(t *testing.T) {
+	// --api-key flag must take priority over the key in the config file.
+	prev, prevKey := apiURL, apiKey
+	apiURL = "http://localhost:19999"
+	apiKey = "flag-key-override"
 	defer func() { apiURL = prev; apiKey = prevKey }()
 
 	c, err := getClient()
