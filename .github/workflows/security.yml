@@ -17,7 +17,7 @@ jobs:
     name: pip-audit (Python deps)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v5
         with:
@@ -33,7 +33,7 @@ jobs:
     name: trivy (vuln, second opinion)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run Trivy
         uses: aquasecurity/trivy-action@0.35.0
