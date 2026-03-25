@@ -111,11 +111,65 @@ class ChunkerService:
                 references=[],
             )
 
+    # Map cix language names to (module_name, language_function_name).
+    # Each entry corresponds to a PyPI package tree-sitter-<lang>.
+    _LANGUAGE_BINDINGS: dict[str, tuple[str, str]] = {
+        "python": ("tree_sitter_python", "language"),
+        "typescript": ("tree_sitter_typescript", "language_typescript"),
+        "javascript": ("tree_sitter_javascript", "language"),
+        "go": ("tree_sitter_go", "language"),
+        "rust": ("tree_sitter_rust", "language"),
+        "java": ("tree_sitter_java", "language"),
+        "c": ("tree_sitter_c", "language"),
+        "cpp": ("tree_sitter_cpp", "language"),
+        "c_sharp": ("tree_sitter_c_sharp", "language"),
+        "ruby": ("tree_sitter_ruby", "language"),
+        "php": ("tree_sitter_php", "language_php"),
+        "swift": ("tree_sitter_swift", "language"),
+        "kotlin": ("tree_sitter_kotlin", "language"),
+        "scala": ("tree_sitter_scala", "language"),
+        "bash": ("tree_sitter_bash", "language"),
+        "html": ("tree_sitter_html", "language"),
+        "css": ("tree_sitter_css", "language"),
+        "scss": ("tree_sitter_scss", "language"),
+        "lua": ("tree_sitter_lua", "language"),
+        "sql": ("tree_sitter_sql", "language"),
+        "json": ("tree_sitter_json", "language"),
+        "yaml": ("tree_sitter_yaml", "language"),
+        "toml": ("tree_sitter_toml", "language"),
+        "xml": ("tree_sitter_xml", "language_xml"),
+        "markdown": ("tree_sitter_markdown", "language"),
+        "haskell": ("tree_sitter_haskell", "language"),
+        "ocaml": ("tree_sitter_ocaml", "language_ocaml"),
+        "hcl": ("tree_sitter_hcl", "language"),
+        "dart": ("tree_sitter_dart", "language"),
+        "elixir": ("tree_sitter_elixir", "language"),
+        "erlang": ("tree_sitter_erlang", "language"),
+        "zig": ("tree_sitter_zig", "language"),
+        "julia": ("tree_sitter_julia", "language"),
+        "r": ("tree_sitter_r", "language"),
+        "svelte": ("tree_sitter_svelte", "language"),
+        "graphql": ("tree_sitter_graphql", "language"),
+        "dockerfile": ("tree_sitter_dockerfile", "language"),
+        "cmake": ("tree_sitter_cmake", "language"),
+        "make": ("tree_sitter_make", "language"),
+        "fortran": ("tree_sitter_fortran", "language"),
+        "objc": ("tree_sitter_objc", "language"),
+        "commonlisp": ("tree_sitter_commonlisp", "language"),
+        "regex": ("tree_sitter_regex", "language"),
+    }
+
     def _get_parser(self, language: str):
         if language not in self._parsers:
             try:
-                from tree_sitter_languages import get_parser
-                self._parsers[language] = get_parser(language)
+                from tree_sitter import Language, Parser
+                binding = self._LANGUAGE_BINDINGS.get(language)
+                if not binding:
+                    return None
+                mod_name, func_name = binding
+                mod = __import__(mod_name)
+                lang = Language(getattr(mod, func_name)())
+                self._parsers[language] = Parser(lang)
             except Exception:
                 return None
         return self._parsers[language]
