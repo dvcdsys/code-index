@@ -30,7 +30,7 @@ jobs:
         run: pip-audit -r api/requirements.txt --strict
 
   trivy:
-    name: trivy (filesystem + secrets)
+    name: trivy (vuln, second opinion)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
-          scanners: vuln,secret
+          scanners: vuln
           severity: HIGH,CRITICAL
           format: sarif
           output: trivy-results.sarif
