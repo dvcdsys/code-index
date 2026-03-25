@@ -27,6 +27,11 @@ func New(baseURL, apiKey string) *Client {
 	}
 }
 
+// BaseURL returns the base URL this client is configured to use.
+func (c *Client) BaseURL() string {
+	return c.baseURL
+}
+
 // do performs an HTTP request with auth
 func (c *Client) do(method, path string, body interface{}) (*http.Response, error) {
 	var bodyReader io.Reader

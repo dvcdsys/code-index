@@ -5,40 +5,40 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	API      APIConfig      `mapstructure:"api"`
-	Watcher  WatcherConfig  `mapstructure:"watcher"`
-	Server   ServerConfig   `mapstructure:"server"`
-	Indexing IndexingConfig `mapstructure:"indexing"`
-	Projects []ProjectEntry `mapstructure:"projects"`
+	API      APIConfig      `yaml:"api"`
+	Watcher  WatcherConfig  `yaml:"watcher"`
+	Server   ServerConfig   `yaml:"server"`
+	Indexing IndexingConfig `yaml:"indexing"`
+	Projects []ProjectEntry `yaml:"projects"`
 }
 
 type APIConfig struct {
-	URL string `mapstructure:"url"`
-	Key string `mapstructure:"key"`
+	URL string `yaml:"url"`
+	Key string `yaml:"key"`
 }
 
 type WatcherConfig struct {
-	Enabled     bool     `mapstructure:"enabled"`
-	DebounceMS  int      `mapstructure:"debounce_ms"`
-	ExcludePatterns []string `mapstructure:"exclude"`
+	Enabled         bool     `yaml:"enabled"`
+	DebounceMS      int      `yaml:"debounce_ms"`
+	ExcludePatterns []string `yaml:"exclude"`
 }
 
 type ServerConfig struct {
-	Port     int `mapstructure:"port"`
-	CacheTTL int `mapstructure:"cache_ttl"`
+	Port     int `yaml:"port"`
+	CacheTTL int `yaml:"cache_ttl"`
 }
 
 type IndexingConfig struct {
-	BatchSize int `mapstructure:"batchsize"`
+	BatchSize int `yaml:"batchsize"`
 }
 
 type ProjectEntry struct {
-	Path      string `mapstructure:"path"`
-	AutoWatch bool   `mapstructure:"auto_watch"`
+	Path      string `yaml:"path"`
+	AutoWatch bool   `yaml:"auto_watch"`
 }
 
 var (
@@ -46,7 +46,32 @@ var (
 	configPath   string
 )
 
-// Load loads configuration from ~/.cix/config.yaml
+// defaults returns a Config populated with default values.
+func defaults() Config {
+	return Config{
+		API: APIConfig{
+			URL: "http://localhost:21847",
+		},
+		Watcher: WatcherConfig{
+			Enabled:    true,
+			DebounceMS: 5000,
+			ExcludePatterns: []string{
+				"node_modules", ".git", ".venv", "__pycache__",
+				"dist", "build", ".next", ".cache", ".DS_Store",
+			},
+		},
+		Server: ServerConfig{
+			Port:     8080,
+			CacheTTL: 300,
+		},
+		Indexing: IndexingConfig{
+			BatchSize: 20,
+		},
+	}
+}
+
+// Load loads configuration from ~/.cix/config.yaml.
+// Fields absent from the file keep their default values.
 func Load() (*Config, error) {
 	if globalConfig != nil {
 		return globalConfig, nil
@@ -60,79 +85,65 @@ func Load() (*Config, error) {
 	configDir := filepath.Join(home, ".cix")
 	configPath = filepath.Join(configDir, "config.yaml")
 
-	// Create config dir if not exists
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return nil, fmt.Errorf("create config dir: %w", err)
 	}
 
-	viper.SetConfigFile(configPath)
-	viper.SetConfigType("yaml")
+	cfg := defaults()
 
-	// Set defaults
-	viper.SetDefault("api.url", "http://localhost:21847")
-	viper.SetDefault("watcher.enabled", true)
-	viper.SetDefault("watcher.debounce_ms", 5000)
-	viper.SetDefault("watcher.exclude", []string{
-		"node_modules", ".git", ".venv", "__pycache__",
-		"dist", "build", ".next", ".cache", ".DS_Store",
-	})
-	viper.SetDefault("server.port", 8080)
-	viper.SetDefault("server.cache_ttl", 300)
-	viper.SetDefault("indexing.batchsize", 20)
-
-	// Read config file if exists, ignore if missing
-	if err := viper.ReadInConfig(); err != nil {
-		if !os.IsNotExist(err) {
-			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-				return nil, fmt.Errorf("read config: %w", err)
-			}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			globalConfig = &cfg
+			return globalConfig, nil
 		}
+		return nil, fmt.Errorf("read config: %w", err)
 	}
 
-	var cfg Config
-	if err := viper.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("unmarshal config: %w", err)
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
 	globalConfig = &cfg
 	return globalConfig, nil
 }
 
-// Save saves the current configuration to disk
+// Save writes cfg to disk and updates the in-memory singleton.
 func Save(cfg *Config) error {
-	viper.Set("api", cfg.API)
-	viper.Set("watcher", cfg.Watcher)
-	viper.Set("server", cfg.Server)
-	viper.Set("indexing", cfg.Indexing)
-	viper.Set("projects", cfg.Projects)
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
 
-	if err := viper.WriteConfig(); err != nil {
-		// Try to write if file doesn't exist
-		if err := viper.SafeWriteConfig(); err != nil {
-			return fmt.Errorf("save config: %w", err)
-		}
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		return fmt.Errorf("save config: %w", err)
 	}
 
 	globalConfig = cfg
 	return nil
 }
 
-// GetConfigPath returns the path to the config file
+// GetConfigPath returns the path to the config file.
 func GetConfigPath() string {
 	return configPath
 }
 
-// AddProject adds a project to the config
+// ResetForTesting clears the in-memory singleton.
+// Only intended for use in tests.
+func ResetForTesting() {
+	globalConfig = nil
+	configPath = ""
+}
+
+// AddProject adds a project to the config.
 func AddProject(path string, autoWatch bool) error {
 	cfg, err := Load()
 	if err != nil {
 		return err
 	}
 
-	// Check if already exists
 	for _, p := range cfg.Projects {
 		if p.Path == path {
-			// Update autoWatch if different
 			if p.AutoWatch != autoWatch {
 				p.AutoWatch = autoWatch
 				return Save(cfg)
@@ -149,7 +160,7 @@ func AddProject(path string, autoWatch bool) error {
 	return Save(cfg)
 }
 
-// RemoveProject removes a project from the config
+// RemoveProject removes a project from the config.
 func RemoveProject(path string) error {
 	cfg, err := Load()
 	if err != nil {
@@ -167,7 +178,7 @@ func RemoveProject(path string) error {
 	return Save(cfg)
 }
 
-// GetLogsDir returns the logs directory path
+// GetLogsDir returns the logs directory path.
 func GetLogsDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -182,7 +193,7 @@ func GetLogsDir() (string, error) {
 	return logsDir, nil
 }
 
-// GetPIDFile returns the PID file path
+// GetPIDFile returns the PID file path.
 func GetPIDFile() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
