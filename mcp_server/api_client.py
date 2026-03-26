@@ -1,13 +1,37 @@
 import os
+from pathlib import Path
 
 import httpx
 
-BASE_URL = os.environ.get("CODE_INDEX_API_URL", "http://localhost:21847")
-API_KEY = os.environ.get("CODE_INDEX_API_KEY", "")
+
+def _load_config() -> tuple[str, str]:
+    """Load api url+key. Priority: env var → ~/.cix/config.yaml → default."""
+    url = os.environ.get("CODE_INDEX_API_URL", "")
+    key = os.environ.get("CODE_INDEX_API_KEY", "")
+
+    if not url or not key:
+        try:
+            import yaml
+            config_path = Path.home() / ".cix" / "config.yaml"
+            if config_path.exists():
+                with config_path.open() as f:
+                    cfg = yaml.safe_load(f) or {}
+                api_cfg = cfg.get("api", {})
+                if not url:
+                    url = api_cfg.get("url", "")
+                if not key:
+                    key = api_cfg.get("key", "")
+        except Exception:
+            pass
+
+    return (url or "http://localhost:21847", key or "")
+
+
+BASE_URL, API_KEY = _load_config()
 
 _NOT_RUNNING_MSG = (
     "Code index service not running. Start with:\n"
-    "  cd ~/Cursor/code-index && docker compose up -d"
+    "  cd ~/Cursor/claude-code-index && docker compose up -d"
 )
 
 
