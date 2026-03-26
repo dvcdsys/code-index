@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import os
 import sys
 
 from mcp.server.fastmcp import FastMCP
@@ -13,10 +14,11 @@ def _encode_path(path: str) -> str:
 
 mcp = FastMCP("code-index")
 
-_selected_project_path: str | None = None
+_selected_project_path: str | None = os.environ.get("CIX_PROJECT") or None
 
 _NO_PROJECT_MSG = (
-    "No project selected. Use select_project with the full project path."
+    "No project selected. Use select_project with the full project path, "
+    "or set the CIX_PROJECT environment variable."
 )
 
 
@@ -194,18 +196,124 @@ async def find_symbols(query: str, types: list[str] = [], limit: int = 20) -> st
 
 
 @mcp.tool()
+async def find_definitions(
+    symbol: str,
+    kind: str = "",
+    file_filter: str = "",
+    limit: int = 10,
+) -> str:
+    """Go to definition — find where a symbol is declared. Use BEFORE Grep when looking for a specific symbol definition. kind filter: function, class, method, type. file_filter narrows to a specific file path."""
+    if not _selected_project_path:
+        return _NO_PROJECT_MSG
+
+    try:
+        encoded_path = _encode_path(_selected_project_path)
+        body: dict = {"symbol": symbol, "limit": limit}
+        if kind:
+            body["kind"] = kind
+        if file_filter:
+            body["file_path"] = file_filter
+
+        data = await api_client.post(
+            f"/api/v1/projects/{encoded_path}/search/definitions", json=body
+        )
+
+        results = data.get("results", [])
+        if not results:
+            return f"No definitions found for: {symbol}"
+
+        lines = [f"Found {data['total']} definition(s) for \"{symbol}\":\n"]
+        for r in results:
+            parent = f" (in {r['parent_name']})" if r.get("parent_name") else ""
+            sig = f"\n     Signature: {r['signature']}" if r.get("signature") else ""
+            lines.append(
+                f"  [{r['kind']}] {r['name']}{parent}\n"
+                f"     {r['file_path']}:{r['line']}-{r['end_line']} ({r['language']}){sig}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        return _format_error(e)
+
+
+@mcp.tool()
+async def find_references(
+    symbol: str,
+    file_filter: str = "",
+    limit: int = 30,
+) -> str:
+    """Find all usages of a symbol across the codebase (AST-based). Use after find_definitions to trace call sites. Returns file paths and line numbers."""
+    if not _selected_project_path:
+        return _NO_PROJECT_MSG
+
+    try:
+        encoded_path = _encode_path(_selected_project_path)
+        body: dict = {"symbol": symbol, "limit": limit}
+        if file_filter:
+            body["file_path"] = file_filter
+
+        data = await api_client.post(
+            f"/api/v1/projects/{encoded_path}/search/references", json=body
+        )
+
+        results = data.get("results", [])
+        if not results:
+            return f"No references found for: {symbol}"
+
+        lines = [f"Found {data['total']} reference(s) to \"{symbol}\":\n"]
+        for r in results:
+            lines.append(f"  {r['file_path']}:{r['start_line']} ({r['language']})")
+        return "\n".join(lines)
+    except Exception as e:
+        return _format_error(e)
+
+
+@mcp.tool()
+async def search_files(pattern: str, limit: int = 20) -> str:
+    """Find files by path fragment — use instead of Glob when you know part of a filename or directory name."""
+    if not _selected_project_path:
+        return _NO_PROJECT_MSG
+
+    try:
+        encoded_path = _encode_path(_selected_project_path)
+        data = await api_client.post(
+            f"/api/v1/projects/{encoded_path}/search/files",
+            json={"query": pattern, "limit": limit},
+        )
+
+        results = data.get("results", [])
+        if not results:
+            return f"No files found matching: {pattern}"
+
+        total = data.get("total", len(results))
+        lines = [f"Found {total} file(s) matching \"{pattern}\":\n"]
+        for r in results:
+            lang = f" [{r['language']}]" if r.get("language") else ""
+            lines.append(f"  {r['file_path']}{lang}")
+        return "\n".join(lines)
+    except Exception as e:
+        return _format_error(e)
+
+
+@mcp.tool()
 async def index_project(path: str = "") -> str:
-    """Trigger reindexing after significant code changes. Requires the cix CLI to be installed since the CLI handles file discovery and sends content to the server. Defaults to the active project if no path provided."""
+    """Trigger server-side incremental reindex. Re-embeds files already known to the server. For first-time indexing or after adding new files, use 'cix reindex -p <path>' from the terminal. Defaults to the active project if no path provided."""
     try:
         project_path = path if path else _selected_project_path
         if not project_path:
             return _NO_PROJECT_MSG
 
+        encoded_path = _encode_path(project_path)
+        data = await api_client.post(
+            f"/api/v1/projects/{encoded_path}/index",
+            json={"full": False},
+        )
+
+        run_id = data.get("run_id", "unknown")
+        message = data.get("message", "Indexing started")
         return (
-            f"To reindex, run this command in the terminal:\n"
-            f"  cix reindex -p {project_path}\n\n"
-            f"The CLI handles file discovery and sends content to the server.\n"
-            f"Use index_status to check progress after starting."
+            f"{message}\n"
+            f"Run ID: {run_id}\n"
+            f"Use index_status to check progress."
         )
     except Exception as e:
         return _format_error(e)
