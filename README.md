@@ -301,6 +301,64 @@ cix search "error handling in auth flow" --in ./api
 
 ---
 
+## MCP Server
+
+The MCP server is a secondary interface for Claude agents when the CLI is not available (e.g., sandboxed environments). It exposes the same search capabilities as the CLI as [Model Context Protocol](https://modelcontextprotocol.io/) tools, and is registered automatically by `setup-local.sh`.
+
+### Manual Registration
+
+```bash
+claude mcp add code-index \
+    --scope user \
+    -e CODE_INDEX_API_URL="http://localhost:21847" \
+    -e CODE_INDEX_API_KEY="your-api-key" \
+    -- uv run --directory /path/to/claude-code-index python -m mcp_server
+```
+
+To skip the `select_project` call at the start of each session, add `-e CIX_PROJECT=...`:
+
+```bash
+claude mcp add code-index \
+    --scope user \
+    -e CODE_INDEX_API_URL="http://localhost:21847" \
+    -e CODE_INDEX_API_KEY="your-api-key" \
+    -e CIX_PROJECT="/absolute/path/to/your/project" \
+    -- uv run --directory /path/to/claude-code-index python -m mcp_server
+```
+
+### Configuration
+
+Connection settings are resolved in priority order:
+
+| Priority | Source | Notes |
+|----------|--------|-------|
+| 1 | `CODE_INDEX_API_URL` / `CODE_INDEX_API_KEY` env vars | Passed via `-e` in `claude mcp add` |
+| 2 | `~/.cix/config.yaml` (`api.url` / `api.key`) | Written by `cix config set` |
+| 3 | `http://localhost:21847` / no key | Default for no-auth local setups |
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `select_project(path)` | Activate a project for the session. Not needed if `CIX_PROJECT` env var is set. |
+| `list_projects()` | List all registered projects with stats. |
+| `create_project(path)` | Register a new project path. |
+| `search_code(query, limit, file_filter)` | Semantic search — finds code by meaning. Primary search tool. |
+| `find_symbols(query, types, limit)` | Symbol lookup by name (functions, classes, methods, types). |
+| `find_definitions(symbol, kind, file_filter, limit)` | Go-to-definition — find where a symbol is declared. |
+| `find_references(symbol, file_filter, limit)` | Find all usages of a symbol (AST-based). |
+| `search_files(pattern, limit)` | Find files by path fragment. |
+| `index_project(path)` | Trigger server-side incremental reindex. |
+| `index_status(path)` | Check indexing progress (phase, files, ETA). |
+| `project_summary(path)` | Project overview: languages, top directories, key symbols. |
+
+### Differences from CLI
+
+- `index_project` triggers a server-side incremental reindex of files already known to the server. For first-time indexing or after adding new files, use `cix init` or `cix reindex -p <path>` from the terminal.
+- `find_references` uses AST-based reference tracking — results show file + line number only, not code content.
+
+---
+
 ## How Indexing Works
 
 **Chunking** — tree-sitter parses code into semantic chunks (functions, classes, methods). Unsupported languages fall back to a sliding window (2000 chars, 256 char overlap).
