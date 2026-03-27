@@ -143,6 +143,13 @@ func (w *Watcher) handleEvent(ei notify.EventInfo) {
 		return
 	}
 
+	// Branch switch: .git/HEAD changed → immediate incremental reindex
+	rel, _ := filepath.Rel(w.projectPath, path)
+	if rel == filepath.Join(".git", "HEAD") {
+		w.triggerImmediateReindex("git branch switched")
+		return
+	}
+
 	// .gitignore, .cixignore, or .cixconfig.yaml changed → full reindex
 	baseName := filepath.Base(path)
 	if baseName == ".gitignore" || baseName == ".cixignore" || baseName == ".cixconfig.yaml" {
@@ -207,6 +214,30 @@ func (w *Watcher) triggerFullReindex() {
 		result.FilesProcessed, result.ChunksCreated, result.RunID)
 }
 
+// triggerImmediateReindex cancels any pending debounce and immediately runs an
+// incremental reindex. Unlike flushChanges, this runs even when pendingChanges
+// is empty — used for branch switches where FSEvents may have coalesced all
+// individual file events into a single directory event (which handleEvent skips).
+func (w *Watcher) triggerImmediateReindex(reason string) {
+	w.mu.Lock()
+	if w.timer != nil {
+		w.timer.Stop()
+	}
+	w.pendingChanges = make(map[string]bool)
+	w.mu.Unlock()
+
+	w.logger.Printf("%s, triggering reindex...", reason)
+
+	result, err := indexer.Run(w.apiClient, w.projectPath, false, 0)
+	if err != nil {
+		w.logger.Printf("Failed to reindex: %v", err)
+		return
+	}
+
+	w.logger.Printf("Reindex complete: %d files, %d chunks (run ID: %s)",
+		result.FilesProcessed, result.ChunksCreated, result.RunID)
+}
+
 // flushChanges sends accumulated changes to the API for reindexing.
 func (w *Watcher) flushChanges() {
 	w.mu.Lock()
@@ -250,9 +281,13 @@ func (w *Watcher) flushChanges() {
 
 // isExcluded checks if a path should be ignored based on directory exclusions.
 func (w *Watcher) isExcluded(path string) bool {
-	// Check each component of the path
 	rel, err := filepath.Rel(w.projectPath, path)
 	if err != nil {
+		return false
+	}
+
+	// Allow .git/HEAD through for branch switch detection.
+	if rel == filepath.Join(".git", "HEAD") {
 		return false
 	}
 

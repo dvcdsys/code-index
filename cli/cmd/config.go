@@ -59,42 +59,31 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	fmt.Println("Configuration:")
-	fmt.Printf("  API URL: %s\n", cfg.API.URL)
+	apiKey := "(not set)"
 	if cfg.API.Key != "" {
-		// Mask API key
-		maskedKey := cfg.API.Key
-		if len(maskedKey) > 20 {
-			maskedKey = maskedKey[:12] + "..." + maskedKey[len(maskedKey)-4:]
+		k := cfg.API.Key
+		if len(k) > 20 {
+			k = k[:12] + "..." + k[len(k)-4:]
 		}
-		fmt.Printf("  API Key: %s\n", maskedKey)
-	} else {
-		fmt.Printf("  API Key: (not set)\n")
+		apiKey = k
 	}
 
-	fmt.Printf("\nWatcher:\n")
-	fmt.Printf("  Enabled: %v\n", cfg.Watcher.Enabled)
-	fmt.Printf("  Debounce: %dms\n", cfg.Watcher.DebounceMS)
-
-	fmt.Printf("\nIndexing:\n")
-	fmt.Printf("  Batch Size: %d files\n", cfg.Indexing.BatchSize)
-
-	fmt.Printf("\nServer:\n")
-	fmt.Printf("  Port: %d\n", cfg.Server.Port)
-	fmt.Printf("  Cache TTL: %ds\n", cfg.Server.CacheTTL)
+	fmt.Printf("%-28s = %s\n", "api.url", cfg.API.URL)
+	fmt.Printf("%-28s = %s\n", "api.key", apiKey)
+	fmt.Printf("%-28s = %v\n", "watcher.enabled", cfg.Watcher.Enabled)
+	fmt.Printf("%-28s = %d\n", "watcher.debounce_ms", cfg.Watcher.DebounceMS)
+	fmt.Printf("%-28s = %d\n", "indexing.batch_size", cfg.Indexing.BatchSize)
+	fmt.Printf("%-28s = %d\n", "server.port", cfg.Server.Port)
+	fmt.Printf("%-28s = %d\n", "server.cache_ttl", cfg.Server.CacheTTL)
 
 	if len(cfg.Projects) > 0 {
-		fmt.Printf("\nProjects (%d):\n", len(cfg.Projects))
+		fmt.Printf("\nprojects (%d):\n", len(cfg.Projects))
 		for _, p := range cfg.Projects {
-			autoWatch := "no"
-			if p.AutoWatch {
-				autoWatch = "yes"
-			}
-			fmt.Printf("  - %s (auto-watch: %s)\n", p.Path, autoWatch)
+			fmt.Printf("  - %s (auto-watch: %v)\n", p.Path, p.AutoWatch)
 		}
 	}
 
-	fmt.Printf("\nConfig file: %s\n", config.GetConfigPath())
+	fmt.Printf("\nconfig file: %s\n", config.GetConfigPath())
 
 	return nil
 }
