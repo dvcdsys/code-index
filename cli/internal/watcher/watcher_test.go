@@ -126,6 +126,27 @@ func TestIsExcluded_NestedExcludedDir(t *testing.T) {
 	}
 }
 
+func TestIsExcluded_GitHEAD(t *testing.T) {
+	w := newTestWatcher(t, "/project", "http://localhost")
+
+	// .git/HEAD must pass through for branch switch detection.
+	if w.isExcluded("/project/.git/HEAD") {
+		t.Error(".git/HEAD should not be excluded")
+	}
+
+	// All other .git/ paths must still be excluded.
+	for _, p := range []string{
+		"/project/.git/config",
+		"/project/.git/COMMIT_EDITMSG",
+		"/project/.git/objects/ab/cdef123",
+		"/project/.git/refs/heads/main",
+	} {
+		if !w.isExcluded(p) {
+			t.Errorf("%q should be excluded", p)
+		}
+	}
+}
+
 func TestIsExcludedExt_BinaryFile(t *testing.T) {
 	w := newTestWatcher(t, "/project", "http://localhost")
 
@@ -515,6 +536,44 @@ func TestHandleEvent_CixignoreRemove_FullReindex(t *testing.T) {
 	defer calls.mu.Unlock()
 	if calls.Begin < 1 {
 		t.Error("expected full reindex triggered by .cixignore removal")
+	}
+}
+
+func TestHandleEvent_GitHEADChange_TriggersReindex(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644)
+
+	srv, calls := newIndexServer(t, dir)
+	w := newTestWatcher(t, dir, srv.URL)
+
+	headPath := filepath.Join(dir, ".git", "HEAD")
+	w.handleEvent(mockEventInfo{path: headPath, event: notify.Write})
+
+	calls.mu.Lock()
+	defer calls.mu.Unlock()
+	if calls.Begin < 1 {
+		t.Error("expected reindex triggered by .git/HEAD change (branch switch)")
+	}
+}
+
+func TestHandleEvent_GitHEADChange_ClearsPendingChanges(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644)
+
+	srv, _ := newIndexServer(t, dir)
+	w := newTestWatcher(t, dir, srv.URL)
+
+	// Simulate some pending changes accumulated before the branch switch.
+	w.trackChange(filepath.Join(dir, "a.go"))
+	w.trackChange(filepath.Join(dir, "b.go"))
+
+	headPath := filepath.Join(dir, ".git", "HEAD")
+	w.handleEvent(mockEventInfo{path: headPath, event: notify.Write})
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.pendingChanges) != 0 {
+		t.Errorf("pendingChanges should be cleared after HEAD-triggered reindex, got %v", w.pendingChanges)
 	}
 }
 
