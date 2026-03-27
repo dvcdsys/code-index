@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,6 +71,21 @@ func defaults() Config {
 	}
 }
 
+// normalizeLegacyKeys maps old viper-generated YAML key names to the current
+// yaml struct tag names. Provides backward compatibility for configs created
+// before the viper→yaml.v3 migration.
+func normalizeLegacyKeys(data []byte) []byte {
+	for _, pair := range [][2]string{
+		{"debouncems:", "debounce_ms:"},
+		{"excludepatterns:", "exclude:"},
+		{"cachettl:", "cache_ttl:"},
+		{"autowatch:", "auto_watch:"},
+	} {
+		data = bytes.ReplaceAll(data, []byte(pair[0]), []byte(pair[1]))
+	}
+	return data
+}
+
 // Load loads configuration from ~/.cix/config.yaml.
 // Fields absent from the file keep their default values.
 func Load() (*Config, error) {
@@ -100,11 +116,18 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	normalized := normalizeLegacyKeys(data)
+	if err := yaml.Unmarshal(normalized, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
 	globalConfig = &cfg
+
+	// If the file used legacy viper-style keys, re-save in the current format.
+	if !bytes.Equal(data, normalized) {
+		_ = Save(&cfg)
+	}
+
 	return globalConfig, nil
 }
 

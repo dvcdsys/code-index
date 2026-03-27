@@ -298,6 +298,55 @@ indexing:
 	}
 }
 
+// TestLoad_LegacyKeys verifies backward compatibility with viper-generated
+// config files that use lowercased field names without underscores.
+func TestLoad_LegacyKeys(t *testing.T) {
+	home := isolateHome(t)
+
+	cfgDir := filepath.Join(home, ".cix")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := `
+watcher:
+  enabled: true
+  debouncems: 2500
+  excludepatterns:
+    - node_modules
+    - .git
+server:
+  port: 9090
+  cachettl: 120
+projects:
+  - path: /srv/myproject
+    autowatch: true
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Watcher.DebounceMS != 2500 {
+		t.Errorf("DebounceMS = %d, want 2500 (legacy key: debouncems)", cfg.Watcher.DebounceMS)
+	}
+	if len(cfg.Watcher.ExcludePatterns) != 2 {
+		t.Errorf("ExcludePatterns len = %d, want 2 (legacy key: excludepatterns)", len(cfg.Watcher.ExcludePatterns))
+	}
+	if cfg.Server.CacheTTL != 120 {
+		t.Errorf("CacheTTL = %d, want 120 (legacy key: cachettl)", cfg.Server.CacheTTL)
+	}
+	if cfg.Server.Port != 9090 {
+		t.Errorf("Port = %d, want 9090", cfg.Server.Port)
+	}
+	if len(cfg.Projects) != 1 || !cfg.Projects[0].AutoWatch {
+		t.Errorf("Projects[0].AutoWatch = false, want true (legacy key: autowatch)")
+	}
+}
+
 func TestAddProject(t *testing.T) {
 	isolateHome(t)
 
