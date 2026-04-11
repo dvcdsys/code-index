@@ -55,6 +55,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Indexing.BatchSize != 20 {
 		t.Errorf("Indexing.BatchSize = %d, want 20", cfg.Indexing.BatchSize)
 	}
+	if cfg.Watcher.SyncIntervalMins != 5 {
+		t.Errorf("Watcher.SyncIntervalMins = %d, want 5", cfg.Watcher.SyncIntervalMins)
+	}
 }
 
 func TestLoad_FromFile(t *testing.T) {
@@ -71,6 +74,7 @@ api:
 watcher:
   enabled: false
   debounce_ms: 2000
+  sync_interval_mins: 10
 server:
   port: 3000
   cache_ttl: 60
@@ -97,6 +101,9 @@ indexing:
 	}
 	if cfg.Watcher.DebounceMS != 2000 {
 		t.Errorf("Watcher.DebounceMS = %d, want 2000", cfg.Watcher.DebounceMS)
+	}
+	if cfg.Watcher.SyncIntervalMins != 10 {
+		t.Errorf("Watcher.SyncIntervalMins = %d, want 10", cfg.Watcher.SyncIntervalMins)
 	}
 	if cfg.Server.Port != 3000 {
 		t.Errorf("Server.Port = %d, want 3000", cfg.Server.Port)
@@ -213,9 +220,10 @@ func TestSave_RoundTrip(t *testing.T) {
 			Key: "saved-key",
 		},
 		Watcher: WatcherConfig{
-			Enabled:         false,
-			DebounceMS:      1234,
-			ExcludePatterns: []string{".git", "vendor"},
+			Enabled:          false,
+			DebounceMS:       1234,
+			SyncIntervalMins: 15,
+			ExcludePatterns:  []string{".git", "vendor"},
 		},
 		Server: ServerConfig{
 			Port:     4444,
@@ -249,6 +257,9 @@ func TestSave_RoundTrip(t *testing.T) {
 	}
 	if got.Watcher.DebounceMS != want.Watcher.DebounceMS {
 		t.Errorf("Watcher.DebounceMS = %d, want %d", got.Watcher.DebounceMS, want.Watcher.DebounceMS)
+	}
+	if got.Watcher.SyncIntervalMins != want.Watcher.SyncIntervalMins {
+		t.Errorf("Watcher.SyncIntervalMins = %d, want %d", got.Watcher.SyncIntervalMins, want.Watcher.SyncIntervalMins)
 	}
 	if got.Server.Port != want.Server.Port {
 		t.Errorf("Server.Port = %d, want %d", got.Server.Port, want.Server.Port)

@@ -23,9 +23,10 @@ type APIConfig struct {
 }
 
 type WatcherConfig struct {
-	Enabled         bool     `yaml:"enabled"`
-	DebounceMS      int      `yaml:"debounce_ms"`
-	ExcludePatterns []string `yaml:"exclude"`
+	Enabled          bool     `yaml:"enabled"`
+	DebounceMS       int      `yaml:"debounce_ms"`
+	ExcludePatterns  []string `yaml:"exclude"`
+	SyncIntervalMins int      `yaml:"sync_interval_mins"`
 }
 
 type ServerConfig struct {
@@ -60,6 +61,7 @@ func defaults() Config {
 				"node_modules", ".git", ".venv", "__pycache__",
 				"dist", "build", ".next", ".cache", ".DS_Store",
 			},
+			SyncIntervalMins: 5,
 		},
 		Server: ServerConfig{
 			Port:     8080,

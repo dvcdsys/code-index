@@ -426,6 +426,10 @@ The file watcher triggers a full reindex when `.cixconfig.yaml` changes.
 | `EXCLUDED_DIRS` | `node_modules,.git,.venv,...` | Comma-separated dirs to skip |
 | `CPUS` | `2.0` | Number of CPU cores available to the container |
 | `OMP_NUM_THREADS` | all cores | OpenMP threads used by the embedding model (CPU inference) |
+| `MAX_CHUNK_TOKENS` | `1500` | Max tokens per chunk sent to the embedding model. Controls peak VRAM — see [VRAM Usage](#vram-usage-nomic-aicoderankembed-rtx-3090). |
+| `MAX_BATCH_SIZE` | `8` | Max chunks per GPU call. Reduce to lower peak VRAM at the cost of indexing throughput. |
+| `MAX_EMBEDDING_CONCURRENCY` | `1` | Max concurrent GPU embedding calls. Keep at `1` for a single GPU — prevents CUDA OOM from allocator fragmentation. |
+| `EMBEDDING_QUEUE_TIMEOUT` | `300` | Seconds a request waits in the GPU queue before the server returns HTTP 503. `0` = reject immediately when the GPU slot is busy. |
 | `CHROMA_PERSIST_DIR` | `~/.cix/data/chroma` (local) | ChromaDB storage path — **local mode only**, ignored in Docker |
 | `SQLITE_PATH` | `~/.cix/data/sqlite/projects.db` (local) | SQLite database path — **local mode only**, ignored in Docker |
 
@@ -616,6 +620,24 @@ Supported targets: `darwin-arm64`, `darwin-amd64`, `linux-arm64`, `linux-amd64`.
 ## GPU Acceleration (CUDA)
 
 A CUDA-enabled image is available for servers with NVIDIA GPUs. Inference runs on GPU automatically — no configuration needed.
+
+### VRAM Usage (nomic-ai/CodeRankEmbed, RTX 3090)
+
+Two env vars give a predictable VRAM ceiling. Set them in `.env` before starting the container:
+
+| `MAX_CHUNK_TOKENS` | `MAX_BATCH_SIZE` | Peak VRAM |
+|-------------------:|:----------------:|----------:|
+| 256 | 8 | ~692 MB |
+| 512 | 8 | ~985 MB |
+| 1 024 | 8 | ~2 127 MB |
+| 2 048 | 4 | ~4 077 MB |
+| 4 096 | 1 | ~4 402 MB |
+
+Defaults (`MAX_CHUNK_TOKENS=1500`, `MAX_BATCH_SIZE=8`) land in the ≤ 2 048 row — peak **≤ 4 077 MB** including model weights (~644 MB).
+
+`MAX_CHUNK_TOKENS` caps the length of each code chunk fed to the model (1 token ≈ 4 chars). `MAX_BATCH_SIZE` caps how many chunks are embedded in a single GPU call. Reducing either lowers peak VRAM at the cost of indexing throughput.
+
+See [`doc/vram-profiling.md`](doc/vram-profiling.md) for full methodology and raw measurements.
 
 **Docker Hub:** [`dvcdsys/code-index:latest-cu130`](https://hub.docker.com/r/dvcdsys/code-index/tags)
 
