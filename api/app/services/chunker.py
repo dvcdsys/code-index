@@ -37,7 +37,9 @@ LANGUAGE_NODES: dict[str, dict[str, list[str]]] = {
     },
 }
 
-MAX_CHUNK_SIZE = 6000  # chars (~1500 tokens); balances completeness vs memory
+from ..config import settings
+
+MAX_CHUNK_SIZE = settings.max_chunk_tokens * 4  # chars; 1 token ≈ 4 ASCII chars
 
 # Identifier leaf-node types per language (for reference extraction)
 IDENTIFIER_NODES: dict[str, set[str]] = {

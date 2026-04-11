@@ -29,11 +29,13 @@ Supported keys:
   api.url       - API server URL
   api.key       - API authentication key
   watcher.debounce_ms - Debounce delay in milliseconds
+  watcher.sync_interval_mins - Periodic sync interval in minutes
 
 Examples:
   cix config set api.key cix_abc123...
   cix config set api.url http://localhost:21847
-  cix config set watcher.debounce_ms 3000`,
+  cix config set watcher.debounce_ms 3000
+  cix config set watcher.sync_interval_mins 5`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConfigSet,
 }
@@ -72,6 +74,7 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%-28s = %s\n", "api.key", apiKey)
 	fmt.Printf("%-28s = %v\n", "watcher.enabled", cfg.Watcher.Enabled)
 	fmt.Printf("%-28s = %d\n", "watcher.debounce_ms", cfg.Watcher.DebounceMS)
+	fmt.Printf("%-28s = %d\n", "watcher.sync_interval_mins", cfg.Watcher.SyncIntervalMins)
 	fmt.Printf("%-28s = %d\n", "indexing.batch_size", cfg.Indexing.BatchSize)
 	fmt.Printf("%-28s = %d\n", "server.port", cfg.Server.Port)
 	fmt.Printf("%-28s = %d\n", "server.cache_ttl", cfg.Server.CacheTTL)
@@ -110,6 +113,13 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid value for debounce_ms: %s", value)
 		}
 		cfg.Watcher.DebounceMS = ms
+	case "watcher.sync_interval_mins":
+		var mins int
+		_, err := fmt.Sscanf(value, "%d", &mins)
+		if err != nil || mins < 1 {
+			return fmt.Errorf("invalid value for sync_interval_mins (must be >= 1): %s", value)
+		}
+		cfg.Watcher.SyncIntervalMins = mins
 	case "indexing.batch_size":
 		var bs int
 		_, err := fmt.Sscanf(value, "%d", &bs)

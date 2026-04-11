@@ -1,6 +1,50 @@
 package client
 
-import "fmt"
+import (
+	"fmt"
+	"math/rand"
+	"net/http"
+	"strconv"
+	"time"
+)
+
+// maxSendRetries is the number of times SendFiles will retry on HTTP 503/429.
+const maxSendRetries = 8
+
+// sendRetryDelay returns the sleep duration before the given retry attempt
+// using exponential backoff (2s, 4s, 8s … capped at 60s) plus random jitter.
+func sendRetryDelay(attempt int) time.Duration {
+	secs := 1 << uint(attempt+1) // 2, 4, 8, 16, 32, 64 …
+	if secs > 60 {
+		secs = 60
+	}
+	// ±1 s jitter to avoid thundering herd when many watchers hit 503 at once
+	jitter := rand.Intn(2000) - 1000 // -1000 … +999 ms
+	d := time.Duration(secs)*time.Second + time.Duration(jitter)*time.Millisecond
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
+}
+
+// retryAfterDelay parses the Retry-After header value (integer seconds) and
+// returns it as a duration. Falls back to defaultDelay if parsing fails or the
+// header is absent. Always adds a small random jitter to spread retries.
+func retryAfterDelay(header string, defaultDelay time.Duration) time.Duration {
+	if header == "" {
+		return defaultDelay
+	}
+	secs, err := strconv.Atoi(header)
+	if err != nil || secs <= 0 {
+		return defaultDelay
+	}
+	jitter := rand.Intn(2000) // 0–2000 ms
+	d := time.Duration(secs)*time.Second + time.Duration(jitter)*time.Millisecond
+	if d > 120*time.Second {
+		d = 120 * time.Second
+	}
+	return d
+}
 
 // --- Three-phase indexing protocol types ---
 
@@ -51,21 +95,40 @@ func (c *Client) BeginIndex(path string, full bool) (*BeginIndexResponse, error)
 }
 
 // SendFiles sends a batch of files to be indexed in the given run.
+// On HTTP 503 (GPU busy) or 429 (rate limited) it retries with exponential
+// backoff up to maxSendRetries times before giving up.
 func (c *Client) SendFiles(path string, runID string, files []FilePayload) (*SendFilesResponse, error) {
 	encodedPath := encodeProjectPath(path)
 	body := map[string]interface{}{
 		"run_id": runID,
 		"files":  files,
 	}
-	resp, err := c.do("POST", fmt.Sprintf("/api/v1/projects/%s/index/files", encodedPath), body)
-	if err != nil {
-		return nil, err
+
+	for attempt := 0; attempt <= maxSendRetries; attempt++ {
+		resp, err := c.do("POST", fmt.Sprintf("/api/v1/projects/%s/index/files", encodedPath), body)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode == http.StatusServiceUnavailable ||
+			resp.StatusCode == http.StatusTooManyRequests {
+			header := resp.Header.Get("Retry-After")
+			resp.Body.Close()
+			delay := retryAfterDelay(header, sendRetryDelay(attempt))
+			fmt.Printf("  GPU busy — retrying in %s (attempt %d/%d)...\n",
+				delay.Round(time.Second), attempt+1, maxSendRetries)
+			time.Sleep(delay)
+			continue
+		}
+
+		var result SendFilesResponse
+		if err := parseResponse(resp, &result); err != nil {
+			return nil, err
+		}
+		return &result, nil
 	}
-	var result SendFilesResponse
-	if err := parseResponse(resp, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+
+	return nil, fmt.Errorf("GPU still busy after %d retries — try again later", maxSendRetries)
 }
 
 // FinishIndex completes the indexing session, removing deleted files.

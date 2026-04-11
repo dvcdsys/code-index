@@ -40,15 +40,17 @@ func newTestWatcher(t *testing.T, projectPath, apiURL string) *Watcher {
 	t.Helper()
 
 	return &Watcher{
-		projectPath:    projectPath,
-		apiClient:      client.New(apiURL, "test-key"),
-		debounceMS:     50, // short for tests
-		excludeDirs:    map[string]bool{"node_modules": true, ".git": true},
-		excludeExts:    map[string]bool{".jpg": true, ".png": true, ".pyc": true},
-		eventCh:        make(chan notify.EventInfo, 256),
-		logger:         log.New(io.Discard, "", 0),
-		stopCh:         make(chan struct{}),
-		pendingChanges: make(map[string]bool),
+		projectPath:      projectPath,
+		apiClient:        client.New(apiURL, "test-key"),
+		debounceMS:       50, // short for tests
+		syncIntervalMins: 5,
+		excludeDirs:      map[string]bool{"node_modules": true, ".git": true},
+		excludeExts:      map[string]bool{".jpg": true, ".png": true, ".pyc": true},
+		eventCh:          make(chan notify.EventInfo, 256),
+		logger:           log.New(io.Discard, "", 0),
+		stopCh:           make(chan struct{}),
+		pendingChanges:   make(map[string]bool),
+		// New fields initialized to zero values
 	}
 }
 
@@ -96,6 +98,21 @@ func newIndexServer(t *testing.T, dir string) (*httptest.Server, *serverCalls) {
 	}))
 	t.Cleanup(srv.Close)
 	return srv, calls
+}
+
+// waitForCalls polls the mock server counters until BeginIndex has been called
+// at least target times, or the deadline is reached.
+func waitForCalls(calls *serverCalls, target int) {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		calls.mu.Lock()
+		count := calls.Begin
+		calls.mu.Unlock()
+		if count >= target {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +361,18 @@ func TestFlushChanges_TriggersIncrementalReindex(t *testing.T) {
 	w.pendingChanges[filepath.Join(dir, "main.go")] = true
 	w.flushChanges()
 
+	// Wait for indexing to complete (it runs in a goroutine now)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		calls.mu.Lock()
+		count := calls.Begin
+		calls.mu.Unlock()
+		if count >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
 	if calls.Begin < 1 {
@@ -420,6 +449,8 @@ func TestFlushChanges_RecoveryAfterServerDown(t *testing.T) {
 	w2.pendingChanges[filePath] = true
 	w2.flushChanges()
 
+	waitForCalls(calls, 1)
+
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
 	if calls.Begin < 1 || calls.Finish < 1 {
@@ -439,6 +470,8 @@ func TestTriggerFullReindex_CallsAPI(t *testing.T) {
 	w := newTestWatcher(t, dir, srv.URL)
 
 	w.triggerFullReindex()
+
+	waitForCalls(calls, 1)
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
@@ -461,6 +494,8 @@ func TestHandleEvent_GitignoreChange_FullReindex(t *testing.T) {
 	os.WriteFile(giPath, []byte("*.log\n"), 0644)
 	w.handleEvent(mockEventInfo{path: giPath, event: notify.Write})
 
+	waitForCalls(calls, 1)
+
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
 	if calls.Begin < 1 {
@@ -478,6 +513,8 @@ func TestHandleEvent_CixignoreChange_FullReindex(t *testing.T) {
 	cixPath := filepath.Join(dir, ".cixignore")
 	os.WriteFile(cixPath, []byte("vendor-ext/\n"), 0644)
 	w.handleEvent(mockEventInfo{path: cixPath, event: notify.Write})
+
+	waitForCalls(calls, 1)
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
@@ -497,6 +534,8 @@ func TestHandleEvent_CixconfigChange_FullReindex(t *testing.T) {
 	os.WriteFile(cfgPath, []byte("ignore:\n  submodules: true\n"), 0644)
 	w.handleEvent(mockEventInfo{path: cfgPath, event: notify.Write})
 
+	waitForCalls(calls, 1)
+
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
 	if calls.Begin < 1 {
@@ -515,6 +554,8 @@ func TestHandleEvent_CixignoreCreate_FullReindex(t *testing.T) {
 	os.WriteFile(cixPath, []byte("submodules/\n"), 0644)
 	w.handleEvent(mockEventInfo{path: cixPath, event: notify.Create})
 
+	waitForCalls(calls, 1)
+
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
 	if calls.Begin < 1 {
@@ -531,6 +572,8 @@ func TestHandleEvent_CixignoreRemove_FullReindex(t *testing.T) {
 
 	cixPath := filepath.Join(dir, ".cixignore")
 	w.handleEvent(mockEventInfo{path: cixPath, event: notify.Remove})
+
+	waitForCalls(calls, 1)
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
@@ -549,6 +592,8 @@ func TestHandleEvent_GitHEADChange_TriggersReindex(t *testing.T) {
 	headPath := filepath.Join(dir, ".git", "HEAD")
 	w.handleEvent(mockEventInfo{path: headPath, event: notify.Write})
 
+	waitForCalls(calls, 1)
+
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
 	if calls.Begin < 1 {
@@ -560,7 +605,7 @@ func TestHandleEvent_GitHEADChange_ClearsPendingChanges(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644)
 
-	srv, _ := newIndexServer(t, dir)
+	srv, calls := newIndexServer(t, dir)
 	w := newTestWatcher(t, dir, srv.URL)
 
 	// Simulate some pending changes accumulated before the branch switch.
@@ -569,6 +614,8 @@ func TestHandleEvent_GitHEADChange_ClearsPendingChanges(t *testing.T) {
 
 	headPath := filepath.Join(dir, ".git", "HEAD")
 	w.handleEvent(mockEventInfo{path: headPath, event: notify.Write})
+
+	waitForCalls(calls, 1)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()

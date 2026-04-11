@@ -16,6 +16,7 @@ from ..schemas.indexing import (
     IndexRequest,
     IndexTriggerResponse,
 )
+from ..services.embeddings import EmbeddingBusyError
 from ..services.indexer import indexer_service
 
 router = APIRouter(
@@ -122,9 +123,16 @@ async def begin_index(project_path: str, body: IndexBeginRequest | None = None):
 async def index_files(project_path: str, body: IndexFilesRequest):
     project_path = await resolve_project_path(project_path)
     await _ensure_project(project_path)
-    files_accepted, chunks_created, total = await indexer_service.process_files(
-        project_path, body.run_id, body.files,
-    )
+    try:
+        files_accepted, chunks_created, total = await indexer_service.process_files(
+            project_path, body.run_id, body.files,
+        )
+    except EmbeddingBusyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"GPU is busy processing another embedding request, retry after {exc.retry_after}s",
+            headers={"Retry-After": str(exc.retry_after)},
+        )
     return IndexFilesResponse(
         files_accepted=files_accepted,
         chunks_created=chunks_created,

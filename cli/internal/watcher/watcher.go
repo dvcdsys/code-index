@@ -23,6 +23,7 @@ type Watcher struct {
 	projectPath    string
 	apiClient      *client.Client
 	debounceMS     int
+	syncIntervalMins int
 	excludeDirs    map[string]bool
 	excludeExts    map[string]bool
 	eventCh        chan notify.EventInfo
@@ -31,14 +32,21 @@ type Watcher struct {
 	mu             sync.Mutex
 	pendingChanges map[string]bool
 	timer          *time.Timer
+
+	// Indexing state management
+	indexingMu       sync.Mutex
+	isIndexing       bool
+	reindexRequested bool
+	fullReindexReq   bool
 }
 
 // Options configures the watcher behavior.
 type Options struct {
-	DebounceMS  int
-	ExcludeDirs []string
-	ExcludeExts []string
-	Logger      *log.Logger
+	DebounceMS       int
+	SyncIntervalMins int
+	ExcludeDirs      []string
+	ExcludeExts      []string
+	Logger           *log.Logger
 }
 
 // DefaultExcludeDirs are directories that should never be watched.
@@ -67,6 +75,10 @@ func New(projectPath string, apiClient *client.Client, opts Options) (*Watcher, 
 		opts.DebounceMS = 5000
 	}
 
+	if opts.SyncIntervalMins <= 0 {
+		opts.SyncIntervalMins = 5
+	}
+
 	if opts.Logger == nil {
 		opts.Logger = log.New(os.Stdout, "[watcher] ", log.LstdFlags)
 	}
@@ -90,15 +102,16 @@ func New(projectPath string, apiClient *client.Client, opts Options) (*Watcher, 
 	}
 
 	return &Watcher{
-		projectPath:    projectPath,
-		apiClient:      apiClient,
-		debounceMS:     opts.DebounceMS,
-		excludeDirs:    excludeDirs,
-		excludeExts:    excludeExts,
-		eventCh:        make(chan notify.EventInfo, 256),
-		logger:         opts.Logger,
-		stopCh:         make(chan struct{}),
-		pendingChanges: make(map[string]bool),
+		projectPath:      projectPath,
+		apiClient:        apiClient,
+		debounceMS:       opts.DebounceMS,
+		syncIntervalMins: opts.SyncIntervalMins,
+		excludeDirs:      excludeDirs,
+		excludeExts:      excludeExts,
+		eventCh:          make(chan notify.EventInfo, 256),
+		logger:           opts.Logger,
+		stopCh:           make(chan struct{}),
+		pendingChanges:   make(map[string]bool),
 	}, nil
 }
 
@@ -107,20 +120,28 @@ func (w *Watcher) Start() error {
 	w.logger.Printf("Watching %s (debounce: %dms)", w.projectPath, w.debounceMS)
 
 	// Use "..." suffix for recursive watching.
-	// On macOS this uses FSEvents (1 FD for entire tree).
-	// On Linux this uses inotify (1 FD per inotify instance).
 	watchPath := filepath.Join(w.projectPath, "...")
 	if err := notify.Watch(watchPath, w.eventCh, notify.All); err != nil {
 		return fmt.Errorf("start watch: %w", err)
 	}
 	defer notify.Stop(w.eventCh)
 
+	// Fallback: periodic incremental sync to catch anything missed by OS events.
+	syncTicker := time.NewTicker(time.Duration(w.syncIntervalMins) * time.Minute)
+	defer syncTicker.Stop()
+
 	w.logger.Printf("Watching recursively via native OS events")
+
+	// Initial sync on start to catch changes made while watcher was offline
+	go w.triggerImmediateReindex("initial sync")
 
 	for {
 		select {
 		case ei := <-w.eventCh:
 			w.handleEvent(ei)
+
+		case <-syncTicker.C:
+			w.triggerImmediateReindex("periodic sync")
 
 		case <-w.stopCh:
 			w.logger.Println("Stopping watcher")
@@ -157,8 +178,9 @@ func (w *Watcher) handleEvent(ei notify.EventInfo) {
 		return
 	}
 
-	// Skip directories (we only care about file changes for incremental reindex)
+	// For directories, we still trigger reindexing but don't need to check binary/ext.
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		w.trackChange(path)
 		return
 	}
 
@@ -203,21 +225,11 @@ func (w *Watcher) triggerFullReindex() {
 	w.mu.Unlock()
 
 	w.logger.Println("Ignore rules changed (.gitignore/.cixignore), triggering full reindex...")
-
-	result, err := indexer.Run(w.apiClient, w.projectPath, true, 0)
-	if err != nil {
-		w.logger.Printf("Failed to trigger full reindex: %v", err)
-		return
-	}
-
-	w.logger.Printf("Full reindex complete: %d files, %d chunks (run ID: %s)",
-		result.FilesProcessed, result.ChunksCreated, result.RunID)
+	w.runIndexer(true)
 }
 
 // triggerImmediateReindex cancels any pending debounce and immediately runs an
-// incremental reindex. Unlike flushChanges, this runs even when pendingChanges
-// is empty — used for branch switches where FSEvents may have coalesced all
-// individual file events into a single directory event (which handleEvent skips).
+// incremental reindex.
 func (w *Watcher) triggerImmediateReindex(reason string) {
 	w.mu.Lock()
 	if w.timer != nil {
@@ -227,15 +239,7 @@ func (w *Watcher) triggerImmediateReindex(reason string) {
 	w.mu.Unlock()
 
 	w.logger.Printf("%s, triggering reindex...", reason)
-
-	result, err := indexer.Run(w.apiClient, w.projectPath, false, 0)
-	if err != nil {
-		w.logger.Printf("Failed to reindex: %v", err)
-		return
-	}
-
-	w.logger.Printf("Reindex complete: %d files, %d chunks (run ID: %s)",
-		result.FilesProcessed, result.ChunksCreated, result.RunID)
+	w.runIndexer(false)
 }
 
 // flushChanges sends accumulated changes to the API for reindexing.
@@ -269,14 +273,61 @@ func (w *Watcher) flushChanges() {
 		w.logger.Printf("  %s", relPath)
 	}
 
-	result, err := indexer.Run(w.apiClient, w.projectPath, false, 0)
-	if err != nil {
-		w.logger.Printf("Failed to reindex: %v", err)
+	w.runIndexer(false)
+}
+
+// runIndexer performs indexing sequentially, ensuring only one run at a time.
+// If multiple requests arrive during indexing, they are coalesced into a
+// single follow-up run.
+func (w *Watcher) runIndexer(full bool) {
+	w.mu.Lock()
+	if w.isIndexing {
+		w.reindexRequested = true
+		if full {
+			w.fullReindexReq = true
+		}
+		w.mu.Unlock()
 		return
 	}
+	w.isIndexing = true
+	w.mu.Unlock()
 
-	w.logger.Printf("Reindex complete: %d files, %d chunks (run ID: %s)",
-		result.FilesProcessed, result.ChunksCreated, result.RunID)
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			w.isIndexing = false
+			reindex := w.reindexRequested
+			isFull := w.fullReindexReq
+			w.reindexRequested = false
+			w.fullReindexReq = false
+			w.mu.Unlock()
+
+			if reindex {
+				w.runIndexer(isFull)
+			}
+		}()
+
+		// Run with transient failure retries
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			var result *indexer.Result
+			result, err = indexer.Run(w.apiClient, w.projectPath, full, 0)
+			if err == nil {
+				if full {
+					w.logger.Printf("Full reindex complete: %d files, %d chunks (run ID: %s)",
+						result.FilesProcessed, result.ChunksCreated, result.RunID)
+				} else {
+					w.logger.Printf("Reindex complete: %d files, %d chunks (run ID: %s)",
+						result.FilesProcessed, result.ChunksCreated, result.RunID)
+				}
+				return
+			}
+			w.logger.Printf("Indexing failed (attempt %d/3): %v", attempt+1, err)
+			if attempt < 2 {
+				time.Sleep(time.Duration(attempt+1) * 3 * time.Second)
+			}
+		}
+	}()
 }
 
 // isExcluded checks if a path should be ignored based on directory exclusions.

@@ -144,8 +144,9 @@ func runWatcherForeground(projectPath string, silent bool) error {
 	}
 
 	opts := watcher.Options{
-		DebounceMS:  cfg.Watcher.DebounceMS,
-		ExcludeDirs: cfg.Watcher.ExcludePatterns,
+		DebounceMS:       cfg.Watcher.DebounceMS,
+		SyncIntervalMins: cfg.Watcher.SyncIntervalMins,
+		ExcludeDirs:      cfg.Watcher.ExcludePatterns,
 	}
 
 	w, err := watcher.New(projectPath, apiClient, opts)
