@@ -117,16 +117,18 @@ type ProjectSummary struct {
 	RecentSymbols  []map[string]interface{} `json:"recent_symbols"`
 }
 
-// FileResult represents a file search result
+// FileResult represents a file search result.
+// Field names and JSON tags mirror api/app/schemas/search.py:FileResultItem.
 type FileResult struct {
-	Path     string `json:"path"`
-	Language string `json:"language"`
+	FilePath string  `json:"file_path"`
+	Language *string `json:"language"`
 }
 
-// FileSearchResponse represents file search response
+// FileSearchResponse represents file search response.
+// Mirrors api/app/schemas/search.py:FileSearchResponse.
 type FileSearchResponse struct {
-	Files []FileResult `json:"files"`
-	Total int          `json:"total"`
+	Results []FileResult `json:"results"`
+	Total   int          `json:"total"`
 }
 
 // SearchFiles searches for files by path pattern

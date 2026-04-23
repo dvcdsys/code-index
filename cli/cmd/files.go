@@ -66,24 +66,24 @@ func runFiles(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("search failed: %w", err)
 	}
 
-	if len(results.Files) == 0 {
+	if len(results.Results) == 0 {
 		fmt.Println("No files found")
 		return nil
 	}
 
 	fmt.Printf("Found %d file(s):\n\n", results.Total)
 
-	for i, f := range results.Files {
+	for i, f := range results.Results {
 		// Try to show relative path
-		relPath, relErr := filepath.Rel(absPath, f.Path)
-		displayPath := f.Path
+		relPath, relErr := filepath.Rel(absPath, f.FilePath)
+		displayPath := f.FilePath
 		if relErr == nil {
 			displayPath = relPath
 		}
 
 		fmt.Printf("%d. %s", i+1, displayPath)
-		if f.Language != "" {
-			fmt.Printf("  (%s)", f.Language)
+		if f.Language != nil && *f.Language != "" {
+			fmt.Printf("  (%s)", *f.Language)
 		}
 		fmt.Println()
 	}
