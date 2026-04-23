@@ -16,9 +16,9 @@ func TestRunFiles_Results(t *testing.T) {
 			writeJSON(w, 200, map[string]any{"projects": []any{}, "total": 0})
 		case strings.Contains(r.URL.Path, hash+"/search/files"):
 			writeJSON(w, 200, map[string]any{
-				"files": []map[string]any{
-					{"path": proj + "/config/app.yaml", "language": "yaml"},
-					{"path": proj + "/config/db.yaml", "language": "yaml"},
+				"results": []map[string]any{
+					{"file_path": proj + "/config/app.yaml", "language": "yaml"},
+					{"file_path": proj + "/config/db.yaml", "language": "yaml"},
 				},
 				"total": 2,
 			})
@@ -60,7 +60,7 @@ func TestRunFiles_EmptyResults(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/api/v1/projects"):
 			writeJSON(w, 200, map[string]any{"projects": []any{}, "total": 0})
 		case strings.Contains(r.URL.Path, hash+"/search/files"):
-			writeJSON(w, 200, map[string]any{"files": []any{}, "total": 0})
+			writeJSON(w, 200, map[string]any{"results": []any{}, "total": 0})
 		default:
 			http.NotFound(w, r)
 		}
