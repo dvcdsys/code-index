@@ -46,13 +46,19 @@ FROM ghcr.io/ggml-org/llama.cpp:server-cuda AS llama-source
 # Skips: libnpp (~200 MB), libcusparse (~200 MB), nvtx — not used by llama.cpp.
 FROM nvidia/cuda:12.8.1-base-ubuntu24.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libcublas-12-8 \
-    libnccl2 \
-    libgomp1 \
-    ca-certificates \
-    curl \
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        libcublas-12-8 \
+        libnccl2 \
+        libgomp1 \
+        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Non-root user — uid/gid 1001. Named-volume deployments inherit ownership from
+# the image; bind-mount deployments must ensure host dir is owned by uid 1001
+# (or override with `user: "0:0"` in compose for dev).
+RUN groupadd -r -g 1001 cix && useradd -r -u 1001 -g cix -s /sbin/nologin cix
 
 # Copy llama-server and its shared libs.
 # We intentionally skip libggml-cpu-*.so (14 CPU-arch variants) — the CUDA
@@ -88,9 +94,12 @@ ENV CIX_LLAMA_TRANSPORT=unix
 
 EXPOSE 21847
 
+RUN mkdir -p /data && chown cix:cix /data
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:21847/health || exit 1
+    CMD ["/cix-server", "-healthcheck"]
+
+USER cix:cix
 
 ENTRYPOINT ["/cix-server"]
