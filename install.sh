@@ -50,21 +50,37 @@ PLATFORM="${OS}-${ARCH}"
 # ── Resolve version ───────────────────────────────────────────────────────────
 
 if [ -z "$VERSION" ]; then
-    echo "Fetching latest release..."
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    echo "Fetching latest CLI release..."
+    # Search for latest tag starting with cli/
+    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
         | grep '"tag_name"' \
+        | grep 'cli/' \
+        | head -1 \
         | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    
     if [ -z "$VERSION" ]; then
-        echo "Failed to fetch latest version. Specify with --version."
+        echo "Failed to fetch latest version from cli/* tags. Trying latest release..."
+        VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep '"tag_name"' \
+            | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    fi
+    
+    if [ -z "$VERSION" ]; then
+        echo "Failed to fetch version. Specify with --version."
         exit 1
     fi
 fi
 
-echo "Installing cix ${VERSION} (${PLATFORM})..."
+# Strip cli/ prefix for display and download if present
+CLEAN_VERSION="${VERSION#cli/}"
+
+echo "Installing cix ${CLEAN_VERSION} (${PLATFORM})..."
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
 ARCHIVE="${BINARY_NAME}-${PLATFORM}.tar.gz"
+# Note: GitHub release assets are attached to the tag. 
+# If tag is cli/v0.2.0, the download URL uses the full tag name.
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
