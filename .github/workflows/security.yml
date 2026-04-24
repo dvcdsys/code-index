@@ -44,6 +44,12 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
+          # server/bench is a Phase 0 PoC module (chromem + tree-sitter
+          # benchmarks). It pins an old golang.org/x/net via its own
+          # go.mod and replace directive, and is never shipped in the
+          # cix-server binary. Scan it separately if needed, not as part
+          # of the prod CVE gate.
+          skip-dirs: server/bench
           scanners: vuln
           severity: HIGH,CRITICAL
           format: sarif
