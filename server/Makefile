@@ -25,7 +25,7 @@ IMAGE_REPO  ?= dvcdsys/code-index
 IMAGE_TAG   ?= go-cu128
 VERSION     ?= $(shell git describe --tags --always 2>/dev/null || echo "0.0.0-dev")
 
-.PHONY: help build test test-gate fetch-llama bundle docker-build-cuda clean
+.PHONY: help build test test-gate fetch-llama bundle run docker-build-cuda clean
 
 help:
 	@echo "Targets:"
@@ -33,6 +33,7 @@ help:
 	@echo "  test               — go test ./... (no llama-server required)"
 	@echo "  fetch-llama        — download + SHA256-verify llama.cpp $(LLAMA_VERSION) for $(OS)-$(ARCH)"
 	@echo "  bundle             — build + fetch-llama, assemble dist/$(BUNDLE_NAME)/ tree"
+	@echo "  run                — bundle + launch cix-server (reads .env from repo root, sets CIX_LLAMA_BIN_DIR)"
 	@echo "  test-gate          — run the Phase 3 parity gate (requires fetch-llama + GGUF)"
 	@echo "  docker-build-cuda  — build + push linux/amd64 CUDA image $(IMAGE_REPO):$(IMAGE_TAG)"
 	@echo "  clean              — remove dist/"
@@ -60,6 +61,25 @@ bundle: fetch-llama build
 	cp -R $(LLAMA_DIR)/. $(BUNDLE_DIR)/llama/
 	@echo "Bundle ready: $(BUNDLE_DIR)"
 	@echo "Optional:    tar czf $(DIST_DIR)/$(BUNDLE_NAME).tar.gz -C $(DIST_DIR) $(BUNDLE_NAME)"
+
+# run — native macOS development target with Metal GPU acceleration.
+# Reads env vars from <repo-root>/.env (copy from .env.example and fill in
+# CIX_API_KEY), then launches cix-server with CIX_LLAMA_BIN_DIR pointing at
+# the bundled Metal-enabled llama-server.
+#
+# Usage:
+#   make run                  — start server on default port 21847
+#   make run CIX_PORT=8080    — override port via extra env var
+ENV_FILE := $(ROOT)/../.env
+run: bundle
+	@[ -f "$(ENV_FILE)" ] || { \
+	    echo "ERROR: $(ENV_FILE) not found."; \
+	    echo "       cp .env.example .env  and set CIX_API_KEY before running."; \
+	    exit 1; \
+	}
+	env $$(grep -v '^[[:space:]]*[#;]' "$(ENV_FILE)" | grep -v '^[[:space:]]*$$' | xargs) \
+	    CIX_LLAMA_BIN_DIR="$(BUNDLE_DIR)/llama" \
+	    "$(BUNDLE_DIR)/cix-server"
 
 test-gate:
 	@# The gate depends on a local GGUF and a fetched llama-server. The dev

@@ -29,7 +29,7 @@ services:
               count: 1
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:21847/health"]
+      test: ["/cix-server", "-healthcheck"]
       interval: 30s
       timeout: 10s
       start_period: 120s

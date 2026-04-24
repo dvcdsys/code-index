@@ -63,12 +63,13 @@ The `llama-server` sidecar (from upstream [llama.cpp](https://github.com/ggml-or
 
 ### 1. Start the API Server
 
-Two deployment options:
+Three deployment options:
 
 | Mode | Best for | GPU acceleration | Prerequisites |
 |------|----------|-----------------|---------------|
 | **Docker (CPU)** | any OS, development | none | Docker |
 | **Docker (CUDA)** | NVIDIA GPU servers | CUDA | Docker, NVIDIA Container Toolkit |
+| **Native (macOS)** | Apple Silicon — full Metal GPU | Metal | Go 1.24+, Xcode CLT |
 
 #### Docker (CPU)
 
@@ -89,6 +90,86 @@ See [GPU Acceleration (CUDA)](#gpu-acceleration-cuda) section below.
 
 ```bash
 docker compose -f docker-compose.cuda.yml up -d
+```
+
+#### Native macOS (Apple Silicon — Metal GPU)
+
+> **Why not Docker?** Docker Desktop on macOS runs containers inside a Linux VM — Metal GPU is **not accessible** from within a container. For full Apple Silicon GPU acceleration you must run the server natively.
+
+**Prerequisites:** Go 1.24+, Xcode Command Line Tools
+
+```bash
+xcode-select --install   # if not already installed
+```
+
+**Step 1 — Build binary + download Metal-enabled llama-server (once)**
+
+```bash
+cd server
+make bundle
+# Outputs:
+#   dist/cix-darwin-arm64/cix-server
+#   dist/cix-darwin-arm64/llama/llama-server  (includes libggml-metal.dylib)
+```
+
+**Step 2 — Configure**
+
+```bash
+cp .env.example .env
+# Edit .env — set at minimum:
+#   CIX_API_KEY=cix_<your-random-key>
+#   CIX_N_GPU_LAYERS=99      ← offload all layers to Metal
+```
+
+**Step 3 — Run**
+
+```bash
+cd server && make run
+# Reads .env from repo root, sets CIX_LLAMA_BIN_DIR automatically.
+```
+
+```bash
+curl http://localhost:21847/health   # → {"status": "ok"}
+```
+
+| Variable | Recommended | Notes |
+|---|---|---|
+| `CIX_N_GPU_LAYERS` | `99` | Offload all layers to Metal; `0` = CPU only |
+| `CIX_LLAMA_BIN_DIR` | set by `make run` | Path to the `llama-server` binary dir |
+| `CIX_EMBEDDINGS_ENABLED` | `true` | Enable GPU embeddings (default) |
+
+> [!TIP]
+> `make run` always runs `make bundle` first (no-op if already built), so it's safe to use after any `git pull`.
+
+**Auto-start with launchd** (optional — run server in the background on login):
+
+```bash
+cat > ~/Library/LaunchAgents/com.cix.server.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.cix.server</string>
+  <key>ProgramArguments</key>
+  <array><string>/ABSOLUTE/PATH/TO/server/dist/cix-darwin-arm64/cix-server</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CIX_API_KEY</key><string>YOUR_KEY</string>
+    <key>CIX_LLAMA_BIN_DIR</key><string>/ABSOLUTE/PATH/TO/server/dist/cix-darwin-arm64/llama</string>
+    <key>CIX_N_GPU_LAYERS</key><string>99</string>
+    <key>CIX_PORT</key><string>21847</string>
+    <key>CIX_SQLITE_PATH</key><string>/Users/YOUR_USER/.cix/data/sqlite/projects.db</string>
+    <key>CIX_CHROMA_PERSIST_DIR</key><string>/Users/YOUR_USER/.cix/data/chroma</string>
+    <key>CIX_GGUF_CACHE_DIR</key><string>/Users/YOUR_USER/.cix/data/models</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/cix-server.log</string>
+  <key>StandardErrorPath</key><string>/tmp/cix-server.err</string>
+</dict></plist>
+EOF
+# Replace /ABSOLUTE/PATH/TO and YOUR_USER/YOUR_KEY with real values, then:
+launchctl load ~/Library/LaunchAgents/com.cix.server.plist
+launchctl start com.cix.server
 ```
 
 ### 2. Install the CLI
@@ -272,7 +353,7 @@ cix search "error handling in auth flow" --in ./api
 
 Supported languages: Python, TypeScript, JavaScript, Go, Rust, Java (+ 40+ others via fallback).
 
-**Embeddings** — each chunk is encoded with a GGUF build of CodeRankEmbed (default: [awhiteside/CodeRankEmbed-Q8_0-GGUF](https://huggingface.co/awhiteside/CodeRankEmbed-Q8_0-GGUF); 768d, 8192 token context, ~145MB on disk) via `llama-cpp-python`. Queries get a `"Represent this query for searching relevant code: "` prefix for asymmetric retrieval.
+**Embeddings** — each chunk is encoded with a GGUF build of CodeRankEmbed (default: [awhiteside/CodeRankEmbed-Q8_0-GGUF](https://huggingface.co/awhiteside/CodeRankEmbed-Q8_0-GGUF); 768d, 8192 token context, ~145MB on disk) via the `llama-server` sidecar (llama.cpp). Queries get a `"Represent this query for searching relevant code: "` prefix for asymmetric retrieval.
 
 **Incremental reindex** — uses SHA256 file hashes. Only new or changed files are re-embedded. Deleted files are removed from the index.
 
@@ -356,7 +437,7 @@ Data is stored in `/data` inside the container — mount a volume to persist it.
 
 ### Switching Embedding Models
 
-The server ships with `awhiteside/CodeRankEmbed-Q8_0-GGUF` — a Q8-quantized build of CodeRankEmbed (137M params, 768 dims, ~145MB on disk, ~650MB idle VRAM/RAM). Inference runs via `llama-cpp-python`, so **only GGUF repositories are supported**. Plain PyTorch/`sentence-transformers` repos will fail to load with `ValueError: No .gguf file found`.
+The server ships with `awhiteside/CodeRankEmbed-Q8_0-GGUF` — a Q8-quantized build of CodeRankEmbed (137M params, 768 dims, ~145MB on disk, ~650MB idle VRAM/RAM). Inference runs via the `llama-server` sidecar (llama.cpp), so **only GGUF repositories are supported**. Plain PyTorch/`sentence-transformers` repos will not work.
 
 To switch models:
 1. Stop the server (`make server-local-stop` or `make server-docker-stop`).
@@ -375,7 +456,8 @@ To switch models:
 > ChromaDB and SQLite paths are suffixed by a sanitised form of the model name (e.g. `projects.db_awhiteside_coderankembed_q8_0_gguf`). This isolates vector spaces per model, so switching back and forth keeps old indices intact and avoids dim-mismatch errors.
 
 > [!TIP]
-> On Apple Silicon, the llama-cpp-python wheel already includes Metal support — GPU layers are picked up automatically, no extra setup needed. On Linux with NVIDIA, the CUDA image is compiled with `-DGGML_CUDA=on`; on systems without `nvidia-smi`, the service transparently falls back to CPU. Force a specific behaviour with `CIX_N_GPU_LAYERS=0` (CPU) or `CIX_N_GPU_LAYERS=-1` (all layers on GPU).
+> **Apple Silicon:** Docker cannot access Metal GPU — run natively with `cd server && make run` (see [Native macOS (Apple Silicon — Metal GPU)](#native-macos-apple-silicon--metal-gpu) above). The bundled `llama-server` includes `libggml-metal.dylib`; set `CIX_N_GPU_LAYERS=99` for full Metal offload.
+> **Linux NVIDIA:** use the CUDA image (`docker-compose.cuda.yml`). Force CPU with `CIX_N_GPU_LAYERS=0`.
 
 ---
 
