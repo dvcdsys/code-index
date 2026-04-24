@@ -1,0 +1,19 @@
+{
+  "benchmark": "chromem-go scale",
+  "n_vectors": 50000,
+  "n_queries": 100,
+  "dim": 768,
+  "top_k": 10,
+  "upsert_seconds": 0.053032583,
+  "ram_bytes_after_insert": 192287080,
+  "ram_bytes_after_query": 15307784,
+  "ram_gb_after_query": 0.014256484806537628,
+  "p50_ms": 22.613,
+  "p95_ms": 23.869,
+  "p99_ms": 24.285,
+  "min_ms": 20.643,
+  "max_ms": 24.656,
+  "gate": "PASS",
+  "gate_p95_lt_ms": 200,
+  "gate_ram_lt_gb": 4
+}

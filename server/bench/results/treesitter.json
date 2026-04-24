@@ -1,0 +1,165 @@
+{
+  "benchmark": "gotreesitter top-10 coverage",
+  "languages": [
+    {
+      "lang": "python",
+      "fixture": "sample.py",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 285,
+      "symbol_hits": 6,
+      "hit_types": [
+        "class_definition:2",
+        "function_definition:4"
+      ],
+      "gate": "PASS"
+    },
+    {
+      "lang": "go",
+      "fixture": "sample.go",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 364,
+      "symbol_hits": 7,
+      "hit_types": [
+        "function_declaration:3",
+        "method_declaration:2",
+        "type_spec:2"
+      ],
+      "gate": "PASS"
+    },
+    {
+      "lang": "javascript",
+      "fixture": "sample.js",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 297,
+      "symbol_hits": 9,
+      "hit_types": [
+        "arrow_function:1",
+        "class_declaration:2",
+        "function_declaration:2",
+        "method_definition:4"
+      ],
+      "gate": "PASS"
+    },
+    {
+      "lang": "typescript",
+      "fixture": "sample.ts",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 377,
+      "symbol_hits": 11,
+      "hit_types": [
+        "arrow_function:1",
+        "class_declaration:2",
+        "function_declaration:2",
+        "interface_declaration:1",
+        "method_definition:4",
+        "type_alias_declaration:1"
+      ],
+      "gate": "PASS"
+    },
+    {
+      "lang": "tsx",
+      "fixture": "sample.tsx",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 285,
+      "symbol_hits": 7,
+      "hit_types": [
+        "arrow_function:4",
+        "function_declaration:1",
+        "interface_declaration:1",
+        "type_alias_declaration:1"
+      ],
+      "gate": "PASS"
+    },
+    {
+      "lang": "java",
+      "fixture": "Sample.java",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 363,
+      "symbol_hits": 8,
+      "hit_types": [
+        "class_declaration:1",
+        "interface_declaration:1",
+        "method_declaration:6"
+      ],
+      "gate": "PASS"
+    },
+    {
+      "lang": "c",
+      "fixture": "sample.c",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 455,
+      "symbol_hits": 7,
+      "hit_types": [
+        "function_definition:5",
+        "struct_specifier:2"
+      ],
+      "gate": "PASS"
+    },
+    {
+      "lang": "cpp",
+      "fixture": "sample.cpp",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 352,
+      "symbol_hits": 8,
+      "hit_types": [
+        "class_specifier:1",
+        "function_definition:5",
+        "namespace_definition:1",
+        "struct_specifier:1"
+      ],
+      "gate": "PASS"
+    },
+    {
+      "lang": "rust",
+      "fixture": "sample.rs",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 457,
+      "symbol_hits": 12,
+      "hit_types": [
+        "enum_item:1",
+        "function_item:6",
+        "impl_item:2",
+        "struct_item:2",
+        "trait_item:1"
+      ],
+      "gate": "PASS"
+    },
+    {
+      "lang": "ruby",
+      "fixture": "sample.rb",
+      "loaded": true,
+      "parse_ok": true,
+      "root_errors": 0,
+      "total_nodes_walked": 206,
+      "symbol_hits": 11,
+      "hit_types": [
+        "class:4",
+        "method:4",
+        "module:2",
+        "singleton_method:1"
+      ],
+      "gate": "PASS"
+    }
+  ],
+  "passed": 10,
+  "total": 10,
+  "gate": "PASS"
+}

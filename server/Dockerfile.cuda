@@ -1,0 +1,96 @@
+# syntax=docker/dockerfile:1.7
+# Phase 6 CUDA Dockerfile — 3-stage minimal build.
+#
+# Stage 1: compile Go binary (pure static, no CGO)
+# Stage 2: extract llama-server + CUDA shared libs from upstream llama.cpp image
+# Stage 3: minimal runtime — nvidia/cuda:runtime (libcudart + libcublas) +
+#          libnccl2 (linked by libggml-cuda.so) + llama libs + Go binary
+#
+# Result: ~1–1.5 GB vs ~3.6 GB with the full upstream image as runtime base.
+#
+# Build:
+#   docker buildx build --platform linux/amd64 \
+#     --build-arg VERSION=$(git describe --tags --always) \
+#     -f server/Dockerfile.cuda \
+#     -t dvcdsys/code-index:go-cu128 \
+#     --push server/
+
+ARG VERSION=0.0.0-dev
+
+# ── Stage 1: compile the Go binary ─────────────────────────────────────────
+FROM --platform=linux/amd64 golang:1.24-alpine AS builder
+ARG VERSION
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/cix-server \
+    ./cmd/cix-server
+
+# ── Stage 2: llama.cpp CUDA binaries ───────────────────────────────────────
+# We use the upstream image only as a source — nothing from its OS layer
+# ends up in the final image.
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda AS llama-source
+
+# ── Stage 3: minimal CUDA runtime ──────────────────────────────────────────
+# Use the smallest NVIDIA base (libcudart only) and install ONLY what
+# libggml-cuda.so actually needs:
+#   libcublas-12-8  → libcublas.so.12 + libcublasLt.so.12
+#   libnccl2        → libnccl.so.2 (libggml-cuda.so is linked to it at build
+#                     time for multi-GPU support; harmless on single-GPU)
+# Skips: libnpp (~200 MB), libcusparse (~200 MB), nvtx — not used by llama.cpp.
+FROM nvidia/cuda:12.8.1-base-ubuntu24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libcublas-12-8 \
+    libnccl2 \
+    libgomp1 \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy llama-server and its shared libs.
+# We intentionally skip libggml-cpu-*.so (14 CPU-arch variants) — the CUDA
+# backend (libggml-cuda.so) is the only backend needed in the GPU container.
+COPY --from=llama-source /app/llama-server              /app/llama-server
+COPY --from=llama-source /app/libggml-base.so*          /app/
+COPY --from=llama-source /app/libggml.so*               /app/
+COPY --from=llama-source /app/libggml-cuda.so           /app/
+# CPU backends — required even in GPU mode (GGML uses them for I/O buffers).
+# x64: baseline SSE2 fallback; haswell: AVX2 for modern CPUs (most x86_64 servers).
+COPY --from=llama-source /app/libggml-cpu-x64.so        /app/
+COPY --from=llama-source /app/libggml-cpu-haswell.so    /app/
+COPY --from=llama-source /app/libllama.so*              /app/
+COPY --from=llama-source /app/libllama-common.so*       /app/
+COPY --from=llama-source /app/libmtmd.so*               /app/
+
+# Register /app in the dynamic linker cache so llama-server resolves its own libs.
+RUN echo "/app" > /etc/ld.so.conf.d/cix.conf && ldconfig
+
+COPY --from=builder /out/cix-server /cix-server
+
+# Inherit CUDA lib path from the nvidia/cuda base; /app for llama shared libs.
+ENV LD_LIBRARY_PATH=/app:/usr/local/cuda/lib64
+
+ENV CIX_LLAMA_BIN_DIR=/app
+ENV CIX_PORT=21847
+ENV CIX_SQLITE_PATH=/data/sqlite/projects.db
+ENV CIX_CHROMA_PERSIST_DIR=/data/chroma
+ENV CIX_GGUF_CACHE_DIR=/data/models
+ENV CIX_N_GPU_LAYERS=99
+ENV CIX_LLAMA_STARTUP_TIMEOUT=120
+ENV CIX_LLAMA_TRANSPORT=unix
+
+EXPOSE 21847
+
+VOLUME ["/data"]
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:21847/health || exit 1
+
+ENTRYPOINT ["/cix-server"]

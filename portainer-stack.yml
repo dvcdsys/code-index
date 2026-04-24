@@ -6,12 +6,16 @@ services:
     ports:
       - "21847:21847"
     environment:
-      - API_KEY=${API_KEY}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-ai/CodeRankEmbed}
-      - CHROMA_PERSIST_DIR=/data/chroma
-      - SQLITE_PATH=/data/sqlite/projects.db
-      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-524288}
-      - EXCLUDED_DIRS=${EXCLUDED_DIRS:-node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store}
+      - CIX_API_KEY=${API_KEY}
+      - CIX_EMBEDDING_MODEL=${EMBEDDING_MODEL:-awhiteside/CodeRankEmbed-Q8_0-GGUF}
+      - CIX_CHROMA_PERSIST_DIR=/data/chroma
+      - CIX_SQLITE_PATH=/data/sqlite/projects.db
+      - CIX_MAX_FILE_SIZE=${MAX_FILE_SIZE:-524288}
+      - CIX_EXCLUDED_DIRS=${EXCLUDED_DIRS:-node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store}
+      - CIX_GGUF_CACHE_DIR=/data/models
+      - CIX_LLAMA_BIN_DIR=/app
+      - CIX_LLAMA_STARTUP_TIMEOUT=120
+      - CIX_EMBEDDINGS_ENABLED=true
     volumes:
       - cix_data:/data
     deploy:
@@ -25,7 +29,7 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:21847/health"]
       interval: 30s
       timeout: 10s
-      start_period: 60s
+      start_period: 120s
       retries: 3
 
 volumes:

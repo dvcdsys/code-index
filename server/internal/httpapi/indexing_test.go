@@ -1,0 +1,241 @@
+package httpapi
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"path/filepath"
+	"testing"
+
+	"github.com/dvcdsys/code-index/server/internal/indexer"
+	"github.com/dvcdsys/code-index/server/internal/projects"
+	"github.com/dvcdsys/code-index/server/internal/vectorstore"
+)
+
+// fakeEmbedder duplicated locally so tests stay inside httpapi_test.
+type fakeEmbedder struct{ dim int }
+
+func (f *fakeEmbedder) EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		v := make([]float32, f.dim)
+		for j := 0; j < f.dim && j < len(t); j++ {
+			v[j] = float32(t[j]) / 255.0
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+func (f *fakeEmbedder) EmbedQuery(ctx context.Context, q string) ([]float32, error) {
+	v := make([]float32, f.dim)
+	for j := 0; j < f.dim && j < len(q); j++ {
+		v[j] = float32(q[j]) / 255.0
+	}
+	return v, nil
+}
+
+func shaHex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// newIndexerTestDeps wires a full Phase 5 Deps (DB + vectorstore + indexer +
+// fake embedder), with a pre-created project. Returns deps and the project hash.
+func newIndexerTestDeps(t *testing.T, projectPath string) (Deps, string) {
+	t.Helper()
+	d := newTestDeps(t)
+
+	// Create the project via the existing package API so row layout matches.
+	_, err := projects.Create(context.Background(), d.DB, projects.CreateRequest{HostPath: projectPath})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	vs, err := vectorstore.Open(filepath.Join(t.TempDir(), "chroma"))
+	if err != nil {
+		t.Fatalf("vectorstore open: %v", err)
+	}
+	emb := &fakeEmbedder{dim: 16}
+	d.VectorStore = vs
+	d.EmbeddingSvc = emb
+	d.Indexer = indexer.New(d.DB, vs, emb, nil)
+
+	return d, projects.HashPath(projectPath)
+}
+
+// ---------------------------------------------------------------------------
+
+func TestIndexBegin_HTTP(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	router := NewRouter(d)
+
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/begin", map[string]any{"full": false})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp indexBeginResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.RunID == "" {
+		t.Error("run_id empty")
+	}
+	if resp.StoredHashes == nil {
+		t.Error("stored_hashes must be {} not null")
+	}
+}
+
+func TestIndexFiles_HTTP_Success(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	router := NewRouter(d)
+
+	// begin
+	beginW := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/begin", map[string]any{})
+	var begin indexBeginResponse
+	_ = json.Unmarshal(beginW.Body.Bytes(), &begin)
+
+	// files
+	content := "package main\nfunc F() int { return 1 }\n"
+	filesBody := map[string]any{
+		"run_id": begin.RunID,
+		"files": []map[string]any{
+			{
+				"path":         "/proj/main.go",
+				"content":      content,
+				"content_hash": shaHex(content),
+				"language":     "go",
+				"size":         len(content),
+			},
+		},
+	}
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/files", filesBody)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp indexFilesResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.FilesAccepted != 1 {
+		t.Errorf("files_accepted=%d", resp.FilesAccepted)
+	}
+	if resp.ChunksCreated == 0 {
+		t.Errorf("chunks_created=0")
+	}
+}
+
+func TestIndexFiles_HTTP_InvalidRunID(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	router := NewRouter(d)
+
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/files", map[string]any{
+		"run_id": "bogus",
+		"files":  []any{},
+	})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestIndexFinish_HTTP(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	router := NewRouter(d)
+
+	beginW := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/begin", map[string]any{})
+	var begin indexBeginResponse
+	_ = json.Unmarshal(beginW.Body.Bytes(), &begin)
+
+	// finish with no files processed
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/finish", map[string]any{
+		"run_id":                 begin.RunID,
+		"deleted_paths":          []string{},
+		"total_files_discovered": 0,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp indexFinishResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Status != "completed" {
+		t.Errorf("status=%q", resp.Status)
+	}
+}
+
+func TestIndexStatus_HTTP_Idle(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	router := NewRouter(d)
+
+	w := doRequest(t, router, http.MethodGet, "/api/v1/projects/"+hash+"/index/status", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp indexProgressResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Status != "idle" {
+		t.Errorf("status=%q, want idle", resp.Status)
+	}
+}
+
+func TestSemanticSearch_HTTP(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	router := NewRouter(d)
+
+	// Index a file first.
+	beginW := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/begin", map[string]any{})
+	var begin indexBeginResponse
+	_ = json.Unmarshal(beginW.Body.Bytes(), &begin)
+
+	content := "package main\nfunc HandleRequest() {}\n"
+	doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/files", map[string]any{
+		"run_id": begin.RunID,
+		"files": []map[string]any{
+			{"path": "/proj/main.go", "content": content, "content_hash": shaHex(content), "language": "go"},
+		},
+	})
+	doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/finish", map[string]any{
+		"run_id": begin.RunID,
+	})
+
+	// Now search.
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/search", map[string]any{
+		"query":     "HandleRequest",
+		"limit":     10,
+		"min_score": 0.0,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp searchResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Total == 0 {
+		t.Error("expected at least one result")
+	}
+}
+
+func TestSemanticSearch_HTTP_MissingQuery(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	router := NewRouter(d)
+
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/search", map[string]any{})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status=%d", w.Code)
+	}
+}
+
+func TestSemanticSearch_HTTP_NoEmbeddings(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	d.EmbeddingSvc = nil
+	router := NewRouter(d)
+
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/search", map[string]any{"query": "x"})
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status=%d", w.Code)
+	}
+}

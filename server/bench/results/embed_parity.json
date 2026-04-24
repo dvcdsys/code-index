@@ -1,0 +1,14 @@
+{
+  "benchmark": "embed parity Python vs Go",
+  "model": "",
+  "gguf_path": "",
+  "dim": 0,
+  "phrases": null,
+  "mean_cosine": 0,
+  "min_cosine": 0,
+  "gate_min_cosine": 0.995,
+  "gate_mean_cosine": 0.999,
+  "gate": "BLOCKED",
+  "blocked": true,
+  "block_reason": "go-llama.cpp load failed: failed loading model (document exact error, flag for Linux retry)"
+}

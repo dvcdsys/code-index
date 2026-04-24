@@ -40,6 +40,10 @@ data/
 cli/build/
 cli/dist/
 
+# Server build artifacts + runtime logs
+server/dist/
+server/exec.log
+
 # uv
 .python-version
 
@@ -48,3 +52,8 @@ docs/
 
 # Claude Code
 .claude/
+
+# Third-party tooling accidentally dropped in repo root
+portainer_mcp/
+portainer-mcp*
+tools.yaml

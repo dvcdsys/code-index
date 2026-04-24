@@ -4,18 +4,15 @@
 
 ```
 code-index/
-├── api/              # Python API server (FastAPI + embeddings)
-│   ├── app/
-│   │   ├── routers/  # HTTP endpoints
-│   │   ├── services/ # business logic (indexing, search, embeddings)
-│   │   ├── schemas/  # Pydantic models
-│   │   └── core/     # config, exceptions, language detection
-│   └── Dockerfile
+├── server/           # Go API server (cix-server)
+│   ├── cmd/          # main entrypoint
+│   ├── internal/     # config, db, httpapi, embeddings, indexer, vectorstore, ...
+│   ├── Dockerfile    # CPU multi-arch build
+│   └── Dockerfile.cuda  # CUDA 3-stage build
 ├── cli/              # Go CLI (cix binary)
 │   ├── cmd/          # cobra commands
 │   └── internal/     # client, config, daemon, indexer, watcher
-├── mcp_server/       # MCP server wrapper
-├── tests/            # Python integration tests
+├── legacy/python-api/  # archived Python backend (deprecated, see doc/MIGRATION_FROM_PYTHON.md)
 └── skills/           # Claude Code skill definitions
 ```
 
@@ -23,25 +20,32 @@ code-index/
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Go | 1.21+ | CLI |
-| Python | 3.11+ | API server |
-| uv | latest | Python package manager |
+| Go | 1.24+ | server + CLI |
 | Docker | 24+ | containerized server |
 | make | any | build shortcuts |
 
 ## Local development setup
 
-### API server
+### Server
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r api/requirements.txt
+cd server
+go mod download
 
-cp .env.example .env
-# Edit .env — set API_KEY to anything for local dev
+# Run unit tests
+go test ./...
 
-source .env
-cd api && uvicorn app.main:app --host 0.0.0.0 --port 21847 --reload
+# Build binary
+make build   # → server/dist/cix-darwin-arm64/cix-server (or linux-amd64)
+
+# Build + fetch llama-server (for local E2E)
+make bundle
+
+# Run server locally (no embeddings)
+CIX_PORT=21847 CIX_EMBEDDINGS_ENABLED=false \
+  CIX_SQLITE_PATH=/tmp/cix-dev.db \
+  CIX_CHROMA_PERSIST_DIR=/tmp/cix-chroma \
+  ./dist/cix-darwin-arm64/cix-server
 ```
 
 ### CLI
@@ -51,7 +55,6 @@ cd cli
 go mod download
 go build -o cix .
 
-# Run directly without installing
 ./cix config set api.url http://localhost:21847
 ./cix config set api.key <your-api-key>
 ```
@@ -59,61 +62,61 @@ go build -o cix .
 Or install globally:
 
 ```bash
-make build && make install   # → /usr/local/bin/cix
+cd cli && make build && make install   # → /usr/local/bin/cix
 ```
 
 ## Running tests
 
 ```bash
-# Python tests (requires running API server)
-source .venv/bin/activate
-pytest tests/ -v
+# Server unit tests
+cd server && go test ./...
 
-# Go — no tests yet, just build check
+# Server parity gate (requires make bundle + a local GGUF)
+cd server && make test-gate
+
+# CLI build check
 cd cli && go build ./...
 ```
 
 ## Making changes
 
-### API (Python)
+### Server (Go)
 
-- Endpoints go in `api/app/routers/`
-- Business logic goes in `api/app/services/`
-- Request/response models go in `api/app/schemas/`
-- After changes: restart uvicorn (auto-reloads with `--reload`)
+- Endpoints: `server/internal/httpapi/`
+- Business logic: `server/internal/indexer/`, `server/internal/embeddings/`
+- Config: `server/internal/config/config.go`
+- After changes: `go build ./...` + `go test ./...`
+- **Do not touch `cli/`** — CLI is a separate module with its own scope.
 
 ### CLI (Go)
 
-- New commands go in `cli/cmd/` as a new `.go` file, registered in `root.go`
-- HTTP client lives in `cli/internal/client/`
+- New commands: `cli/cmd/` as a new `.go` file, registered in `root.go`
+- HTTP client: `cli/internal/client/`
 - After changes: `cd cli && go build -o cix .`
 
 ## Building the Docker image
 
 ```bash
-# Local build (for testing)
-docker compose up -d --build
+# CPU multi-arch (linux/amd64 + linux/arm64)
+# (run via GitHub Actions on server/v* tag — manual push rarely needed)
 
-# Push to Docker Hub (multi-arch)
-make docker-setup                              # once per machine
-make docker-push-all DOCKER_USER=yourname
+# CUDA amd64
+make docker-build-cuda   # from repo root
 ```
 
-See [README — Building and Publishing to Docker Hub](README.md#building-and-publishing-to-docker-hub) for details.
+See [README — Building and Publishing](README.md#building-and-publishing-to-docker-hub) for details.
 
 ## Pull requests
 
-- All changes to `main` must go through a pull request — direct pushes are not allowed
-- At least **1 approval** from a contributor is required before merging
+- All changes to `main` must go through a pull request
+- At least **1 approval** required before merging
 - Keep PRs focused — one feature or fix per PR
-- Test against a running API server before submitting
-- For CLI changes: make sure `go vet ./...` passes
-- For API changes: make sure `pytest tests/` passes
+- For server changes: `go test ./...` must pass in `server/`
+- For CLI changes: `go vet ./...` must pass in `cli/`
 
 ## Reporting issues
 
 Open an issue at https://github.com/dvcdsys/code-index/issues with:
 - OS and architecture
-- Docker or local mode
-- `cix --version` output
+- Docker image tag or binary version (`cix-server -v`)
 - Relevant logs (`docker compose logs` or `~/.cix/logs/watcher.log`)
