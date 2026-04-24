@@ -18,8 +18,13 @@ import (
 
 // EmbeddingsQuerier is the minimal surface the /search handler needs from the
 // embeddings service. *embeddings.Service satisfies it; tests substitute a fake.
+//
+// Ready is consumed by /api/v1/status.model_loaded (m5) and by /health
+// (optionally, when the full probe is wired) to report the sidecar's real
+// state instead of a hard-coded `true`.
 type EmbeddingsQuerier interface {
 	EmbedQuery(ctx context.Context, query string) ([]float32, error)
+	Ready(ctx context.Context) error
 }
 
 // Compile-time assertion that *embeddings.Service still satisfies the surface.

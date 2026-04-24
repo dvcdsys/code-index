@@ -196,16 +196,22 @@ func defaultGGUFCacheDir() string {
 
 // defaultLlamaBinDir points at the `llama/` sibling directory next to the
 // cix-server executable. This is the bundle layout produced by `make bundle`.
-// If Executable() fails (e.g. during `go run`), we fall back to ./llama so a
-// developer can still point CIX_LLAMA_BIN_DIR at their local fetch.
+//
+// n4 — the earlier comment claimed we fall back to "./llama" on symlink
+// resolution failure; actually we fall back to `<exe_dir>/llama` in that case
+// too (the pre-symlink exe path still has a valid Dir). The only truly
+// relative "llama" fallback is when os.Executable() itself fails (extremely
+// rare, usually during `go run`).
 func defaultLlamaBinDir() string {
 	exe, err := os.Executable()
 	if err != nil {
 		return "llama"
 	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return filepath.Join(filepath.Dir(exe), "llama")
+	// Resolve symlinks so nested invocations (e.g. installers putting
+	// cix-server into /usr/local/bin pointing at /opt/cix/bin) still find
+	// the bundled llama/ directory next to the real binary.
+	if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+		exe = resolved
 	}
 	return filepath.Join(filepath.Dir(exe), "llama")
 }

@@ -52,6 +52,18 @@ func UpsertSymbols(ctx context.Context, db *sql.DB, projectPath string, symbols 
 	}
 	defer tx.Rollback() //nolint:errcheck // safe no-op after commit
 
+	if err := UpsertSymbolsTx(ctx, tx, projectPath, symbols); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	return nil
+}
+
+// UpsertSymbolsTx is the Tx-scoped counterpart of UpsertSymbols. The caller
+// owns the transaction (commit/rollback). Used by the indexer's batch tx.
+func UpsertSymbolsTx(ctx context.Context, tx *sql.Tx, projectPath string, symbols []Symbol) error {
 	for i := range symbols {
 		if symbols[i].ID == "" {
 			symbols[i].ID = uuid.NewString()
@@ -76,9 +88,6 @@ func UpsertSymbols(ctx context.Context, db *sql.DB, projectPath string, symbols 
 			return fmt.Errorf("upsert symbol %q: %w", symbols[i].Name, err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
 	return nil
 }
 
@@ -86,6 +95,17 @@ func UpsertSymbols(ctx context.Context, db *sql.DB, projectPath string, symbols 
 // Mirrors SymbolIndexService.delete_by_file.
 func DeleteByFile(ctx context.Context, db *sql.DB, projectPath, filePath string) error {
 	_, err := db.ExecContext(ctx,
+		`DELETE FROM symbols WHERE project_path = ? AND file_path = ?`,
+		projectPath, filePath,
+	)
+	return err
+}
+
+// DeleteByFileTx is the Tx-scoped counterpart of DeleteByFile. Used by the
+// indexer to batch per-file deletes inside its outer SAVEPOINT so a failure
+// on one file rolls back just that file's work.
+func DeleteByFileTx(ctx context.Context, tx *sql.Tx, projectPath, filePath string) error {
+	_, err := tx.ExecContext(ctx,
 		`DELETE FROM symbols WHERE project_path = ? AND file_path = ?`,
 		projectPath, filePath,
 	)
@@ -179,6 +199,17 @@ func UpsertReferences(ctx context.Context, db *sql.DB, projectPath string, refs 
 	}
 	defer tx.Rollback() //nolint:errcheck // safe no-op after commit
 
+	if err := UpsertReferencesTx(ctx, tx, projectPath, refs); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	return nil
+}
+
+// UpsertReferencesTx is the Tx-scoped counterpart of UpsertReferences.
+func UpsertReferencesTx(ctx context.Context, tx *sql.Tx, projectPath string, refs []Reference) error {
 	for _, r := range refs {
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO refs (project_path, name, file_path, line, col, language)
@@ -189,9 +220,6 @@ func UpsertReferences(ctx context.Context, db *sql.DB, projectPath string, refs 
 			return fmt.Errorf("insert ref %q: %w", r.Name, err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
 	return nil
 }
 
@@ -199,6 +227,15 @@ func UpsertReferences(ctx context.Context, db *sql.DB, projectPath string, refs 
 // Mirrors ReferenceIndexService.delete_by_file.
 func DeleteRefsByFile(ctx context.Context, db *sql.DB, projectPath, filePath string) error {
 	_, err := db.ExecContext(ctx,
+		`DELETE FROM refs WHERE project_path = ? AND file_path = ?`,
+		projectPath, filePath,
+	)
+	return err
+}
+
+// DeleteRefsByFileTx is the Tx-scoped counterpart of DeleteRefsByFile.
+func DeleteRefsByFileTx(ctx context.Context, tx *sql.Tx, projectPath, filePath string) error {
+	_, err := tx.ExecContext(ctx,
 		`DELETE FROM refs WHERE project_path = ? AND file_path = ?`,
 		projectPath, filePath,
 	)

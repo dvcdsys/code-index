@@ -2,6 +2,7 @@ package embeddings
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 )
 
@@ -33,9 +34,26 @@ func (w *logWriter) Write(p []byte) (int, error) {
 		}
 		line := bytes.TrimRight(w.buf[:idx], "\r")
 		if len(line) > 0 {
-			w.logger.Log(nil, w.level, string(line), "source", w.source)
+			// Pass a real context. slog.Log with nil triggers a vet warning
+			// and some slog handlers dereference the ctx on every call.
+			w.logger.Log(context.Background(), w.level, string(line), "source", w.source)
 		}
 		w.buf = w.buf[idx+1:]
 	}
 	return len(p), nil
+}
+
+// Close flushes any buffered partial line before the writer is dropped.
+// Called when the parent reaps the child process — llama-server sometimes
+// crashes before emitting a trailing newline and without this we silently
+// drop the last (often most useful) line from the crash log. n1 fix.
+func (w *logWriter) Close() error {
+	if len(w.buf) > 0 {
+		line := bytes.TrimRight(w.buf, "\r")
+		if len(line) > 0 {
+			w.logger.Log(context.Background(), w.level, string(line), "source", w.source, "partial", true)
+		}
+		w.buf = nil
+	}
+	return nil
 }
