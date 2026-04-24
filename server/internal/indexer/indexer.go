@@ -616,6 +616,53 @@ func (s *Service) FinishIndexing(
 }
 
 // ---------------------------------------------------------------------------
+// Cancel
+// ---------------------------------------------------------------------------
+
+// CancelIndexing terminates any active session for the given project. It is
+// idempotent: returns (false, nil) when no active session exists. Used by the
+// CLI watcher's stale-session guard at startup (prior `cix watch` that crashed
+// between begin and finish would otherwise leave a live session blocking the
+// next begin with 409 Conflict).
+//
+// Cancelling does not roll back chunks/symbols already persisted by
+// ProcessFiles batches that committed before the cancel — the next reindex
+// will overwrite them. This matches Python's cancel semantics.
+func (s *Service) CancelIndexing(ctx context.Context, projectPath string) (bool, error) {
+	s.mu.Lock()
+	var cancelledRunID string
+	for id, sess := range s.sessions {
+		if sess.projectPath == projectPath && sess.status == "active" {
+			cancelledRunID = id
+			break
+		}
+	}
+	if cancelledRunID == "" {
+		s.mu.Unlock()
+		return false, nil
+	}
+	delete(s.sessions, cancelledRunID)
+	s.mu.Unlock()
+
+	now := nowUTC()
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE index_runs SET status = 'cancelled', completed_at = ? WHERE id = ?`,
+		now, cancelledRunID,
+	); err != nil {
+		return true, fmt.Errorf("update index_runs: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE projects SET status = 'indexed', updated_at = ? WHERE host_path = ?`,
+		now, projectPath,
+	); err != nil {
+		return true, fmt.Errorf("update project: %w", err)
+	}
+
+	s.logger.Info("indexer: session cancelled", "run_id", cancelledRunID, "project", projectPath)
+	return true, nil
+}
+
+// ---------------------------------------------------------------------------
 // Status + session helpers
 // ---------------------------------------------------------------------------
 

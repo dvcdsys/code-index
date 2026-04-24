@@ -150,46 +150,11 @@ func (c *Client) FinishIndex(path string, runID string, deletedPaths []string, t
 	return &result, nil
 }
 
-// IndexTriggerResponse represents the response from triggering indexing
-type IndexTriggerResponse struct {
-	RunID   string `json:"run_id"`
-	Message string `json:"message"`
-}
-
-// IndexProgress represents indexing progress
+// IndexProgress represents indexing progress.
+// Returned by GetIndexStatus / GET /api/v1/projects/{path}/index/status.
 type IndexProgress struct {
-	Status   string                 `json:"status"`
-	Progress map[string]interface{} `json:"progress,omitempty"`
-}
-
-// TriggerIndex triggers project indexing
-func (c *Client) TriggerIndex(path string, full bool) (*IndexTriggerResponse, error) {
-	return c.TriggerIndexWithBatch(path, full, 0)
-}
-
-// TriggerIndexWithBatch triggers project indexing with a custom batch size.
-// batch_size=0 means use server default.
-func (c *Client) TriggerIndexWithBatch(path string, full bool, batchSize int) (*IndexTriggerResponse, error) {
-	encodedPath := encodeProjectPath(path)
-
-	body := map[string]interface{}{
-		"full": full,
-	}
-	if batchSize > 0 {
-		body["batch_size"] = batchSize
-	}
-
-	resp, err := c.do("POST", fmt.Sprintf("/api/v1/projects/%s/index", encodedPath), body)
-	if err != nil {
-		return nil, err
-	}
-
-	var result IndexTriggerResponse
-	if err := parseResponse(resp, &result); err != nil {
-		return nil, err
-	}
-
-	return &result, nil
+	Status   string         `json:"status"`
+	Progress map[string]any `json:"progress,omitempty"`
 }
 
 // GetIndexStatus gets indexing status for a project
@@ -209,20 +174,25 @@ func (c *Client) GetIndexStatus(path string) (*IndexProgress, error) {
 	return &progress, nil
 }
 
-// CancelIndex cancels ongoing indexing
-func (c *Client) CancelIndex(path string) error {
+// CancelIndexResponse matches the server's idempotent cancel reply.
+type CancelIndexResponse struct {
+	Cancelled bool `json:"cancelled"`
+}
+
+// CancelIndex terminates any in-flight indexing session for the given
+// project. Idempotent: succeeds with Cancelled=false when no session exists.
+// The watcher calls this at startup as a stale-session guard.
+func (c *Client) CancelIndex(path string) (*CancelIndexResponse, error) {
 	encodedPath := encodeProjectPath(path)
 
 	resp, err := c.do("POST", fmt.Sprintf("/api/v1/projects/%s/index/cancel", encodedPath), nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer resp.Body.Close()
 
-	var result map[string]string
+	var result CancelIndexResponse
 	if err := parseResponse(resp, &result); err != nil {
-		return err
+		return nil, err
 	}
-
-	return nil
+	return &result, nil
 }

@@ -213,6 +213,37 @@ func indexFinishHandler(d Deps) http.HandlerFunc {
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/v1/projects/{path}/index/cancel
+// ---------------------------------------------------------------------------
+
+type indexCancelResponse struct {
+	Cancelled bool `json:"cancelled"`
+}
+
+// indexCancelHandler terminates any in-flight session for the project.
+// Idempotent: returns {cancelled: false} when no session is active, so the
+// CLI stale-session guard at startup can call this unconditionally.
+func indexCancelHandler(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p := resolveProjectFromHash(w, r, d)
+		if p == nil {
+			return
+		}
+		if d.Indexer == nil {
+			writeJSON(w, http.StatusOK, indexCancelResponse{Cancelled: false})
+			return
+		}
+
+		cancelled, err := d.Indexer.CancelIndexing(r.Context(), p.HostPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, indexCancelResponse{Cancelled: cancelled})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/projects/{path}/index/status
 // ---------------------------------------------------------------------------
 

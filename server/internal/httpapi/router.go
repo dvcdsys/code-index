@@ -73,6 +73,12 @@ type Deps struct {
 //	POST   /api/v1/projects/{path}/search/definitions       go-to-definition
 //	POST   /api/v1/projects/{path}/search/references        find references
 //	POST   /api/v1/projects/{path}/search/files             file path search
+//	POST   /api/v1/projects/{path}/search                   semantic search
+//	POST   /api/v1/projects/{path}/index/begin              start indexing session
+//	POST   /api/v1/projects/{path}/index/files              stream files
+//	POST   /api/v1/projects/{path}/index/finish             commit session
+//	POST   /api/v1/projects/{path}/index/cancel             idempotent cancel
+//	GET    /api/v1/projects/{path}/index/status             progress / last run
 //	GET    /api/v1/projects/{path}/summary                  project summary
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
@@ -115,6 +121,7 @@ func NewRouter(d Deps) http.Handler {
 		pr.Post("/api/v1/projects/{path}/index/begin", indexBeginHandler(d))
 		pr.Post("/api/v1/projects/{path}/index/files", indexFilesHandler(d))
 		pr.Post("/api/v1/projects/{path}/index/finish", indexFinishHandler(d))
+		pr.Post("/api/v1/projects/{path}/index/cancel", indexCancelHandler(d))
 		pr.Get("/api/v1/projects/{path}/index/status", indexStatusHandler(d))
 
 		// Phase 2 — summary.

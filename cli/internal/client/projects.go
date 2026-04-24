@@ -84,18 +84,3 @@ func (c *Client) CreateProject(path string) (*Project, error) {
 	return &project, nil
 }
 
-// DeleteProject deletes a project
-func (c *Client) DeleteProject(path string) error {
-	encodedPath := encodeProjectPath(path)
-	resp, err := c.do("DELETE", fmt.Sprintf("/api/v1/projects/%s", encodedPath), nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 204 {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
-	}
-
-	return nil
-}

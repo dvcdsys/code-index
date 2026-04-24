@@ -169,7 +169,16 @@ func runWatcherForeground(projectPath string, silent bool) error {
 		fmt.Printf("Watching %s (Ctrl+C to stop)\n", projectPath)
 	}
 
-	return w.Start()
+	if err := w.Start(); err != nil {
+		return err
+	}
+	// Non-zero exit if we stopped while the server was unreachable so
+	// shell wrappers (systemd, launchd, supervisor) see a failure instead
+	// of a quiet exit.
+	if w.Broken() {
+		return fmt.Errorf("watcher stopped while indexing was broken")
+	}
+	return nil
 }
 
 func runWatchStop(cmd *cobra.Command, args []string) error {
