@@ -1,9 +1,9 @@
 module github.com/dvcdsys/code-index/server
 
-go 1.24.0
+go 1.25.0
 
 require (
-	github.com/go-chi/chi/v5 v5.1.0
+	github.com/go-chi/chi/v5 v5.2.4
 	github.com/google/uuid v1.6.0
 	github.com/odvcencio/gotreesitter v0.0.0-20260423084729-38e2b42712f2
 	github.com/philippgille/chromem-go v0.7.0

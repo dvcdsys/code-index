@@ -100,6 +100,9 @@ docker-build-cuda:
 	docker buildx build \
 	  --builder $(BUILDER) \
 	  --platform linux/amd64 \
+	  --pull \
+	  --provenance=mode=max \
+	  --sbom=true \
 	  --build-arg VERSION=$(VERSION) \
 	  -f $(ROOT)/Dockerfile.cuda \
 	  -t $(IMAGE_REPO):$(IMAGE_TAG) \
@@ -118,6 +121,9 @@ scout-cuda:
 	docker buildx build \
 	  --builder $(BUILDER) \
 	  --platform linux/amd64 \
+	  --pull \
+	  --provenance=mode=max \
+	  --sbom=true \
 	  --build-arg VERSION=$(VERSION) \
 	  -f $(ROOT)/Dockerfile.cuda \
 	  -t $(IMAGE_REPO):$(SCOUT_TAG) \
