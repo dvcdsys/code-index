@@ -1,5 +1,4 @@
-# Compiled binaries
-cix-server
+# Compiled binaries — match only the executable, not the cmd/cix-server/ source directory.
 /cmd/cix-server/cix-server
 /bin/
 /dist/
