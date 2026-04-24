@@ -254,6 +254,10 @@ var binaryExts = map[string]bool{
 	".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
 	".db": true, ".sqlite": true, ".sqlite3": true,
 	".wasm": true, ".map": true,
+	// Dependency lock/checksum files — extremely large token counts, no semantic value.
+	".lock": true, ".sum": true,
+	// Log files — large, ephemeral, no code value.
+	".log": true,
 }
 
 func isBinaryExtension(path string) bool {
