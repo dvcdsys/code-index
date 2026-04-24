@@ -184,6 +184,55 @@ func TestIndexStatus_HTTP_Idle(t *testing.T) {
 	}
 }
 
+// TestIndexCancel_HTTP_NoSession verifies the endpoint is idempotent: the
+// stale-session guard in the CLI calls /cancel unconditionally at startup,
+// even when nothing is active. Must return 200 + cancelled:false, not 404.
+func TestIndexCancel_HTTP_NoSession(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	router := NewRouter(d)
+
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/cancel", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp indexCancelResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Cancelled {
+		t.Errorf("cancelled=true with no active session")
+	}
+}
+
+// TestIndexCancel_HTTP_ActiveSession exercises the main path: an active
+// session gets torn down, and a subsequent /begin succeeds (where without
+// cancel it would return 409 Conflict).
+func TestIndexCancel_HTTP_ActiveSession(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj")
+	router := NewRouter(d)
+
+	// Start a session.
+	beginW := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/begin", map[string]any{})
+	if beginW.Code != http.StatusOK {
+		t.Fatalf("begin: status=%d body=%s", beginW.Code, beginW.Body.String())
+	}
+
+	// Cancel it.
+	cancelW := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/cancel", nil)
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("cancel: status=%d body=%s", cancelW.Code, cancelW.Body.String())
+	}
+	var resp indexCancelResponse
+	_ = json.Unmarshal(cancelW.Body.Bytes(), &resp)
+	if !resp.Cancelled {
+		t.Errorf("cancelled=false, want true")
+	}
+
+	// A fresh begin must now succeed (would be 409 without cancel).
+	begin2W := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/begin", map[string]any{})
+	if begin2W.Code != http.StatusOK {
+		t.Fatalf("second begin after cancel: status=%d body=%s", begin2W.Code, begin2W.Body.String())
+	}
+}
+
 func TestSemanticSearch_HTTP(t *testing.T) {
 	d, hash := newIndexerTestDeps(t, "/proj")
 	router := NewRouter(d)

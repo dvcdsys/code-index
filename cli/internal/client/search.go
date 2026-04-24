@@ -105,16 +105,34 @@ func (c *Client) SearchSymbols(projectPath, query string, kinds []string, limit 
 	return &result, nil
 }
 
-// ProjectSummary represents project summary information
+// DirectoryEntry is one row of ProjectSummary.TopDirectories.
+// Mirrors server/internal/httpapi/search.go:dirEntry.
+type DirectoryEntry struct {
+	Path      string `json:"path"`
+	FileCount int    `json:"file_count"`
+}
+
+// RecentSymbolEntry is one row of ProjectSummary.RecentSymbols.
+// Mirrors server/internal/httpapi/search.go:symbolEntry.
+type RecentSymbolEntry struct {
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	FilePath string `json:"file_path"`
+	Language string `json:"language"`
+}
+
+// ProjectSummary represents project summary information.
+// Fields are typed (not map[string]interface{}) so a server-side schema
+// change surfaces as a JSON decode error instead of silent zero values.
 type ProjectSummary struct {
-	HostPath       string                   `json:"host_path"`
-	Status         string                   `json:"status"`
-	Languages      []string                 `json:"languages"`
-	TotalFiles     int                      `json:"total_files"`
-	TotalChunks    int                      `json:"total_chunks"`
-	TotalSymbols   int                      `json:"total_symbols"`
-	TopDirectories []map[string]interface{} `json:"top_directories"`
-	RecentSymbols  []map[string]interface{} `json:"recent_symbols"`
+	HostPath       string              `json:"host_path"`
+	Status         string              `json:"status"`
+	Languages      []string            `json:"languages"`
+	TotalFiles     int                 `json:"total_files"`
+	TotalChunks    int                 `json:"total_chunks"`
+	TotalSymbols   int                 `json:"total_symbols"`
+	TopDirectories []DirectoryEntry    `json:"top_directories"`
+	RecentSymbols  []RecentSymbolEntry `json:"recent_symbols"`
 }
 
 // FileResult represents a file search result.
