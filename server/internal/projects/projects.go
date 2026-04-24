@@ -114,9 +114,9 @@ func Create(ctx context.Context, db *sql.DB, req CreateRequest) (*Project, error
 	}
 
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO projects (host_path, container_path, languages, settings, stats, status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		hostPath, hostPath, "[]", string(settingsJSON), string(statsJSON), "created", now, now,
+		`INSERT INTO projects (host_path, container_path, languages, settings, stats, status, created_at, updated_at, path_hash)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		hostPath, hostPath, "[]", string(settingsJSON), string(statsJSON), "created", now, now, hashPath(hostPath),
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
@@ -136,35 +136,21 @@ func Get(ctx context.Context, db *sql.DB, hostPath string) (*Project, error) {
 	return scanProject(hostPath, row)
 }
 
-// GetByHash resolves a project by SHA1 hash prefix (matching Python resolve_project_path).
+// GetByHash resolves a project by SHA1 hash prefix (matching Python
+// resolve_project_path). Backed by the indexed `path_hash` column (m7 fix),
+// so the lookup is O(log n) instead of a full-table scan + per-row hashing.
+// For pre-m7 databases the hash column is backfilled on Open, so this query
+// works uniformly across fresh and upgraded installs.
 func GetByHash(ctx context.Context, db *sql.DB, pathHash string) (*Project, error) {
-	rows, err := db.QueryContext(ctx, `SELECT host_path FROM projects`)
-	if err != nil {
-		return nil, fmt.Errorf("list host_paths: %w", err)
-	}
-
 	var matched string
-	for rows.Next() {
-		var hp string
-		if err := rows.Scan(&hp); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan host_path: %w", err)
-		}
-		if hashPath(hp) == pathHash {
-			matched = hp
-			break
-		}
-	}
-	// Close rows before calling Get to release the DB connection (critical
-	// for in-memory DBs with MaxOpenConns(1)).
-	rowsErr := rows.Err()
-	rows.Close()
-
-	if rowsErr != nil {
-		return nil, rowsErr
-	}
-	if matched == "" {
+	err := db.QueryRowContext(ctx,
+		`SELECT host_path FROM projects WHERE path_hash = ?`, pathHash,
+	).Scan(&matched)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: hash=%s", ErrNotFound, pathHash)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup by path_hash: %w", err)
 	}
 	return Get(ctx, db, matched)
 }

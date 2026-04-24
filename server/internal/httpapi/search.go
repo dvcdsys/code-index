@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,7 +16,46 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/langdetect"
 	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/symbolindex"
+	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
+
+// vectorStoreResult wraps a vectorstore.SearchResult so fan-out can dedupe by
+// (file_path, start_line, end_line) across multiple language-scoped queries.
+type vectorStoreResult struct {
+	r vectorstore.SearchResult
+}
+
+func wrapResults(rs []vectorstore.SearchResult) []vectorStoreResult {
+	out := make([]vectorStoreResult, len(rs))
+	for i := range rs {
+		out[i] = vectorStoreResult{r: rs[i]}
+	}
+	return out
+}
+
+// dedupByLocation keeps the highest-scoring result per (file_path, start, end).
+// Preserves the relative order of the first-seen instances.
+func dedupByLocation(rs []vectorStoreResult) []vectorStoreResult {
+	type key struct {
+		fp     string
+		start  int
+		end    int
+	}
+	seen := make(map[key]int, len(rs))
+	out := rs[:0]
+	for _, w := range rs {
+		k := key{w.r.FilePath, w.r.StartLine, w.r.EndLine}
+		if idx, ok := seen[k]; ok {
+			if w.r.Score > out[idx].r.Score {
+				out[idx] = w
+			}
+			continue
+		}
+		seen[k] = len(out)
+		out = append(out, w)
+	}
+	return out
+}
 
 // ---------------------------------------------------------------------------
 // Request / response types (match Python schemas/search.py exactly)
@@ -268,6 +308,12 @@ func referenceSearchHandler(d Deps) http.HandlerFunc {
 			return
 		}
 
+		// m3 — the refs table stores only token locations (name, file, line,
+		// col) so `Content` is intentionally empty and `EndLine == StartLine`.
+		// Matches the Python `ReferenceIndexService` shape. Clients that need
+		// source snippets should follow up with a semantic search or a
+		// file-read; populating Content here would require a full-file
+		// re-read on every request and was deemed too costly.
 		results := make([]referenceItem, 0, len(refs))
 		for _, ref := range refs {
 			results = append(results, referenceItem{
@@ -332,6 +378,13 @@ func fileSearchHandler(d Deps) http.HandlerFunc {
 				}
 				results = append(results, fileResultItem{FilePath: fp, Language: langPtr})
 			}
+			// m1 — a WAL / IO error during iteration would otherwise return a
+			// partial list with HTTP 200 and no hint that anything went wrong.
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			rows.Close()
 		}
 		if results == nil {
@@ -381,6 +434,11 @@ func projectSummaryHandler(d Deps) http.HandlerFunc {
 					dirCount[key]++
 				}
 			}
+			if err := rows.Err(); err != nil { // m1
+				rows.Close()
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			rows.Close()
 		}
 
@@ -405,6 +463,11 @@ func projectSummaryHandler(d Deps) http.HandlerFunc {
 					return
 				}
 				recentSyms = append(recentSyms, s)
+			}
+			if err := symRows.Err(); err != nil { // m1
+				symRows.Close()
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
 			}
 			symRows.Close()
 		}
@@ -512,7 +575,10 @@ type searchRequest struct {
 	Limit     int      `json:"limit"`
 	Languages []string `json:"languages"`
 	Paths     []string `json:"paths"`
-	MinScore  float32  `json:"min_score"`
+	// MinScore is a pointer so we can distinguish "not provided" from an
+	// explicit zero. Python uses a Pydantic default (0.1) which also allows
+	// explicit 0 through — mirror that here. m2 fix.
+	MinScore *float32 `json:"min_score,omitempty"`
 }
 
 type searchResultItem struct {
@@ -561,8 +627,11 @@ func semanticSearchHandler(d Deps) http.HandlerFunc {
 		if body.Limit <= 0 {
 			body.Limit = 10
 		}
-		if body.MinScore == 0 {
-			body.MinScore = 0.1
+		// m2 — only apply default when the caller did not send the field.
+		// Explicit 0 means "return everything above the HNSW floor".
+		minScore := float32(0.1)
+		if body.MinScore != nil {
+			minScore = *body.MinScore
 		}
 
 		start := time.Now()
@@ -583,39 +652,85 @@ func semanticSearchHandler(d Deps) http.HandlerFunc {
 			return
 		}
 
-		// Where filter — matches Python: single language → equality; multi → $or.
-		var where map[string]string
-		if len(body.Languages) == 1 {
-			where = map[string]string{"language": body.Languages[0]}
-		}
-		// Note: chromem-go accepts a single where map; OR across languages is
-		// handled via post-filter below when Languages > 1.
+		// M4 — multi-language fan-out. chromem-go's `where` map cannot express
+		// "language IN (go, python)" natively, so:
+		//   - 0 languages: single query, no where filter.
+		//   - 1 language: single query with `where={"language": lang}` — same
+		//     HNSW-level pre-filter as Python.
+		//   - ≥2 languages: N independent queries (one per language) merged and
+		//     deduped by document ID. Preserves pre-filter semantics so the top
+		//     results are not starved by unrelated languages when the collection
+		//     is large.
+		const maxFanout = 4
 
-		results, err := d.VectorStore.Search(r.Context(), p.HostPath, qEmb, body.Limit*2, where)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
+		var allResults []vectorStoreResult
+		switch {
+		case len(body.Languages) == 0:
+			r1, err := d.VectorStore.Search(r.Context(), p.HostPath, qEmb, body.Limit*2, nil)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			allResults = wrapResults(r1)
+		case len(body.Languages) == 1:
+			r1, err := d.VectorStore.Search(r.Context(), p.HostPath, qEmb, body.Limit*2,
+				map[string]string{"language": body.Languages[0]})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			allResults = wrapResults(r1)
+		case len(body.Languages) <= maxFanout:
+			// Per-language fan-out; merge and dedupe.
+			for _, lang := range body.Languages {
+				rPart, err := d.VectorStore.Search(r.Context(), p.HostPath, qEmb, body.Limit*2,
+					map[string]string{"language": lang})
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				allResults = append(allResults, wrapResults(rPart)...)
+			}
+			allResults = dedupByLocation(allResults)
+			// Sort by descending score — merged slices arrive pre-sorted per
+			// partition but out of order across partitions.
+			sort.SliceStable(allResults, func(i, j int) bool {
+				return allResults[i].r.Score > allResults[j].r.Score
+			})
+		default:
+			// Too many languages for fan-out — fall back to post-filter with a
+			// generous over-fetch to minimise starvation.
+			rAll, err := d.VectorStore.Search(r.Context(), p.HostPath, qEmb,
+				body.Limit*len(body.Languages)*2, nil)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			allResults = wrapResults(rAll)
 		}
 
+		// Post-filter for the >maxFanout path needs a language set.
 		langSet := map[string]struct{}{}
 		for _, l := range body.Languages {
 			langSet[l] = struct{}{}
 		}
+		applyPostLangFilter := len(body.Languages) > maxFanout
 
-		filtered := make([]searchResultItem, 0, len(results))
-		for _, r := range results {
-			if r.Score < body.MinScore {
+		filtered := make([]searchResultItem, 0, len(allResults))
+		for _, wrapped := range allResults {
+			res := wrapped.r
+			if res.Score < minScore {
 				continue
 			}
-			if len(body.Languages) > 1 {
-				if _, ok := langSet[r.Language]; !ok {
+			if applyPostLangFilter {
+				if _, ok := langSet[res.Language]; !ok {
 					continue
 				}
 			}
 			if len(body.Paths) > 0 {
 				matched := false
 				for _, pfx := range body.Paths {
-					if strings.HasPrefix(r.FilePath, pfx) || strings.Contains(r.FilePath, pfx) {
+					if strings.HasPrefix(res.FilePath, pfx) || strings.Contains(res.FilePath, pfx) {
 						matched = true
 						break
 					}
@@ -625,14 +740,14 @@ func semanticSearchHandler(d Deps) http.HandlerFunc {
 				}
 			}
 			filtered = append(filtered, searchResultItem{
-				FilePath:   r.FilePath,
-				StartLine:  r.StartLine,
-				EndLine:    r.EndLine,
-				Content:    r.Content,
-				Score:      r.Score,
-				ChunkType:  r.ChunkType,
-				SymbolName: r.SymbolName,
-				Language:   r.Language,
+				FilePath:   res.FilePath,
+				StartLine:  res.StartLine,
+				EndLine:    res.EndLine,
+				Content:    res.Content,
+				Score:      res.Score,
+				ChunkType:  res.ChunkType,
+				SymbolName: res.SymbolName,
+				Language:   res.Language,
 			})
 			if len(filtered) >= body.Limit {
 				break

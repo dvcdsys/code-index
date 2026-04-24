@@ -60,8 +60,15 @@ func newTCPClient(host string, port int) *llamaClient {
 	}
 }
 
-// Health issues a GET /health and returns nil on a 200 response. Used by the
-// supervisor's readiness probe loop and for debug endpoints.
+// Health issues a GET /health and returns nil only when the sidecar reports
+// itself as fully ready. Used by the supervisor's readiness probe loop and
+// for debug endpoints.
+//
+// n3 — llama.cpp's /health returns HTTP 200 with `{"status": "loading model"}`
+// during warm-up. A byte-only probe would consider that "ready" and race
+// against the first real embed call, which then fails with an opaque error.
+// We therefore parse the body and require status == "ok" (or empty, for
+// older llama.cpp versions that did not emit the field).
 func (c *llamaClient) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
 	if err != nil {
@@ -72,11 +79,27 @@ func (c *llamaClient) Health(ctx context.Context) error {
 		return fmt.Errorf("health: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
+		// Drain to let the connection be reused.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return fmt.Errorf("health: status %d", resp.StatusCode)
 	}
-	return nil
+	// Cap body read at 1 KiB — /health payloads are tiny and we do not want
+	// to amplify a misbehaving sidecar's large response.
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1024)).Decode(&body); err != nil {
+		// Older versions served an empty body; treat a decode failure as OK.
+		return nil
+	}
+	switch body.Status {
+	case "", "ok":
+		return nil
+	default:
+		// "loading model" / "no slot available" etc — not ready yet.
+		return fmt.Errorf("health: status=%q", body.Status)
+	}
 }
 
 // embedRequest / embedResponse mirror the llama.cpp /v1/embeddings contract.

@@ -54,14 +54,15 @@ type Progress struct {
 
 // Session is the in-memory state of an active indexing run.
 type session struct {
-	runID          string
-	projectPath    string
-	filesProcessed int
-	chunksCreated  int
-	languagesSeen  map[string]struct{}
-	startTime      time.Time
-	status         string // active|completed
-	phase          string // receiving|completed
+	runID           string
+	projectPath     string
+	filesDiscovered int // last CLI-reported total from /index/finish or batch payloads
+	filesProcessed  int
+	chunksCreated   int
+	languagesSeen   map[string]struct{}
+	startTime       time.Time
+	status          string // active|completed
+	phase           string // receiving|completed
 }
 
 // Embedder is the minimal embeddings surface the indexer consumes. The real
@@ -88,6 +89,12 @@ type Service struct {
 
 	mu       sync.RWMutex
 	sessions map[string]*session // runID → state
+
+	// stopCh is closed when Shutdown is called. Housekeeping goroutines
+	// (ttlCleanup, delayedCleanup) select on it so they unblock promptly
+	// instead of leaking for up to sessionTTL on server shutdown.
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // New constructs a Service. All deps are required except logger (falls back to
@@ -102,7 +109,14 @@ func New(db *sql.DB, vs *vectorstore.Store, emb Embedder, logger *slog.Logger) *
 		emb:      emb,
 		logger:   logger,
 		sessions: make(map[string]*session),
+		stopCh:   make(chan struct{}),
 	}
+}
+
+// Shutdown signals all housekeeping goroutines to exit. Safe to call multiple
+// times. Callers should invoke this before closing the DB.
+func (s *Service) Shutdown() {
+	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
 // ---------------------------------------------------------------------------
@@ -111,8 +125,47 @@ func New(db *sql.DB, vs *vectorstore.Store, emb Embedder, logger *slog.Logger) *
 
 // BeginIndexing creates a run row, returns stored file hashes for diffing, and
 // wipes the project's data if full=true. Mirrors indexer.py begin_indexing.
+//
+// Concurrency: at most one active session per project is allowed. A second
+// concurrent /index/begin for the same project returns ErrSessionConflict,
+// which the HTTP handler maps to 409 Conflict. Python coincidentally serialises
+// this via single-threaded asyncio; Go uses explicit guard.
 func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bool) (string, map[string]string, error) {
+	// C2 — reject a second /index/begin for the same project while another run
+	// is active. Must hold the write lock across check-and-insert so two racing
+	// callers cannot both see "no active session" and both proceed.
 	runID := uuid.NewString()
+	s.mu.Lock()
+	for _, e := range s.sessions {
+		if e.projectPath == projectPath && e.status == "active" {
+			s.mu.Unlock()
+			return "", nil, fmt.Errorf("%w: project=%q existing_run=%q",
+				ErrSessionConflict, projectPath, e.runID)
+		}
+	}
+	// Reserve the session slot before any DB work so a parallel call sees it
+	// immediately. The session is finalised with languagesSeen, startTime
+	// after we know the begin succeeded.
+	s.sessions[runID] = &session{
+		runID:         runID,
+		projectPath:   projectPath,
+		languagesSeen: map[string]struct{}{},
+		startTime:     time.Now(),
+		status:        "active",
+		phase:         "receiving",
+	}
+	s.mu.Unlock()
+
+	// Clean up the reservation on any error path.
+	commit := false
+	defer func() {
+		if !commit {
+			s.mu.Lock()
+			delete(s.sessions, runID)
+			s.mu.Unlock()
+		}
+	}()
+
 	now := nowUTC()
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -140,12 +193,9 @@ func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bo
 	storedHashes := map[string]string{}
 
 	if full {
-		if s.vs != nil {
-			if err := s.vs.DeleteCollection(projectPath); err != nil {
-				// Not fatal: collection may not exist yet.
-				s.logger.Warn("delete collection on full reindex", "err", err)
-			}
-		}
+		// M1 — commit the DB wipe first; DeleteCollection is irreversible and
+		// must run last so a DB failure does not leave file_hashes pointing at
+		// already-deleted vectors (would skip re-indexing on next incremental).
 		tx2, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return "", nil, fmt.Errorf("begin tx (full): %w", err)
@@ -163,6 +213,13 @@ func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bo
 		if err := tx2.Commit(); err != nil {
 			return "", nil, fmt.Errorf("commit (full): %w", err)
 		}
+		if s.vs != nil {
+			if err := s.vs.DeleteCollection(projectPath); err != nil {
+				// Not fatal: collection may not exist yet. Worst case: vectors
+				// stay but DB is empty, and the next full reindex cleans up.
+				s.logger.Warn("delete collection on full reindex", "err", err)
+			}
+		}
 	} else {
 		rows, err := s.db.QueryContext(ctx,
 			`SELECT file_path, content_hash FROM file_hashes WHERE project_path = ?`,
@@ -179,20 +236,14 @@ func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bo
 			}
 			storedHashes[fp] = hash
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return "", nil, fmt.Errorf("iterate file_hashes: %w", err)
+		}
 		rows.Close()
 	}
 
-	s.mu.Lock()
-	s.sessions[runID] = &session{
-		runID:         runID,
-		projectPath:   projectPath,
-		languagesSeen: map[string]struct{}{},
-		startTime:     time.Now(),
-		status:        "active",
-		phase:         "receiving",
-	}
-	s.mu.Unlock()
-
+	commit = true
 	go s.ttlCleanup(runID)
 
 	return runID, storedHashes, nil
@@ -207,6 +258,13 @@ func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bo
 //
 // On embeddings.ErrBusy the error is returned unchanged so the HTTP handler can
 // emit 503 + Retry-After.
+//
+// Transactions (M2+M3): every per-file DB write (file_hashes upsert + symbols
+// delete + refs delete) lives inside a SAVEPOINT. On any error for that file
+// the savepoint is rolled back — the vector store side is reverted via
+// DeleteByFile best-effort, but we accept it may leak vectors since vectorstore
+// has no transactions. End-of-batch batchSymbols/batchRefs are written inside
+// the outer transaction so a late error rolls back the whole batch cleanly.
 func (s *Service) ProcessFiles(
 	ctx context.Context,
 	projectPath, runID string,
@@ -230,6 +288,20 @@ func (s *Service) ProcessFiles(
 	// 512 KB matches the CLI default; above this the tokenise loop would hold
 	// the queue slot for tens of seconds per file.
 	const maxContentBytes = 512 * 1024
+
+	// Open the per-batch transaction. Every per-file DB change lives inside a
+	// SAVEPOINT of this tx so a single bad file only rolls back that file's
+	// rows, not the whole batch.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("begin batch tx: %w", err)
+	}
+	txCommitted := false
+	defer func() {
+		if !txCommitted {
+			_ = tx.Rollback()
+		}
+	}()
 
 	for _, fp := range files {
 		if strings.TrimSpace(fp.Content) == "" {
@@ -255,6 +327,7 @@ func (s *Service) ProcessFiles(
 		}
 
 		// Symbol extraction — mirrors Python: function|class|method|type with a name.
+		fileSymbols := make([]symbolindex.Symbol, 0, len(chunks))
 		for _, c := range chunks {
 			if c.SymbolName == nil {
 				continue
@@ -264,7 +337,7 @@ func (s *Service) ProcessFiles(
 			default:
 				continue
 			}
-			batchSymbols = append(batchSymbols, symbolindex.Symbol{
+			fileSymbols = append(fileSymbols, symbolindex.Symbol{
 				Name:       *c.SymbolName,
 				Kind:       c.ChunkType,
 				FilePath:   c.FilePath,
@@ -276,8 +349,9 @@ func (s *Service) ProcessFiles(
 			})
 		}
 
+		fileRefs := make([]symbolindex.Reference, 0, len(refs))
 		for _, r := range refs {
-			batchRefs = append(batchRefs, symbolindex.Reference{
+			fileRefs = append(fileRefs, symbolindex.Reference{
 				Name:     r.Name,
 				FilePath: r.FilePath,
 				Line:     r.Line,
@@ -311,20 +385,40 @@ func (s *Service) ProcessFiles(
 			continue
 		}
 
-		// Delete old chunks/symbols/refs before insert (matches Python).
+		// Per-file SAVEPOINT so a partial failure rolls back only this file.
+		// savepointName is derived from filesAccepted (monotonically increasing
+		// within the tx) so nested savepoints cannot collide.
+		savepointName := fmt.Sprintf("f%d", filesAccepted)
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT "+savepointName); err != nil {
+			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("savepoint: %w", err)
+		}
+		// Rollback helper for the failure path below.
+		rollback := func() {
+			_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+savepointName)
+			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepointName)
+		}
+
+		// Delete old symbols/refs before insert (matches Python).
+		if err := symbolindex.DeleteByFileTx(ctx, tx, projectPath, fp.Path); err != nil {
+			s.logger.Error("indexer: symbols delete by file", "path", fp.Path, "err", err)
+			rollback()
+			continue
+		}
+		if err := symbolindex.DeleteRefsByFileTx(ctx, tx, projectPath, fp.Path); err != nil {
+			s.logger.Error("indexer: refs delete by file", "path", fp.Path, "err", err)
+			rollback()
+			continue
+		}
+
+		// Vector store has no transactions — delete is best-effort. If the
+		// savepoint rolls back below we leave any vectors in place; they get
+		// overwritten on the next successful indexing of this file.
 		if s.vs != nil {
 			if err := s.vs.DeleteByFile(ctx, projectPath, fp.Path); err != nil {
 				s.logger.Error("indexer: vectorstore delete by file", "path", fp.Path, "err", err)
+				rollback()
 				continue
 			}
-		}
-		if err := symbolindex.DeleteByFile(ctx, s.db, projectPath, fp.Path); err != nil {
-			s.logger.Error("indexer: symbols delete by file", "path", fp.Path, "err", err)
-			continue
-		}
-		if err := symbolindex.DeleteRefsByFile(ctx, s.db, projectPath, fp.Path); err != nil {
-			s.logger.Error("indexer: refs delete by file", "path", fp.Path, "err", err)
-			continue
 		}
 
 		// Upsert chunks.
@@ -347,21 +441,29 @@ func (s *Service) ProcessFiles(
 		if s.vs != nil {
 			if err := s.vs.UpsertChunks(ctx, projectPath, vsChunks, embs); err != nil {
 				s.logger.Error("indexer: vectorstore upsert", "path", fp.Path, "err", err)
+				rollback()
 				continue
 			}
 		}
 
-		batchChunks += len(chunks)
-
-		if _, err := s.db.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`INSERT OR REPLACE INTO file_hashes
 			 (project_path, file_path, content_hash, indexed_at)
 			 VALUES (?, ?, ?, ?)`,
 			projectPath, fp.Path, fp.ContentHash, now,
 		); err != nil {
 			s.logger.Error("indexer: file_hashes upsert", "path", fp.Path, "err", err)
+			rollback()
 			continue
 		}
+
+		if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepointName); err != nil {
+			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("release savepoint: %w", err)
+		}
+
+		batchChunks += len(chunks)
+		batchSymbols = append(batchSymbols, fileSymbols...)
+		batchRefs = append(batchRefs, fileRefs...)
 
 		s.mu.Lock()
 		sess.languagesSeen[language] = struct{}{}
@@ -369,16 +471,24 @@ func (s *Service) ProcessFiles(
 		filesAccepted++
 	}
 
+	// M2 — these upserts are part of the outer tx. Any failure returns the
+	// whole batch's work via deferred tx.Rollback, so the session counters
+	// below only advance on a successful commit.
 	if len(batchSymbols) > 0 {
-		if err := symbolindex.UpsertSymbols(ctx, s.db, projectPath, batchSymbols); err != nil {
-			return 0, 0, 0, fmt.Errorf("upsert symbols: %w", err)
+		if err := symbolindex.UpsertSymbolsTx(ctx, tx, projectPath, batchSymbols); err != nil {
+			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("upsert symbols: %w", err)
 		}
 	}
 	if len(batchRefs) > 0 {
-		if err := symbolindex.UpsertReferences(ctx, s.db, projectPath, batchRefs); err != nil {
-			return 0, 0, 0, fmt.Errorf("upsert refs: %w", err)
+		if err := symbolindex.UpsertReferencesTx(ctx, tx, projectPath, batchRefs); err != nil {
+			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("upsert refs: %w", err)
 		}
 	}
+
+	if err := tx.Commit(); err != nil {
+		return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("commit batch: %w", err)
+	}
+	txCommitted = true
 
 	s.mu.Lock()
 	sess.filesProcessed += filesAccepted
@@ -412,6 +522,12 @@ func (s *Service) FinishIndexing(
 	if err != nil {
 		return "", 0, 0, err
 	}
+
+	// Record the CLI's discovery count for GET /index/status responses
+	// received between here and cleanup. m4 fix.
+	s.mu.Lock()
+	sess.filesDiscovered = totalFilesDiscovered
+	s.mu.Unlock()
 
 	now := nowUTC()
 
@@ -511,12 +627,14 @@ func (s *Service) GetProgress(projectPath string) *Progress {
 	for _, sess := range s.sessions {
 		if sess.projectPath == projectPath {
 			return &Progress{
-				RunID:          sess.runID,
-				Status:         sessStatusToHTTP(sess.status),
-				Phase:          sess.phase,
-				FilesProcessed: sess.filesProcessed,
-				ChunksCreated:  sess.chunksCreated,
-				ElapsedSeconds: time.Since(sess.startTime).Seconds(),
+				RunID:           sess.runID,
+				Status:          sessStatusToHTTP(sess.status),
+				Phase:           sess.phase,
+				FilesDiscovered: sess.filesDiscovered,
+				FilesProcessed:  sess.filesProcessed,
+				FilesTotal:      sess.filesDiscovered, // CLI's reported total, best-known estimate mid-run
+				ChunksCreated:   sess.chunksCreated,
+				ElapsedSeconds:  time.Since(sess.startTime).Seconds(),
 			}
 		}
 	}
@@ -528,6 +646,10 @@ var ErrNoSession = errors.New("indexer: no active session for run_id")
 
 // ErrProjectMismatch signals that the run_id belongs to a different project.
 var ErrProjectMismatch = errors.New("indexer: run_id does not match project")
+
+// ErrSessionConflict signals that /index/begin was called for a project that
+// already has an active session. HTTP handlers should map this to 409 Conflict.
+var ErrSessionConflict = errors.New("indexer: session already active for project")
 
 func (s *Service) requireSession(runID, projectPath string) (*session, error) {
 	s.mu.RLock()
@@ -542,8 +664,16 @@ func (s *Service) requireSession(runID, projectPath string) (*session, error) {
 	return sess, nil
 }
 
+// ttlCleanup drops the session after sessionTTL if it is still active.
+// Returns early without any DB work when Shutdown() is called.
 func (s *Service) ttlCleanup(runID string) {
-	time.Sleep(sessionTTL)
+	t := time.NewTimer(sessionTTL)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-s.stopCh:
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sess, ok := s.sessions[runID]; ok && sess.status == "active" {
@@ -552,8 +682,17 @@ func (s *Service) ttlCleanup(runID string) {
 	}
 }
 
+// delayedCleanup removes a completed session from the in-memory map after
+// cleanupDelay so a slow client can still fetch GetProgress for ~60s post-
+// finish. Returns early without any DB work when Shutdown() is called.
 func (s *Service) delayedCleanup(runID string) {
-	time.Sleep(cleanupDelay)
+	t := time.NewTimer(cleanupDelay)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-s.stopCh:
+		return
+	}
 	s.mu.Lock()
 	delete(s.sessions, runID)
 	s.mu.Unlock()

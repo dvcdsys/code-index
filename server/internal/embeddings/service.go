@@ -86,6 +86,24 @@ func (s *Service) Stop(ctx context.Context) error {
 	return s.sup.Stop(ctx)
 }
 
+// Ready reports whether the embeddings pipeline is currently able to serve a
+// request. Returns nil when the model is loaded and the supervisor is healthy,
+// ErrDisabled when embeddings are turned off, or ErrSupervisor/ErrNotReady
+// when the sidecar has died or is still warming up. m5 — /api/v1/status uses
+// this to populate model_loaded rather than hard-coding `true`.
+func (s *Service) Ready(ctx context.Context) error {
+	if s == nil || s.disabled {
+		return ErrDisabled
+	}
+	if s.sup == nil {
+		return ErrSupervisor
+	}
+	if s.sup.dead.Load() {
+		return ErrSupervisor
+	}
+	return s.sup.Ready(ctx)
+}
+
 // EmbedQuery prepends the model's asymmetric-retrieval prefix and returns a
 // single vector. Mirrors Python `embed_query`.
 func (s *Service) EmbedQuery(ctx context.Context, query string) ([]float32, error) {

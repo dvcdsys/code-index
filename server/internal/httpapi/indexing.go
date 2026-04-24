@@ -85,6 +85,11 @@ func indexBeginHandler(d Deps) http.HandlerFunc {
 
 		runID, stored, err := d.Indexer.BeginIndexing(r.Context(), p.HostPath, body.Full)
 		if err != nil {
+			// C2 — another session is already active for this project.
+			if errors.Is(err, indexer.ErrSessionConflict) {
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -224,13 +229,18 @@ func indexStatusHandler(d Deps) http.HandlerFunc {
 
 		progress := d.Indexer.GetProgress(p.HostPath)
 		if progress != nil {
+			// m4 — match Python's progress payload. Python emits
+			// files_discovered alongside files_processed (routers/indexing.py).
 			writeJSON(w, http.StatusOK, indexProgressResponse{
 				Status: progress.Status,
 				Progress: map[string]any{
 					"phase":            progress.Phase,
+					"files_discovered": progress.FilesDiscovered,
 					"files_processed":  progress.FilesProcessed,
+					"files_total":      progress.FilesTotal,
 					"chunks_created":   progress.ChunksCreated,
 					"elapsed_seconds":  roundFloat1(progress.ElapsedSeconds),
+					"run_id":           progress.RunID,
 				},
 			})
 			return
