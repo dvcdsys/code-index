@@ -6,6 +6,8 @@ ARG VERSION=0.0.0-dev
 
 FROM golang:1.24-alpine AS builder
 ARG VERSION
+# Patch Alpine base packages before building to avoid CVEs in the builder layer.
+RUN apk upgrade --no-cache
 WORKDIR /src
 
 # Copy go.mod / go.sum first for a warm module cache layer.
