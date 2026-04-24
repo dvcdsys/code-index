@@ -1,0 +1,19 @@
+# Compiled binaries
+cix-server
+/cmd/cix-server/cix-server
+/bin/
+/dist/
+
+# Local databases / state
+*.db
+*.db-wal
+*.db-shm
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/

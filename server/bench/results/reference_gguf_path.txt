@@ -1,0 +1,1 @@
+/Users/dvcdsys/.cache/huggingface/hub/models--awhiteside--CodeRankEmbed-Q8_0-GGUF/snapshots/576e7cca423d6a818ffece5d292985858af5fb74/coderankembed-q8_0.gguf

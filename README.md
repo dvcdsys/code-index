@@ -1,4 +1,4 @@
-> **Work in progress.** This project was largely vibe-coded. Use at your own risk.
+[![Release Server](https://github.com/dvcdsys/code-index/actions/workflows/release-server.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/release-server.yml)
 
 ```
  ██████╗██╗██╗  ██╗
@@ -47,14 +47,15 @@ cix CLI (Go)
 ├── reindex   → manual reindex trigger
 └── watch     → fsnotify daemon → auto reindex on changes
 
-API Server (Python / FastAPI)
-├── sentence-transformers  → embeddings (CodeRankEmbed, 768d)
-├── ChromaDB               → vector store (cosine similarity)
-├── tree-sitter            → AST chunking (functions, classes, methods)
-└── SQLite                 → project metadata, symbols, file hashes
+cix-server (Go) — server/
+├── llama-server (llama.cpp sidecar) → embeddings (CodeRankEmbed Q8_0 GGUF, 768d)
+├── chromem-go                       → vector store (cosine similarity)
+├── gotreesitter                     → AST chunking (200+ languages)
+└── modernc.org/sqlite               → project metadata, symbols, file hashes
 ```
 
-The API server does the heavy lifting (ML model, ~400MB RAM). The CLI is a thin Go binary that talks to it over HTTP.
+The server is a pure-Go static binary. The CLI is a thin Go binary that talks to it over HTTP.
+The `llama-server` sidecar (from upstream [llama.cpp](https://github.com/ggml-org/llama.cpp)) handles embeddings — the Go process starts it as a child process and communicates via Unix socket.
 
 ---
 
@@ -62,68 +63,32 @@ The API server does the heavy lifting (ML model, ~400MB RAM). The CLI is a thin 
 
 ### 1. Start the API Server
 
-Three deployment options — pick the one that fits your setup:
+Two deployment options:
 
 | Mode | Best for | GPU acceleration | Prerequisites |
 |------|----------|-----------------|---------------|
-| **Local** | macOS (Apple Silicon), development | MPS (Apple GPU) | none — `uv` installs Python automatically |
-| **Docker** | any OS, isolation, servers | CPU only | Docker |
-| **CUDA** | NVIDIA GPU servers | CUDA | Docker, NVIDIA Container Toolkit |
-
-#### Local (recommended for Mac)
-
-Native execution with automatic Apple MPS (Metal) GPU acceleration on Apple Silicon. No Python or Docker required — the setup script installs everything via [uv](https://docs.astral.sh/uv/).
-
-```bash
-git clone https://github.com/dvcdsys/code-index && cd code-index
-./setup-local.sh    # or: make server-local-setup
-```
-
-This installs `uv` (if needed), downloads Python 3.12 automatically, installs dependencies, downloads the embedding model (~274MB), starts the server, and registers the MCP server in Claude Code.
-
-```bash
-curl http://localhost:21847/health   # → {"status": "ok"}
-```
-
-Daily usage after setup:
-
-```bash
-make server-local-start     # start server
-make server-local-stop      # stop server
-make server-local-restart   # restart server
-make server-local-status    # check status
-make server-local-logs      # tail logs
-```
+| **Docker (CPU)** | any OS, development | none | Docker |
+| **Docker (CUDA)** | NVIDIA GPU servers | CUDA | Docker, NVIDIA Container Toolkit |
 
 #### Docker (CPU)
 
 ```bash
 git clone https://github.com/dvcdsys/code-index && cd code-index
-./setup.sh    # or: make server-docker-start
+cp .env.example .env
+# Edit .env — set CIX_API_KEY to a random string
+docker compose up -d
 ```
-
-This generates `.env` with a random API key, creates `~/.cix/data/` for persistent storage, pulls `dvcdsys/code-index:latest` from Docker Hub, and starts the container.
 
 ```bash
-make server-docker-start    # start
-make server-docker-stop     # stop
-make server-docker-restart  # restart
-make server-docker-status   # check status
-make server-docker-logs     # tail logs
+curl http://localhost:21847/health   # → {"status": "ok"}
 ```
 
-> **Note:** Docker Desktop on Mac runs a Linux VM — Apple Metal/MPS is not available inside containers. For GPU-accelerated inference on Mac, use the Local mode instead.
-
-#### CUDA (NVIDIA GPU)
+#### Docker (CUDA — NVIDIA GPU)
 
 See [GPU Acceleration (CUDA)](#gpu-acceleration-cuda) section below.
 
 ```bash
-make server-cuda-start      # start
-make server-cuda-stop       # stop
-make server-cuda-restart    # restart
-make server-cuda-status     # check status
-make server-cuda-logs       # tail logs
+docker compose -f docker-compose.cuda.yml up -d
 ```
 
 ### 2. Install the CLI
@@ -152,7 +117,7 @@ cd cli && go build -o cix . && sudo mv cix /usr/local/bin/
 ```bash
 # Point cix at your server (API key is in .env)
 cix config set api.url http://localhost:21847
-cix config set api.key $(grep API_KEY .env | cut -d= -f2)
+cix config set api.key $(grep CIX_API_KEY .env | cut -d= -f2)
 ```
 
 ### 4. Index a Project
@@ -301,71 +266,13 @@ cix search "error handling in auth flow" --in ./api
 
 ---
 
-## MCP Server
-
-The MCP server is a secondary interface for Claude agents when the CLI is not available (e.g., sandboxed environments). It exposes the same search capabilities as the CLI as [Model Context Protocol](https://modelcontextprotocol.io/) tools, and is registered automatically by `setup-local.sh`.
-
-### Manual Registration
-
-```bash
-claude mcp add code-index \
-    --scope user \
-    -e CODE_INDEX_API_URL="http://localhost:21847" \
-    -e CODE_INDEX_API_KEY="your-api-key" \
-    -- uv run --directory /path/to/claude-code-index python -m mcp_server
-```
-
-To skip the `select_project` call at the start of each session, add `-e CIX_PROJECT=...`:
-
-```bash
-claude mcp add code-index \
-    --scope user \
-    -e CODE_INDEX_API_URL="http://localhost:21847" \
-    -e CODE_INDEX_API_KEY="your-api-key" \
-    -e CIX_PROJECT="/absolute/path/to/your/project" \
-    -- uv run --directory /path/to/claude-code-index python -m mcp_server
-```
-
-### Configuration
-
-Connection settings are resolved in priority order:
-
-| Priority | Source | Notes |
-|----------|--------|-------|
-| 1 | `CODE_INDEX_API_URL` / `CODE_INDEX_API_KEY` env vars | Passed via `-e` in `claude mcp add` |
-| 2 | `~/.cix/config.yaml` (`api.url` / `api.key`) | Written by `cix config set` |
-| 3 | `http://localhost:21847` / no key | Default for no-auth local setups |
-
-### Available Tools
-
-| Tool | Description |
-|------|-------------|
-| `select_project(path)` | Activate a project for the session. Not needed if `CIX_PROJECT` env var is set. |
-| `list_projects()` | List all registered projects with stats. |
-| `create_project(path)` | Register a new project path. |
-| `search_code(query, limit, file_filter)` | Semantic search — finds code by meaning. Primary search tool. |
-| `find_symbols(query, types, limit)` | Symbol lookup by name (functions, classes, methods, types). |
-| `find_definitions(symbol, kind, file_filter, limit)` | Go-to-definition — find where a symbol is declared. |
-| `find_references(symbol, file_filter, limit)` | Find all usages of a symbol (AST-based). |
-| `search_files(pattern, limit)` | Find files by path fragment. |
-| `index_project(path)` | Trigger server-side incremental reindex. |
-| `index_status(path)` | Check indexing progress (phase, files, ETA). |
-| `project_summary(path)` | Project overview: languages, top directories, key symbols. |
-
-### Differences from CLI
-
-- `index_project` triggers a server-side incremental reindex of files already known to the server. For first-time indexing or after adding new files, use `cix init` or `cix reindex -p <path>` from the terminal.
-- `find_references` uses AST-based reference tracking — results show file + line number only, not code content.
-
----
-
 ## How Indexing Works
 
 **Chunking** — tree-sitter parses code into semantic chunks (functions, classes, methods). Unsupported languages fall back to a sliding window (2000 chars, 256 char overlap).
 
 Supported languages: Python, TypeScript, JavaScript, Go, Rust, Java (+ 40+ others via fallback).
 
-**Embeddings** — each chunk is encoded with [nomic-ai/CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) (768d, 8192 token context, ~274MB). Queries get a `"Represent this query for searching relevant code: "` prefix for asymmetric retrieval.
+**Embeddings** — each chunk is encoded with a GGUF build of CodeRankEmbed (default: [awhiteside/CodeRankEmbed-Q8_0-GGUF](https://huggingface.co/awhiteside/CodeRankEmbed-Q8_0-GGUF); 768d, 8192 token context, ~145MB on disk) via `llama-cpp-python`. Queries get a `"Represent this query for searching relevant code: "` prefix for asymmetric retrieval.
 
 **Incremental reindex** — uses SHA256 file hashes. Only new or changed files are re-embedded. Deleted files are removed from the index.
 
@@ -417,129 +324,97 @@ The file watcher triggers a full reindex when `.cixconfig.yaml` changes.
 
 ### Server Environment Variables (`.env`)
 
+See `.env.example` for a complete template.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `API_KEY` | auto-generated | Bearer token for API auth |
-| `PORT` | `21847` | API server port |
-| `EMBEDDING_MODEL` | `nomic-ai/CodeRankEmbed` | HuggingFace model name |
-| `MAX_FILE_SIZE` | `524288` | Skip files larger than this (bytes) |
-| `EXCLUDED_DIRS` | `node_modules,.git,.venv,...` | Comma-separated dirs to skip |
-| `CPUS` | `2.0` | Number of CPU cores available to the container |
-| `OMP_NUM_THREADS` | all cores | OpenMP threads used by the embedding model (CPU inference) |
-| `MAX_CHUNK_TOKENS` | `1500` | Max tokens per chunk sent to the embedding model. Controls peak VRAM — see [VRAM Usage](#vram-usage-nomic-aicoderankembed-rtx-3090). |
-| `MAX_BATCH_SIZE` | `8` | Max chunks per GPU call. Reduce to lower peak VRAM at the cost of indexing throughput. |
-| `MAX_EMBEDDING_CONCURRENCY` | `1` | Max concurrent GPU embedding calls. Keep at `1` for a single GPU — prevents CUDA OOM from allocator fragmentation. |
-| `EMBEDDING_QUEUE_TIMEOUT` | `300` | Seconds a request waits in the GPU queue before the server returns HTTP 503. `0` = reject immediately when the GPU slot is busy. |
-| `CHROMA_PERSIST_DIR` | `~/.cix/data/chroma` (local) | ChromaDB storage path — **local mode only**, ignored in Docker |
-| `SQLITE_PATH` | `~/.cix/data/sqlite/projects.db` (local) | SQLite database path — **local mode only**, ignored in Docker |
+| `CIX_API_KEY` | — | Bearer token for API auth |
+| `CIX_PORT` | `21847` | API server port |
+| `CIX_EMBEDDING_MODEL` | `awhiteside/CodeRankEmbed-Q8_0-GGUF` | HuggingFace GGUF repo |
+| `CIX_MAX_FILE_SIZE` | `524288` | Skip files larger than this (bytes) |
+| `CIX_EXCLUDED_DIRS` | `node_modules,.git,.venv,...` | Comma-separated dirs to skip |
+| `CIX_N_GPU_LAYERS` | auto | `99` offloads all layers to GPU; `0` forces CPU |
+| `CIX_GGUF_CACHE_DIR` | `/data/models` | Where the GGUF file is cached |
+| `CIX_LLAMA_BIN_DIR` | `/app` | Directory containing `llama-server` binary |
+| `CIX_LLAMA_STARTUP_TIMEOUT` | `60` | Seconds to wait for llama-server ready |
+| `CIX_EMBEDDINGS_ENABLED` | `true` | Set to `false` to skip embeddings (CPU-only mode) |
+| `CIX_CHROMA_PERSIST_DIR` | `/data/chroma` | Vector store path |
+| `CIX_SQLITE_PATH` | `/data/sqlite/projects.db` | SQLite database path |
 
-In Docker mode, data is stored in `~/.cix/data/` on the host via bind mount — no extra configuration needed.
+Data is stored in `/data` inside the container — mount a volume to persist it.
 
 ### Resource Usage
 
 | | Local (native) | Docker (CPU) | CUDA |
 |--|----------------|--------------|------|
-| Memory (idle) | 2-4GB | 2-4GB | 2-4GB |
-| Memory (indexing) | up to 4-6GB | up to 4-6GB | up to 4-6GB |
+| Memory (idle) | ~1GB | ~1GB | ~1GB |
+| Memory (indexing) | up to 2GB | up to 2GB | up to 2GB |
 | CPU | no limit | `CPUS` env var (default: 2) | unlimited |
-| GPU | MPS (Apple Silicon) | none | NVIDIA CUDA |
+| GPU | Metal (Apple Silicon) | none | NVIDIA CUDA |
 | Disk | `~/.cix/data/` (~50-200MB/project) | same | same |
 | Auto-restart | no (use launchd/systemd) | yes | yes |
+
+### Switching Embedding Models
+
+The server ships with `awhiteside/CodeRankEmbed-Q8_0-GGUF` — a Q8-quantized build of CodeRankEmbed (137M params, 768 dims, ~145MB on disk, ~650MB idle VRAM/RAM). Inference runs via `llama-cpp-python`, so **only GGUF repositories are supported**. Plain PyTorch/`sentence-transformers` repos will fail to load with `ValueError: No .gguf file found`.
+
+To switch models:
+1. Stop the server (`make server-local-stop` or `make server-docker-stop`).
+2. Set `EMBEDDING_MODEL` in `.env` to a Hugging Face repo that contains a `.gguf` file, for example:
+   ```bash
+   # code-specialised (default)
+   EMBEDDING_MODEL=awhiteside/CodeRankEmbed-Q8_0-GGUF
+   # smaller general-purpose alternative
+   EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5-GGUF
+   ```
+3. *(Optional)* Pre-cache the new model into the Docker image:
+   `docker compose build --build-arg EMBEDDING_MODEL=<repo>`.
+4. Start the server and re-index your projects.
+
+> [!NOTE]
+> ChromaDB and SQLite paths are suffixed by a sanitised form of the model name (e.g. `projects.db_awhiteside_coderankembed_q8_0_gguf`). This isolates vector spaces per model, so switching back and forth keeps old indices intact and avoids dim-mismatch errors.
+
+> [!TIP]
+> On Apple Silicon, the llama-cpp-python wheel already includes Metal support — GPU layers are picked up automatically, no extra setup needed. On Linux with NVIDIA, the CUDA image is compiled with `-DGGML_CUDA=on`; on systems without `nvidia-smi`, the service transparently falls back to CPU. Force a specific behaviour with `CIX_N_GPU_LAYERS=0` (CPU) or `CIX_N_GPU_LAYERS=-1` (all layers on GPU).
 
 ---
 
 ## Server Management
 
-All commands follow the pattern `make server-{mode}-{action}`:
+```bash
+docker compose up -d                           # start (CPU)
+docker compose -f docker-compose.cuda.yml up -d  # start (CUDA)
+docker compose logs -f                         # tail logs
+docker compose down                            # stop
+```
+
+Developer builds (from source):
 
 ```bash
-# Local (native, MPS on Apple Silicon)
-make server-local-setup     # first-time setup (installs uv, Python, deps)
-make server-local-start     # start server
-make server-local-stop      # stop server
-make server-local-restart   # restart server
-make server-local-status    # check status
-make server-local-logs      # tail logs
-
-# Docker (CPU)
-make server-docker-start    # start server
-make server-docker-stop     # stop server
-make server-docker-restart  # restart server
-make server-docker-status   # check status
-make server-docker-logs     # tail logs
-
-# CUDA (NVIDIA GPU)
-make server-cuda-start      # start server
-make server-cuda-stop       # stop server
-make server-cuda-restart    # restart server
-make server-cuda-status     # check status
-make server-cuda-logs       # tail logs
+cd server && make build        # build cix-server binary
+cd server && make bundle       # build + fetch llama-server
+cd server && make test-gate    # parity gate (requires GGUF)
+make docker-build-cuda         # build + push CUDA image
 ```
 
 ---
 
 ## Building and Publishing to Docker Hub
 
-Use this when you want to push your own image to Docker Hub (e.g. to run on a server or share).
-
-### 1. Login to Docker Hub
-
 ```bash
 docker login
+make docker-build-cuda   # builds + pushes server/Dockerfile.cuda → dvcdsys/code-index:go-cu128
 ```
 
-### 2. Create the buildx builder (once per machine)
-
-```bash
-make docker-setup
-```
-
-This creates a multi-platform `buildx` builder named `cix-builder`.
-
-### 3. Build and push
-
-Replace `yourname` with your Docker Hub username.
-
-**CPU (multi-arch: arm64 + amd64):**
-
-```bash
-make docker-push-all DOCKER_USER=yourname
-# Pushes yourname/code-index:<version> (version auto-detected from git tags)
-```
-
-**CUDA (NVIDIA GPU, amd64 only):**
-
-```bash
-make docker-push-cuda DOCKER_USER=yourname
-# Pushes :latest-cu130 and :<version>-cu130 tags
-```
-
-### Pre-built images
-
-Ready-to-use images are available on Docker Hub:
+Pre-built images on Docker Hub:
 
 | Tag | Architecture | Use case |
 |-----|-------------|----------|
-| `dvcdsys/code-index:latest` | multi-arch (arm64 + amd64) | default, recommended |
-| `dvcdsys/code-index:<version>` | multi-arch (arm64 + amd64) | pinned version |
-| `dvcdsys/code-index:latest-cu130` | amd64 | NVIDIA GPU servers (CUDA 13.0) |
-| `dvcdsys/code-index:<version>-cu130` | amd64 | pinned CUDA version |
+| `dvcdsys/code-index:latest` | linux/amd64 + linux/arm64 | CPU, `CIX_EMBEDDINGS_ENABLED=false` |
+| `dvcdsys/code-index:cu128` | linux/amd64 | NVIDIA GPU (CUDA 12.8), full embeddings |
+| `dvcdsys/code-index:0.2-python-legacy` | linux/amd64 | Frozen Python build, rollback only |
 
-### 4. Use your image
-
-Update `docker-compose.yml` to reference your image instead of building locally:
-
-```yaml
-services:
-  api:
-    image: yourname/code-index:latest
-```
-
-Then start as usual:
-
-```bash
-make server-docker-start
-```
+See `doc/DOCKER_TAGS.md` for the full tag lifecycle policy.
 
 ---
 
@@ -572,15 +447,14 @@ GET  /api/v1/projects/{id}/summary              # project overview
 
 **`API key not set`**
 ```bash
-cix config set api.key $(grep API_KEY /path/to/code-index/.env | cut -d= -f2)
+cix config set api.key $(grep CIX_API_KEY /path/to/code-index/.env | cut -d= -f2)
 ```
 
 **`connection refused`**
 ```bash
-curl http://localhost:21847/health   # check if server is up
-make server-local-start             # local
-make server-docker-start            # Docker
-make server-cuda-start              # CUDA
+curl http://localhost:21847/health              # check if server is up
+docker compose up -d                           # start (CPU)
+docker compose -f docker-compose.cuda.yml up -d  # start (CUDA)
 ```
 
 **`project not found`**
@@ -621,49 +495,38 @@ Supported targets: `darwin-arm64`, `darwin-amd64`, `linux-arm64`, `linux-amd64`.
 
 A CUDA-enabled image is available for servers with NVIDIA GPUs. Inference runs on GPU automatically — no configuration needed.
 
-### VRAM Usage (nomic-ai/CodeRankEmbed, RTX 3090)
+### VRAM Usage (CodeRankEmbed Q8_0 GGUF, RTX 3090)
 
-Two env vars give a predictable VRAM ceiling. Set them in `.env` before starting the container:
+With the GGUF backend the footprint is near-constant: weights (~200-250 MB) plus
+the pre-allocated context (`n_ctx=8192`, ~200-400 MB) give a **~0.5-0.7 GB**
+idle draw. Embedding calls do not spike VRAM the way fp16 PyTorch attention
+used to — sequence length and batch size only change latency, not peak memory.
 
-| `MAX_CHUNK_TOKENS` | `MAX_BATCH_SIZE` | Peak VRAM |
-|-------------------:|:----------------:|----------:|
-| 256 | 8 | ~692 MB |
-| 512 | 8 | ~985 MB |
-| 1 024 | 8 | ~2 127 MB |
-| 2 048 | 4 | ~4 077 MB |
-| 4 096 | 1 | ~4 402 MB |
+`MAX_CHUNK_TOKENS` still caps the length of each code chunk (1 token ≈ 4 chars)
+and must stay ≤ `n_ctx` (8192). `MAX_EMBEDDING_CONCURRENCY` should stay at `1`
+for single-GPU setups — llama.cpp serialises through one context.
 
-Defaults (`MAX_CHUNK_TOKENS=1500`, `MAX_BATCH_SIZE=8`) land in the ≤ 2 048 row — peak **≤ 4 077 MB** including model weights (~644 MB).
+See [`doc/vram-profiling.md`](doc/vram-profiling.md) for methodology and numbers.
 
-`MAX_CHUNK_TOKENS` caps the length of each code chunk fed to the model (1 token ≈ 4 chars). `MAX_BATCH_SIZE` caps how many chunks are embedded in a single GPU call. Reducing either lowers peak VRAM at the cost of indexing throughput.
+**Docker Hub:** [`dvcdsys/code-index:cu128`](https://hub.docker.com/r/dvcdsys/code-index/tags)
 
-See [`doc/vram-profiling.md`](doc/vram-profiling.md) for full methodology and raw measurements.
+Tags: `cu128` (stable) and `v<version>-cu128` (pinned). Image size: ~1.66 GB
+(3-stage build: nvidia/cuda:12.8.1-base + libcublas + llama-server binaries + Go binary).
 
-**Docker Hub:** [`dvcdsys/code-index:latest-cu130`](https://hub.docker.com/r/dvcdsys/code-index/tags)
-
-Tags: `latest-cu130` (always latest build) and `<version>-cu130` (pinned, e.g., `0.2.3-cu130`).
+See `doc/DOCKER_TAGS.md` for the full tag lifecycle.
 
 **Host requirements:**
 
-- NVIDIA GPU with driver **>= 550** (CUDA 13.0 compatible)
+- NVIDIA GPU with driver **>= 520** (CUDA 12.x compatible)
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host
 
 **Docker Compose:**
 
 ```bash
-make server-cuda-start
-# or manually:
 docker compose -f docker-compose.cuda.yml up -d
 ```
 
 **Portainer:** use `portainer-stack-cuda.yml` — deploy as a new stack with `API_KEY` env variable set.
-
-```bash
-make server-cuda-stop       # stop
-make server-cuda-restart    # restart
-make server-cuda-status     # check status
-make server-cuda-logs       # tail logs
-```
 
 ---
 
