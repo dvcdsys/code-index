@@ -101,9 +101,13 @@ func migratePathHash(db *sql.DB) error {
 		if _, err := db.Exec(`ALTER TABLE projects ADD COLUMN path_hash TEXT`); err != nil {
 			return fmt.Errorf("add path_hash column: %w", err)
 		}
-		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_projects_path_hash ON projects(path_hash)`); err != nil {
-			return fmt.Errorf("create path_hash index: %w", err)
-		}
+	}
+
+	// Always create the index — Schema.Exec no longer does it because a
+	// pre-m7 projects table lacks the column and would fail the whole DDL
+	// batch. IF NOT EXISTS makes this idempotent on fresh DBs.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_projects_path_hash ON projects(path_hash)`); err != nil {
+		return fmt.Errorf("create path_hash index: %w", err)
 	}
 
 	// Backfill any NULL path_hash rows (covers both fresh migrations and
