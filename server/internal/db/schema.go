@@ -21,7 +21,12 @@ CREATE TABLE IF NOT EXISTS projects (
     path_hash TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_projects_path_hash ON projects(path_hash);
+-- NOTE: CREATE INDEX on path_hash is intentionally NOT here. Pre-m7 databases
+-- have a projects table without the path_hash column; creating the index
+-- against a multi-statement Schema.Exec would fail before migratePathHash
+-- has a chance to add the column. Index creation lives in migratePathHash
+-- where the column is guaranteed to exist (either by fresh CREATE TABLE
+-- above or by ALTER TABLE ADD COLUMN in the migration).
 
 CREATE TABLE IF NOT EXISTS file_hashes (
     project_path TEXT NOT NULL,
