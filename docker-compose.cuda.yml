@@ -1,27 +1,27 @@
 services:
   code-index-api:
-    image: dvcdsys/code-index:latest-cu130
-    build:
-      context: .
-      dockerfile: api/Dockerfile.cuda
+    image: dvcdsys/code-index:cu128
     container_name: code-index
     restart: unless-stopped
     ports:
       - "${PORT:-21847}:21847"
     environment:
-      - API_KEY=${API_KEY}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-ai/CodeRankEmbed}
-      - CHROMA_PERSIST_DIR=/data/chroma
-      - SQLITE_PATH=/data/sqlite/projects.db
-      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-524288}
-      - EXCLUDED_DIRS=${EXCLUDED_DIRS:-node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store}
+      - CIX_API_KEY=${CIX_API_KEY}
+      - CIX_EMBEDDING_MODEL=${CIX_EMBEDDING_MODEL:-awhiteside/CodeRankEmbed-Q8_0-GGUF}
+      - CIX_CHROMA_PERSIST_DIR=/data/chroma
+      - CIX_SQLITE_PATH=/data/sqlite/projects.db
+      - CIX_MAX_FILE_SIZE=${CIX_MAX_FILE_SIZE:-524288}
+      - CIX_EXCLUDED_DIRS=${CIX_EXCLUDED_DIRS:-node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store}
+      - CIX_N_GPU_LAYERS=99
+      - CIX_GGUF_CACHE_DIR=/data/models
+      - CIX_LLAMA_STARTUP_TIMEOUT=120
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       - ${HOME}/.cix/data:/data
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 10G
         reservations:
           memory: 2G
           devices:
@@ -32,5 +32,5 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:21847/health"]
       interval: 30s
       timeout: 10s
-      start_period: 90s
+      start_period: 120s
       retries: 3
