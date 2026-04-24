@@ -208,8 +208,13 @@ func (s *supervisor) spawn(ctx context.Context) error {
 	)
 
 	cmd := exec.Command(binPath, argv...)
-	cmd.Stdout = newLogWriter(s.logger, slog.LevelInfo, "llama-server.stdout")
-	cmd.Stderr = newLogWriter(s.logger, slog.LevelInfo, "llama-server.stderr")
+	// Keep references to the log writers so waitChild can flush any trailing
+	// partial line after the child exits (n1 — otherwise the very last line
+	// of a crash log is silently dropped when it lacks a newline).
+	stdoutLog := newLogWriter(s.logger, slog.LevelInfo, "llama-server.stdout")
+	stderrLog := newLogWriter(s.logger, slog.LevelInfo, "llama-server.stderr")
+	cmd.Stdout = stdoutLog
+	cmd.Stderr = stderrLog
 	// Defense-in-depth for dylib resolution on darwin. Official llama.cpp
 	// macOS builds already use @loader_path rpath so this is belt-and-braces.
 	cmd.Env = append(os.Environ(), "DYLD_LIBRARY_PATH="+s.cfg.BinDir)
@@ -230,8 +235,9 @@ func (s *supervisor) spawn(ctx context.Context) error {
 	s.waiterDone = make(chan struct{})
 	s.mu.Unlock()
 
-	// Exit-watcher: if the child dies unexpectedly, try to restart.
-	go s.waitChild(cmd)
+	// Exit-watcher: if the child dies unexpectedly, try to restart. The log
+	// writers are closed inside waitChild to flush any trailing partial line.
+	go s.waitChild(cmd, stdoutLog, stderrLog)
 
 	// Readiness probe: poll /health until success or timeout.
 	readyCtx, cancel := context.WithTimeout(ctx, time.Duration(s.cfg.StartupSec)*time.Second)
@@ -281,11 +287,23 @@ func (s *supervisor) waitReady(ctx context.Context) error {
 }
 
 // waitChild reaps the child process. If the exit was due to a Stop() call we
-// just record the result; otherwise we trigger the restart loop.
-func (s *supervisor) waitChild(cmd *exec.Cmd) {
+// just record the result; otherwise we trigger the restart loop. Log writers
+// are closed here so any unterminated final line is flushed before we move on
+// — particularly important for crash-exit logs (n1 fix).
+func (s *supervisor) waitChild(cmd *exec.Cmd, stdoutLog, stderrLog *logWriter) {
 	defer close(s.waiterDone)
 
 	err := cmd.Wait()
+
+	// Flush trailing partial lines before going quiet. Errors here are not
+	// actionable, so we discard them.
+	if stdoutLog != nil {
+		_ = stdoutLog.Close()
+	}
+	if stderrLog != nil {
+		_ = stderrLog.Close()
+	}
+
 	if s.stopping.Load() {
 		s.logger.Info("llama-server exited on shutdown", "err", err)
 		return
@@ -393,6 +411,18 @@ func (s *supervisor) Stop(ctx context.Context) error {
 // killGroup is the emergency teardown path used by spawn() when the child
 // starts but never becomes ready. It differs from Stop in that it does not
 // flip the `stopping` flag — the caller is responsible for sequencing.
+//
+// Circuit-breaker semantics (A2): setting `stopping = true` is intentional
+// here. It tells the waitChild goroutine that this exit is a deliberate kill,
+// not a crash, so it does NOT loop back into restartLoop. The caller
+// (spawn → waitReady fail → killGroup) then sees the waiter finish, returns
+// ErrNotReady to restartLoop, which sets `dead = true`. Net effect: a failed
+// readiness probe after repeated restarts permanently marks the supervisor
+// dead instead of looping forever trying to restart a broken child.
+//
+// There is no supported path to reset `stopping` after this — bring the
+// service back by recreating the whole embeddings.Service on the next
+// process restart (in practice: container restart or cix-server reboot).
 func (s *supervisor) killGroup() {
 	s.mu.RLock()
 	cmd := s.cmd
@@ -404,8 +434,6 @@ func (s *supervisor) killGroup() {
 	if err != nil {
 		pgid = cmd.Process.Pid
 	}
-	// We want the waiter to observe a clean exit so `stopping` is flipped here
-	// — otherwise it would treat this as a crash and try to restart.
 	s.stopping.Store(true)
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	if s.cfg.Transport == "unix" {

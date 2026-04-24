@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"math/rand"
+	"regexp"
 	"sort"
 	"testing"
 	"time"
@@ -214,6 +215,56 @@ func TestSearchWithWhereFilter(t *testing.T) {
 		if r.Language != "python" {
 			t.Errorf("where filter failed: got language=%q, want python", r.Language)
 		}
+	}
+}
+
+// TestDocIDFormat asserts the exact Python-parity shape:
+//
+//	md5hex(filePath)[:12] ":" startLine "-" endLine ":" idx
+//
+// This guards against accidental regressions where someone changes the docID
+// function back to the full 32-char hash or drops the positional idx — both
+// break parity with the legacy Python implementation and allow silent
+// overwrites on identical (file, start, end) triples.
+func TestDocIDFormat(t *testing.T) {
+	got := docID("/a/b/c.go", 10, 20, 3)
+	re := regexp.MustCompile(`^[0-9a-f]{12}:\d+-\d+:\d+$`)
+	if !re.MatchString(got) {
+		t.Fatalf("docID = %q; does not match ^[0-9a-f]{12}:\\d+-\\d+:\\d+$", got)
+	}
+	// Deterministic: same inputs → same id.
+	if docID("/a/b/c.go", 10, 20, 3) != got {
+		t.Fatal("docID is not deterministic for identical inputs")
+	}
+	// Different idx changes the id.
+	if docID("/a/b/c.go", 10, 20, 4) == got {
+		t.Fatal("docID must include positional idx — same (path,start,end,idx=3) collides with idx=4")
+	}
+	// Different path changes the id.
+	if docID("/a/b/d.go", 10, 20, 3) == got {
+		t.Fatal("docID must change with filePath")
+	}
+}
+
+// TestOverlappingChunksNoCollision covers the C1 fix: two chunks with the
+// same (file, start, end) but distinct positions in the input slice must
+// both be stored (not silently overwritten).
+func TestOverlappingChunksNoCollision(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	const project = "/p"
+
+	r := rand.New(rand.NewSource(1))
+	chunks := []Chunk{
+		{Content: "A", FilePath: "dup.go", StartLine: 1, EndLine: 10, ChunkType: "function", Language: "go"},
+		{Content: "B", FilePath: "dup.go", StartLine: 1, EndLine: 10, ChunkType: "function", Language: "go"},
+	}
+	embs := [][]float32{randNorm(r, testDim), randNorm(r, testDim)}
+	if err := s.UpsertChunks(ctx, project, chunks, embs); err != nil {
+		t.Fatalf("UpsertChunks: %v", err)
+	}
+	if got := s.Count(project); got != 2 {
+		t.Errorf("Count after upsert of two colliding-range chunks = %d, want 2", got)
 	}
 }
 

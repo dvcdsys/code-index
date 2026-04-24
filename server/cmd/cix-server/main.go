@@ -96,10 +96,19 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("embeddings: %w", err)
 	}
+	// Shared shutdown context — see M7 below. We build it lazily (in the
+	// signal handler) so startup doesn't carry a dangling deadline.
+	var shutdownCtx context.Context
 	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := embedSvc.Stop(stopCtx); err != nil {
+		// Fallback for the path where shutdownCtx was never assigned (e.g.
+		// startup-error branch): bound embeddings stop independently.
+		ctx := shutdownCtx
+		if ctx == nil {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+		}
+		if err := embedSvc.Stop(ctx); err != nil {
 			logger.Error("embeddings stop", "err", err)
 		}
 	}()
@@ -119,6 +128,9 @@ func run() error {
 	}
 
 	idx := indexer.New(database, vs, embedSvc, logger)
+	// Stop housekeeping goroutines during shutdown so sessionTTL timers do not
+	// leak for up to 1h past shutdown. m8 fix.
+	defer idx.Shutdown()
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		DB:             database,
@@ -168,7 +180,11 @@ func run() error {
 		return nil
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// M7 — single shared shutdown budget for HTTP drain + embeddings supervisor.
+	// Previously each subsystem had its own 10s context, producing up to 20s
+	// of total grace — which blows past Docker's default SIGKILL deadline.
+	var cancel context.CancelFunc
+	shutdownCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("graceful shutdown: %w", err)

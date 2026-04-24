@@ -37,6 +37,10 @@ func (f *fakeEmbedder) EmbedQuery(ctx context.Context, q string) ([]float32, err
 	return v, nil
 }
 
+// Ready satisfies the EmbeddingsQuerier interface so a fake embedder can
+// stand in for *embeddings.Service in router tests. Always healthy.
+func (f *fakeEmbedder) Ready(_ context.Context) error { return nil }
+
 func shaHex(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])

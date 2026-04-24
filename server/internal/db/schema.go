@@ -13,8 +13,15 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT DEFAULT 'created',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    last_indexed_at TEXT
+    last_indexed_at TEXT,
+    -- path_hash is the first 16 hex chars of SHA1(host_path). It replaces the
+    -- O(n) GetByHash scan with an O(log n) index lookup. Computed in Go on
+    -- insert; the column is nullable here so migrating databases can backfill
+    -- lazily via Open's ALTER+UPDATE hook.
+    path_hash TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_projects_path_hash ON projects(path_hash);
 
 CREATE TABLE IF NOT EXISTS file_hashes (
     project_path TEXT NOT NULL,

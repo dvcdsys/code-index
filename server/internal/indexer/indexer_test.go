@@ -140,6 +140,33 @@ func TestBeginIndexing_Full_WipesState(t *testing.T) {
 	}
 }
 
+// TestBeginIndexing_ConflictOnConcurrent covers C2: a second /index/begin
+// for the same project while the first session is still active must return
+// ErrSessionConflict. A different project must be allowed.
+func TestBeginIndexing_ConflictOnConcurrent(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, "/p1")
+	seedProject(t, d, "/p2")
+
+	ctx := context.Background()
+	vs := newStore(t)
+	svc := New(d, vs, &fakeEmbedder{dim: 8}, nil)
+
+	if _, _, err := svc.BeginIndexing(ctx, "/p1", false); err != nil {
+		t.Fatalf("first BeginIndexing: %v", err)
+	}
+
+	// Second call for the same project must conflict.
+	if _, _, err := svc.BeginIndexing(ctx, "/p1", false); !errors.Is(err, ErrSessionConflict) {
+		t.Fatalf("second BeginIndexing: want ErrSessionConflict, got %v", err)
+	}
+
+	// Different project must succeed.
+	if _, _, err := svc.BeginIndexing(ctx, "/p2", false); err != nil {
+		t.Fatalf("BeginIndexing on different project: %v", err)
+	}
+}
+
 func TestProcessFiles_HappyPath(t *testing.T) {
 	d := openTestDB(t)
 	seedProject(t, d, "/proj")

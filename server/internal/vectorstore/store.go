@@ -63,11 +63,20 @@ func collectionName(projectPath string) string {
 	return fmt.Sprintf("project_%x", h)
 }
 
-// docID: "{md5hex(filePath)[:12]}:{startLine}-{endLine}"
-// (filePath, startLine, endLine) is unique per chunk — no positional idx needed.
-func docID(filePath string, startLine, endLine int) string {
+// docID mirrors the Python VectorStoreService format:
+//
+//	"{md5hex(filePath)[:12]}:{startLine}-{endLine}:{idx}"
+//
+// The positional `idx` is required because overlapping-window or repeated
+// chunkers can emit two chunks with identical (filePath, startLine, endLine);
+// without idx the second silently overwrites the first in chromem-go.
+//
+// `h[:6]` gives 12 hex characters, matching Python's `md5[:12]`. Keep this
+// function byte-compatible with `legacy/python-api/app-root/app/services/vector_store.py`
+// so a future migration tool can diff ids between backends.
+func docID(filePath string, startLine, endLine, idx int) string {
 	h := md5.Sum([]byte(filePath))
-	return fmt.Sprintf("%x:%d-%d", h, startLine, endLine)
+	return fmt.Sprintf("%x:%d-%d:%d", h[:6], startLine, endLine, idx)
 }
 
 // embedNotUsed is a stub embedding func. chromem-go requires one, but we always
@@ -99,7 +108,7 @@ func (s *Store) UpsertChunks(ctx context.Context, projectPath string, chunks []C
 	docs := make([]chromem.Document, len(chunks))
 	for i, c := range chunks {
 		docs[i] = chromem.Document{
-			ID:      docID(c.FilePath, c.StartLine, c.EndLine),
+			ID:      docID(c.FilePath, c.StartLine, c.EndLine, i),
 			Content: c.Content,
 			Metadata: map[string]string{
 				"file_path":   c.FilePath,
