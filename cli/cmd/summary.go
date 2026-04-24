@@ -79,16 +79,14 @@ func runSummary(cmd *cobra.Command, args []string) error {
 	if len(summary.TopDirectories) > 0 {
 		fmt.Println("Top directories:")
 		for _, dir := range summary.TopDirectories {
-			path, _ := dir["path"].(string)
-			count, _ := dir["file_count"].(float64)
-			if path != "" {
-				relPath, relErr := filepath.Rel(absPath, path)
-				displayPath := path
-				if relErr == nil {
-					displayPath = relPath
-				}
-				fmt.Printf("  %s/ (%d files)\n", displayPath, int(count))
+			if dir.Path == "" {
+				continue
 			}
+			displayPath := dir.Path
+			if relPath, relErr := filepath.Rel(absPath, dir.Path); relErr == nil {
+				displayPath = relPath
+			}
+			fmt.Printf("  %s/ (%d files)\n", displayPath, dir.FileCount)
 		}
 		fmt.Println()
 	}
@@ -97,11 +95,10 @@ func runSummary(cmd *cobra.Command, args []string) error {
 	if len(summary.RecentSymbols) > 0 {
 		fmt.Println("Top symbols:")
 		for _, sym := range summary.RecentSymbols {
-			name, _ := sym["name"].(string)
-			kind, _ := sym["kind"].(string)
-			if name != "" {
-				fmt.Printf("  [%s] %s\n", kind, name)
+			if sym.Name == "" {
+				continue
 			}
+			fmt.Printf("  [%s] %s\n", sym.Kind, sym.Name)
 		}
 	}
 
