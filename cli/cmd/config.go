@@ -61,13 +61,13 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// Render only metadata (length) — never the key bytes, masked or not.
+	// CodeQL go/clear-text-logging flags any partial display, and for a
+	// debug command "is it configured + how long" is enough; users with
+	// the actual value can read the config file directly.
 	apiKey := "(not set)"
 	if cfg.API.Key != "" {
-		k := cfg.API.Key
-		if len(k) > 20 {
-			k = k[:12] + "..." + k[len(k)-4:]
-		}
-		apiKey = k
+		apiKey = fmt.Sprintf("(set, %d chars)", len(cfg.API.Key))
 	}
 
 	fmt.Printf("%-28s = %s\n", "api.url", cfg.API.URL)
