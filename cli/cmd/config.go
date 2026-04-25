@@ -61,13 +61,15 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// Render only metadata (length) — never the key bytes, masked or not.
-	// CodeQL go/clear-text-logging flags any partial display, and for a
-	// debug command "is it configured + how long" is enough; users with
-	// the actual value can read the config file directly.
+	// Render only "set" / "not set" — never any data derived from the key.
+	// CodeQL go/clear-text-logging flags partial display, masked output,
+	// and even length-only output (because len(cfg.API.Key) still
+	// originates from the secret field). For a debug command "is it
+	// configured" is enough; users with the actual value can read the
+	// config file directly.
 	apiKey := "(not set)"
 	if cfg.API.Key != "" {
-		apiKey = fmt.Sprintf("(set, %d chars)", len(cfg.API.Key))
+		apiKey = "(set)"
 	}
 
 	fmt.Printf("%-28s = %s\n", "api.url", cfg.API.URL)
