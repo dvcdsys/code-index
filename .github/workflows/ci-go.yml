@@ -12,6 +12,12 @@ on:
       - "server/**"
       - ".github/workflows/ci-go.yml"
 
+# Read-only token: this workflow runs vet/test/build only — no writes to
+# the repo, no SARIF upload, no package publish. CodeQL flagged the
+# missing block (.github/workflows/ci-go.yml:37 — go/missing-permissions).
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
