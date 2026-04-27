@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -582,14 +583,34 @@ type searchRequest struct {
 }
 
 type searchResultItem struct {
-	FilePath   string  `json:"file_path"`
+	FilePath   string      `json:"file_path"`
+	StartLine  int         `json:"start_line"`
+	EndLine    int         `json:"end_line"`
+	Content    string      `json:"content"`
+	Score      float32     `json:"score"`
+	ChunkType  string      `json:"chunk_type"`
+	SymbolName string      `json:"symbol_name"`
+	Language   string      `json:"language"`
+	// NestedHits records other matches inside this result's line range that
+	// were merged into it by mergeOverlappingHits. Populated only when at
+	// least one inner hit was absorbed; emitted as `nested_hits` in JSON.
+	// The renderer uses these to show breadcrumbs (e.g. "+ 2 more matches:
+	// H2 'Foo' line 27, H3 'Bar' line 29") so the user can see WHY this
+	// outer chunk ranks well even when the actual signal came from a
+	// sub-section.
+	NestedHits []nestedHit `json:"nested_hits,omitempty"`
+}
+
+// nestedHit is a compact view of a chunk that was merged INTO another
+// result. We don't need the full content (the parent's content already
+// contains it textually) — just enough metadata to render a breadcrumb
+// and let the caller jump to the exact line.
+type nestedHit struct {
 	StartLine  int     `json:"start_line"`
 	EndLine    int     `json:"end_line"`
-	Content    string  `json:"content"`
-	Score      float32 `json:"score"`
+	SymbolName string  `json:"symbol_name,omitempty"`
 	ChunkType  string  `json:"chunk_type"`
-	SymbolName string  `json:"symbol_name"`
-	Language   string  `json:"language"`
+	Score      float32 `json:"score"`
 }
 
 type searchResponse struct {
@@ -652,117 +673,173 @@ func semanticSearchHandler(d Deps) http.HandlerFunc {
 			return
 		}
 
-		// M4 — multi-language fan-out. chromem-go's `where` map cannot express
-		// "language IN (go, python)" natively, so:
-		//   - 0 languages: single query, no where filter.
-		//   - 1 language: single query with `where={"language": lang}` — same
-		//     HNSW-level pre-filter as Python.
-		//   - ≥2 languages: N independent queries (one per language) merged and
-		//     deduped by document ID. Preserves pre-filter semantics so the top
-		//     results are not starved by unrelated languages when the collection
-		//     is large.
-		const maxFanout = 4
-
-		var allResults []vectorStoreResult
-		switch {
-		case len(body.Languages) == 0:
-			r1, err := d.VectorStore.Search(r.Context(), p.HostPath, qEmb, body.Limit*2, nil)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			allResults = wrapResults(r1)
-		case len(body.Languages) == 1:
-			r1, err := d.VectorStore.Search(r.Context(), p.HostPath, qEmb, body.Limit*2,
-				map[string]string{"language": body.Languages[0]})
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			allResults = wrapResults(r1)
-		case len(body.Languages) <= maxFanout:
-			// Per-language fan-out; merge and dedupe.
-			for _, lang := range body.Languages {
-				rPart, err := d.VectorStore.Search(r.Context(), p.HostPath, qEmb, body.Limit*2,
-					map[string]string{"language": lang})
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, err.Error())
-					return
-				}
-				allResults = append(allResults, wrapResults(rPart)...)
-			}
-			allResults = dedupByLocation(allResults)
-			// Sort by descending score — merged slices arrive pre-sorted per
-			// partition but out of order across partitions.
-			sort.SliceStable(allResults, func(i, j int) bool {
-				return allResults[i].r.Score > allResults[j].r.Score
-			})
-		default:
-			// Too many languages for fan-out — fall back to post-filter with a
-			// generous over-fetch to minimise starvation.
-			rAll, err := d.VectorStore.Search(r.Context(), p.HostPath, qEmb,
-				body.Limit*len(body.Languages)*2, nil)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			allResults = wrapResults(rAll)
-		}
-
-		// Post-filter for the >maxFanout path needs a language set.
+		// Post-filter (path/language) and merge state are computed once outside
+		// the window loop — both are cheap and don't depend on factor.
 		langSet := map[string]struct{}{}
 		for _, l := range body.Languages {
 			langSet[l] = struct{}{}
 		}
-		applyPostLangFilter := len(body.Languages) > maxFanout
+		applyPostLangFilter := len(body.Languages) > maxFanoutSearch
 
-		filtered := make([]searchResultItem, 0, len(allResults))
-		for _, wrapped := range allResults {
-			res := wrapped.r
-			if res.Score < minScore {
-				continue
+		// Windowed retrieval. Start by asking the vector store for limit×2
+		// (the historical default), and if mergeOverlappingHits collapses
+		// the result set below the user's --limit budget — typically because
+		// of nested markdown sections or class+method overlaps — re-ask for
+		// limit×4, then ×8, up to ×maxFactorSearch. Stops early when the
+		// store returns fewer rows than requested (HNSW exhausted).
+		var merged []searchResultItem
+		factor := 2
+		for {
+			n := body.Limit * factor
+			rawWrapped, err := fetchVectorResults(
+				r.Context(), d.VectorStore, p.HostPath, qEmb, n, body.Languages,
+			)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
 			}
-			if applyPostLangFilter {
-				if _, ok := langSet[res.Language]; !ok {
-					continue
-				}
-			}
-			if len(body.Paths) > 0 {
-				matched := false
-				for _, pfx := range body.Paths {
-					if strings.HasPrefix(res.FilePath, pfx) || strings.Contains(res.FilePath, pfx) {
-						matched = true
-						break
-					}
-				}
-				if !matched {
-					continue
-				}
-			}
-			filtered = append(filtered, searchResultItem{
-				FilePath:   res.FilePath,
-				StartLine:  res.StartLine,
-				EndLine:    res.EndLine,
-				Content:    res.Content,
-				Score:      res.Score,
-				ChunkType:  res.ChunkType,
-				SymbolName: res.SymbolName,
-				Language:   res.Language,
-			})
-			if len(filtered) >= body.Limit {
+			filtered := filterToSearchItems(rawWrapped, minScore, body.Paths, langSet, applyPostLangFilter)
+			merged = mergeOverlappingHits(filtered)
+			if len(merged) >= body.Limit {
 				break
 			}
+			if len(rawWrapped) < n {
+				// Vector store returned everything it had — no point asking again.
+				break
+			}
+			if factor >= maxFactorSearch {
+				break
+			}
+			factor *= 2
+		}
+
+		if len(merged) > body.Limit {
+			merged = merged[:body.Limit]
 		}
 
 		elapsedMS := float64(time.Since(start).Microseconds()) / 1000.0
 		elapsedMS = float64(int(elapsedMS*10+0.5)) / 10
 
 		writeJSON(w, http.StatusOK, searchResponse{
-			Results:     filtered,
-			Total:       len(filtered),
+			Results:     merged,
+			Total:       len(merged),
 			QueryTimeMS: elapsedMS,
 		})
 	}
+}
+
+// maxFanoutSearch is the language-count threshold above which we drop
+// per-language pre-filter and fall back to a single over-fetched query
+// with post-filter. Same value as the previous inline `maxFanout`.
+const maxFanoutSearch = 4
+
+// maxFactorSearch caps the windowed retrieval expansion. With body.Limit=10
+// and factor=16 we top out at 160 raw results — enough to fill the budget
+// even on heavily nested markdown without spending all day re-querying.
+const maxFactorSearch = 16
+
+// fetchVectorResults performs the per-language fan-out vector-store query
+// at the given limit and returns deduped, score-sorted results. Extracted
+// from semanticSearchHandler so the windowed retry loop can call it with
+// growing `n` values without duplicating the four-case switch.
+//
+// The fan-out strategy mirrors the original inline logic: 0 languages →
+// single query; 1 language → single query with where-filter; 2..maxFanout
+// → N queries with per-language where-filter, deduped and re-sorted by
+// score; >maxFanout → single oversized query, post-filter handled by
+// caller (filterToSearchItems with applyPostLangFilter=true).
+func fetchVectorResults(
+	ctx context.Context,
+	store *vectorstore.Store,
+	projectPath string,
+	qEmb []float32,
+	n int,
+	languages []string,
+) ([]vectorStoreResult, error) {
+	switch {
+	case len(languages) == 0:
+		r1, err := store.Search(ctx, projectPath, qEmb, n, nil)
+		if err != nil {
+			return nil, err
+		}
+		return wrapResults(r1), nil
+	case len(languages) == 1:
+		r1, err := store.Search(ctx, projectPath, qEmb, n,
+			map[string]string{"language": languages[0]})
+		if err != nil {
+			return nil, err
+		}
+		return wrapResults(r1), nil
+	case len(languages) <= maxFanoutSearch:
+		var combined []vectorStoreResult
+		for _, lang := range languages {
+			rPart, err := store.Search(ctx, projectPath, qEmb, n,
+				map[string]string{"language": lang})
+			if err != nil {
+				return nil, err
+			}
+			combined = append(combined, wrapResults(rPart)...)
+		}
+		combined = dedupByLocation(combined)
+		sort.SliceStable(combined, func(i, j int) bool {
+			return combined[i].r.Score > combined[j].r.Score
+		})
+		return combined, nil
+	default:
+		rAll, err := store.Search(ctx, projectPath, qEmb, n*len(languages), nil)
+		if err != nil {
+			return nil, err
+		}
+		return wrapResults(rAll), nil
+	}
+}
+
+// filterToSearchItems applies min-score, language post-filter, and path
+// prefix/substring matches. It does NOT truncate — the merge step needs
+// the full filtered set to identify all overlaps before deciding which to
+// drop. Truncation happens after merge in the caller.
+func filterToSearchItems(
+	wrapped []vectorStoreResult,
+	minScore float32,
+	paths []string,
+	langSet map[string]struct{},
+	applyPostLangFilter bool,
+) []searchResultItem {
+	filtered := make([]searchResultItem, 0, len(wrapped))
+	for _, w := range wrapped {
+		res := w.r
+		if res.Score < minScore {
+			continue
+		}
+		if applyPostLangFilter {
+			if _, ok := langSet[res.Language]; !ok {
+				continue
+			}
+		}
+		if len(paths) > 0 {
+			matched := false
+			for _, pfx := range paths {
+				if strings.HasPrefix(res.FilePath, pfx) || strings.Contains(res.FilePath, pfx) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		filtered = append(filtered, searchResultItem{
+			FilePath:   res.FilePath,
+			StartLine:  res.StartLine,
+			EndLine:    res.EndLine,
+			Content:    res.Content,
+			Score:      res.Score,
+			ChunkType:  res.ChunkType,
+			SymbolName: res.SymbolName,
+			Language:   res.Language,
+		})
+	}
+	return filtered
 }
 
 // strconvItoa avoids pulling strconv just for one call in this file — mirrors
