@@ -1,5 +1,6 @@
 [![CI: Server](https://github.com/dvcdsys/code-index/actions/workflows/ci-server.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/ci-server.yml)
 [![CI: CLI](https://github.com/dvcdsys/code-index/actions/workflows/ci-cli.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/ci-cli.yml)
+[![CodeQL](https://github.com/dvcdsys/code-index/actions/workflows/codeql.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/codeql.yml)
 [![Security](https://github.com/dvcdsys/code-index/actions/workflows/security.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/security.yml)
 
 ```
