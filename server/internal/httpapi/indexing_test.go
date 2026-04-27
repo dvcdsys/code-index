@@ -312,28 +312,28 @@ func TestSemanticSearch_NestedMarkdownMerge(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	// Find the outer section result and verify it has nested_hits.
-	var outer *searchResultItem
+	// Find the README.md file group and verify the merge happened.
+	var group *fileGroupResult
 	for i := range resp.Results {
-		r := &resp.Results[i]
-		if r.FilePath == "/proj-md/README.md" && r.StartLine == 1 {
-			outer = r
+		if resp.Results[i].FilePath == "/proj-md/README.md" {
+			group = &resp.Results[i]
 			break
 		}
 	}
-	if outer == nil {
-		t.Fatalf("expected an outer section starting at line 1, got results: %+v", resp.Results)
+	if group == nil {
+		t.Fatalf("expected a file group for README.md, got results: %+v", resp.Results)
+	}
+	// After merge, only ONE match should remain in this file (the outer
+	// H1 section absorbing the two H2s as nested hits).
+	if len(group.Matches) != 1 {
+		t.Fatalf("expected 1 match in README.md after merge, got %d: %+v", len(group.Matches), group.Matches)
+	}
+	outer := group.Matches[0]
+	if outer.StartLine != 1 {
+		t.Errorf("outer match should start at line 1, got %d", outer.StartLine)
 	}
 	if len(outer.NestedHits) == 0 {
-		t.Errorf("outer section should have nested hits absorbed, got NestedHits=%v", outer.NestedHits)
-	}
-	// And we should NOT see those nested ranges as separate top-level results.
-	for _, r := range resp.Results {
-		if r.FilePath == "/proj-md/README.md" && r.StartLine != 1 {
-			// Any other start line in the same file means a nested section
-			// leaked through merging.
-			t.Errorf("non-outer section leaked as separate result: lines %d-%d", r.StartLine, r.EndLine)
-		}
+		t.Errorf("outer match should record absorbed nested hits, got NestedHits=%v", outer.NestedHits)
 	}
 }
 

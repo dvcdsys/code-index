@@ -18,14 +18,19 @@ func TestRunSearch_Results(t *testing.T) {
 			writeJSON(w, 200, map[string]any{
 				"results": []map[string]any{
 					{
-						"file_path":   proj + "/api/auth.go",
-						"start_line":  10,
-						"end_line":    25,
-						"content":     "func AuthMiddleware() {}",
-						"score":       0.92,
-						"chunk_type":  "function",
-						"symbol_name": "AuthMiddleware",
-						"language":    "go",
+						"file_path":  proj + "/api/auth.go",
+						"language":   "go",
+						"best_score": 0.92,
+						"matches": []map[string]any{
+							{
+								"start_line":  10,
+								"end_line":    25,
+								"content":     "func AuthMiddleware() {}",
+								"score":       0.92,
+								"chunk_type":  "function",
+								"symbol_name": "AuthMiddleware",
+							},
+						},
 					},
 				},
 				"total":         1,
@@ -58,8 +63,8 @@ func TestRunSearch_Results(t *testing.T) {
 	if !strings.Contains(out, "auth.go") {
 		t.Errorf("expected file path in output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "1 result") {
-		t.Errorf("expected result count in output, got:\n%s", out)
+	if !strings.Contains(out, "1 file") {
+		t.Errorf("expected file count in output, got:\n%s", out)
 	}
 }
 
