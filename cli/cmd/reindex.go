@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/anthropics/code-index/cli/internal/config"
@@ -68,8 +71,20 @@ func runReindex(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s reindexing: %s (batch size: %d)\n", indexType, absPath, batchSize)
 
-	result, err := indexer.Run(apiClient, absPath, reindexFull, batchSize)
+	// SIGINT/SIGTERM → ctx cancellation. The indexer propagates ctx through
+	// SendFilesStreaming, which closes the HTTP connection; the server's
+	// streaming handler sees the disconnect and calls CancelIndexing,
+	// freeing the project lock immediately rather than at the 1-hour TTL.
+	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	result, err := indexer.Run(ctx, apiClient, absPath, reindexFull, batchSize, indexer.AutoProgressMode())
 	if err != nil {
+		// If the user hit Ctrl+C, surface a friendlier message — the deferred
+		// CancelIndex inside indexer.Run already freed the server lock.
+		if ctx.Err() == context.Canceled {
+			return fmt.Errorf("indexing cancelled by user")
+		}
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
