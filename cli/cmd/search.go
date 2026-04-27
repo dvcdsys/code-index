@@ -112,48 +112,59 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Print results
-	fmt.Printf("Found %d result(s) (%.1fms):\n\n", results.Total, results.QueryTimeMS)
+	// Files-as-results: --limit is a count of files. Inside each file,
+	// every match above min_score is shown, ordered by line number so the
+	// reader walks the file top-to-bottom.
+	fmt.Printf("Found %d file(s) (%.1fms):\n\n", results.Total, results.QueryTimeMS)
 
-	for i, result := range results.Results {
-		// Format score as colored
-		scoreStr := fmt.Sprintf("%.2f", result.Score)
-
-		// Print result header
-		fmt.Printf("%d. [%s] %s:%d-%d\n",
-			i+1, scoreStr, result.FilePath, result.StartLine, result.EndLine)
-
-		// Print metadata
-		meta := []string{}
-		if result.SymbolName != "" {
-			meta = append(meta, fmt.Sprintf("Symbol: %s", result.SymbolName))
+	for i, file := range results.Results {
+		// File header. Best score is the rank driver; total match count
+		// gives a sense of how relevant this file is overall.
+		matchWord := "match"
+		if len(file.Matches) != 1 {
+			matchWord = "matches"
 		}
-		meta = append(meta, fmt.Sprintf("Type: %s", result.ChunkType))
-		if result.Language != "" {
-			meta = append(meta, fmt.Sprintf("Lang: %s", result.Language))
+		langSuffix := ""
+		if file.Language != "" {
+			langSuffix = " · " + file.Language
 		}
-		fmt.Printf("   %s\n", strings.Join(meta, " | "))
+		fmt.Printf("%d. %s  [best %.2f]  %d %s%s\n",
+			i+1, file.FilePath, file.BestScore, len(file.Matches), matchWord, langSuffix)
 
-		fmt.Printf("   ```%s\n", result.Language)
-		content := result.Content
-		for _, line := range strings.Split(content, "\n") {
-			fmt.Printf("   %s\n", line)
-		}
-		fmt.Printf("   ```\n")
+		for _, m := range file.Matches {
+			// Per-match separator with score + line range + label so the
+			// user can scan vertically by relevance, even though matches
+			// are in line order.
+			label := m.ChunkType
+			if m.SymbolName != "" {
+				label = fmt.Sprintf("%s %s", m.ChunkType, m.SymbolName)
+			}
+			rangeStr := fmt.Sprintf("line %d", m.StartLine)
+			if m.EndLine != m.StartLine {
+				rangeStr = fmt.Sprintf("lines %d-%d", m.StartLine, m.EndLine)
+			}
+			fmt.Printf("   -- [%.2f] %s  (%s)\n", m.Score, rangeStr, label)
 
-		// Breadcrumbs for nested hits absorbed by the server's merge step.
-		// Tells the user "this big chunk ranks well because of these inner
-		// matches" so they're not surprised that --limit returned fewer
-		// items than expected.
-		if len(result.NestedHits) > 0 {
-			fmt.Printf("   + %d more match(es) inside:\n", len(result.NestedHits))
-			for _, nh := range result.NestedHits {
-				label := nh.ChunkType
-				if nh.SymbolName != "" {
-					label = fmt.Sprintf("%s %s", nh.ChunkType, nh.SymbolName)
+			lang := file.Language
+			fmt.Printf("      ```%s\n", lang)
+			for _, line := range strings.Split(m.Content, "\n") {
+				fmt.Printf("      %s\n", line)
+			}
+			fmt.Printf("      ```\n")
+
+			// Nested hits — chunks merged INTO this match by the server.
+			// They sit textually inside m.Content; this just exposes the
+			// inner anchor points so the user can jump to the exact line.
+			if len(m.NestedHits) > 0 {
+				fmt.Printf("      + %d more match(es) inside:\n", len(m.NestedHits))
+				for _, nh := range m.NestedHits {
+					nhLabel := nh.ChunkType
+					if nh.SymbolName != "" {
+						nhLabel = fmt.Sprintf("%s %s", nh.ChunkType, nh.SymbolName)
+					}
+					fmt.Printf("        · [%.2f] line %d  (%s)\n",
+						nh.Score, nh.StartLine, nhLabel)
 				}
-				fmt.Printf("     · [%.2f] %s:%d-%d (%s)\n",
-					nh.Score, result.FilePath, nh.StartLine, nh.EndLine, label)
 			}
 		}
 		fmt.Println()

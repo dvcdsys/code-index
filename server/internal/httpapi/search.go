@@ -582,29 +582,28 @@ type searchRequest struct {
 	MinScore *float32 `json:"min_score,omitempty"`
 }
 
+// searchResultItem is the per-chunk match used INTERNALLY during retrieval.
+// It is not exposed in the JSON response — the wire format groups matches
+// by file (see fileGroupResult). The merge step (mergeOverlappingHits)
+// works on this struct, then groupByFile lifts the survivors into
+// file-grouped results.
 type searchResultItem struct {
-	FilePath   string      `json:"file_path"`
+	FilePath   string      `json:"-"`
 	StartLine  int         `json:"start_line"`
 	EndLine    int         `json:"end_line"`
 	Content    string      `json:"content"`
 	Score      float32     `json:"score"`
 	ChunkType  string      `json:"chunk_type"`
-	SymbolName string      `json:"symbol_name"`
-	Language   string      `json:"language"`
-	// NestedHits records other matches inside this result's line range that
-	// were merged into it by mergeOverlappingHits. Populated only when at
-	// least one inner hit was absorbed; emitted as `nested_hits` in JSON.
-	// The renderer uses these to show breadcrumbs (e.g. "+ 2 more matches:
-	// H2 'Foo' line 27, H3 'Bar' line 29") so the user can see WHY this
-	// outer chunk ranks well even when the actual signal came from a
-	// sub-section.
+	SymbolName string      `json:"symbol_name,omitempty"`
+	Language   string      `json:"-"`
 	NestedHits []nestedHit `json:"nested_hits,omitempty"`
 }
 
 // nestedHit is a compact view of a chunk that was merged INTO another
-// result. We don't need the full content (the parent's content already
-// contains it textually) — just enough metadata to render a breadcrumb
-// and let the caller jump to the exact line.
+// result by mergeOverlappingHits (e.g. an H2 section absorbed into its
+// containing H1). The parent's `content` already includes the inner
+// textually; this just records the metadata so renderers can show a
+// breadcrumb and let the user jump to the exact line.
 type nestedHit struct {
 	StartLine  int     `json:"start_line"`
 	EndLine    int     `json:"end_line"`
@@ -613,10 +612,37 @@ type nestedHit struct {
 	Score      float32 `json:"score"`
 }
 
+// fileMatch is one search hit inside a file group. Mirrors the per-chunk
+// information from searchResultItem but without the file_path/language
+// (those live one level up on fileGroupResult — same for every match in
+// the group).
+type fileMatch struct {
+	StartLine  int         `json:"start_line"`
+	EndLine    int         `json:"end_line"`
+	Content    string      `json:"content"`
+	Score      float32     `json:"score"`
+	ChunkType  string      `json:"chunk_type"`
+	SymbolName string      `json:"symbol_name,omitempty"`
+	NestedHits []nestedHit `json:"nested_hits,omitempty"`
+}
+
+// fileGroupResult is the top-level unit of search output: one file with
+// every match inside it that passed min_score. Files are ranked by
+// BestScore (the highest match score in the group) and matches inside are
+// ordered by StartLine ascending so the renderer reads top-to-bottom like
+// the actual file. There is no per-file cap on matches — the only filter
+// inside a file is the similarity threshold.
+type fileGroupResult struct {
+	FilePath  string      `json:"file_path"`
+	Language  string      `json:"language,omitempty"`
+	BestScore float32     `json:"best_score"`
+	Matches   []fileMatch `json:"matches"`
+}
+
 type searchResponse struct {
-	Results     []searchResultItem `json:"results"`
-	Total       int                `json:"total"`
-	QueryTimeMS float64            `json:"query_time_ms"`
+	Results     []fileGroupResult `json:"results"`
+	Total       int               `json:"total"`
+	QueryTimeMS float64           `json:"query_time_ms"`
 }
 
 // semanticSearchHandler implements POST /api/v1/projects/{path}/search,
@@ -673,21 +699,26 @@ func semanticSearchHandler(d Deps) http.HandlerFunc {
 			return
 		}
 
-		// Post-filter (path/language) and merge state are computed once outside
-		// the window loop — both are cheap and don't depend on factor.
+		// Post-filter (path/language) state is computed once outside the
+		// window loop — cheap and doesn't depend on factor.
 		langSet := map[string]struct{}{}
 		for _, l := range body.Languages {
 			langSet[l] = struct{}{}
 		}
 		applyPostLangFilter := len(body.Languages) > maxFanoutSearch
 
-		// Windowed retrieval. Start by asking the vector store for limit×2
-		// (the historical default), and if mergeOverlappingHits collapses
-		// the result set below the user's --limit budget — typically because
-		// of nested markdown sections or class+method overlaps — re-ask for
-		// limit×4, then ×8, up to ×maxFactorSearch. Stops early when the
-		// store returns fewer rows than requested (HNSW exhausted).
-		var merged []searchResultItem
+		// Windowed retrieval. The user's --limit is a count of FILES, not
+		// chunks. We start with a chunk over-fetch of limit×2, group by
+		// file, and if we don't have `limit` distinct files yet, re-fetch
+		// with limit×4, ×8, ×16. Stops early when:
+		//   - we have ≥ limit file groups, OR
+		//   - the vector store returned fewer rows than asked (HNSW is
+		//     exhausted), OR
+		//   - factor cap (×16) reached.
+		//
+		// Inside each file there is no count cap — every match that passed
+		// min_score is shown. The threshold is the only intra-file filter.
+		var fileGroups []fileGroupResult
 		factor := 2
 		for {
 			n := body.Limit * factor
@@ -699,12 +730,12 @@ func semanticSearchHandler(d Deps) http.HandlerFunc {
 				return
 			}
 			filtered := filterToSearchItems(rawWrapped, minScore, body.Paths, langSet, applyPostLangFilter)
-			merged = mergeOverlappingHits(filtered)
-			if len(merged) >= body.Limit {
+			merged := mergeOverlappingHits(filtered)
+			fileGroups = groupByFile(merged)
+			if len(fileGroups) >= body.Limit {
 				break
 			}
 			if len(rawWrapped) < n {
-				// Vector store returned everything it had — no point asking again.
 				break
 			}
 			if factor >= maxFactorSearch {
@@ -713,19 +744,70 @@ func semanticSearchHandler(d Deps) http.HandlerFunc {
 			factor *= 2
 		}
 
-		if len(merged) > body.Limit {
-			merged = merged[:body.Limit]
+		if len(fileGroups) > body.Limit {
+			fileGroups = fileGroups[:body.Limit]
 		}
 
 		elapsedMS := float64(time.Since(start).Microseconds()) / 1000.0
 		elapsedMS = float64(int(elapsedMS*10+0.5)) / 10
 
 		writeJSON(w, http.StatusOK, searchResponse{
-			Results:     merged,
-			Total:       len(merged),
+			Results:     fileGroups,
+			Total:       len(fileGroups),
 			QueryTimeMS: elapsedMS,
 		})
 	}
+}
+
+// groupByFile takes the merged per-chunk results and lifts them into
+// file-grouped output. Inside each file matches are sorted by StartLine
+// ascending (natural reading order); files are sorted by BestScore
+// descending (hottest hit drives the rank).
+func groupByFile(items []searchResultItem) []fileGroupResult {
+	if len(items) == 0 {
+		return nil
+	}
+	indexByPath := map[string]int{}
+	var groups []fileGroupResult
+	for _, it := range items {
+		idx, ok := indexByPath[it.FilePath]
+		if !ok {
+			groups = append(groups, fileGroupResult{
+				FilePath:  it.FilePath,
+				Language:  it.Language,
+				BestScore: it.Score,
+			})
+			idx = len(groups) - 1
+			indexByPath[it.FilePath] = idx
+		}
+		g := &groups[idx]
+		if it.Score > g.BestScore {
+			g.BestScore = it.Score
+		}
+		g.Matches = append(g.Matches, fileMatch{
+			StartLine:  it.StartLine,
+			EndLine:    it.EndLine,
+			Content:    it.Content,
+			Score:      it.Score,
+			ChunkType:  it.ChunkType,
+			SymbolName: it.SymbolName,
+			NestedHits: it.NestedHits,
+		})
+	}
+	for i := range groups {
+		ms := groups[i].Matches
+		sort.SliceStable(ms, func(a, b int) bool {
+			return ms[a].StartLine < ms[b].StartLine
+		})
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		if groups[i].BestScore != groups[j].BestScore {
+			return groups[i].BestScore > groups[j].BestScore
+		}
+		// Tie-break by file path so output is stable in tests.
+		return groups[i].FilePath < groups[j].FilePath
+	})
+	return groups
 }
 
 // maxFanoutSearch is the language-count threshold above which we drop
