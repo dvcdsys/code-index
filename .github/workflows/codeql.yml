@@ -1,0 +1,56 @@
+name: "CodeQL"
+
+# Advanced setup. Replaces GitHub's "default setup" which auto-detects
+# and scans every language it finds — that included java-kotlin, ruby,
+# rust, javascript-typescript, c-cpp, python false-positives from
+# vendored CGO deps and the archived legacy/python-api/ tree.
+#
+# To stop the duplicate runs you also need to disable the default
+# setup once: GitHub repo → Settings → Code security → Code scanning
+# → "CodeQL analysis" → Switch to advanced (or Disable).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays at 06:00 UTC, mirrors security.yml
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep tightly scoped: only languages that actually ship code.
+        # `actions` lints workflow YAML; `go` covers server + CLI.
+        # Do NOT add python (only legacy/python-api/, archived) or
+        # c-cpp (only transitive CGO deps, no first-party C).
+        language: [actions, go]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # security-extended adds rules beyond the default set; matches
+          # what the default setup runs.
+          queries: security-extended
+
+      - name: Autobuild
+        if: matrix.language == 'go'
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
