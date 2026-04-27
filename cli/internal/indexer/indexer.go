@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -21,7 +22,25 @@ type Result struct {
 }
 
 // Run performs a complete index cycle: begin → discover → diff → send batches → finish.
-func Run(apiClient *client.Client, projectPath string, full bool, batchSize int) (*Result, error) {
+//
+// ctx is honoured for cancellation: a SIGINT-derived ctx (or a watcher's stop
+// signal) propagates through to the streaming SendFilesStreaming call, which
+// closes the HTTP connection. The server-side streaming handler sees the
+// disconnect and frees the project's session lock immediately, so the next
+// reindex doesn't hit 409. As a belt-and-braces, this function defers an
+// explicit CancelIndex call for the active run on early exit.
+//
+// mode controls how per-file progress events are rendered. Pass
+// AutoProgressMode() for `cix reindex` (TTY-aware), ProgressQuiet for the
+// watcher (only summary + errors hit the log).
+func Run(
+	ctx context.Context,
+	apiClient *client.Client,
+	projectPath string,
+	full bool,
+	batchSize int,
+	mode ProgressMode,
+) (*Result, error) {
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
 	}
@@ -35,6 +54,17 @@ func Run(apiClient *client.Client, projectPath string, full bool, batchSize int)
 		return nil, fmt.Errorf("begin index: %w", err)
 	}
 	fmt.Printf("  Session: %s\n", beginResp.RunID)
+
+	// Belt-and-braces: if we exit early (ctx cancellation, network error,
+	// SendFilesStreaming failure), tell the server to release the project
+	// lock instead of leaving it for the 1-hour TTL. CancelIndex is
+	// idempotent and fast.
+	cancelDone := false
+	defer func() {
+		if !cancelDone {
+			_, _ = apiClient.CancelIndex(projectPath)
+		}
+	}()
 
 	// Phase 2: Discover files on disk
 	fmt.Println("Discovering files...")
@@ -80,8 +110,16 @@ func Run(apiClient *client.Client, projectPath string, full bool, batchSize int)
 		fmt.Printf("  %d file(s) to process\n", len(toProcess))
 	}
 
-	// Phase 3: Send files in batches
+	// Phase 3: Send files in batches via streaming. Each batch gets its own
+	// progressRenderer so per-file indices restart from 1 in the renderer's
+	// context but display globally as (batchOffset+i).
 	for i := 0; i < len(toProcess); i += batchSize {
+		// Honour ctx cancellation between batches; mid-batch cancellation
+		// is handled inside SendFilesStreaming.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		end := i + batchSize
 		if end > len(toProcess) {
 			end = len(toProcess)
@@ -110,20 +148,28 @@ func Run(apiClient *client.Client, projectPath string, full bool, batchSize int)
 			continue
 		}
 
-		resp, err := apiClient.SendFiles(projectPath, beginResp.RunID, payloads)
+		// batchOffset is 1-based offset of the first payload in this batch
+		// within the overall toProcess slice. Renderer adds ev.FileIndex
+		// (which is also 1-based per batch) and prints `[N/total]`.
+		renderer := newProgressRenderer(mode, len(toProcess), i)
+		_, err := apiClient.SendFilesStreaming(
+			ctx, projectPath, beginResp.RunID, payloads, renderer.onEvent,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("send files (batch %d-%d): %w", i+1, end, err)
 		}
-
-		fmt.Printf("  Processed %d/%d files (%d chunks)\n",
-			resp.FilesProcessedTotal, len(toProcess), resp.ChunksCreated)
 	}
 
-	// Phase 4: Finish — server cleans up deleted files and finalizes the run
+	// Phase 4: Finish — server cleans up deleted files and finalizes the run.
+	// We mark cancelDone before this point so the deferred CancelIndex doesn't
+	// fire on the happy path.
+	cancelDone = true
 	finishResp, err := apiClient.FinishIndex(
 		projectPath, beginResp.RunID, deletedPaths, len(discovered),
 	)
 	if err != nil {
+		// Restore the deferred cancel — finish failed, lock should be released.
+		_, _ = apiClient.CancelIndex(projectPath)
 		return nil, fmt.Errorf("finish index: %w", err)
 	}
 

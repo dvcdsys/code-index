@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/anthropics/code-index/cli/internal/client"
 	"github.com/anthropics/code-index/cli/internal/config"
@@ -126,5 +127,9 @@ func getClient() (*client.Client, error) {
 		}
 	}
 
-	return client.New(url, key), nil
+	c := client.New(url, key)
+	if cfg.Indexing.StreamingIdleTimeoutSec > 0 {
+		c.SetStreamingIdleTimeout(time.Duration(cfg.Indexing.StreamingIdleTimeoutSec) * time.Second)
+	}
+	return c, nil
 }

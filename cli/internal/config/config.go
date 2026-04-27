@@ -36,6 +36,12 @@ type ServerConfig struct {
 
 type IndexingConfig struct {
 	BatchSize int `yaml:"batchsize"`
+
+	// StreamingIdleTimeoutSec is the maximum allowed silence on the streaming
+	// /index/files response before the CLI gives up and closes the conn. The
+	// server emits a heartbeat every 10s, so 30s gives the network three
+	// retry windows. Set to 0 to disable the watchdog (not recommended).
+	StreamingIdleTimeoutSec int `yaml:"streaming_idle_timeout_sec"`
 }
 
 type ProjectEntry struct {
@@ -68,7 +74,8 @@ func defaults() Config {
 			CacheTTL: 300,
 		},
 		Indexing: IndexingConfig{
-			BatchSize: 20,
+			BatchSize:               20,
+			StreamingIdleTimeoutSec: 30,
 		},
 	}
 }

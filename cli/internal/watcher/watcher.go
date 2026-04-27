@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -463,11 +464,27 @@ func (w *Watcher) runIndexer(full bool) {
 			}
 		}()
 
+		// Bridge stopCh → ctx for the duration of this indexing run so
+		// SendFilesStreaming bails out fast when the watcher is stopped.
+		ctx, cancelRun := context.WithCancel(context.Background())
+		stopBridge := make(chan struct{})
+		go func() {
+			select {
+			case <-w.stopCh:
+				cancelRun()
+			case <-stopBridge:
+			}
+		}()
+		defer func() {
+			cancelRun()
+			close(stopBridge)
+		}()
+
 		// Run with transient failure retries
 		var err error
 		for attempt := 0; attempt < 3; attempt++ {
 			var result *indexer.Result
-			result, err = indexer.Run(w.apiClient, w.projectPath, full, 0)
+			result, err = indexer.Run(ctx, w.apiClient, w.projectPath, full, 0, indexer.ProgressQuiet)
 			if err == nil {
 				if full {
 					w.logger.Printf("Full reindex complete: %d files, %d chunks (run ID: %s)",

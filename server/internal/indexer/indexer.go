@@ -270,8 +270,35 @@ func (s *Service) ProcessFiles(
 	projectPath, runID string,
 	files []FilePayload,
 ) (int, int, int, error) {
+	return s.ProcessFilesStreaming(ctx, projectPath, runID, files, nil)
+}
+
+// ProcessFilesStreaming is ProcessFiles with an optional progress channel. The
+// streaming HTTP handler passes a channel that forwards each event as an
+// NDJSON line; non-streaming callers use ProcessFiles which passes nil.
+//
+// The terminal event (batch_done on success, error fatal=true on failure) is
+// sent with a guaranteed-blocking send so the consumer always sees it.
+// Per-file progress events use a non-blocking send and may be dropped if the
+// consumer is slower than the embed loop — that is acceptable because the
+// final summary is what callers depend on.
+//
+// When progress is non-nil, the channel is left open on return; the caller
+// is expected to close it after collecting the terminal event.
+func (s *Service) ProcessFilesStreaming(
+	ctx context.Context,
+	projectPath, runID string,
+	files []FilePayload,
+	progress chan<- ProgressEvent,
+) (int, int, int, error) {
 	sess, err := s.requireSession(runID, projectPath)
 	if err != nil {
+		emitTerminal(progress, ProgressEvent{
+			Event:   EventError,
+			Message: err.Error(),
+			Fatal:   true,
+			RunID:   runID,
+		})
 		return 0, 0, 0, err
 	}
 
@@ -303,12 +330,28 @@ func (s *Service) ProcessFiles(
 		}
 	}()
 
-	for _, fp := range files {
+	for fi, fp := range files {
+		// file_started — emit even for files we'll skip below, so the client
+		// counter advances monotonically and rendering stays aligned with N.
+		progressSend(progress, ProgressEvent{
+			Event:     EventFileStarted,
+			Path:      fp.Path,
+			FileIndex: fi + 1,
+			BatchSize: len(files),
+			RunID:     runID,
+		})
+
 		if strings.TrimSpace(fp.Content) == "" {
 			continue
 		}
 		if len(fp.Content) > maxContentBytes {
 			s.logger.Warn("indexer: file too large, skipping", "path", fp.Path, "size_bytes", len(fp.Content))
+			progressSend(progress, ProgressEvent{
+				Event:   EventFileError,
+				Path:    fp.Path,
+				Message: fmt.Sprintf("file too large (%d bytes)", len(fp.Content)),
+				Fatal:   false,
+			})
 			continue
 		}
 
@@ -320,11 +363,22 @@ func (s *Service) ProcessFiles(
 		chunks, refs, err := chunker.ChunkFile(fp.Path, fp.Content, language, 0)
 		if err != nil {
 			s.logger.Warn("indexer: chunk file failed", "path", fp.Path, "err", err)
+			progressSend(progress, ProgressEvent{
+				Event:   EventFileError,
+				Path:    fp.Path,
+				Message: "chunk: " + err.Error(),
+				Fatal:   false,
+			})
 			continue
 		}
 		if len(chunks) == 0 {
 			continue
 		}
+		progressSend(progress, ProgressEvent{
+			Event:  EventFileChunked,
+			Path:   fp.Path,
+			Chunks: len(chunks),
+		})
 
 		// Symbol extraction — mirrors Python: function|class|method|type with a name.
 		fileSymbols := make([]symbolindex.Symbol, 0, len(chunks))
@@ -366,6 +420,7 @@ func (s *Service) ProcessFiles(
 			texts[i] = c.ChunkType + ": " + c.Content
 		}
 		var embs [][]float32
+		embedStart := time.Now()
 		if tae, ok := s.emb.(TokenAwareEmbedder); ok {
 			embs, err = tae.TokenizeAndEmbed(ctx, texts)
 		} else {
@@ -374,16 +429,38 @@ func (s *Service) ProcessFiles(
 		if err != nil {
 			// Propagate ErrBusy so handler can map to 503 + Retry-After.
 			if _, busy := embeddings.IsBusy(err); busy {
+				emitTerminal(progress, ProgressEvent{
+					Event:   EventError,
+					Message: err.Error(),
+					Fatal:   true,
+				})
 				return filesAccepted, batchChunks, sess.filesProcessed, err
 			}
 			if errors.Is(err, embeddings.ErrDisabled) ||
 				errors.Is(err, embeddings.ErrSupervisor) ||
 				errors.Is(err, embeddings.ErrNotReady) {
+				emitTerminal(progress, ProgressEvent{
+					Event:   EventError,
+					Message: err.Error(),
+					Fatal:   true,
+				})
 				return filesAccepted, batchChunks, sess.filesProcessed, err
 			}
 			s.logger.Error("indexer: embed texts failed", "path", fp.Path, "err", err)
+			progressSend(progress, ProgressEvent{
+				Event:   EventFileError,
+				Path:    fp.Path,
+				Message: "embed: " + err.Error(),
+				Fatal:   false,
+			})
 			continue
 		}
+		progressSend(progress, ProgressEvent{
+			Event:   EventFileEmbedded,
+			Path:    fp.Path,
+			Chunks:  len(chunks),
+			EmbedMS: time.Since(embedStart).Milliseconds(),
+		})
 
 		// Per-file SAVEPOINT so a partial failure rolls back only this file.
 		// savepointName is derived from filesAccepted (monotonically increasing
@@ -458,6 +535,11 @@ func (s *Service) ProcessFiles(
 		}
 
 		if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepointName); err != nil {
+			emitTerminal(progress, ProgressEvent{
+				Event:   EventError,
+				Message: "release savepoint: " + err.Error(),
+				Fatal:   true,
+			})
 			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("release savepoint: %w", err)
 		}
 
@@ -469,6 +551,12 @@ func (s *Service) ProcessFiles(
 		sess.languagesSeen[language] = struct{}{}
 		s.mu.Unlock()
 		filesAccepted++
+
+		progressSend(progress, ProgressEvent{
+			Event:  EventFileDone,
+			Path:   fp.Path,
+			Chunks: len(chunks),
+		})
 	}
 
 	// M2 — these upserts are part of the outer tx. Any failure returns the
@@ -476,16 +564,31 @@ func (s *Service) ProcessFiles(
 	// below only advance on a successful commit.
 	if len(batchSymbols) > 0 {
 		if err := symbolindex.UpsertSymbolsTx(ctx, tx, projectPath, batchSymbols); err != nil {
+			emitTerminal(progress, ProgressEvent{
+				Event:   EventError,
+				Message: "upsert symbols: " + err.Error(),
+				Fatal:   true,
+			})
 			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("upsert symbols: %w", err)
 		}
 	}
 	if len(batchRefs) > 0 {
 		if err := symbolindex.UpsertReferencesTx(ctx, tx, projectPath, batchRefs); err != nil {
+			emitTerminal(progress, ProgressEvent{
+				Event:   EventError,
+				Message: "upsert refs: " + err.Error(),
+				Fatal:   true,
+			})
 			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("upsert refs: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
+		emitTerminal(progress, ProgressEvent{
+			Event:   EventError,
+			Message: "commit batch: " + err.Error(),
+			Fatal:   true,
+		})
 		return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("commit batch: %w", err)
 	}
 	txCommitted = true
@@ -502,6 +605,13 @@ func (s *Service) ProcessFiles(
 		"chunks", batchChunks,
 		"total_files", total,
 	)
+
+	emitTerminal(progress, ProgressEvent{
+		Event:               EventBatchDone,
+		FilesAccepted:       filesAccepted,
+		ChunksCreated:       batchChunks,
+		FilesProcessedTotal: total,
+	})
 
 	return filesAccepted, batchChunks, total, nil
 }
