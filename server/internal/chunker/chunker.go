@@ -2,9 +2,20 @@
 // The public surface is ChunkFile, which returns ([]Chunk, []Reference, error).
 // Sliding-window fallback is used when a language is not supported by the
 // tree-sitter grammars bundle or when parsing fails.
+//
+// The set of active languages is built from a baked-in default registry
+// (see defaultRegistry) and may be filtered at startup via Configure(). The
+// CIX_LANGUAGES env var feeds Configure with a comma-separated whitelist;
+// empty/nil keeps all defaults.
 package chunker
 
 import (
+	"log/slog"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	sitter "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
 )
@@ -24,53 +35,401 @@ const (
 // minRefNameLength mirrors MIN_REF_NAME_LENGTH in chunker.py.
 const minRefNameLength = 2
 
+// parseBudget caps wall-clock time spent in tree-sitter for a single file.
+// Some grammars (notably bash) have catastrophic-backtracking pathologies on
+// specific inputs — install.sh in this very repo took 31s to parse before
+// this guard. The parser's own SetTimeoutMicros checkpoint is best-effort
+// and overshoots by 3-4×, so we set the hint generously and rely on the
+// post-parse wall-clock check to decide whether to keep the tree.
+//
+// On overshoot we fall back to sliding-window chunks. We accept the wasted
+// CPU (parser keeps running until its next checkpoint) because killing a
+// pure-Go parse from outside is not safe — the only practical levers are
+// SetTimeoutMicros and the cancellation flag, both with the same overshoot
+// characteristic.
+const (
+	parseBudget = 2 * time.Second
+	parseHint   = uint64(parseBudget / time.Microsecond)
+)
+
 // ---------------------------------------------------------------------------
-// Language maps — ported 1:1 from chunker.py
+// Language registry — built from defaultRegistry() at init() and reduced by
+// Configure() if the operator set CIX_LANGUAGES. The three exported maps
+// stay package-private; the engine reads them directly.
 // ---------------------------------------------------------------------------
 
-// languageNodes maps language → kind → []node_type.
-// Kind values: function|class|method|type.
-var languageNodes = map[string]map[string][]string{
-	"python": {
-		"function": {"function_definition"},
-		"class":    {"class_definition"},
-	},
-	"typescript": {
-		"function": {"function_declaration", "arrow_function"},
-		"class":    {"class_declaration"},
-		"method":   {"method_definition"},
-		"type":     {"interface_declaration", "type_alias_declaration"},
-	},
-	"javascript": {
-		"function": {"function_declaration", "arrow_function"},
-		"class":    {"class_declaration"},
-		"method":   {"method_definition"},
-	},
-	"go": {
-		"function": {"function_declaration"},
-		"method":   {"method_declaration"},
-		"type":     {"type_spec"},
-	},
-	"rust": {
-		"function": {"function_item"},
-		"class":    {"struct_item", "enum_item"},
-		"type":     {"trait_item"},
-	},
-	"java": {
-		"function": {"method_declaration"},
-		"class":    {"class_declaration"},
-		"type":     {"interface_declaration"},
-	},
+// languageEntry bundles the three pieces of state a language needs.
+type languageEntry struct {
+	factory     languageFunc
+	nodes       map[string][]string  // function|class|method|type → AST node types
+	identifiers map[string]struct{}  // identifier leaf-node types for ref extraction
 }
 
-// identifierNodes maps language → set of identifier leaf-node types.
-var identifierNodes = map[string]map[string]struct{}{
-	"python":     {"identifier": {}},
-	"typescript": {"identifier": {}, "type_identifier": {}, "property_identifier": {}},
-	"javascript": {"identifier": {}, "property_identifier": {}},
-	"go":         {"identifier": {}, "type_identifier": {}, "field_identifier": {}},
-	"rust":       {"identifier": {}, "type_identifier": {}, "field_identifier": {}},
-	"java":       {"identifier": {}, "type_identifier": {}},
+// languageFunc is a factory for sitter.Language.
+type languageFunc func() *sitter.Language
+
+var (
+	registryMu       sync.RWMutex
+	languageRegistry map[string]languageFunc
+	languageNodes    map[string]map[string][]string
+	identifierNodes  map[string]map[string]struct{}
+)
+
+func init() {
+	// Populate full defaults so direct ChunkFile usage (and tests) works
+	// without a Configure() call. Server startup later may filter via
+	// Configure(cfg.Languages).
+	Configure(nil)
+}
+
+// Configure (re)builds the active language registry from the baked-in
+// defaultRegistry, optionally filtered to the IDs in `enabled`. Empty or nil
+// `enabled` activates all defaults. Unknown IDs are logged and ignored.
+// Idempotent and safe to call multiple times; concurrent ChunkFile callers
+// see a consistent snapshot via registryMu.
+func Configure(enabled []string) {
+	defaults := defaultRegistry()
+
+	wantAll := len(enabled) == 0
+	wanted := make(map[string]struct{}, len(enabled))
+	if !wantAll {
+		for _, raw := range enabled {
+			id := strings.ToLower(strings.TrimSpace(raw))
+			if id == "" {
+				continue
+			}
+			wanted[id] = struct{}{}
+		}
+	}
+
+	reg := make(map[string]languageFunc, len(defaults))
+	nodes := make(map[string]map[string][]string, len(defaults))
+	idents := make(map[string]map[string]struct{}, len(defaults))
+
+	for lang, entry := range defaults {
+		if !wantAll {
+			if _, ok := wanted[lang]; !ok {
+				continue
+			}
+		}
+		reg[lang] = entry.factory
+		if entry.nodes != nil {
+			nodes[lang] = entry.nodes
+		}
+		if entry.identifiers != nil {
+			idents[lang] = entry.identifiers
+		}
+	}
+
+	if !wantAll {
+		for id := range wanted {
+			if _, ok := defaults[id]; !ok {
+				slog.Warn("chunker: unknown language in CIX_LANGUAGES, ignored", "lang", id)
+			}
+		}
+	}
+
+	registryMu.Lock()
+	languageRegistry = reg
+	languageNodes = nodes
+	identifierNodes = idents
+	registryMu.Unlock()
+}
+
+// SupportedLanguages returns a snapshot of currently-active language IDs.
+// Useful for /health, debug endpoints, and test assertions.
+func SupportedLanguages() []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]string, 0, len(languageRegistry))
+	for k := range languageRegistry {
+		out = append(out, k)
+	}
+	return out
+}
+
+// defaultRegistry returns the baked-in language entries. Adding a language is
+// a single new map entry — no other code changes are needed because the
+// chunker engine is data-driven.
+func defaultRegistry() map[string]languageEntry {
+	idID := func(extra ...string) map[string]struct{} {
+		m := map[string]struct{}{"identifier": {}}
+		for _, e := range extra {
+			m[e] = struct{}{}
+		}
+		return m
+	}
+
+	return map[string]languageEntry{
+		// --- Tier 1: original 6, kept as-is for parity with legacy Python ---
+		"python": {
+			factory: grammars.PythonLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition"},
+				"class":    {"class_definition"},
+			},
+			identifiers: idID(),
+		},
+		"typescript": {
+			factory: grammars.TypescriptLanguage,
+			nodes: map[string][]string{
+				"function": {"function_declaration", "arrow_function"},
+				"class":    {"class_declaration"},
+				"method":   {"method_definition"},
+				"type":     {"interface_declaration", "type_alias_declaration"},
+			},
+			identifiers: idID("type_identifier", "property_identifier"),
+		},
+		"javascript": {
+			factory: grammars.JavascriptLanguage,
+			nodes: map[string][]string{
+				"function": {"function_declaration", "arrow_function"},
+				"class":    {"class_declaration"},
+				"method":   {"method_definition"},
+			},
+			identifiers: idID("property_identifier"),
+		},
+		"go": {
+			factory: grammars.GoLanguage,
+			nodes: map[string][]string{
+				"function": {"function_declaration"},
+				"method":   {"method_declaration"},
+				"type":     {"type_spec"},
+			},
+			identifiers: idID("type_identifier", "field_identifier"),
+		},
+		"rust": {
+			factory: grammars.RustLanguage,
+			nodes: map[string][]string{
+				"function": {"function_item"},
+				"class":    {"struct_item", "enum_item"},
+				"type":     {"trait_item"},
+			},
+			identifiers: idID("type_identifier", "field_identifier"),
+		},
+		"java": {
+			factory: grammars.JavaLanguage,
+			nodes: map[string][]string{
+				"function": {"method_declaration"},
+				"class":    {"class_declaration"},
+				"type":     {"interface_declaration"},
+			},
+			identifiers: idID("type_identifier"),
+		},
+
+		// --- Tier 2: bug-fix — grammars were registered, node maps were not ---
+		"tsx": {
+			factory: grammars.TsxLanguage,
+			nodes: map[string][]string{
+				"function": {"function_declaration", "arrow_function"},
+				"class":    {"class_declaration"},
+				"method":   {"method_definition"},
+				"type":     {"interface_declaration", "type_alias_declaration"},
+			},
+			identifiers: idID("type_identifier", "property_identifier"),
+		},
+		"c": {
+			factory: grammars.CLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition"},
+				"class":    {"struct_specifier"},
+				"type":     {"enum_specifier", "union_specifier", "type_definition"},
+			},
+			identifiers: idID("type_identifier", "field_identifier"),
+		},
+		"cpp": {
+			factory: grammars.CppLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition"},
+				"class":    {"class_specifier", "struct_specifier"},
+				"type":     {"enum_specifier", "union_specifier", "type_definition", "namespace_definition"},
+			},
+			identifiers: idID("type_identifier", "field_identifier"),
+		},
+		"ruby": {
+			factory: grammars.RubyLanguage,
+			nodes: map[string][]string{
+				"function": {"method", "singleton_method"},
+				"class":    {"class", "module"},
+			},
+			identifiers: idID("constant"),
+		},
+
+		// --- Tier 3: mainstream additions, high confidence in node names ---
+		"c_sharp": {
+			factory: grammars.CSharpLanguage,
+			nodes: map[string][]string{
+				"function": {"local_function_statement"},
+				"class":    {"class_declaration"},
+				"method":   {"method_declaration"},
+				"type":     {"interface_declaration", "struct_declaration", "enum_declaration", "record_declaration"},
+			},
+			identifiers: idID("type_identifier"),
+		},
+		"php": {
+			factory: grammars.PhpLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition"},
+				"class":    {"class_declaration"},
+				"method":   {"method_declaration"},
+				"type":     {"interface_declaration", "trait_declaration"},
+			},
+			identifiers: idID("name", "variable_name"),
+		},
+		"swift": {
+			factory: grammars.SwiftLanguage,
+			nodes: map[string][]string{
+				"function": {"function_declaration"},
+				"class":    {"class_declaration"},
+				"type":     {"protocol_declaration"},
+			},
+			identifiers: idID("simple_identifier", "type_identifier"),
+		},
+		"kotlin": {
+			factory: grammars.KotlinLanguage,
+			nodes: map[string][]string{
+				"function": {"function_declaration"},
+				"class":    {"class_declaration", "object_declaration"},
+			},
+			identifiers: idID("type_identifier", "simple_identifier"),
+		},
+		"scala": {
+			factory: grammars.ScalaLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition"},
+				"class":    {"class_definition", "object_definition"},
+				"type":     {"trait_definition"},
+			},
+			identifiers: idID("type_identifier"),
+		},
+		"bash": {
+			factory: grammars.BashLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition"},
+			},
+			identifiers: idID("variable_name", "word"),
+		},
+		"lua": {
+			factory: grammars.LuaLanguage,
+			nodes: map[string][]string{
+				"function": {"function_declaration", "function_definition"},
+			},
+			identifiers: idID(),
+		},
+		"dart": {
+			factory: grammars.DartLanguage,
+			nodes: map[string][]string{
+				"function": {"function_signature"},
+				"class":    {"class_definition"},
+				"method":   {"method_signature"},
+				"type":     {"mixin_declaration", "extension_declaration"},
+			},
+			identifiers: idID("type_identifier"),
+		},
+		"r": {
+			factory: grammars.RLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition"},
+			},
+			identifiers: idID(),
+		},
+		"objc": {
+			factory: grammars.ObjcLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition"},
+				"class":    {"class_interface", "class_implementation"},
+				"method":   {"method_definition"},
+				"type":     {"protocol_declaration"},
+			},
+			identifiers: idID("type_identifier", "field_identifier"),
+		},
+
+		// --- Tier 4: markup / data / config with structural nodes ---
+		"html": {
+			factory: grammars.HtmlLanguage,
+			nodes: map[string][]string{
+				"type": {"doctype"},
+			},
+			identifiers: nil,
+		},
+		"css": {
+			factory: grammars.CssLanguage,
+			nodes: map[string][]string{
+				"class": {"rule_set"},
+			},
+			identifiers: nil,
+		},
+		"scss": {
+			factory: grammars.ScssLanguage,
+			nodes: map[string][]string{
+				"function": {"mixin_statement"},
+				"class":    {"rule_set"},
+			},
+			identifiers: nil,
+		},
+		"sql": {
+			factory: grammars.SqlLanguage,
+			nodes: map[string][]string{
+				"function": {"create_function_statement"},
+				"type":     {"create_table_statement"},
+			},
+			identifiers: nil,
+		},
+		"markdown": {
+			factory: grammars.MarkdownLanguage,
+			nodes: map[string][]string{
+				"type": {"section", "atx_heading"},
+			},
+			identifiers: nil,
+		},
+
+		// --- Tier 5: medium-confidence additions ---
+		"zig": {
+			factory: grammars.ZigLanguage,
+			nodes: map[string][]string{
+				"function": {"function_declaration"},
+				"class":    {"struct_declaration"},
+			},
+			identifiers: idID(),
+		},
+		"julia": {
+			factory: grammars.JuliaLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition"},
+			},
+			identifiers: idID(),
+		},
+		"fortran": {
+			factory: grammars.FortranLanguage,
+			nodes: map[string][]string{
+				"function": {"subroutine", "function"},
+				"class":    {"module"},
+			},
+			identifiers: idID(),
+		},
+		"haskell": {
+			factory: grammars.HaskellLanguage,
+			nodes: map[string][]string{
+				// `function` = untyped top-level def; `bind` = typed binding
+				// (signature + match together); `signature` is loose stand-alone
+				// type signatures.
+				"function": {"function", "bind", "signature"},
+				"type":     {"data_type", "newtype"},
+			},
+			identifiers: map[string]struct{}{
+				"variable": {}, "constructor": {}, "name": {},
+			},
+		},
+		"ocaml": {
+			factory: grammars.OcamlLanguage,
+			nodes: map[string][]string{
+				"function": {"value_definition"},
+				"class":    {"module_definition"},
+				"type":     {"type_definition"},
+			},
+			identifiers: idID("type_identifier"),
+		},
+	}
 }
 
 // skipNames mirrors SKIP_NAMES in chunker.py.
@@ -122,26 +481,6 @@ type Reference struct {
 }
 
 // ---------------------------------------------------------------------------
-// Language registry
-// ---------------------------------------------------------------------------
-
-// languageFunc is a factory for sitter.Language.
-type languageFunc func() *sitter.Language
-
-var languageRegistry = map[string]languageFunc{
-	"python":     grammars.PythonLanguage,
-	"go":         grammars.GoLanguage,
-	"javascript": grammars.JavascriptLanguage,
-	"typescript": grammars.TypescriptLanguage,
-	"tsx":        grammars.TsxLanguage,
-	"java":       grammars.JavaLanguage,
-	"c":          grammars.CLanguage,
-	"cpp":        grammars.CppLanguage,
-	"rust":       grammars.RustLanguage,
-	"ruby":       grammars.RubyLanguage,
-}
-
-// ---------------------------------------------------------------------------
 // ChunkFile — main entry point
 // ---------------------------------------------------------------------------
 
@@ -155,9 +494,26 @@ func ChunkFile(filePath, content, language string, maxSize int) ([]Chunk, []Refe
 	chunks, refs, err := chunkWithTreesitter(filePath, content, language, maxSize)
 	if err != nil {
 		// Fallback: sliding window, no references.
-		return chunkSlidingWindow(filePath, content, language), nil, nil
+		return chunkFallback(filePath, content, language), nil, nil
 	}
 	return chunks, refs, nil
+}
+
+// chunkFallback returns reasonable chunks for content that the tree-sitter
+// path could not handle (parser timeout, no grammar, malformed input, …).
+//
+// For languages where a regex-based extractor exists (currently only bash),
+// we try that first — it produces real `function` chunks instead of generic
+// `block` ones, which is much more useful for semantic search. If the
+// extractor returns nil (no symbols found), we fall through to the universal
+// sliding-window strategy so the file content is still indexed.
+func chunkFallback(filePath, content, language string) []Chunk {
+	if language == "bash" {
+		if c := bashRegexChunks(filePath, content); len(c) > 0 {
+			return c
+		}
+	}
+	return chunkSlidingWindow(filePath, content, language)
 }
 
 // ---------------------------------------------------------------------------
@@ -165,19 +521,24 @@ func ChunkFile(filePath, content, language string, maxSize int) ([]Chunk, []Refe
 // ---------------------------------------------------------------------------
 
 func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chunk, []Reference, error) {
+	// Snapshot under RLock so a concurrent Configure() call does not race the read.
+	registryMu.RLock()
 	langFn, ok := languageRegistry[language]
+	nodeKinds := languageNodes[language]
+	idTypes := identifierNodes[language]
+	registryMu.RUnlock()
+
 	if !ok {
-		return chunkSlidingWindow(filePath, content, language), nil, nil
+		return chunkFallback(filePath, content, language), nil, nil
 	}
 	lang := langFn()
 	if lang == nil {
-		return chunkSlidingWindow(filePath, content, language), nil, nil
+		return chunkFallback(filePath, content, language), nil, nil
 	}
 
-	nodeKinds, ok := languageNodes[language]
-	if !ok {
+	if nodeKinds == nil {
 		// Grammar exists but we don't have node definitions → sliding window.
-		return chunkSlidingWindow(filePath, content, language), nil, nil
+		return chunkFallback(filePath, content, language), nil, nil
 	}
 
 	// Build flat target → kind map.
@@ -190,7 +551,41 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 
 	src := []byte(content)
 	parser := sitter.NewParser(lang)
+
+	// Twin guards: SetTimeoutMicros is the parser's own checkpoint-based
+	// budget; the cancellation flag is set by an external timer when the
+	// wall-clock deadline expires. The parser checks both at the same
+	// granularity, so they overshoot together — we still rely on the
+	// post-parse wall-clock check below to decide whether the tree is
+	// trustworthy.
+	parser.SetTimeoutMicros(parseHint)
+	var cancelFlag uint32
+	parser.SetCancellationFlag(&cancelFlag)
+	deadline := time.AfterFunc(parseBudget, func() {
+		atomic.StoreUint32(&cancelFlag, 1)
+	})
+
+	parseStart := time.Now()
 	tree, err := parser.Parse(src)
+	parseElapsed := time.Since(parseStart)
+	deadline.Stop()
+
+	// Hard wall-clock check — even if parser claims success, a tree that
+	// took >2× the budget is the result of a backtracking pathology and
+	// the structure is not trustworthy enough to chunk on. Falling back to
+	// sliding window keeps the indexer responsive.
+	if parseElapsed > 2*parseBudget {
+		slog.Warn("chunker: parse exceeded budget, falling back to sliding window",
+			"path", filePath, "language", language, "elapsed", parseElapsed,
+			"budget", parseBudget)
+		return chunkFallback(filePath, content, language), nil, nil
+	}
+	if atomic.LoadUint32(&cancelFlag) == 1 {
+		slog.Warn("chunker: parse cancelled by deadline, falling back to sliding window",
+			"path", filePath, "language", language, "elapsed", parseElapsed)
+		return chunkFallback(filePath, content, language), nil, nil
+	}
+
 	if err != nil {
 		return nil, nil, err
 	}
@@ -205,8 +600,8 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 
 	extractNodes(root, lang, src, targetTypes, lines, filePath, language, &chunks, &coveredRanges, nil)
 
-	// Extract references.
-	refs := extractReferences(root, lang, src, targetTypes, filePath, language)
+	// Extract references using the snapshotted identifier set.
+	refs := extractReferences(root, lang, src, targetTypes, idTypes, filePath, language)
 
 	// Fill gaps between extracted symbol nodes with "module" chunks.
 	sortRanges(coveredRanges)
@@ -237,7 +632,7 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	}
 
 	if len(finalChunks) == 0 {
-		return chunkSlidingWindow(filePath, content, language), nil, nil
+		return chunkFallback(filePath, content, language), nil, nil
 	}
 	return finalChunks, refs, nil
 }
@@ -312,15 +707,17 @@ func extractNodes(
 }
 
 // extractReferences walks AST collecting identifier usages (not definitions).
+// idNodeTypes is passed in (rather than read from the global map) so callers
+// can snapshot once and stay consistent if Configure() is called concurrently.
 func extractReferences(
 	root *sitter.Node,
 	lang *sitter.Language,
 	src []byte,
 	targetTypes map[string]string,
+	idNodeTypes map[string]struct{},
 	filePath, language string,
 ) []Reference {
-	idNodeTypes, ok := identifierNodes[language]
-	if !ok {
+	if len(idNodeTypes) == 0 {
 		return nil
 	}
 
@@ -388,12 +785,27 @@ func extractReferences(
 }
 
 // extractName returns the first identifier-like child's text, or nil.
+//
+// The set of "identifier-like" node types covers the main grammars in the
+// default registry. Notable additions beyond the obvious `identifier`:
+//   - `field_identifier` — Go method names (`func (b *Bar) Foo()` → "Foo")
+//   - `word` — bash function names (`hello() { ... }` → "hello")
+//   - `simple_identifier` — Swift / Kotlin function names
+//   - `constant` — Ruby class/module names (which start with uppercase)
+//
+// Without these, the symbol_name field on the resulting chunk was nil and
+// the CLI's `cix summary` rendered weird placeholders (`[method] bool`,
+// `[function] <nil>`).
 func extractName(node *sitter.Node, lang *sitter.Language, src []byte) *string {
 	nameTypes := map[string]struct{}{
 		"identifier":          {},
 		"name":                {},
 		"property_identifier": {},
 		"type_identifier":     {},
+		"field_identifier":    {},
+		"word":                {},
+		"simple_identifier":   {},
+		"constant":            {},
 	}
 	cnt := node.ChildCount()
 	for i := 0; i < cnt; i++ {
