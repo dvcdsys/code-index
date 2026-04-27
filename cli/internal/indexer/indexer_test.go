@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
@@ -50,11 +51,11 @@ type indexHandler struct {
 }
 
 func (h *indexHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	p := r.URL.Path
 
 	switch {
 	case strings.Contains(p, h.hash+"/index/begin"):
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"run_id":        "run-test",
 			"stored_hashes": h.beginHashes,
@@ -67,7 +68,17 @@ func (h *indexHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.Unmarshal(body, &payload)
 		h.FilesReceived = append(h.FilesReceived, payload.Files...)
-		json.NewEncoder(w).Encode(map[string]any{
+
+		// Speak NDJSON — the new client requires it. We emit a single
+		// batch_done event matching the legacy summary semantics so existing
+		// assertions on FilesReceived continue to hold.
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"event":                 "batch_done",
 			"files_accepted":        len(payload.Files),
 			"chunks_created":        len(payload.Files),
 			"files_processed_total": len(payload.Files),
@@ -80,11 +91,16 @@ func (h *indexHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.Unmarshal(body, &finish)
 		h.DeletedPaths = finish.DeletedPaths
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"status":          "ok",
 			"files_processed": len(h.FilesReceived),
 			"chunks_created":  len(h.FilesReceived),
 		})
+
+	case strings.Contains(p, h.hash+"/index/cancel"):
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"cancelled": false})
 
 	default:
 		http.NotFound(w, r)
@@ -111,7 +127,7 @@ func TestRun_AddNewFile(t *testing.T) {
 	srv, h := newServer(t, dir, map[string]string{})
 
 	c := client.New(srv.URL, "test-key")
-	result, err := Run(c, dir, false, 0)
+	result, err := Run(context.Background(), c, dir, false, 0, ProgressQuiet)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,7 +153,7 @@ func TestRun_UpdatedFile(t *testing.T) {
 	})
 
 	c := client.New(srv.URL, "test-key")
-	_, err := Run(c, dir, false, 0)
+	_, err := Run(context.Background(), c, dir, false, 0, ProgressQuiet)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,7 +181,7 @@ func TestRun_DeletedFile(t *testing.T) {
 	})
 
 	c := client.New(srv.URL, "test-key")
-	_, err := Run(c, dir, false, 0)
+	_, err := Run(context.Background(), c, dir, false, 0, ProgressQuiet)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -219,7 +235,7 @@ func TestRun_NoChanges(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := client.New(srv.URL, "test-key")
-	_, err := Run(c, dir, false, 0)
+	_, err := Run(context.Background(), c, dir, false, 0, ProgressQuiet)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -243,7 +259,7 @@ func TestRun_FullReindex(t *testing.T) {
 	srv, h := newServer(t, dir, map[string]string{path: storedHash})
 
 	c := client.New(srv.URL, "test-key")
-	_, err := Run(c, dir, true /* full */, 0)
+	_, err := Run(context.Background(), c, dir, true /* full */, 0, ProgressQuiet)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -270,7 +286,7 @@ func TestRun_ServerUnavailable(t *testing.T) {
 	srv.Close()
 
 	c := client.New(srv.URL, "test-key")
-	_, err := Run(c, dir, false, 0)
+	_, err := Run(context.Background(), c, dir, false, 0, ProgressQuiet)
 	if err == nil {
 		t.Fatal("expected error when server is unavailable, got nil")
 	}
@@ -294,7 +310,7 @@ func TestRun_ServerError5xx(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := client.New(srv.URL, "test-key")
-	_, err := Run(c, dir, false, 0)
+	_, err := Run(context.Background(), c, dir, false, 0, ProgressQuiet)
 	if err == nil {
 		t.Fatal("expected error on 503, got nil")
 	}
@@ -317,7 +333,7 @@ func TestRun_RecoveryAfterFailure(t *testing.T) {
 	downSrv.Close()
 
 	c1 := client.New(downSrv.URL, "test-key")
-	if _, err := Run(c1, dir, false, 0); err == nil {
+	if _, err := Run(context.Background(), c1, dir, false, 0, ProgressQuiet); err == nil {
 		t.Fatal("expected error on first run")
 	}
 
@@ -326,7 +342,7 @@ func TestRun_RecoveryAfterFailure(t *testing.T) {
 	srv, h := newServer(t, dir, map[string]string{})
 
 	c2 := client.New(srv.URL, "test-key")
-	_, err := Run(c2, dir, false, 0)
+	_, err := Run(context.Background(), c2, dir, false, 0, ProgressQuiet)
 	if err != nil {
 		t.Fatalf("expected recovery run to succeed: %v", err)
 	}
@@ -352,7 +368,7 @@ func TestRun_MultipleFiles(t *testing.T) {
 	srv, h := newServer(t, dir, map[string]string{})
 
 	c := client.New(srv.URL, "test-key")
-	result, err := Run(c, dir, false, 1 /* batchSize=1 to exercise batching */)
+	result, err := Run(context.Background(), c, dir, false, 1 /* batchSize=1 to exercise batching */, ProgressQuiet)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

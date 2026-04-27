@@ -55,12 +55,15 @@ func newTestWatcher(t *testing.T, projectPath, apiURL string) *Watcher {
 }
 
 // newIndexServer sets up a minimal mock that handles the three-phase index
-// protocol and counts how many times each phase was called.
+// protocol and counts how many times each phase was called. /index/files
+// emits an NDJSON stream when the client sends Accept: application/x-ndjson
+// (matching the streaming protocol the production server speaks).
 type serverCalls struct {
 	mu     sync.Mutex
 	Begin  int
 	Files  int
 	Finish int
+	Cancel int
 }
 
 func newIndexServer(t *testing.T, dir string) (*httptest.Server, *serverCalls) {
@@ -69,30 +72,50 @@ func newIndexServer(t *testing.T, dir string) (*httptest.Server, *serverCalls) {
 	hash := projectHash(dir)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		p := r.URL.Path
 		calls.mu.Lock()
-		defer calls.mu.Unlock()
 
 		switch {
 		case strings.Contains(p, hash+"/index/begin"):
 			calls.Begin++
+			calls.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
 				"run_id":        "run-watch",
 				"stored_hashes": map[string]string{},
 			})
 		case strings.Contains(p, hash+"/index/files"):
 			calls.Files++
+			calls.mu.Unlock()
 			io.ReadAll(r.Body) //nolint
-			json.NewEncoder(w).Encode(map[string]any{
-				"files_accepted": 0, "chunks_created": 0, "files_processed_total": 0,
+			// Always speak NDJSON — the production server does the negotiation
+			// based on the Accept header; for tests we emit the new protocol
+			// unconditionally because the new client always opts in.
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"event":                 "batch_done",
+				"files_accepted":        0,
+				"chunks_created":        0,
+				"files_processed_total": 0,
 			})
 		case strings.Contains(p, hash+"/index/finish"):
 			calls.Finish++
+			calls.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
 				"status": "ok", "files_processed": 0, "chunks_created": 0,
 			})
+		case strings.Contains(p, hash+"/index/cancel"):
+			calls.Cancel++
+			calls.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"cancelled": false})
 		default:
+			calls.mu.Unlock()
 			http.NotFound(w, r)
 		}
 	}))

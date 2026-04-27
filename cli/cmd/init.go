@@ -75,7 +75,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	cfg, _ := config.Load()
 	batchSize := cfg.Indexing.BatchSize
 	fmt.Printf("Starting indexing (batch size: %d)...\n", batchSize)
-	result, err := indexer.Run(client, absPath, false, batchSize)
+	result, err := indexer.Run(cmd.Context(), client, absPath, false, batchSize, indexer.AutoProgressMode())
 	if err != nil {
 		return fmt.Errorf("indexing failed: %w", err)
 	}

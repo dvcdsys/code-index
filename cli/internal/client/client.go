@@ -14,7 +14,22 @@ type Client struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+
+	// streamingClient is used for endpoints that return chunked NDJSON
+	// (currently only POST /index/files when Accept advertises x-ndjson).
+	// Timeout is 0 because the natural duration of an indexing batch is
+	// dominated by GPU embed time and there is no useful overall ceiling.
+	// Idle silence is bounded by streamingIdleTimeout instead.
+	streamingClient      *http.Client
+	streamingIdleTimeout time.Duration
 }
+
+// defaultStreamingIdleTimeout is the maximum allowed gap between events on a
+// streaming response. Server emits a heartbeat every 10s, so 60s gives a 6×
+// margin — enough to absorb a one-shot llama-supervisor restart (which can
+// pause embedding for ~5s several times in a row before the queue catches up)
+// or a network hiccup, without giving up on a still-progressing batch.
+const defaultStreamingIdleTimeout = 60 * time.Second
 
 // New creates a new API client
 func New(baseURL, apiKey string) *Client {
@@ -24,7 +39,15 @@ func New(baseURL, apiKey string) *Client {
 		httpClient: &http.Client{
 			Timeout: 600 * time.Second,
 		},
+		streamingClient:      &http.Client{Timeout: 0},
+		streamingIdleTimeout: defaultStreamingIdleTimeout,
 	}
+}
+
+// SetStreamingIdleTimeout overrides the silence threshold for streaming
+// endpoints. Pass 0 to disable the watchdog entirely (not recommended).
+func (c *Client) SetStreamingIdleTimeout(d time.Duration) {
+	c.streamingIdleTimeout = d
 }
 
 // BaseURL returns the base URL this client is configured to use.
