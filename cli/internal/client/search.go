@@ -2,16 +2,34 @@ package client
 
 import "fmt"
 
-// SearchResult represents a code search result
+// SearchResult represents a code search result.
+//
+// NestedHits is populated by the server's mergeOverlappingHits step when
+// other matches inside this chunk's line range were absorbed (e.g. a
+// markdown H2 inside an H1 section, or a method inside its class). The
+// renderer uses these to show breadcrumbs so the user can see WHY this
+// outer chunk ranks well.
 type SearchResult struct {
-	FilePath   string  `json:"file_path"`
+	FilePath   string       `json:"file_path"`
+	StartLine  int          `json:"start_line"`
+	EndLine    int          `json:"end_line"`
+	Content    string       `json:"content"`
+	Score      float64      `json:"score"`
+	ChunkType  string       `json:"chunk_type"`
+	SymbolName string       `json:"symbol_name"`
+	Language   string       `json:"language"`
+	NestedHits []NestedHit  `json:"nested_hits,omitempty"`
+}
+
+// NestedHit is a chunk that was merged INTO another result by the server.
+// Just enough metadata to render a breadcrumb and let the user jump to
+// the exact line. The full content is already inside the parent result.
+type NestedHit struct {
 	StartLine  int     `json:"start_line"`
 	EndLine    int     `json:"end_line"`
-	Content    string  `json:"content"`
-	Score      float64 `json:"score"`
+	SymbolName string  `json:"symbol_name,omitempty"`
 	ChunkType  string  `json:"chunk_type"`
-	SymbolName string  `json:"symbol_name"`
-	Language   string  `json:"language"`
+	Score      float64 `json:"score"`
 }
 
 // SearchResponse represents the search response
