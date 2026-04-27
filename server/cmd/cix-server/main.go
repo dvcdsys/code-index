@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/chunker"
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
@@ -72,6 +73,9 @@ func run() error {
 	if cfg.APIKey == "" {
 		logger.Warn("CIX_API_KEY is empty — authenticated endpoints are reachable without auth (dev mode)")
 	}
+
+	chunker.Configure(cfg.Languages)
+	logger.Info("chunker languages configured", "active", chunker.SupportedLanguages())
 
 	dbPath := cfg.DynamicSQLitePath()
 	logger.Info("opening database", "path", dbPath)
