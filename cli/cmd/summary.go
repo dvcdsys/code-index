@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	"github.com/anthropics/code-index/cli/internal/client"
 	"github.com/spf13/cobra"
 )
 
@@ -91,16 +93,45 @@ func runSummary(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	// Recent symbols
+	// Top symbols — grouped by language so it's obvious which symbols come
+	// from which file type. Mixed lists used to be hard to scan ("why is
+	// `s` showing up as a function?" — turns out: minified JS bundle).
 	if len(summary.RecentSymbols) > 0 {
 		fmt.Println("Top symbols:")
-		for _, sym := range summary.RecentSymbols {
-			if sym.Name == "" {
-				continue
-			}
-			fmt.Printf("  [%s] %s\n", sym.Kind, sym.Name)
-		}
+		printSymbolsByLanguage(summary.RecentSymbols)
 	}
 
 	return nil
+}
+
+// printSymbolsByLanguage groups symbols by their language and renders each
+// group under a `<lang> (N):` header. Languages are sorted alphabetically;
+// within each group, original order is preserved (the server already returns
+// them ranked). Symbols with empty Language are bucketed under "(unknown)".
+func printSymbolsByLanguage(syms []client.RecentSymbolEntry) {
+	groups := map[string][]client.RecentSymbolEntry{}
+	for _, sym := range syms {
+		if sym.Name == "" {
+			continue
+		}
+		lang := sym.Language
+		if lang == "" {
+			lang = "(unknown)"
+		}
+		groups[lang] = append(groups[lang], sym)
+	}
+
+	langs := make([]string, 0, len(groups))
+	for l := range groups {
+		langs = append(langs, l)
+	}
+	sort.Strings(langs)
+
+	for _, lang := range langs {
+		entries := groups[lang]
+		fmt.Printf("  %s (%d):\n", lang, len(entries))
+		for _, sym := range entries {
+			fmt.Printf("    [%s] %s\n", sym.Kind, sym.Name)
+		}
+	}
 }

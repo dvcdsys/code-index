@@ -27,7 +27,10 @@ func TestRunSummary(t *testing.T) {
 					{"path": proj + "/cli", "file_count": 20.0},
 				},
 				"recent_symbols": []map[string]any{
-					{"name": "IndexerService", "kind": "class"},
+					{"name": "IndexerService", "kind": "class", "language": "go"},
+					{"name": "User", "kind": "class", "language": "python"},
+					{"name": "ParseJSON", "kind": "function", "language": "go"},
+					{"name": "noLangSymbol", "kind": "function"},
 				},
 			})
 		default:

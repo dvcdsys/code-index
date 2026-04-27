@@ -25,11 +25,17 @@ IMAGE_REPO  ?= dvcdsys/code-index
 IMAGE_TAG   ?= go-cu128
 VERSION     ?= $(shell git describe --tags --always 2>/dev/null || echo "0.0.0-dev")
 
+# Floating dev tag — overwritten on every `docker-build-cuda-dev` push. Used
+# by the operator to deploy "current local work" onto the RTX 3090 box for
+# manual smoke testing before merging a PR.
+DEV_TAG     ?= cu128-dev
+GIT_SHA     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "nogit")
+
 BUILDER     ?= cix-builder
 SCOUT_TAG   ?= scout-$(shell date +%Y%m%d-%H%M)
 
 .PHONY: help build test test-gate fetch-llama bundle run docker-build-cuda \
-        scout-cuda scout-cpu promote-cuda clean
+        docker-build-cuda-dev scout-cuda scout-cpu promote-cuda clean
 
 help:
 	@echo "Targets:"
@@ -40,6 +46,7 @@ help:
 	@echo "  run                — bundle + launch cix-server (reads .env from repo root, sets CIX_LLAMA_BIN_DIR)"
 	@echo "  test-gate          — run the Phase 3 parity gate (requires fetch-llama + GGUF)"
 	@echo "  docker-build-cuda  — build + push linux/amd64 CUDA image $(IMAGE_REPO):$(IMAGE_TAG)"
+	@echo "  docker-build-cuda-dev — build + push CUDA dev image $(IMAGE_REPO):$(DEV_TAG)"
 	@echo "  scout-cuda         — build CUDA image via native x86 builder → push :<SCOUT_TAG> → docker scout cves"
 	@echo "  scout-cpu          — build CPU image locally → docker scout cves (no push)"
 	@echo "  promote-cuda       — retag SCOUT_TAG as go-cu128+cu128 without rebuild (imagetools)"
@@ -108,6 +115,33 @@ docker-build-cuda:
 	  -t $(IMAGE_REPO):$(IMAGE_TAG) \
 	  --push \
 	  $(ROOT)
+
+# Local dev workflow for the RTX 3090 box (the GPU prod server reachable via
+# Portainer MCP). Builds the CUDA image with a "dev" tag and pushes to Docker
+# Hub from the dev machine. Operator then bumps the Portainer stack image
+# tag to :cu128-dev (or pulls fresh) and smoke-tests on real hardware before
+# opening a PR / cutting a versioned release.
+#
+# Skips Docker Scout — this image is for the operator's eyes, not for
+# downstream users; run `make scout-cuda` before promoting to :cu128/:go-cu128.
+docker-build-cuda-dev:
+	@echo "→ Building CUDA dev image on $(BUILDER) → $(IMAGE_REPO):$(DEV_TAG)"
+	docker buildx build \
+	  --builder $(BUILDER) \
+	  --platform linux/amd64 \
+	  --pull \
+	  --provenance=mode=max \
+	  --sbom=true \
+	  --build-arg VERSION=$(VERSION)-dev-$(GIT_SHA) \
+	  -f $(ROOT)/Dockerfile.cuda \
+	  -t $(IMAGE_REPO):$(DEV_TAG) \
+	  --push \
+	  $(ROOT)
+	@echo ""
+	@echo "✓ Pushed $(IMAGE_REPO):$(DEV_TAG)"
+	@echo ""
+	@echo "Next: bump the Portainer stack image to :$(DEV_TAG) and redeploy,"
+	@echo "      then smoke-test on the RTX 3090 box."
 
 # Scout workflow — iterate locally before touching production tags:
 #
