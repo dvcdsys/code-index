@@ -1,72 +1,50 @@
-name: Release CLI
+name: "Release: CLI"
 
+# Triggered by CLI-namespaced tags (e.g. `cli/v0.4.0`). Server releases
+# use `server/v*`. Bare `v*` tags are the historical pre-split CLI line
+# and are no longer wired to any workflow.
 on:
   push:
     tags:
-      - "v*"
+      - "cli/v*"
 
 permissions:
   contents: write
 
 jobs:
-  build-linux:
-    name: Build ${{ matrix.target }}
-    runs-on: ubuntu-latest
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - target: linux-arm64
-            goarch: arm64
           - target: linux-amd64
+            runner: ubuntu-latest
+            goos: linux
             goarch: amd64
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: cli/go.mod
-          cache-dependency-path: cli/go.sum
-
-      - name: Build
-        working-directory: cli
-        env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-        run: |
-          VERSION="${{ github.ref_name }}"
-          go build \
-            -ldflags="-s -w -X 'github.com/anthropics/code-index/cli/cmd.Version=${VERSION}'" \
-            -o "dist/cix" .
-
-      - name: Package
-        working-directory: cli
-        run: |
-          cd dist
-          tar -czf "cix-${{ matrix.target }}.tar.gz" cix
-          rm cix
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: cix-${{ matrix.target }}
-          path: cli/dist/cix-${{ matrix.target }}.*
-
-  build-darwin:
-    name: Build ${{ matrix.target }}
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        include:
-          - target: darwin-arm64
+            cgo: "0"
+          - target: linux-arm64
+            runner: ubuntu-latest
+            goos: linux
             goarch: arm64
+            cgo: "0"
           - target: darwin-amd64
+            runner: macos-latest
+            goos: darwin
             goarch: amd64
-
+            cgo: "1"
+          - target: darwin-arm64
+            runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            cgo: "1"
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v6
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
@@ -74,49 +52,68 @@ jobs:
       - name: Build
         working-directory: cli
         env:
-          GOOS: darwin
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "1"
+          CGO_ENABLED: ${{ matrix.cgo }}
         run: |
-          VERSION="${{ github.ref_name }}"
+          # Strip `cli/` namespace prefix — binaries report `v0.4.0`, not `cli/v0.4.0`.
+          VERSION="${GITHUB_REF_NAME#cli/}"
           go build \
             -ldflags="-s -w -X 'github.com/anthropics/code-index/cli/cmd.Version=${VERSION}'" \
             -o "dist/cix" .
 
       - name: Package
-        working-directory: cli
+        working-directory: cli/dist
         run: |
-          cd dist
           tar -czf "cix-${{ matrix.target }}.tar.gz" cix
           rm cix
 
-      - uses: actions/upload-artifact@v7
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: cix-${{ matrix.target }}
-          path: cli/dist/cix-${{ matrix.target }}.*
+          path: cli/dist/cix-${{ matrix.target }}.tar.gz
 
   release:
-    name: Create Release
-    needs: [build-linux, build-darwin]
+    name: Publish release
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v8
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Checksums
-        run: |
-          cd artifacts
-          sha256sum * > checksums.txt
+      - name: Compute checksums
+        working-directory: artifacts
+        run: sha256sum * > checksums.txt
 
-      - name: Create GitHub Release
+      - name: Extract version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#cli/}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          name: "CLI ${{ steps.ver.outputs.version }}"
           files: |
             artifacts/*.tar.gz
             artifacts/checksums.txt
           generate_release_notes: true
-          make_latest: "legacy"
+          # Server releases own the "latest" pointer (Docker image is the
+          # primary deliverable). CLI installs filter by `cli/` tag prefix.
+          make_latest: "false"
+          body: |
+            ## Install
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install.sh | bash
+            ```
+
+            Re-run the same command later to upgrade — the installer
+            picks the latest `cli/v*` release and skips if you already
+            have it (use `--force` to reinstall).

@@ -1,4 +1,6 @@
-[![Release Server](https://github.com/dvcdsys/code-index/actions/workflows/release-server.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/release-server.yml)
+[![CI: Server](https://github.com/dvcdsys/code-index/actions/workflows/ci-server.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/ci-server.yml)
+[![CI: CLI](https://github.com/dvcdsys/code-index/actions/workflows/ci-cli.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/ci-cli.yml)
+[![Security](https://github.com/dvcdsys/code-index/actions/workflows/security.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/security.yml)
 
 ```
  ██████╗██╗██╗  ██╗
@@ -9,7 +11,8 @@
  ╚═════╝╚═╝╚═╝  ╚═╝  Code IndeX
 ```
 
-[![Release CLI](https://github.com/dvcdsys/code-index/actions/workflows/release-cli.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/release-cli.yml)
+[![Release: Server](https://github.com/dvcdsys/code-index/actions/workflows/release-server.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/release-server.yml)
+[![Release: CLI](https://github.com/dvcdsys/code-index/actions/workflows/release-cli.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/release-cli.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker Hub](https://img.shields.io/docker/pulls/dvcdsys/code-index)](https://hub.docker.com/r/dvcdsys/code-index)
 
@@ -560,14 +563,41 @@ cix watch stop && cix watch /path/to/project
 
 ## Releases
 
-Cross-platform binaries are built with:
+CLI and server ship on independent tag streams:
+
+| Component | Tag pattern | Workflow | Artifact |
+|---|---|---|---|
+| CLI (`cix`) | `cli/v*` (e.g. `cli/v0.4.0`) | `release-cli.yml` | `cix-{darwin,linux}-{amd64,arm64}.tar.gz` on a GitHub Release |
+| Server (`cix-server`) | `server/v*` (e.g. `server/v0.3.0`) | `release-server.yml` | Docker images on Docker Hub (`:latest`, `:cu128`) |
+
+Bare `v*` tags are the historical pre-split CLI line — the installer
+still falls back to them when no `cli/v*` release exists, but no new
+bare-`v*` tags should be created.
+
+### Cutting a CLI release
+
+```bash
+git tag cli/v0.4.0
+git push origin cli/v0.4.0
+```
+
+GitHub Actions builds binaries for macOS + Linux (amd64 + arm64),
+uploads them to a release named `cli/v0.4.0`, and the installer
+automatically picks them up on the next run.
+
+### Cutting a server release
+
+See `doc/DOCKER_TAGS.md` and the T9 step in `.claude/CLAUDE.md`.
+
+### Local cross-build (no release)
 
 ```bash
 cd cli
-make release VERSION=v0.1.0
+make release VERSION=v0.4.0
 ```
 
-This produces archives for macOS and Linux (amd64 + arm64) in `cli/dist/`, plus a `checksums.txt`. Upload them to a GitHub Release and the `install.sh` installer will pick up the latest version automatically.
+Produces archives in `cli/dist/` plus `checksums.txt`. Useful for
+testing the artifact format before pushing a tag.
 
 Supported targets: `darwin-arm64`, `darwin-amd64`, `linux-arm64`, `linux-amd64`.
 
