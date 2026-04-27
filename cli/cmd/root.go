@@ -52,6 +52,10 @@ var rootCmd = &cobra.Command{
 Search by meaning, not just text. Works with any agent or terminal.
 Files are automatically re-indexed when changed via the file watcher.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		if showVersion, _ := cmd.Flags().GetBool("version"); showVersion {
+			fmt.Printf("cix %s\n", Version)
+			return
+		}
 		printBanner()
 		cmd.Help()
 	},

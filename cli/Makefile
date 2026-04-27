@@ -28,8 +28,13 @@ clean:
 # Builds binaries for macOS and Linux (amd64 + arm64),
 # packages each into a .tar.gz archive ready for GitHub Releases.
 #
+# Production CLI releases use the `cli/v*` tag namespace and are built
+# by .github/workflows/release-cli.yml — `make release` is for local
+# cross-builds (smoke-testing the artifact format).
+#
 # Usage:
-#   make release VERSION=v0.1.0
+#   make release VERSION=v0.4.0           # local archives only
+#   git tag cli/v0.4.0 && git push --tags # actual production release
 #
 # Output:
 #   dist/cix-darwin-arm64.tar.gz
