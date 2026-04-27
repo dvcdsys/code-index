@@ -378,7 +378,10 @@ func defaultRegistry() map[string]languageEntry {
 		"markdown": {
 			factory: grammars.MarkdownLanguage,
 			nodes: map[string][]string{
-				"type": {"section", "atx_heading"},
+				// `section` already wraps the heading + body in
+				// tree-sitter-markdown — adding `atx_heading` would emit
+				// duplicate one-line chunks for every `### foo` line.
+				"type": {"section"},
 			},
 			identifiers: nil,
 		},
@@ -864,45 +867,60 @@ func chunkSlidingWindow(filePath, content, language string) []Chunk {
 // Chunk splitting
 // ---------------------------------------------------------------------------
 
+// splitChunk cuts an oversized chunk into pieces of <= maxSize chars.
+//
+// Only the FIRST piece keeps the original SymbolName/SymbolSignature/
+// ChunkType — subsequent pieces become anonymous `block` chunks. Without
+// this, splitting a long function would create N rows in the symbol index
+// all claiming to be `func run()`, making `cix def run` return N
+// duplicates pointing at different line ranges of the same symbol.
+//
+// The full text of the symbol is still indexed (both for FTS and embed
+// search) — just attributed to the symbol only via its first chunk.
 func splitChunk(chunk Chunk, maxSize int) []Chunk {
 	lines := splitLines(chunk.Content)
 	var subChunks []Chunk
 	var currentLines []string
 	currentStart := chunk.StartLine
 
+	emit := func(content string, startLine, endLine int, isFirst bool) {
+		c := Chunk{
+			Content:    content,
+			FilePath:   chunk.FilePath,
+			StartLine:  startLine,
+			EndLine:    endLine,
+			Language:   chunk.Language,
+			ParentName: chunk.ParentName,
+		}
+		if isFirst {
+			c.ChunkType = chunk.ChunkType
+			c.SymbolName = chunk.SymbolName
+			c.SymbolSignature = chunk.SymbolSignature
+		} else {
+			c.ChunkType = "block"
+		}
+		subChunks = append(subChunks, c)
+	}
+
 	for _, line := range lines {
 		currentLines = append(currentLines, line)
 		currentContent := joinLines(currentLines)
 		if len(currentContent) >= maxSize && len(currentLines) > 1 {
 			splitContent := joinLines(currentLines[:len(currentLines)-1])
-			subChunks = append(subChunks, Chunk{
-				Content:         splitContent,
-				ChunkType:       chunk.ChunkType,
-				FilePath:        chunk.FilePath,
-				StartLine:       currentStart,
-				EndLine:         currentStart + len(currentLines) - 2,
-				Language:        chunk.Language,
-				SymbolName:      chunk.SymbolName,
-				SymbolSignature: chunk.SymbolSignature,
-				ParentName:      chunk.ParentName,
-			})
+			emit(splitContent,
+				currentStart,
+				currentStart+len(currentLines)-2,
+				len(subChunks) == 0)
 			currentStart = currentStart + len(currentLines) - 1
 			currentLines = []string{line}
 		}
 	}
 
 	if len(currentLines) > 0 {
-		subChunks = append(subChunks, Chunk{
-			Content:         joinLines(currentLines),
-			ChunkType:       chunk.ChunkType,
-			FilePath:        chunk.FilePath,
-			StartLine:       currentStart,
-			EndLine:         chunk.EndLine,
-			Language:        chunk.Language,
-			SymbolName:      chunk.SymbolName,
-			SymbolSignature: chunk.SymbolSignature,
-			ParentName:      chunk.ParentName,
-		})
+		emit(joinLines(currentLines),
+			currentStart,
+			chunk.EndLine,
+			len(subChunks) == 0)
 	}
 	return subChunks
 }

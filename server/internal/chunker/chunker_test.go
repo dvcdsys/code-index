@@ -189,6 +189,47 @@ func TestChunkFile_OversizedChunkSplit(t *testing.T) {
 	}
 }
 
+func TestSplitChunk_OnlyFirstKeepsSymbol(t *testing.T) {
+	// A long Python function that splitChunk will cut into >1 piece.
+	var sb strings.Builder
+	sb.WriteString("def big_func():\n")
+	for i := 0; i < 2000; i++ {
+		sb.WriteString("    x = 1  # padding line\n")
+	}
+	src := sb.String()
+	chunks, _, err := ChunkFile("big.py", src, "python", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find all chunks that mention `big_func`. Only one chunk in the index
+	// should claim the symbol; the rest must be anonymous `block` pieces
+	// even though they textually belong to the same function.
+	withSymbol := 0
+	for _, c := range chunks {
+		if c.SymbolName != nil && *c.SymbolName == "big_func" {
+			withSymbol++
+			if c.ChunkType != "function" {
+				t.Errorf("chunk with symbol big_func has type %q, want function", c.ChunkType)
+			}
+		}
+	}
+	if withSymbol != 1 {
+		t.Errorf("expected exactly 1 chunk attributed to big_func after split, got %d", withSymbol)
+	}
+
+	// And we DID split — meaning multiple chunks for this function exist.
+	totalForFunc := 0
+	for _, c := range chunks {
+		if c.FilePath == "big.py" && c.ChunkType != "module" {
+			totalForFunc++
+		}
+	}
+	if totalForFunc < 2 {
+		t.Skipf("test self-check: function fit into one chunk (totalForFunc=%d) — need bigger fixture", totalForFunc)
+	}
+}
+
 func TestFindGaps_NoOverlap(t *testing.T) {
 	covered := [][2]int{{2, 5}, {10, 12}}
 	gaps := findGaps(covered, 15)
