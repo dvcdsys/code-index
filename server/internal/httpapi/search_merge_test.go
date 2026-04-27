@@ -172,6 +172,80 @@ func TestMerge_TripleNesting(t *testing.T) {
 	}
 }
 
+// --- groupByFile ----------------------------------------------------------
+
+// TestGroupByFile_SortsByBestScore: files are ordered by best chunk score
+// descending. main.go's best chunk (0.80) outranks doc.md's best (0.60).
+func TestGroupByFile_SortsByBestScore(t *testing.T) {
+	items := []searchResultItem{
+		mkItem("doc.md", 1, 10, 0.60, "", "section"),
+		mkItem("main.go", 5, 20, 0.40, "Foo", "function"),
+		mkItem("main.go", 30, 50, 0.80, "Bar", "function"),
+	}
+	groups := groupByFile(items)
+	if len(groups) != 2 {
+		t.Fatalf("want 2 groups, got %d", len(groups))
+	}
+	if groups[0].FilePath != "main.go" || groups[0].BestScore != 0.80 {
+		t.Errorf("first group should be main.go (0.80), got %+v", groups[0])
+	}
+	if groups[1].FilePath != "doc.md" {
+		t.Errorf("second group should be doc.md, got %s", groups[1].FilePath)
+	}
+}
+
+// TestGroupByFile_SortsMatchesByLineAsc: inside a file, matches read top-
+// to-bottom — score order is for FILE ranking, not for matches inside.
+func TestGroupByFile_SortsMatchesByLineAsc(t *testing.T) {
+	items := []searchResultItem{
+		mkItem("a.go", 100, 120, 0.50, "later", "function"),
+		mkItem("a.go", 30, 50, 0.80, "earlier", "function"),
+		mkItem("a.go", 200, 220, 0.40, "latest", "function"),
+	}
+	groups := groupByFile(items)
+	if len(groups) != 1 {
+		t.Fatalf("want 1 group, got %d", len(groups))
+	}
+	ms := groups[0].Matches
+	if len(ms) != 3 {
+		t.Fatalf("want 3 matches, got %d", len(ms))
+	}
+	if ms[0].StartLine != 30 || ms[1].StartLine != 100 || ms[2].StartLine != 200 {
+		t.Errorf("matches not sorted by StartLine asc: %v %v %v",
+			ms[0].StartLine, ms[1].StartLine, ms[2].StartLine)
+	}
+	// Best score still tracks the max score across all matches.
+	if groups[0].BestScore != 0.80 {
+		t.Errorf("best score = %v, want 0.80", groups[0].BestScore)
+	}
+}
+
+// TestGroupByFile_PreservesNestedHits: items that survived merge with
+// nested_hits attached should carry them through into the file group.
+func TestGroupByFile_PreservesNestedHits(t *testing.T) {
+	parent := mkItem("d.md", 1, 100, 0.50, "", "section")
+	parent.NestedHits = []nestedHit{
+		{StartLine: 10, EndLine: 30, ChunkType: "section", Score: 0.60},
+	}
+	groups := groupByFile([]searchResultItem{parent})
+	if len(groups) != 1 || len(groups[0].Matches) != 1 {
+		t.Fatalf("unexpected shape: %+v", groups)
+	}
+	if len(groups[0].Matches[0].NestedHits) != 1 {
+		t.Errorf("nested hits dropped during groupByFile: %+v", groups[0].Matches[0])
+	}
+}
+
+// TestGroupByFile_Empty: nil/empty in → nil out.
+func TestGroupByFile_Empty(t *testing.T) {
+	if groupByFile(nil) != nil {
+		t.Error("nil input should produce nil output")
+	}
+	if groupByFile([]searchResultItem{}) != nil {
+		t.Error("empty input should produce nil output")
+	}
+}
+
 // TestMerge_AdjacentNoSymbolNotMerged: two anonymous chunks adjacent in
 // the same file are NOT merged — we only merge adjacent chunks if at
 // least one carries a symbol (otherwise we have no signal that they're

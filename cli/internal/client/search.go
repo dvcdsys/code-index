@@ -2,28 +2,23 @@ package client
 
 import "fmt"
 
-// SearchResult represents a code search result.
-//
-// NestedHits is populated by the server's mergeOverlappingHits step when
-// other matches inside this chunk's line range were absorbed (e.g. a
-// markdown H2 inside an H1 section, or a method inside its class). The
-// renderer uses these to show breadcrumbs so the user can see WHY this
-// outer chunk ranks well.
-type SearchResult struct {
-	FilePath   string       `json:"file_path"`
-	StartLine  int          `json:"start_line"`
-	EndLine    int          `json:"end_line"`
-	Content    string       `json:"content"`
-	Score      float64      `json:"score"`
-	ChunkType  string       `json:"chunk_type"`
-	SymbolName string       `json:"symbol_name"`
-	Language   string       `json:"language"`
-	NestedHits []NestedHit  `json:"nested_hits,omitempty"`
+// FileMatch is one search hit inside a file group. Position + score +
+// content + chunk metadata. NestedHits records overlapping inner chunks
+// that were absorbed by mergeOverlappingHits on the server side (e.g. a
+// markdown H2 absorbed into its parent H1 section).
+type FileMatch struct {
+	StartLine  int         `json:"start_line"`
+	EndLine    int         `json:"end_line"`
+	Content    string      `json:"content"`
+	Score      float64     `json:"score"`
+	ChunkType  string      `json:"chunk_type"`
+	SymbolName string      `json:"symbol_name,omitempty"`
+	NestedHits []NestedHit `json:"nested_hits,omitempty"`
 }
 
-// NestedHit is a chunk that was merged INTO another result by the server.
-// Just enough metadata to render a breadcrumb and let the user jump to
-// the exact line. The full content is already inside the parent result.
+// NestedHit is a chunk absorbed INTO a parent FileMatch. The parent's
+// content already contains it textually; this carries just the metadata
+// so renderers can show a breadcrumb and let the user jump to the line.
 type NestedHit struct {
 	StartLine  int     `json:"start_line"`
 	EndLine    int     `json:"end_line"`
@@ -32,11 +27,23 @@ type NestedHit struct {
 	Score      float64 `json:"score"`
 }
 
+// SearchResult is the top-level unit of search output: one file with
+// every match inside it that passed min_score. Files are ordered by
+// BestScore descending; matches inside are ordered by StartLine ascending
+// (natural reading order). No per-file cap — the only intra-file filter
+// is the similarity threshold.
+type SearchResult struct {
+	FilePath  string      `json:"file_path"`
+	Language  string      `json:"language,omitempty"`
+	BestScore float64     `json:"best_score"`
+	Matches   []FileMatch `json:"matches"`
+}
+
 // SearchResponse represents the search response
 type SearchResponse struct {
-	Results      []SearchResult `json:"results"`
-	Total        int            `json:"total"`
-	QueryTimeMS  float64        `json:"query_time_ms"`
+	Results     []SearchResult `json:"results"`
+	Total       int            `json:"total"`
+	QueryTimeMS float64        `json:"query_time_ms"`
 }
 
 // SymbolResult represents a symbol search result
