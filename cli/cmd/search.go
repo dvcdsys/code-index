@@ -139,7 +139,24 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		for _, line := range strings.Split(content, "\n") {
 			fmt.Printf("   %s\n", line)
 		}
-		fmt.Printf("   ```\n\n")
+		fmt.Printf("   ```\n")
+
+		// Breadcrumbs for nested hits absorbed by the server's merge step.
+		// Tells the user "this big chunk ranks well because of these inner
+		// matches" so they're not surprised that --limit returned fewer
+		// items than expected.
+		if len(result.NestedHits) > 0 {
+			fmt.Printf("   + %d more match(es) inside:\n", len(result.NestedHits))
+			for _, nh := range result.NestedHits {
+				label := nh.ChunkType
+				if nh.SymbolName != "" {
+					label = fmt.Sprintf("%s %s", nh.ChunkType, nh.SymbolName)
+				}
+				fmt.Printf("     · [%.2f] %s:%d-%d (%s)\n",
+					nh.Score, result.FilePath, nh.StartLine, nh.EndLine, label)
+			}
+		}
+		fmt.Println()
 	}
 
 	return nil

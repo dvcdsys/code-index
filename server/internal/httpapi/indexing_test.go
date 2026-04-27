@@ -272,6 +272,71 @@ func TestSemanticSearch_HTTP(t *testing.T) {
 	}
 }
 
+// TestSemanticSearch_NestedMarkdownMerge indexes a markdown file with H1
+// containing two H2 sections, all containing a unique token. The chunker
+// emits 3 overlapping `section` chunks (1 outer + 2 inner). After
+// mergeOverlappingHits the outer section absorbs both inner ones —
+// observable as ONE result with NestedHits populated, instead of three
+// near-duplicates fighting for the user's --limit budget.
+func TestSemanticSearch_NestedMarkdownMerge(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj-md")
+	router := NewRouter(d)
+
+	beginW := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/begin", map[string]any{})
+	var begin indexBeginResponse
+	_ = json.Unmarshal(beginW.Body.Bytes(), &begin)
+
+	content := "# Setup zlork\n\nIntro about zlork.\n\n## Local zlork dev\n\n" +
+		"Steps for zlork.\n\n## Remote zlork\n\nMore zlork.\n"
+	doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/files", map[string]any{
+		"run_id": begin.RunID,
+		"files": []map[string]any{
+			{"path": "/proj-md/README.md", "content": content, "content_hash": shaHex(content), "language": "markdown"},
+		},
+	})
+	doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/finish", map[string]any{
+		"run_id": begin.RunID,
+	})
+
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/search", map[string]any{
+		"query":     "zlork",
+		"limit":     10,
+		"min_score": 0.0,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp searchResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Find the outer section result and verify it has nested_hits.
+	var outer *searchResultItem
+	for i := range resp.Results {
+		r := &resp.Results[i]
+		if r.FilePath == "/proj-md/README.md" && r.StartLine == 1 {
+			outer = r
+			break
+		}
+	}
+	if outer == nil {
+		t.Fatalf("expected an outer section starting at line 1, got results: %+v", resp.Results)
+	}
+	if len(outer.NestedHits) == 0 {
+		t.Errorf("outer section should have nested hits absorbed, got NestedHits=%v", outer.NestedHits)
+	}
+	// And we should NOT see those nested ranges as separate top-level results.
+	for _, r := range resp.Results {
+		if r.FilePath == "/proj-md/README.md" && r.StartLine != 1 {
+			// Any other start line in the same file means a nested section
+			// leaked through merging.
+			t.Errorf("non-outer section leaked as separate result: lines %d-%d", r.StartLine, r.EndLine)
+		}
+	}
+}
+
 func TestSemanticSearch_HTTP_MissingQuery(t *testing.T) {
 	d, hash := newIndexerTestDeps(t, "/proj")
 	router := NewRouter(d)
