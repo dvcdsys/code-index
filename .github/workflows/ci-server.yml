@@ -1,20 +1,19 @@
-name: CI — Go server
+name: "CI: Server"
 
 on:
   push:
     branches: [main]
     paths:
       - "server/**"
-      - ".github/workflows/ci-go.yml"
+      - ".github/workflows/ci-server.yml"
   pull_request:
     branches: [main]
     paths:
       - "server/**"
-      - ".github/workflows/ci-go.yml"
+      - ".github/workflows/ci-server.yml"
 
-# Read-only token: this workflow runs vet/test/build only — no writes to
-# the repo, no SARIF upload, no package publish. CodeQL flagged the
-# missing block (.github/workflows/ci-go.yml:37 — go/missing-permissions).
+# Read-only: vet/test/build only. CodeQL flagged the implicit block as
+# go/missing-permissions, hence the explicit declaration.
 permissions:
   contents: read
 
@@ -24,20 +23,21 @@ jobs:
     defaults:
       run:
         working-directory: server
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
 
-      - name: go vet
+      - name: Vet
         run: go vet ./...
 
-      - name: go test
+      - name: Test
         run: go test -race ./...
 
-      - name: go build
+      - name: Build
         run: go build ./...
