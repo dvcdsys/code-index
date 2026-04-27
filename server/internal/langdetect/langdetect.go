@@ -25,6 +25,7 @@ var extensionMap = map[string]string{
 	".cs":   "c_sharp",
 	".swift": "swift",
 	".kt":   "kotlin",
+	".kts":  "kotlin",
 	".scala": "scala",
 	".zig":  "zig",
 	".jl":   "julia",
@@ -36,7 +37,7 @@ var extensionMap = map[string]string{
 	".mm":   "objc",
 	// Web / scripting
 	".ts":     "typescript",
-	".tsx":    "typescript",
+	".tsx":    "tsx",
 	".js":     "javascript",
 	".jsx":    "javascript",
 	".rb":     "ruby",

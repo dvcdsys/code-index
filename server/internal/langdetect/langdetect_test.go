@@ -10,7 +10,7 @@ func TestDetect(t *testing.T) {
 		{"main.go", "go"},
 		{"app.py", "python"},
 		{"index.ts", "typescript"},
-		{"index.tsx", "typescript"},
+		{"index.tsx", "tsx"},
 		{"app.js", "javascript"},
 		{"lib.rs", "rust"},
 		{"Hello.java", "java"},
@@ -35,6 +35,8 @@ func TestDetect(t *testing.T) {
 		{"/some/path/to/main.go", "go"},
 		{"script.R", "r"},  // uppercase .R
 		{"script.sh", "bash"},
+		{"build.gradle.kts", "kotlin"},
+		{"app.kts", "kotlin"},
 	}
 	for _, c := range cases {
 		got := Detect(c.path)

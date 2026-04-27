@@ -37,6 +37,12 @@ type Config struct {
 	LlamaNGpuLayers   int    // CIX_N_GPU_LAYERS; -1 on darwin (Metal all layers), 0 elsewhere.
 	LlamaStartupSec   int    // CIX_LLAMA_STARTUP_TIMEOUT; readiness probe ceiling in seconds.
 	EmbeddingsEnabled bool   // CIX_EMBEDDINGS_ENABLED; test hook to bypass sidecar entirely.
+
+	// Languages narrows the chunker's active language set. Empty / unset
+	// activates all baked-in defaults (see chunker.defaultRegistry). Values
+	// not present in the registry are warned-and-ignored at startup.
+	// Source: CIX_LANGUAGES (comma-separated, case-insensitive).
+	Languages []string
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -145,6 +151,14 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.EmbeddingsEnabled = enabled
+
+	if langs := getenv("CIX_LANGUAGES", ""); langs != "" {
+		for _, l := range strings.Split(langs, ",") {
+			if s := strings.TrimSpace(l); s != "" {
+				c.Languages = append(c.Languages, s)
+			}
+		}
+	}
 
 	return c, nil
 }
