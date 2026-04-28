@@ -38,6 +38,13 @@ type Config struct {
 	LlamaStartupSec   int    // CIX_LLAMA_STARTUP_TIMEOUT; readiness probe ceiling in seconds.
 	EmbeddingsEnabled bool   // CIX_EMBEDDINGS_ENABLED; test hook to bypass sidecar entirely.
 
+	// EmbedIncludePath toggles a path+language+symbol preamble in front of
+	// each chunk before sending it to the embedder. Improves retrieval for
+	// queries whose terms appear in file paths (e.g. "server search handler"),
+	// at the cost of requiring a full reindex when toggled. Source:
+	// CIX_EMBED_INCLUDE_PATH (default true).
+	EmbedIncludePath bool
+
 	// Languages narrows the chunker's active language set. Empty / unset
 	// activates all baked-in defaults (see chunker.defaultRegistry). Values
 	// not present in the registry are warned-and-ignored at startup.
@@ -151,6 +158,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.EmbeddingsEnabled = enabled
+
+	includePath, err := getenvBool("CIX_EMBED_INCLUDE_PATH", true)
+	if err != nil {
+		return nil, err
+	}
+	c.EmbedIncludePath = includePath
 
 	if langs := getenv("CIX_LANGUAGES", ""); langs != "" {
 		for _, l := range strings.Split(langs, ",") {

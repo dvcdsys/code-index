@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/anthropics/code-index/cli/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
@@ -73,6 +75,21 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\nLast indexed: %s\n", project.LastIndexedAt.Format("2006-01-02 15:04:05"))
 	}
 
+	// Watcher daemon status — surfaces silent stale-index situations where
+	// the user thinks the index is fresh because LastIndexedAt is recent,
+	// but the watcher has actually died and the project has drifted.
+	wstatus := daemon.GetStatus(absPath)
+	if wstatus.Running {
+		fmt.Printf("Watcher: ✓ running (PID %d)\n", wstatus.PID)
+	} else {
+		fmt.Print("Watcher: ✗ not running")
+		if project.LastIndexedAt != nil {
+			elapsed := time.Since(*project.LastIndexedAt)
+			fmt.Printf(" — last index sync %s ago", humanDuration(elapsed))
+		}
+		fmt.Println()
+	}
+
 	// Get indexing progress if in progress
 	if project.Status == "indexing" {
 		fmt.Println("\nIndexing in progress...")
@@ -85,6 +102,22 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// humanDuration returns a human-readable approximation of d for the
+// "watcher down for ..." status line. Coarse on purpose — exact seconds
+// are noise here; the user just needs to know whether drift is plausible.
+func humanDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%.1fh", d.Hours())
+	default:
+		return fmt.Sprintf("%.1fd", d.Hours()/24)
+	}
 }
 
 func formatStatus(status string) string {

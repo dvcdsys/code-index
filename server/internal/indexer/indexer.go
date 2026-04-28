@@ -95,6 +95,13 @@ type Service struct {
 	// instead of leaking for up to sessionTTL on server shutdown.
 	stopCh   chan struct{}
 	stopOnce sync.Once
+
+	// embedIncludePath, when true, makes ProcessFiles wrap each chunk with
+	// a "File: <relpath>\nLanguage: <lang>\n..." preamble before embedding.
+	// Set via SetEmbedIncludePath; default false preserves Python-parity
+	// "<chunk_type>: <content>" formatting for projects that have not been
+	// reindexed under the new format.
+	embedIncludePath bool
 }
 
 // New constructs a Service. All deps are required except logger (falls back to
@@ -117,6 +124,14 @@ func New(db *sql.DB, vs *vectorstore.Store, emb Embedder, logger *slog.Logger) *
 // times. Callers should invoke this before closing the DB.
 func (s *Service) Shutdown() {
 	s.stopOnce.Do(func() { close(s.stopCh) })
+}
+
+// SetEmbedIncludePath toggles the path+language+symbol preamble that
+// ProcessFiles prepends to chunk content before embedding. Toggling between
+// runs requires a full reindex — vectors trained against the new preamble
+// are not interchangeable with vectors trained on bare content.
+func (s *Service) SetEmbedIncludePath(v bool) {
+	s.embedIncludePath = v
 }
 
 // ---------------------------------------------------------------------------
@@ -414,10 +429,19 @@ func (s *Service) ProcessFilesStreaming(
 			})
 		}
 
-		// Embed. Python prefixes with "{chunk_type}: {content}".
+		// Embed. Format depends on embedIncludePath: legacy Python-parity
+		// "{chunk_type}: {content}" when false, or path+language+symbol
+		// preamble + content when true (see embeddings.FormatChunkForEmbedding).
+		// Relative path is computed once per file and reused for all its chunks.
+		relPath := fp.Path
+		if s.embedIncludePath {
+			if rp, rerr := filepath.Rel(projectPath, fp.Path); rerr == nil {
+				relPath = rp
+			}
+		}
 		texts := make([]string, len(chunks))
 		for i, c := range chunks {
-			texts[i] = c.ChunkType + ": " + c.Content
+			texts[i] = embeddings.FormatChunkForEmbedding(c, relPath, s.embedIncludePath)
 		}
 		var embs [][]float32
 		embedStart := time.Now()
@@ -935,5 +959,3 @@ func marshalJSONStringArray(langs []string) string {
 	return b.String()
 }
 
-// Unused but kept for symmetry with Python: filepath.Base is used by callers.
-var _ = filepath.Base

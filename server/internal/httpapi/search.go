@@ -576,6 +576,11 @@ type searchRequest struct {
 	Limit     int      `json:"limit"`
 	Languages []string `json:"languages"`
 	Paths     []string `json:"paths"`
+	// Excludes drops any result whose file path matches one of the prefixes.
+	// Mirrors Paths' matching semantics (prefix or substring) but inverted —
+	// useful for ignoring fixtures, vendored, or legacy directories without
+	// adding them to .cixignore (which would prevent indexing entirely).
+	Excludes []string `json:"excludes"`
 	// MinScore is a pointer so we can distinguish "not provided" from an
 	// explicit zero. Python uses a Pydantic default (0.1) which also allows
 	// explicit 0 through — mirror that here. m2 fix.
@@ -676,7 +681,10 @@ func semanticSearchHandler(d Deps) http.HandlerFunc {
 		}
 		// m2 — only apply default when the caller did not send the field.
 		// Explicit 0 means "return everything above the HNSW floor".
-		minScore := float32(0.1)
+		// Default 0.4 calibrated against CodeRankEmbed-Q8_0 with the
+		// path-aware embedding format. Clients that want the historical
+		// 0.1 behavior must send min_score explicitly.
+		minScore := float32(0.4)
 		if body.MinScore != nil {
 			minScore = *body.MinScore
 		}
@@ -729,7 +737,7 @@ func semanticSearchHandler(d Deps) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			filtered := filterToSearchItems(rawWrapped, minScore, body.Paths, langSet, applyPostLangFilter)
+			filtered := filterToSearchItems(rawWrapped, minScore, body.Paths, body.Excludes, langSet, applyPostLangFilter)
 			merged := mergeOverlappingHits(filtered)
 			fileGroups = groupByFile(merged)
 			if len(fileGroups) >= body.Limit {
@@ -876,14 +884,16 @@ func fetchVectorResults(
 	}
 }
 
-// filterToSearchItems applies min-score, language post-filter, and path
-// prefix/substring matches. It does NOT truncate — the merge step needs
-// the full filtered set to identify all overlaps before deciding which to
-// drop. Truncation happens after merge in the caller.
+// filterToSearchItems applies min-score, language post-filter, path
+// whitelist (paths), and path blacklist (excludes). It does NOT truncate —
+// the merge step needs the full filtered set to identify all overlaps
+// before deciding which to drop. Truncation happens after merge in the
+// caller.
 func filterToSearchItems(
 	wrapped []vectorStoreResult,
 	minScore float32,
 	paths []string,
+	excludes []string,
 	langSet map[string]struct{},
 	applyPostLangFilter bool,
 ) []searchResultItem {
@@ -907,6 +917,18 @@ func filterToSearchItems(
 				}
 			}
 			if !matched {
+				continue
+			}
+		}
+		if len(excludes) > 0 {
+			excluded := false
+			for _, pfx := range excludes {
+				if strings.HasPrefix(res.FilePath, pfx) || strings.Contains(res.FilePath, pfx) {
+					excluded = true
+					break
+				}
+			}
+			if excluded {
 				continue
 			}
 		}
