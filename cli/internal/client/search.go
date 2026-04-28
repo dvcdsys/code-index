@@ -69,6 +69,7 @@ type SearchOptions struct {
 	Limit     int      `json:"limit"`
 	Languages []string `json:"languages,omitempty"`
 	Paths     []string `json:"paths,omitempty"`
+	Excludes  []string `json:"excludes,omitempty"`
 	MinScore  float64  `json:"min_score,omitempty"`
 }
 
@@ -86,6 +87,9 @@ func (c *Client) Search(projectPath, query string, opts SearchOptions) (*SearchR
 	}
 	if len(opts.Paths) > 0 {
 		body["paths"] = opts.Paths
+	}
+	if len(opts.Excludes) > 0 {
+		body["excludes"] = opts.Excludes
 	}
 	if opts.MinScore > 0 {
 		body["min_score"] = opts.MinScore

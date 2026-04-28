@@ -132,6 +132,10 @@ func run() error {
 	}
 
 	idx := indexer.New(database, vs, embedSvc, logger)
+	idx.SetEmbedIncludePath(cfg.EmbedIncludePath)
+	if cfg.EmbedIncludePath {
+		logger.Info("embedding format: path-aware preamble enabled (CIX_EMBED_INCLUDE_PATH=true) — full reindex required if upgrading")
+	}
 	// Stop housekeeping goroutines during shutdown so sessionTTL timers do not
 	// leak for up to 1h past shutdown. m8 fix.
 	defer idx.Shutdown()

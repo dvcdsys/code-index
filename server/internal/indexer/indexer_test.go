@@ -228,6 +228,130 @@ func TestProcessFiles_HappyPath(t *testing.T) {
 	}
 }
 
+// capturingEmbedder records every batch passed to EmbedTexts so tests can
+// assert what the indexer actually sent to the embedder. Returned vectors
+// are zero-valued (still unit length 8) — value content is never checked
+// by callers of this helper.
+type capturingEmbedder struct {
+	dim   int
+	calls [][]string
+}
+
+func (c *capturingEmbedder) EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
+	captured := append([]string(nil), texts...)
+	c.calls = append(c.calls, captured)
+	out := make([][]float32, len(texts))
+	for i := range out {
+		v := make([]float32, c.dim)
+		v[0] = 1
+		out[i] = v
+	}
+	return out, nil
+}
+
+// TestProcessFiles_EmbedTextFormat_LegacyByDefault verifies that without
+// SetEmbedIncludePath, ProcessFiles preserves the historical "<chunk_type>:
+// <content>" format that Python parity depends on.
+func TestProcessFiles_EmbedTextFormat_LegacyByDefault(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, "/proj")
+
+	ctx := context.Background()
+	emb := &capturingEmbedder{dim: 8}
+	svc := New(d, newStore(t), emb, nil)
+	// Default: embedIncludePath is false.
+
+	runID, _, err := svc.BeginIndexing(ctx, "/proj", false)
+	if err != nil {
+		t.Fatalf("BeginIndexing: %v", err)
+	}
+	goFile := "package main\n\nfunc Hello() {}\n"
+	files := []FilePayload{{
+		Path:        "/proj/cmd/hello/main.go",
+		Content:     goFile,
+		ContentHash: sha256hex(goFile),
+		Language:    "go",
+		Size:        len(goFile),
+	}}
+	if _, _, _, err := svc.ProcessFiles(ctx, "/proj", runID, files); err != nil {
+		t.Fatalf("ProcessFiles: %v", err)
+	}
+
+	if len(emb.calls) == 0 {
+		t.Fatal("embedder was never called")
+	}
+	first := emb.calls[0]
+	if len(first) == 0 {
+		t.Fatal("first batch was empty")
+	}
+	for _, txt := range first {
+		// Legacy format must NOT contain a "File:" preamble.
+		if containsString(txt, "File: cmd/hello") {
+			t.Errorf("legacy format leaked path preamble:\n%s", txt)
+		}
+	}
+}
+
+// TestProcessFiles_EmbedTextFormat_PathPrefixWhenEnabled verifies that with
+// SetEmbedIncludePath(true), every chunk text is wrapped with the path-aware
+// preamble produced by embeddings.FormatChunkForEmbedding.
+func TestProcessFiles_EmbedTextFormat_PathPrefixWhenEnabled(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, "/proj")
+
+	ctx := context.Background()
+	emb := &capturingEmbedder{dim: 8}
+	svc := New(d, newStore(t), emb, nil)
+	svc.SetEmbedIncludePath(true)
+
+	runID, _, err := svc.BeginIndexing(ctx, "/proj", false)
+	if err != nil {
+		t.Fatalf("BeginIndexing: %v", err)
+	}
+	goFile := "package main\n\nfunc Hello() {}\n"
+	files := []FilePayload{{
+		Path:        "/proj/cmd/hello/main.go",
+		Content:     goFile,
+		ContentHash: sha256hex(goFile),
+		Language:    "go",
+		Size:        len(goFile),
+	}}
+	if _, _, _, err := svc.ProcessFiles(ctx, "/proj", runID, files); err != nil {
+		t.Fatalf("ProcessFiles: %v", err)
+	}
+
+	if len(emb.calls) == 0 {
+		t.Fatal("embedder was never called")
+	}
+	first := emb.calls[0]
+	if len(first) == 0 {
+		t.Fatal("first batch was empty")
+	}
+	hasPathPreamble := false
+	for _, txt := range first {
+		if containsString(txt, "File: cmd/hello/main.go") &&
+			containsString(txt, "Language: go") {
+			hasPathPreamble = true
+			break
+		}
+	}
+	if !hasPathPreamble {
+		t.Errorf("expected at least one chunk text to carry 'File: cmd/hello/main.go' + 'Language: go'; sent texts:\n%v", first)
+	}
+}
+
+func containsString(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func TestProcessFiles_EmbedderBusy(t *testing.T) {
 	d := openTestDB(t)
 	seedProject(t, d, "/proj")

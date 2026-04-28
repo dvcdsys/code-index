@@ -244,9 +244,10 @@ cix summary
 # Semantic search — natural language, finds by meaning
 cix search <query> [flags]
   --in <path>          restrict to file or directory (repeatable)
+  --exclude <path>     exclude file or directory (repeatable)
   --lang <language>    filter by language (repeatable)
   --limit, -l <n>      max results (default: 10)
-  --min-score <0-1>    minimum relevance score (default: 0.1)
+  --min-score <0-1>    minimum relevance score (default: 0.4)
   -p <path>            project path (default: cwd)
 
 # Symbol search — fast lookup by name
@@ -362,6 +363,56 @@ Supported languages: Python, TypeScript, JavaScript, Go, Rust, Java (+ 40+ other
 **Incremental reindex** — uses SHA256 file hashes. Only new or changed files are re-embedded. Deleted files are removed from the index.
 
 **Filtering** — respects `.gitignore` and `.cixignore`, skips common dirs (`node_modules`, `.git`, `.venv`, etc.), skips files >512KB and empty files. Per-project configuration via `.cixconfig.yaml` (see below).
+
+---
+
+## Tuning Search Quality
+
+### `--min-score` threshold
+
+`cix` defaults to `--min-score 0.4`. This is calibrated for **CodeRankEmbed-Q8_0** with the path-aware embedding format (`CIX_EMBED_INCLUDE_PATH=true`, default).
+
+A typical score landscape on this codebase:
+
+| Match strength | Score range | Action |
+|---|---|---|
+| Exact symbol or filename match | 0.65 – 0.80 | rare; very high confidence |
+| Strong path-aware concept match | 0.50 – 0.65 | typical "good" match for `cix search "cli watch daemon"` |
+| Weaker concept / partial path overlap | 0.40 – 0.50 | typical for ambiguous or multi-token queries |
+| Likely unrelated noise | < 0.40 | filtered out by default |
+
+**When to lower the threshold**:
+
+- The query returns `No results` but you know matching code exists — try `--min-score 0.25`
+- Your query is intentionally vague (exploring an unfamiliar codebase) — `--min-score 0.2`
+- Single-word identifier queries on rare names
+
+**When to raise the threshold**:
+
+- Agent context is filling up with weak matches — `--min-score 0.5`
+- You only want clear top hits — `--min-score 0.6`
+
+> [!NOTE]
+> CodeRankEmbed is **asymmetric**: queries get a `"Represent this query for searching relevant code: "` prefix, which puts query and passage vectors into separate regions of the embedding space. Cosine similarities are systematically lower than for symmetric models — a "strong" match here is 0.55, not 0.80. Don't compare these numbers to thresholds quoted for OpenAI / Voyage / generic sentence-transformers.
+
+> [!TIP]
+> If you switched embedding models or toggled `CIX_EMBED_INCLUDE_PATH`, rerun `cix reindex --full` and recalibrate. Old vectors and new vectors live in the same store but score differently.
+
+### `--exclude` for noisy directories
+
+Repos with vendored code, fixtures, or legacy migrations can pull unrelated paths into top results because path tokens contribute to scoring. Two options:
+
+```bash
+# One-off exclude for a single search
+cix search "main entry point" --exclude legacy --exclude bench/fixtures
+
+# Permanent exclude — add to .cixignore (skips indexing entirely)
+echo "legacy/" >> .cixignore
+echo "bench/fixtures/" >> .cixignore
+cix reindex --full
+```
+
+`.cixignore` is preferred for directories you never want in results — they don't take up index space. `--exclude` is a per-query escape hatch.
 
 ---
 
@@ -557,7 +608,7 @@ cix watch stop && cix watch /path/to/project
 
 **Search returns no results**
 - Check project is indexed: `cix status`
-- Lower the threshold: `cix search "query" --min-score 0.05`
+- Lower the threshold: `cix search "query" --min-score 0.2` (default is `0.4`; see [Tuning Search Quality](#tuning-search-quality))
 - Docker mode: run `cix list` to verify the project is registered
 
 ---
