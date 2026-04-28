@@ -404,10 +404,10 @@ Repos with vendored code, fixtures, or legacy migrations can pull unrelated path
 
 ```bash
 # One-off exclude for a single search
-cix search "main entry point" --exclude legacy --exclude bench/fixtures
+cix search "main entry point" --exclude vendor --exclude bench/fixtures
 
 # Permanent exclude — add to .cixignore (skips indexing entirely)
-echo "legacy/" >> .cixignore
+echo "vendor/" >> .cixignore
 echo "bench/fixtures/" >> .cixignore
 cix reindex --full
 ```
