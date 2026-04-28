@@ -20,10 +20,11 @@ See `doc/DOCKER_TAGS.md` for the current tag inventory.
 ## Python backend
 
 The Python FastAPI backend (`legacy/python-api/`) was deprecated in
-`server/v0.3.0` (2026-04-24). It will be deleted from the repository in
-`server/v0.4.0` (target: ~2026-07-24, ~90 days).
+`server/v0.3.0` (2026-04-24) and removed from the repository in
+`server/v0.4.0` (2026-04-28).
 
 The Docker image `dvcdsys/code-index:0.2-python-legacy` is preserved on
 Docker Hub indefinitely as a rollback option.
 
-See `doc/MIGRATION_FROM_PYTHON.md` for migration instructions.
+See `doc/MIGRATION_FROM_PYTHON.md` for migration instructions and the
+rollback recipe.

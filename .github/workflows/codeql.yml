@@ -2,8 +2,8 @@ name: "CodeQL"
 
 # Advanced setup. Replaces GitHub's "default setup" which auto-detects
 # and scans every language it finds — that included java-kotlin, ruby,
-# rust, javascript-typescript, c-cpp, python false-positives from
-# vendored CGO deps and the archived legacy/python-api/ tree.
+# rust, javascript-typescript, and c-cpp false-positives from vendored
+# CGO deps.
 #
 # To stop the duplicate runs you also need to disable the default
 # setup once: GitHub repo → Settings → Code security → Code scanning
@@ -31,8 +31,7 @@ jobs:
       matrix:
         # Keep tightly scoped: only languages that actually ship code.
         # `actions` lints workflow YAML; `go` covers server + CLI.
-        # Do NOT add python (only legacy/python-api/, archived) or
-        # c-cpp (only transitive CGO deps, no first-party C).
+        # Do NOT add c-cpp (only transitive CGO deps, no first-party C).
         language: [actions, go]
     steps:
       - name: Checkout
