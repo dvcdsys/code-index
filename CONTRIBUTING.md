@@ -12,7 +12,6 @@ code-index/
 ├── cli/              # Go CLI (cix binary)
 │   ├── cmd/          # cobra commands
 │   └── internal/     # client, config, daemon, indexer, watcher
-├── legacy/python-api/  # archived Python backend (deprecated, see doc/MIGRATION_FROM_PYTHON.md)
 └── skills/           # Claude Code skill definitions
 ```
 

@@ -66,6 +66,7 @@ If you need to go back to the Python server:
 
 ## Sunset timeline
 
-The Python code in `legacy/python-api/` will be deleted in `server/v0.4.0`
-(approximately 90 days after v0.3.0 — target ~2026-07-24).
-The `:0.2-python-legacy` Docker tag is preserved on Docker Hub indefinitely.
+The Python code in `legacy/python-api/` was deleted in `server/v0.4.0`
+(2026-04-28). This document is retained for historical reference and as
+the rollback recipe for the preserved `:0.2-python-legacy` Docker tag,
+which stays on Docker Hub indefinitely.
