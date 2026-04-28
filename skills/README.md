@@ -2,7 +2,9 @@
 
 ## cix — Semantic Code Search
 
-Teaches an AI agent how to use `cix` for code navigation instead of Grep/Glob.
+Teaches an AI agent when to reach for `cix` (semantic, cross-file,
+exploratory) versus Grep / Glob / Read (exact strings, known pointers,
+non-code files).
 
 ### Install
 
@@ -18,6 +20,8 @@ In a Claude Code session:
 /cix
 ```
 
-Loads search guidance into context. Claude will use `cix search` instead of Grep/Glob for the rest of the session.
+Loads navigation guidance into context for the rest of the session.
 
-To activate automatically in every session, add `cix` usage instructions to `~/.claude/CLAUDE.md` (see the [Agent Integration](../README.md#agent-integration) section in the main README).
+To activate automatically in every session, add `cix` usage instructions
+to `~/.claude/CLAUDE.md` (see the [Agent Integration](../README.md#agent-integration)
+section in the main README).
