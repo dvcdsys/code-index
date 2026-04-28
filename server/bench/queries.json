@@ -1,0 +1,222 @@
+{
+  "_comment": "Retrieval-quality benchmark queries for the cix repository. Each query is paired with paths that should rank in the top-k (expected_paths) and paths that should NOT (anti_paths). Run before/after toggling CIX_EMBED_INCLUDE_PATH and compare precision@k + anti-path leakage.",
+  "_categories": {
+    "concept": "Natural-language queries that describe a feature/intent, not a specific identifier.",
+    "path_hint": "Queries containing words that appear in file paths (server, cli, watcher) — these benefit most from path-in-embedding.",
+    "identifier": "Single-token camelCase/snake_case names that look like symbols. cix symbols already covers these; goal is no regression."
+  },
+  "queries": [
+    {
+      "query": "main entry point server",
+      "category": "concept",
+      "k": 5,
+      "expected_paths": ["server/cmd/cix-server/main.go"],
+      "anti_paths": ["bench/fixtures/", "legacy/"]
+    },
+    {
+      "query": "supervisor unix socket llama",
+      "category": "concept",
+      "k": 3,
+      "expected_paths": ["server/internal/embeddings/supervisor.go"],
+      "anti_paths": ["legacy/"]
+    },
+    {
+      "query": "tree-sitter chunk function class method",
+      "category": "concept",
+      "k": 5,
+      "expected_paths": ["server/internal/chunker/chunker.go"],
+      "anti_paths": ["legacy/"]
+    },
+    {
+      "query": "three phase indexing protocol",
+      "category": "concept",
+      "k": 3,
+      "expected_paths": ["server/internal/indexer/indexer.go"],
+      "anti_paths": ["legacy/"]
+    },
+    {
+      "query": "semantic search handler embedding cosine",
+      "category": "concept",
+      "k": 3,
+      "expected_paths": ["server/internal/httpapi/search.go"],
+      "anti_paths": ["legacy/"]
+    },
+    {
+      "query": "vector store chromem cosine similarity",
+      "category": "concept",
+      "k": 5,
+      "expected_paths": ["server/internal/vectorstore/store.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "fsnotify file watcher debounce",
+      "category": "concept",
+      "k": 5,
+      "expected_paths": ["cli/internal/watcher/watcher.go"],
+      "anti_paths": ["legacy/"]
+    },
+    {
+      "query": "incremental reindex sha256 file hash",
+      "category": "concept",
+      "k": 5,
+      "expected_paths": ["server/internal/indexer/", "cli/internal/indexer/"],
+      "anti_paths": []
+    },
+    {
+      "query": "config environment variables CIX prefix",
+      "category": "concept",
+      "k": 5,
+      "expected_paths": ["server/internal/config/config.go", "cli/internal/config/config.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "bash regex chunker fallback",
+      "category": "concept",
+      "k": 5,
+      "expected_paths": ["server/internal/chunker/"],
+      "anti_paths": []
+    },
+
+    {
+      "query": "server search handler",
+      "category": "path_hint",
+      "k": 5,
+      "expected_paths": ["server/internal/httpapi/search.go"],
+      "anti_paths": ["legacy/", "bench/fixtures/"]
+    },
+    {
+      "query": "cli watch daemon",
+      "category": "path_hint",
+      "k": 5,
+      "expected_paths": ["cli/cmd/watch.go", "cli/internal/daemon/daemon.go"],
+      "anti_paths": ["legacy/"]
+    },
+    {
+      "query": "embeddings supervisor",
+      "category": "path_hint",
+      "k": 3,
+      "expected_paths": ["server/internal/embeddings/supervisor.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "chunker chunk file",
+      "category": "path_hint",
+      "k": 5,
+      "expected_paths": ["server/internal/chunker/chunker.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "indexer process files",
+      "category": "path_hint",
+      "k": 5,
+      "expected_paths": ["server/internal/indexer/indexer.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "cli search command flags",
+      "category": "path_hint",
+      "k": 5,
+      "expected_paths": ["cli/cmd/search.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "vectorstore store delete by file",
+      "category": "path_hint",
+      "k": 5,
+      "expected_paths": ["server/internal/vectorstore/store.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "httpapi router middleware",
+      "category": "path_hint",
+      "k": 5,
+      "expected_paths": ["server/internal/httpapi/"],
+      "anti_paths": []
+    },
+    {
+      "query": "symbolindex SQLite symbols upsert",
+      "category": "path_hint",
+      "k": 5,
+      "expected_paths": ["server/internal/symbolindex/"],
+      "anti_paths": []
+    },
+    {
+      "query": "watcher daemon pid status",
+      "category": "path_hint",
+      "k": 5,
+      "expected_paths": ["cli/internal/daemon/daemon.go", "cli/cmd/watch.go"],
+      "anti_paths": []
+    },
+
+    {
+      "query": "FormatChunkForEmbedding",
+      "category": "identifier",
+      "k": 3,
+      "expected_paths": ["server/internal/embeddings/format.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "semanticSearchHandler",
+      "category": "identifier",
+      "k": 3,
+      "expected_paths": ["server/internal/httpapi/search.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "BeginIndexing",
+      "category": "identifier",
+      "k": 3,
+      "expected_paths": ["server/internal/indexer/indexer.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "ChunkFile",
+      "category": "identifier",
+      "k": 3,
+      "expected_paths": ["server/internal/chunker/chunker.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "EmbedTexts",
+      "category": "identifier",
+      "k": 5,
+      "expected_paths": ["server/internal/embeddings/", "server/internal/indexer/"],
+      "anti_paths": []
+    },
+    {
+      "query": "TokenizeAndEmbed",
+      "category": "identifier",
+      "k": 3,
+      "expected_paths": ["server/internal/embeddings/service.go"],
+      "anti_paths": []
+    },
+    {
+      "query": "mergeOverlappingHits",
+      "category": "identifier",
+      "k": 3,
+      "expected_paths": ["server/internal/httpapi/"],
+      "anti_paths": []
+    },
+    {
+      "query": "DeleteCollection",
+      "category": "identifier",
+      "k": 3,
+      "expected_paths": ["server/internal/vectorstore/", "server/internal/indexer/"],
+      "anti_paths": []
+    },
+    {
+      "query": "FilePayload",
+      "category": "identifier",
+      "k": 3,
+      "expected_paths": ["server/internal/indexer/", "cli/internal/client/", "cli/internal/indexer/"],
+      "anti_paths": []
+    },
+    {
+      "query": "runWatchStatus",
+      "category": "identifier",
+      "k": 3,
+      "expected_paths": ["cli/cmd/watch.go"],
+      "anti_paths": []
+    }
+  ]
+}
