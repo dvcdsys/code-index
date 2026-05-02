@@ -39,6 +39,8 @@ jobs:
           file: server/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           build-args: VERSION=${{ steps.ver.outputs.version }}
           tags: |
             dvcdsys/code-index:${{ steps.ver.outputs.version }}
@@ -71,6 +73,8 @@ jobs:
           file: server/Dockerfile.cuda
           platforms: linux/amd64
           push: true
+          provenance: mode=max
+          sbom: true
           build-args: VERSION=${{ steps.ver.outputs.version }}
           tags: |
             dvcdsys/code-index:${{ steps.ver.outputs.version }}-cu128
