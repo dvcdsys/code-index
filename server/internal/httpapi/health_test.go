@@ -24,6 +24,7 @@ func newTestServer(t *testing.T) http.Handler {
 		APIVersion:     "v1",
 		Backend:        "go",
 		EmbeddingModel: "test-model",
+		AuthDisabled:   true,
 	})
 }
 

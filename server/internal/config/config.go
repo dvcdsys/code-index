@@ -17,6 +17,12 @@ import (
 // the Python server (21847) during parallel PoC rollout.
 type Config struct {
 	APIKey                  string
+	// AuthDisabled, when true, makes the server skip the API-key check on
+	// every endpoint. Off by default — must be turned on EXPLICITLY via
+	// CIX_AUTH_DISABLED=true (and also requires CIX_API_KEY to be empty).
+	// Replaces the older "empty API key = no auth" implicit bypass; the new
+	// behaviour fails loud when CIX_API_KEY is missing without the flag.
+	AuthDisabled            bool
 	Port                    int
 	EmbeddingModel          string
 	ChromaPersistDir        string
@@ -75,13 +81,24 @@ func (c *Config) DynamicChromaPersistDir() string {
 
 // Load reads CIX_* environment variables and returns a populated Config.
 // Returns an error if a numeric variable is present but unparseable.
+//
+// Defaults for SQLitePath / ChromaPersistDir resolve to ~/.cix/data/... so a
+// fresh `make run` works without any env-file editing. Containers (CUDA + CPU
+// Dockerfiles, portainer-stack.yml) override these explicitly with /data/...
+// where /data is the persistent volume — no behaviour change in production.
 func Load() (*Config, error) {
 	c := &Config{
 		APIKey:           getenv("CIX_API_KEY", ""),
 		EmbeddingModel:   getenv("CIX_EMBEDDING_MODEL", "awhiteside/CodeRankEmbed-Q8_0-GGUF"),
-		ChromaPersistDir: getenv("CIX_CHROMA_PERSIST_DIR", "/data/chroma"),
-		SQLitePath:       getenv("CIX_SQLITE_PATH", "/data/sqlite/projects.db"),
+		ChromaPersistDir: getenv("CIX_CHROMA_PERSIST_DIR", defaultChromaPersistDir()),
+		SQLitePath:       getenv("CIX_SQLITE_PATH", defaultSQLitePath()),
 	}
+
+	authOff, err := getenvBool("CIX_AUTH_DISABLED", false)
+	if err != nil {
+		return nil, err
+	}
+	c.AuthDisabled = authOff
 
 	port, err := getenvInt("CIX_PORT", 8001)
 	if err != nil {
@@ -187,6 +204,13 @@ func Load() (*Config, error) {
 // developer having to set an env var. This is a deliberate PoC ergonomic —
 // it is silent when the file is missing and the HF downloader picks up.
 func (c *Config) Validate() error {
+	// Auth gating — explicit-or-die. Server refuses to start with no key
+	// and no opt-out flag, so a forgotten env var fails loud at boot
+	// instead of silently exposing every endpoint.
+	if c.APIKey == "" && !c.AuthDisabled {
+		return fmt.Errorf("CIX_API_KEY is empty and CIX_AUTH_DISABLED is not set: refuse to start with open auth. " +
+			"Set CIX_API_KEY=<secret> for production, or CIX_AUTH_DISABLED=true for local dev")
+	}
 	if c.LlamaTransport != "unix" && c.LlamaTransport != "tcp" {
 		return fmt.Errorf("CIX_LLAMA_TRANSPORT=%q, must be 'unix' or 'tcp'", c.LlamaTransport)
 	}
@@ -202,6 +226,40 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// defaultDataDir returns the platform-specific root for runtime data
+// (SQLite + chromem-go). Used to build defaults for CIX_SQLITE_PATH and
+// CIX_CHROMA_PERSIST_DIR when neither env var is set.
+//
+// Order of resolution:
+//  1. $CIX_DATA_DIR if set — explicit override
+//  2. ~/.cix/data when $HOME is resolvable — typical dev case
+//  3. /tmp/cix-data when $HOME is missing — fallback for headless / CI
+//
+// Container deployments (Dockerfile, Dockerfile.cuda, portainer-stack.yml)
+// set CIX_SQLITE_PATH and CIX_CHROMA_PERSIST_DIR explicitly to /data/... so
+// this function is never reached in production.
+func defaultDataDir() string {
+	if v := os.Getenv("CIX_DATA_DIR"); v != "" {
+		return v
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".cix", "data")
+	}
+	return filepath.Join(os.TempDir(), "cix-data")
+}
+
+// defaultSQLitePath resolves the local SQLite database path under the
+// platform data dir. The `_` suffix from DynamicSQLitePath is appended at
+// query time, not here.
+func defaultSQLitePath() string {
+	return filepath.Join(defaultDataDir(), "sqlite", "projects.db")
+}
+
+// defaultChromaPersistDir resolves the local chromem-go persist directory.
+func defaultChromaPersistDir() string {
+	return filepath.Join(defaultDataDir(), "chroma")
 }
 
 // defaultGGUFCacheDir chooses a platform-appropriate location for downloaded
