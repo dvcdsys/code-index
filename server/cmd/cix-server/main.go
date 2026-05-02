@@ -70,8 +70,12 @@ func run() error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
-	if cfg.APIKey == "" {
-		logger.Warn("CIX_API_KEY is empty — authenticated endpoints are reachable without auth (dev mode)")
+	// Validate already refused an empty API key without CIX_AUTH_DISABLED=true,
+	// so reaching this point means either auth is properly configured or the
+	// operator explicitly opted out. Log loudly when we are about to serve
+	// without auth so it shows up in container logs / Portainer.
+	if cfg.AuthDisabled {
+		logger.Warn("auth disabled (CIX_AUTH_DISABLED=true) — every endpoint is reachable without an API key")
 	}
 
 	chunker.Configure(cfg.Languages)
@@ -148,6 +152,7 @@ func run() error {
 		EmbeddingModel: cfg.EmbeddingModel,
 		Logger:         logger,
 		APIKey:         cfg.APIKey,
+		AuthDisabled:   cfg.AuthDisabled,
 		EmbeddingSvc:   embedSvc,
 		VectorStore:    vs,
 		Indexer:        idx,

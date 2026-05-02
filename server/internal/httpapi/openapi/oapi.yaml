@@ -1,0 +1,12 @@
+# oapi-codegen v2 config — see https://github.com/oapi-codegen/oapi-codegen
+# Run via `go generate` from gen.go (or `make openapi-gen` from server/).
+package: openapi
+output: openapi.gen.go
+generate:
+  models: true
+  chi-server: true
+  embedded-spec: true
+output-options:
+  skip-prune: true
+compatibility:
+  always-prefix-enum-values: false

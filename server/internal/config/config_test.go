@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -97,25 +98,73 @@ func TestLoadPhase3Defaults(t *testing.T) {
 
 func TestValidateBadTransport(t *testing.T) {
 	unsetAll(t)
+	// Auth-off so the auth-gate check (which runs first) lets us reach the
+	// transport check we actually want to exercise.
+	t.Setenv("CIX_AUTH_DISABLED", "true")
 	t.Setenv("CIX_LLAMA_TRANSPORT", "udp")
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if err := c.Validate(); err == nil {
-		t.Fatal("Validate: expected error for bogus transport")
+	err = c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "CIX_LLAMA_TRANSPORT") {
+		t.Fatalf("Validate: expected transport error, got %v", err)
 	}
 }
 
 func TestValidateBadCtx(t *testing.T) {
 	unsetAll(t)
+	t.Setenv("CIX_AUTH_DISABLED", "true")
 	t.Setenv("CIX_LLAMA_CTX", "0")
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if err := c.Validate(); err == nil {
-		t.Fatal("Validate: expected error for non-positive ctx")
+	err = c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "CIX_LLAMA_CTX") {
+		t.Fatalf("Validate: expected ctx error, got %v", err)
+	}
+}
+
+// TestValidate_AuthGate covers the explicit-or-die rule: an empty CIX_API_KEY
+// is only allowed when CIX_AUTH_DISABLED=true. This is the central guarantee
+// that prevents accidentally-open deployments after the implicit empty-key
+// bypass was removed.
+func TestValidate_AuthGate(t *testing.T) {
+	cases := []struct {
+		name        string
+		apiKey      string
+		authOff     string // "" means env var unset
+		wantLoadErr bool
+		wantValErr  bool
+	}{
+		{name: "no key, no flag → Validate fails", apiKey: "", authOff: "", wantValErr: true},
+		{name: "no key, flag=false → Validate fails", apiKey: "", authOff: "false", wantValErr: true},
+		{name: "no key, flag=true → ok", apiKey: "", authOff: "true"},
+		{name: "key set, no flag → ok", apiKey: "secret"},
+		{name: "key set, flag=true → ok (flag wins)", apiKey: "secret", authOff: "true"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			unsetAll(t)
+			if tc.apiKey != "" {
+				t.Setenv("CIX_API_KEY", tc.apiKey)
+			}
+			if tc.authOff != "" {
+				t.Setenv("CIX_AUTH_DISABLED", tc.authOff)
+			}
+			c, err := Load()
+			if (err != nil) != tc.wantLoadErr {
+				t.Fatalf("Load err=%v, wantErr=%v", err, tc.wantLoadErr)
+			}
+			if err != nil {
+				return
+			}
+			err = c.Validate()
+			if (err != nil) != tc.wantValErr {
+				t.Errorf("Validate err=%v, wantErr=%v", err, tc.wantValErr)
+			}
+		})
 	}
 }
 
@@ -154,6 +203,10 @@ func unsetAll(t *testing.T) {
 		"CIX_GGUF_PATH", "CIX_GGUF_CACHE_DIR", "CIX_LLAMA_BIN_DIR",
 		"CIX_LLAMA_SOCKET", "CIX_LLAMA_TRANSPORT", "CIX_LLAMA_CTX",
 		"CIX_N_GPU_LAYERS", "CIX_LLAMA_STARTUP_TIMEOUT", "CIX_EMBEDDINGS_ENABLED",
+		// Auth gating — without this, a developer's shell with
+		// CIX_AUTH_DISABLED=true would silently make Validate succeed
+		// on tests that expect a missing-key failure.
+		"CIX_AUTH_DISABLED",
 	} {
 		t.Setenv(k, "sentinel")
 		osUnsetenv(k)

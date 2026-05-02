@@ -29,5 +29,13 @@ COPY --from=builder /out/cix-server /cix-server
 ENV CIX_PORT=8001
 EXPOSE 8001
 
+# Container data layout — pin paths under /data so the named volume in
+# portainer-stack.yml / docker-compose receives both SQLite and chromem-go
+# state. The Go default ($HOME/.cix/data) targets local `make run` and is
+# inappropriate inside distroless where there is no usable HOME.
+ENV CIX_SQLITE_PATH=/data/sqlite/projects.db
+ENV CIX_CHROMA_PERSIST_DIR=/data/chroma
+VOLUME ["/data"]
+
 USER nonroot:nonroot
 ENTRYPOINT ["/cix-server"]

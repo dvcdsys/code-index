@@ -20,7 +20,9 @@ func newTestDeps(t *testing.T) Deps {
 		t.Fatalf("open test db: %v", err)
 	}
 	t.Cleanup(func() { d.Close() })
-	return Deps{DB: d}
+	// AuthDisabled=true matches the historical behaviour of these tests
+	// (no Authorization header sent). Production wiring sets a real key.
+	return Deps{DB: d, AuthDisabled: true}
 }
 
 func doRequest(t *testing.T, router http.Handler, method, path string, body any) *httptest.ResponseRecorder {
