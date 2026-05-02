@@ -9,9 +9,9 @@ import (
 	apidb "github.com/dvcdsys/code-index/server/internal/db"
 )
 
-// newAuthTestServer builds a router wired with the given API key. A nil key
-// argument keeps dev-mode behaviour (auth disabled) so existing tests are
-// unaffected.
+// newAuthTestServer builds a router wired with the given API key. An empty
+// key now requires AuthDisabled=true to match production semantics — the
+// router would otherwise panic from requireAPIKey's empty-key guard.
 func newAuthTestServer(t *testing.T, apiKey string) http.Handler {
 	t.Helper()
 	database, err := apidb.Open(":memory:")
@@ -26,6 +26,7 @@ func newAuthTestServer(t *testing.T, apiKey string) http.Handler {
 		APIVersion:     "v1",
 		EmbeddingModel: "test-model",
 		APIKey:         apiKey,
+		AuthDisabled:   apiKey == "",
 	})
 }
 
@@ -78,13 +79,16 @@ func TestAuth_StatusAcceptsCorrectKey(t *testing.T) {
 	}
 }
 
-func TestAuth_EmptyKeySkipsCheck(t *testing.T) {
-	// Dev mode: no key configured => auth middleware passes through.
-	srv := newAuthTestServer(t, "")
+// TestAuth_DisabledFlagSkipsCheck — explicit dev-mode opt-out via the
+// AuthDisabled Deps flag (which is itself fed by CIX_AUTH_DISABLED). With
+// the flag on, NewRouter omits the requireAPIKey middleware entirely, so
+// even unauthenticated routes succeed.
+func TestAuth_DisabledFlagSkipsCheck(t *testing.T) {
+	srv := newAuthTestServer(t, "") // helper sets AuthDisabled=true on empty key
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 in dev mode", rr.Code)
+		t.Fatalf("status = %d, want 200 with AuthDisabled=true", rr.Code)
 	}
 }

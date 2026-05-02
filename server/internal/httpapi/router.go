@@ -1,6 +1,8 @@
 // Package httpapi wires the chi router and HTTP handlers for the Go server.
-// Phase 1: /health and /api/v1/status.
-// Phase 2: project CRUD + symbol/definition/reference/file search + summary.
+//
+// All routes are described in doc/openapi.yaml; the generated chi shim in
+// internal/httpapi/openapi mounts them onto the router and dispatches to
+// methods on the Server struct (see server.go).
 package httpapi
 
 import (
@@ -10,6 +12,7 @@ import (
 	"net/http"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/go-chi/chi/v5"
@@ -39,9 +42,14 @@ type Deps struct {
 	EmbeddingModel string
 	Logger         *slog.Logger
 	// APIKey is the shared secret compared against the `Authorization: Bearer`
-	// header. When empty the server runs in dev mode and skips auth — matches
-	// the behaviour advertised in cmd/cix-server/main.go's startup warning.
+	// header on every authenticated route. Required unless AuthDisabled=true.
 	APIKey string
+	// AuthDisabled, when true, omits the requireAPIKey middleware entirely —
+	// every route becomes reachable without credentials. Off by default.
+	// Toggle via CIX_AUTH_DISABLED=true (config.go) for local dev or tests.
+	// In production this MUST stay false; main.go's Validate refuses to
+	// start with an empty APIKey unless this is explicitly true.
+	AuthDisabled bool
 	// EmbeddingSvc is the in-process embeddings service. May be nil when the
 	// server is started with CIX_EMBEDDINGS_ENABLED=false (e.g. in router
 	// tests). Phase 5 uses it for semantic search.
@@ -54,32 +62,16 @@ type Deps struct {
 	Indexer *indexer.Service
 }
 
-// NewRouter builds the chi router with middleware and all Phase 1+2 routes.
+// NewRouter builds the chi router with middleware and the generated
+// OpenAPI-derived routes.
 //
 // Project paths contain slashes that cannot be embedded in plain URL segments.
 // We follow the Python approach of SHA1-hashing them (first 16 hex chars) and
 // using the hash as the URL key. See internal/projects.HashPath for details.
 //
-// Route list:
-//
-//	GET    /health
-//	GET    /api/v1/status
-//	POST   /api/v1/projects                                 create project
-//	GET    /api/v1/projects                                 list projects
-//	GET    /api/v1/projects/{path}                          get project by hash
-//	PATCH  /api/v1/projects/{path}                          patch project settings
-//	DELETE /api/v1/projects/{path}                          delete project
-//	POST   /api/v1/projects/{path}/search/symbols           symbol name search
-//	POST   /api/v1/projects/{path}/search/definitions       go-to-definition
-//	POST   /api/v1/projects/{path}/search/references        find references
-//	POST   /api/v1/projects/{path}/search/files             file path search
-//	POST   /api/v1/projects/{path}/search                   semantic search
-//	POST   /api/v1/projects/{path}/index/begin              start indexing session
-//	POST   /api/v1/projects/{path}/index/files              stream files
-//	POST   /api/v1/projects/{path}/index/finish             commit session
-//	POST   /api/v1/projects/{path}/index/cancel             idempotent cancel
-//	GET    /api/v1/projects/{path}/index/status             progress / last run
-//	GET    /api/v1/projects/{path}/summary                  project summary
+// Auth: every route except `GET /health` lives behind the `requireAPIKey`
+// middleware. The generated chi-server mounts under a sub-router so the gate
+// stays in one place.
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 
@@ -88,45 +80,33 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(serverVersionHeader(d.ServerVersion))
 	r.Use(structuredLogger(d.Logger))
 
-	// Public probe — no auth, matches Python api/app/routers/health.py.
-	r.Get("/health", healthHandler(d))
+	srv := &Server{Deps: d}
 
-	// Everything else lives behind the API-key middleware so the gate matches
-	// Python's `Depends(verify_api_key)` applied in each router module.
-	r.Group(func(pr chi.Router) {
-		pr.Use(requireAPIKey(d.APIKey))
+	// Auth — the middleware is installed ONLY when an API key is configured
+	// AND auth is not explicitly disabled. config.Validate refuses to start
+	// the server when APIKey is empty without the AuthDisabled flag, so by
+	// the time we reach NewRouter exactly one of the two branches below is
+	// the legitimate state.
+	if !d.AuthDisabled {
+		// requireAPIKey skips public paths (see isPublicPath in middleware.go):
+		// /health, /docs, /docs/*, /openapi.json.
+		r.Use(requireAPIKey(d.APIKey))
+	} else if d.Logger != nil {
+		// Loud signal — every authenticated request will pass without checks.
+		// The startup banner in main.go also logs this; we duplicate here so
+		// router-only test runs surface the same warning.
+		d.Logger.Warn("auth disabled (CIX_AUTH_DISABLED=true) — every endpoint is reachable without an API key")
+	}
 
-		// Phase 1 — status probe (authenticated, unlike /health).
-		pr.Get("/api/v1/status", statusHandler(d))
+	// Documentation — Swagger UI shell + the embedded OpenAPI spec served
+	// from the bytes in openapi.gen.go. Both are public regardless of auth.
+	r.Get("/docs", docsIndexHandler)
+	r.Get("/docs/*", docsAssetsHandler)
+	r.Get("/openapi.json", openapiSpecHandler)
 
-		// Phase 2 — project CRUD.
-		pr.Post("/api/v1/projects", createProjectHandler(d))
-		pr.Get("/api/v1/projects", listProjectsHandler(d))
-
-		// Project-scoped routes: {path} is a 16-char SHA1 hash of the host_path.
-		pr.Get("/api/v1/projects/{path}", getProjectHandler(d))
-		pr.Patch("/api/v1/projects/{path}", patchProjectHandler(d))
-		pr.Delete("/api/v1/projects/{path}", deleteProjectHandler(d))
-
-		// Phase 2 — search endpoints.
-		pr.Post("/api/v1/projects/{path}/search/symbols", symbolSearchHandler(d))
-		pr.Post("/api/v1/projects/{path}/search/definitions", definitionSearchHandler(d))
-		pr.Post("/api/v1/projects/{path}/search/references", referenceSearchHandler(d))
-		pr.Post("/api/v1/projects/{path}/search/files", fileSearchHandler(d))
-
-		// Phase 5 — semantic search.
-		pr.Post("/api/v1/projects/{path}/search", semanticSearchHandler(d))
-
-		// Phase 5 — three-phase indexing protocol.
-		pr.Post("/api/v1/projects/{path}/index/begin", indexBeginHandler(d))
-		pr.Post("/api/v1/projects/{path}/index/files", indexFilesHandler(d))
-		pr.Post("/api/v1/projects/{path}/index/finish", indexFinishHandler(d))
-		pr.Post("/api/v1/projects/{path}/index/cancel", indexCancelHandler(d))
-		pr.Get("/api/v1/projects/{path}/index/status", indexStatusHandler(d))
-
-		// Phase 2 — summary.
-		pr.Get("/api/v1/projects/{path}/summary", projectSummaryHandler(d))
-	})
+	// All API operations — chi.HandlerFromMux walks the spec and registers
+	// one chi route per OpenAPI operation, dispatching to Server methods.
+	openapi.HandlerFromMux(srv, r)
 
 	return r
 }

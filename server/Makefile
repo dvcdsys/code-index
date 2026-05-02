@@ -35,7 +35,12 @@ BUILDER     ?= cix-builder
 SCOUT_TAG   ?= scout-$(shell date +%Y%m%d-%H%M)
 
 .PHONY: help build test test-gate fetch-llama bundle run docker-build-cuda \
-        docker-build-cuda-dev scout-cuda scout-cpu promote-cuda clean
+        docker-build-cuda-dev scout-cuda scout-cpu promote-cuda clean \
+        openapi-gen openapi-check swagger-ui-fetch
+
+# Pin the Swagger UI bundle version. Bumping this is a deliberate commit:
+# update the version, run `make swagger-ui-fetch`, eyeball the diff, ship.
+SWAGGER_UI_VERSION ?= 5.18.2
 
 help:
 	@echo "Targets:"
@@ -50,6 +55,9 @@ help:
 	@echo "  scout-cuda         — build CUDA image via native x86 builder → push :<SCOUT_TAG> → docker scout cves"
 	@echo "  scout-cpu          — build CPU image locally → docker scout cves (no push)"
 	@echo "  promote-cuda       — retag SCOUT_TAG as go-cu128+cu128 without rebuild (imagetools)"
+	@echo "  openapi-gen        — regenerate internal/httpapi/openapi/openapi.gen.go from doc/openapi.yaml"
+	@echo "  openapi-check      — fail if openapi.gen.go is out of sync with doc/openapi.yaml (CI)"
+	@echo "  swagger-ui-fetch   — refresh internal/httpapi/docs/swagger-ui/ from jsdelivr (SWAGGER_UI_VERSION=$(SWAGGER_UI_VERSION))"
 	@echo "  clean              — remove dist/"
 
 build:
@@ -190,3 +198,33 @@ scout-cpu:
 
 clean:
 	rm -rf $(DIST_DIR)
+
+# openapi-gen — regenerate the chi server interface + types from doc/openapi.yaml.
+# The spec is the source of truth; generated code is committed to git so consumers
+# can `go install` without needing the oapi-codegen tool installed.
+openapi-gen:
+	$(GO) generate ./internal/httpapi/openapi/...
+
+# openapi-check — used in CI to ensure the committed .gen.go is in sync with
+# doc/openapi.yaml. Regenerates and fails if `git diff` is non-empty.
+openapi-check: openapi-gen
+	@if ! git diff --quiet internal/httpapi/openapi/openapi.gen.go; then \
+	    echo "ERROR: internal/httpapi/openapi/openapi.gen.go is out of sync with doc/openapi.yaml"; \
+	    echo "       Run 'make openapi-gen' and commit the result."; \
+	    git --no-pager diff internal/httpapi/openapi/openapi.gen.go | head -40; \
+	    exit 1; \
+	fi
+	@echo "openapi.gen.go is in sync with doc/openapi.yaml"
+
+# swagger-ui-fetch — refresh the embedded Swagger UI bundle from jsdelivr.
+# Run when bumping SWAGGER_UI_VERSION; commit the diff in the same PR as the
+# version bump so reviewers can see what changed in the bundle.
+SWAGGER_UI_DIR := $(ROOT)/internal/httpapi/docs/swagger-ui
+SWAGGER_UI_BASE = https://cdn.jsdelivr.net/npm/swagger-ui-dist@$(SWAGGER_UI_VERSION)
+swagger-ui-fetch:
+	@echo "→ Fetching Swagger UI $(SWAGGER_UI_VERSION) into $(SWAGGER_UI_DIR)"
+	@for f in swagger-ui.css swagger-ui-bundle.js swagger-ui-standalone-preset.js favicon-32x32.png favicon-16x16.png; do \
+	    echo "   $$f"; \
+	    curl -fsSL -o "$(SWAGGER_UI_DIR)/$$f" "$(SWAGGER_UI_BASE)/$$f" || { echo "FAIL: $$f"; exit 1; }; \
+	done
+	@echo "✓ Swagger UI bundle refreshed. index.html is hand-maintained — review the diff before committing."
