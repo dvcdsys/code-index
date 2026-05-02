@@ -3,10 +3,29 @@ name: "Release: Server"
 # Triggered by server-namespaced tags (e.g. `server/v0.3.0`).
 # Builds CPU (multi-arch) and CUDA (amd64-only) Docker images and
 # publishes them to Docker Hub, then creates the GitHub release.
+#
+# `workflow_dispatch` allows rebuilding an existing released version
+# without cutting a new tag (e.g. to refresh attestations or pick up
+# a new base image). The GitHub release step is skipped on dispatch.
 on:
   push:
     tags:
       - "server/v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build (tag like `server/v0.4.0` or a SHA)"
+        required: true
+        type: string
+      version:
+        description: "Version string for image tags (e.g. `v0.4.0`)"
+        required: true
+        type: string
+      update_floating_tags:
+        description: "Also push `:latest` and `:cu128` floating tags"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -18,10 +37,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Extract version
         id: ver
-        run: echo "version=${GITHUB_REF_NAME#server/}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "floating=${{ github.event.inputs.update_floating_tags }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#server/}" >> "$GITHUB_OUTPUT"
+            echo "floating=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compose tags
+        id: tags
+        run: |
+          tags="dvcdsys/code-index:${{ steps.ver.outputs.version }}"
+          if [ "${{ steps.ver.outputs.floating }}" = "true" ]; then
+            tags="$tags
+          dvcdsys/code-index:latest"
+          fi
+          {
+            echo 'tags<<EOF'
+            echo "$tags"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -42,9 +84,7 @@ jobs:
           provenance: mode=max
           sbom: true
           build-args: VERSION=${{ steps.ver.outputs.version }}
-          tags: |
-            dvcdsys/code-index:${{ steps.ver.outputs.version }}
-            dvcdsys/code-index:latest
+          tags: ${{ steps.tags.outputs.tags }}
 
   docker-cuda:
     name: Build CUDA image (amd64)
@@ -52,10 +92,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Extract version
         id: ver
-        run: echo "version=${GITHUB_REF_NAME#server/}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "floating=${{ github.event.inputs.update_floating_tags }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#server/}" >> "$GITHUB_OUTPUT"
+            echo "floating=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compose tags
+        id: tags
+        run: |
+          tags="dvcdsys/code-index:${{ steps.ver.outputs.version }}-cu128"
+          if [ "${{ steps.ver.outputs.floating }}" = "true" ]; then
+            tags="$tags
+          dvcdsys/code-index:cu128"
+          fi
+          {
+            echo 'tags<<EOF'
+            echo "$tags"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -76,14 +139,15 @@ jobs:
           provenance: mode=max
           sbom: true
           build-args: VERSION=${{ steps.ver.outputs.version }}
-          tags: |
-            dvcdsys/code-index:${{ steps.ver.outputs.version }}-cu128
-            dvcdsys/code-index:cu128
+          tags: ${{ steps.tags.outputs.tags }}
 
   release:
     name: Publish release
     needs: [docker-cpu, docker-cuda]
     runs-on: ubuntu-latest
+    # Skip GitHub release creation on manual rebuilds — the release
+    # already exists for the version being rebuilt.
+    if: github.event_name == 'push'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
