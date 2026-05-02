@@ -47,8 +47,12 @@ server/exec.log
 # uv
 .python-version
 
-# Local docs
+# Local docs (top-level docs/ is a notebook directory per CLAUDE.md;
+# tracked project documentation lives in doc/). Exception below for the
+# embedded Swagger UI bundle inside the Go server package.
 docs/
+!server/internal/httpapi/docs/
+!server/internal/httpapi/docs/**
 
 # Claude Code
 .claude/

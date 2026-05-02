@@ -1,0 +1,1322 @@
+openapi: 3.0.3
+info:
+  title: cix-server API
+  version: v1
+  description: |
+    HTTP API for the `cix-server` semantic code-index daemon.
+
+    The wire format is byte-stable across server versions; the `api_version`
+    field in `/api/v1/status` ticks independently from `server_version` when
+    a backwards-incompatible change lands.
+
+    ## Authentication
+
+    Every endpoint except `GET /health`, `GET /docs`, and `GET /openapi.yaml`
+    requires a Bearer token matching `CIX_API_KEY`. When the server is started
+    with an empty `CIX_API_KEY` it skips the check (dev mode); a startup log
+    line warns about this.
+
+    ## Project addressing
+
+    Project `host_path` values contain slashes that cannot be embedded in
+    URL segments cleanly, so project-scoped endpoints take a `{path}` URL
+    parameter that is the **first 16 hex chars of `SHA1(host_path)`**.
+    Compute it with `internal/projects.HashPath`.
+
+    ## Streaming indexing
+
+    `POST /api/v1/projects/{path}/index/files` honours the `Accept` header:
+    sending `Accept: application/x-ndjson` switches the response to a
+    newline-delimited stream of `IndexProgressEvent` objects, with a
+    `heartbeat` event every 10 seconds. Old clients that send no Accept
+    header (or `application/json`) get the legacy single-JSON response.
+
+    ## Errors
+
+    All error responses use the same body shape: `{"detail": "<message>"}`.
+    `GET /health` is the only exception — the unhealthy variant additionally
+    carries `{"reason": "..."}`.
+
+servers:
+  # Relative URL — Swagger UI's "Try it out" sends requests to whatever
+  # origin served /openapi.json, so localhost:8001, localhost:21847, and a
+  # remote deployment all just work without CORS preflight surprises.
+  - url: /
+    description: Same-origin (auto-detected from the URL serving this spec)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: probe
+    description: Health and status probes
+  - name: projects
+    description: Project lifecycle (CRUD)
+  - name: search
+    description: Symbol, definition, reference, file, and semantic search
+  - name: indexing
+    description: Three-phase indexing protocol
+  - name: docs
+    description: API documentation
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [probe]
+      summary: Liveness probe (public)
+      description: |
+        Returns `{"status":"ok"}` when the server can reach SQLite within 1
+        second. Returns 503 with `{"status":"unhealthy","reason":"..."}` when
+        the DB ping fails. Public — no `Authorization` header required.
+      security: []
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Server is unhealthy (e.g. DB unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /api/v1/status:
+    get:
+      operationId: getStatus
+      tags: [probe]
+      summary: Server / sidecar status (authenticated)
+      description: |
+        Returns server metadata: version, configured embedding model, whether
+        the llama-server sidecar is reachable (`model_loaded`), number of
+        registered projects, and number of currently-running indexing jobs.
+      responses:
+        "200":
+          description: Status payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/projects:
+    post:
+      operationId: createProject
+      tags: [projects]
+      summary: Register a new project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: A project with this `host_path` already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listProjects
+      tags: [projects]
+      summary: List all registered projects
+      responses:
+        "200":
+          description: Project list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    get:
+      operationId: getProject
+      tags: [projects]
+      summary: Get one project by hash
+      responses:
+        "200":
+          description: Project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      operationId: updateProject
+      tags: [projects]
+      summary: Patch project settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProjectRequest"
+      responses:
+        "200":
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteProject
+      tags: [projects]
+      summary: Delete a project (and all its indexed data)
+      responses:
+        "204":
+          description: Deleted (no body)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/summary:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    get:
+      operationId: getProjectSummary
+      tags: [projects]
+      summary: Project overview (top dirs, recent symbols, totals)
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/search:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: semanticSearch
+      tags: [search]
+      summary: Semantic (vector) search
+      description: |
+        Embeds the query and runs an approximate nearest-neighbour search
+        against the project's chromem-go collection. Results are
+        post-filtered by `min_score`, `paths` (whitelist, prefix-OR-substring
+        match), `excludes` (blacklist, same matching), and `languages` —
+        then merged into per-file groups and ranked by best match score.
+
+        `min_score` semantics:
+          - omitted → server default `0.4` (calibrated for CodeRankEmbed-Q8)
+          - explicit `0` → return everything above HNSW floor
+          - explicit positive → that floor
+
+        `query_time_ms` is rounded to 1 decimal place.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SemanticSearchRequest"
+      responses:
+        "200":
+          description: Per-file grouped semantic results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SemanticSearchResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          description: |
+            Embeddings disabled, vector store missing, or sidecar busy
+            (Retry-After header set).
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds to wait when the embedder is busy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/search/symbols:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: searchSymbols
+      tags: [search]
+      summary: Symbol search by name (prefix/substring)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SymbolSearchRequest"
+      responses:
+        "200":
+          description: Matching symbols
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SymbolSearchResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/search/definitions:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: searchDefinitions
+      tags: [search]
+      summary: Go-to-definition by symbol name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DefinitionRequest"
+      responses:
+        "200":
+          description: Matching definitions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DefinitionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/search/references:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: searchReferences
+      tags: [search]
+      summary: Find references to a symbol
+      description: |
+        Returns the locations where `symbol` appears as an identifier token.
+        `content` is intentionally empty and `end_line == start_line` —
+        populating snippets here would require a full file re-read per
+        result; clients should follow up with semantic search or read the
+        file directly.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReferenceRequest"
+      responses:
+        "200":
+          description: References
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReferenceResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/search/files:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: searchFiles
+      tags: [search]
+      summary: File-path substring search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileSearchRequest"
+      responses:
+        "200":
+          description: Matching file paths
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileSearchResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/index/begin:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: indexBegin
+      tags: [indexing]
+      summary: Open an indexing session
+      description: |
+        Returns a `run_id` and the map of currently-stored content hashes
+        (`stored_hashes`) so the client can compute a delta. Pass `full:true`
+        to wipe project state before indexing. Body is optional.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IndexBeginRequest"
+      responses:
+        "200":
+          description: Session opened
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexBeginResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: An indexing session is already active for this project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/IndexerUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/index/files:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: indexFiles
+      tags: [indexing]
+      summary: Submit a batch of files (max 50)
+      description: |
+        Sends a batch of file payloads belonging to the open `run_id`.
+        Maximum 50 files per call.
+
+        **Streaming negotiation**: send `Accept: application/x-ndjson` to
+        receive a newline-delimited stream of `IndexProgressEvent` objects
+        (one event per line, plus a `heartbeat` every 10 s). Without that
+        header (or with `Accept: application/json`) the response is the
+        legacy single-JSON `IndexFilesResponse` returned after the batch
+        completes.
+      parameters:
+        - in: header
+          name: Accept
+          required: false
+          schema:
+            type: string
+            enum: [application/json, application/x-ndjson]
+          description: |
+            `application/x-ndjson` switches to a streamed response
+            (one `IndexProgressEvent` per line). Default: `application/json`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IndexFilesRequest"
+      responses:
+        "200":
+          description: |
+            Either a single JSON summary (default) or a stream of NDJSON
+            events (when the client opted in via `Accept: application/x-ndjson`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexFilesResponse"
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/IndexProgressEvent"
+              examples:
+                stream:
+                  summary: NDJSON stream (one event per line)
+                  value: |
+                    {"event":"file_started","run_id":"r-1","path":"main.go","file_index":1,"batch_size":20}
+                    {"event":"file_chunked","path":"main.go","chunks":12}
+                    {"event":"file_embedded","path":"main.go","chunks":12,"embed_ms":540}
+                    {"event":"file_done","path":"main.go","chunks":12}
+                    {"event":"heartbeat","ts":"2026-04-27T17:25:00Z"}
+                    {"event":"batch_done","files_accepted":20,"chunks_created":347,"files_processed_total":300}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Project not found OR run_id not found / project mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          description: |
+            Indexer disabled, or GPU sidecar busy. When busy, `Retry-After`
+            header is set with a suggested wait (seconds).
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/index/finish:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: indexFinish
+      tags: [indexing]
+      summary: Commit the indexing session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IndexFinishRequest"
+      responses:
+        "200":
+          description: Session committed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexFinishResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Project not found OR run_id unknown / project mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/IndexerUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/index/cancel:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: indexCancel
+      tags: [indexing]
+      summary: Cancel any active indexing session (idempotent)
+      description: |
+        Returns `{"cancelled": true}` if a session was killed, `false` if
+        none was active. Safe to call unconditionally — used by the CLI's
+        startup stale-session guard.
+      responses:
+        "200":
+          description: Cancellation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexCancelResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/index/status:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    get:
+      operationId: indexStatus
+      tags: [indexing]
+      summary: Live progress of the current run, or last completed run
+      description: |
+        When a session is active: returns mid-run progress with
+        `phase`, `files_discovered/processed/total`, `chunks_created`,
+        `elapsed_seconds`, and `run_id`. When no session is active:
+        falls back to the most recent `index_runs` row, returning only
+        `files_processed/total` and `chunks_created`. If the project
+        has no history at all: `{"status":"idle"}`.
+      responses:
+        "200":
+          description: Progress payload (or idle)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexProgressResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "API key passed as `Authorization: Bearer <CIX_API_KEY>`"
+
+  parameters:
+    ProjectHash:
+      name: path
+      in: path
+      required: true
+      description: |
+        First 16 hex chars of `SHA1(host_path)`. See
+        `internal/projects.HashPath`.
+      schema:
+        type: string
+        pattern: "^[a-f0-9]{16}$"
+        example: "5b7d2c9e1a3f8042"
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unprocessable:
+      description: Malformed request body or missing required fields
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Unhandled server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    IndexerUnavailable:
+      description: Indexing service not configured
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unhealthy]
+        reason:
+          type: string
+          description: Set only when `status` is `unhealthy`.
+
+    StatusResponse:
+      type: object
+      required:
+        - status
+        - backend
+        - server_version
+        - api_version
+        - model_loaded
+        - embedding_model
+        - projects
+        - active_indexing_jobs
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        backend:
+          type: string
+          description: Backend identifier (e.g. `go`).
+        server_version:
+          type: string
+        api_version:
+          type: string
+          example: v1
+        model_loaded:
+          type: boolean
+          description: |
+            Whether the llama-server sidecar reports ready within 500 ms.
+            False when the sidecar is starting or has crashed.
+        embedding_model:
+          type: string
+          description: Hugging Face model id (e.g. `awhiteside/CodeRankEmbed-Q8_0-GGUF`).
+        projects:
+          type: integer
+          minimum: 0
+          description: Total registered projects.
+        active_indexing_jobs:
+          type: integer
+          minimum: 0
+          description: Currently-running `index_runs` rows.
+
+    ProjectSettings:
+      type: object
+      required: [exclude_patterns, max_file_size]
+      properties:
+        exclude_patterns:
+          type: array
+          items: { type: string }
+        max_file_size:
+          type: integer
+          minimum: 0
+
+    ProjectStats:
+      type: object
+      required: [total_files, indexed_files, total_chunks, total_symbols]
+      properties:
+        total_files:
+          type: integer
+          minimum: 0
+        indexed_files:
+          type: integer
+          minimum: 0
+        total_chunks:
+          type: integer
+          minimum: 0
+        total_symbols:
+          type: integer
+          minimum: 0
+
+    Project:
+      type: object
+      required:
+        - host_path
+        - container_path
+        - languages
+        - settings
+        - stats
+        - status
+        - created_at
+        - updated_at
+        - last_indexed_at
+      properties:
+        host_path:
+          type: string
+          description: Absolute filesystem path on the operator's machine.
+        container_path:
+          type: string
+          description: Path inside the container (often equal to host_path).
+        languages:
+          type: array
+          items: { type: string }
+        settings:
+          $ref: "#/components/schemas/ProjectSettings"
+        stats:
+          $ref: "#/components/schemas/ProjectStats"
+        status:
+          type: string
+          enum: [created, indexing, indexed, error]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_indexed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ProjectListResponse:
+      type: object
+      required: [projects, total]
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        total:
+          type: integer
+          minimum: 0
+
+    CreateProjectRequest:
+      type: object
+      required: [host_path]
+      properties:
+        host_path:
+          type: string
+
+    UpdateProjectRequest:
+      type: object
+      properties:
+        settings:
+          $ref: "#/components/schemas/ProjectSettings"
+
+    DirEntry:
+      type: object
+      required: [path, file_count]
+      properties:
+        path:
+          type: string
+        file_count:
+          type: integer
+          minimum: 0
+
+    SymbolEntry:
+      type: object
+      required: [name, kind, file_path, language]
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+        file_path:
+          type: string
+        language:
+          type: string
+
+    ProjectSummary:
+      type: object
+      required:
+        - host_path
+        - status
+        - languages
+        - total_files
+        - total_chunks
+        - total_symbols
+        - top_directories
+        - recent_symbols
+      properties:
+        host_path:
+          type: string
+        status:
+          type: string
+        languages:
+          type: array
+          items: { type: string }
+        total_files:
+          type: integer
+          minimum: 0
+        total_chunks:
+          type: integer
+          minimum: 0
+        total_symbols:
+          type: integer
+          minimum: 0
+        top_directories:
+          type: array
+          items:
+            $ref: "#/components/schemas/DirEntry"
+        recent_symbols:
+          type: array
+          items:
+            $ref: "#/components/schemas/SymbolEntry"
+
+    SymbolSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+        kinds:
+          type: array
+          items: { type: string }
+        limit:
+          type: integer
+          minimum: 0
+          default: 20
+
+    SymbolResultItem:
+      type: object
+      required: [name, kind, file_path, line, end_line, language]
+      properties:
+        name: { type: string }
+        kind: { type: string }
+        file_path: { type: string }
+        line: { type: integer }
+        end_line: { type: integer }
+        language: { type: string }
+        signature: { type: string }
+        parent_name: { type: string }
+
+    SymbolSearchResponse:
+      type: object
+      required: [results, total]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SymbolResultItem"
+        total:
+          type: integer
+          minimum: 0
+
+    DefinitionRequest:
+      type: object
+      required: [symbol]
+      properties:
+        symbol:
+          type: string
+          minLength: 1
+        kind:
+          type: string
+        file_path:
+          type: string
+        limit:
+          type: integer
+          minimum: 0
+          default: 10
+
+    DefinitionItem:
+      type: object
+      required: [name, kind, file_path, line, end_line, language]
+      properties:
+        name: { type: string }
+        kind: { type: string }
+        file_path: { type: string }
+        line: { type: integer }
+        end_line: { type: integer }
+        language: { type: string }
+        signature: { type: string }
+        parent_name: { type: string }
+
+    DefinitionResponse:
+      type: object
+      required: [results, total]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/DefinitionItem"
+        total:
+          type: integer
+          minimum: 0
+
+    ReferenceRequest:
+      type: object
+      required: [symbol]
+      properties:
+        symbol:
+          type: string
+          minLength: 1
+        limit:
+          type: integer
+          minimum: 0
+          default: 50
+        file_path:
+          type: string
+
+    ReferenceItem:
+      type: object
+      required:
+        - file_path
+        - start_line
+        - end_line
+        - content
+        - chunk_type
+        - symbol_name
+        - language
+      properties:
+        file_path: { type: string }
+        start_line: { type: integer }
+        end_line:
+          type: integer
+          description: Always equal to `start_line` (refs table stores tokens, not ranges).
+        content:
+          type: string
+          description: Always empty — see endpoint description.
+        chunk_type:
+          type: string
+          enum: [reference]
+        symbol_name: { type: string }
+        language: { type: string }
+
+    ReferenceResponse:
+      type: object
+      required: [results, total]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReferenceItem"
+        total:
+          type: integer
+          minimum: 0
+
+    FileSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: Substring matched against `file_path`.
+        limit:
+          type: integer
+          minimum: 0
+          default: 20
+
+    FileResultItem:
+      type: object
+      required: [file_path, language]
+      properties:
+        file_path: { type: string }
+        language:
+          type: string
+          nullable: true
+          description: Detected language, or null if undetected.
+
+    FileSearchResponse:
+      type: object
+      required: [results, total]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileResultItem"
+        total:
+          type: integer
+          minimum: 0
+
+    SemanticSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+        limit:
+          type: integer
+          minimum: 0
+          default: 10
+          description: Maximum number of FILE groups (not chunks) to return.
+        languages:
+          type: array
+          items: { type: string }
+        paths:
+          type: array
+          items: { type: string }
+          description: Whitelist — keep only results whose path matches any prefix or substring.
+        excludes:
+          type: array
+          items: { type: string }
+          description: Blacklist — drop results whose path matches any prefix or substring.
+        min_score:
+          type: number
+          format: float
+          description: |
+            Minimum cosine similarity. Omit for server default (0.4 for
+            CodeRankEmbed-Q8). Send `0` explicitly to disable the floor.
+
+    NestedHit:
+      type: object
+      required: [start_line, end_line, chunk_type, score]
+      properties:
+        start_line: { type: integer }
+        end_line: { type: integer }
+        symbol_name: { type: string }
+        chunk_type: { type: string }
+        score:
+          type: number
+          format: float
+
+    FileMatch:
+      type: object
+      required: [start_line, end_line, content, score, chunk_type]
+      properties:
+        start_line: { type: integer }
+        end_line: { type: integer }
+        content: { type: string }
+        score:
+          type: number
+          format: float
+        chunk_type: { type: string }
+        symbol_name: { type: string }
+        nested_hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/NestedHit"
+
+    FileGroupResult:
+      type: object
+      required: [file_path, best_score, matches]
+      properties:
+        file_path: { type: string }
+        language: { type: string }
+        best_score:
+          type: number
+          format: float
+        matches:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileMatch"
+
+    SemanticSearchResponse:
+      type: object
+      required: [results, total, query_time_ms]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileGroupResult"
+        total:
+          type: integer
+          minimum: 0
+        query_time_ms:
+          type: number
+          format: double
+          description: Wall-clock query latency, rounded to 1 decimal place.
+
+    IndexBeginRequest:
+      type: object
+      properties:
+        full:
+          type: boolean
+          default: false
+          description: When true, wipes existing project state before opening the session.
+
+    IndexBeginResponse:
+      type: object
+      required: [run_id, stored_hashes]
+      properties:
+        run_id:
+          type: string
+        stored_hashes:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Map from file path → SHA-256 of currently-stored content. Empty
+            when the project has never been indexed (or `full:true` was passed).
+
+    FilePayload:
+      type: object
+      required: [path, content, content_hash, size]
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+          description: UTF-8 text. Binary files should not be submitted.
+        content_hash:
+          type: string
+          description: SHA-256 hex digest of `content`.
+        language:
+          type: string
+        size:
+          type: integer
+          minimum: 0
+
+    IndexFilesRequest:
+      type: object
+      required: [run_id, files]
+      properties:
+        run_id:
+          type: string
+          minLength: 1
+        files:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/FilePayload"
+
+    IndexFilesResponse:
+      type: object
+      required: [files_accepted, chunks_created, files_processed_total]
+      properties:
+        files_accepted:
+          type: integer
+          minimum: 0
+        chunks_created:
+          type: integer
+          minimum: 0
+        files_processed_total:
+          type: integer
+          minimum: 0
+
+    IndexFinishRequest:
+      type: object
+      required: [run_id]
+      properties:
+        run_id:
+          type: string
+          minLength: 1
+        deleted_paths:
+          type: array
+          items: { type: string }
+        total_files_discovered:
+          type: integer
+          minimum: 0
+
+    IndexFinishResponse:
+      type: object
+      required: [status, files_processed, chunks_created]
+      properties:
+        status:
+          type: string
+          enum: [completed]
+        files_processed:
+          type: integer
+          minimum: 0
+        chunks_created:
+          type: integer
+          minimum: 0
+
+    IndexCancelResponse:
+      type: object
+      required: [cancelled]
+      properties:
+        cancelled:
+          type: boolean
+
+    IndexProgressInfo:
+      type: object
+      description: |
+        Progress payload. The active-session variant carries every field;
+        the historical-fallback variant only carries `files_processed`,
+        `files_total`, and `chunks_created`.
+      properties:
+        phase:
+          type: string
+          enum: [receiving, completed]
+        files_discovered:
+          type: integer
+          minimum: 0
+        files_processed:
+          type: integer
+          minimum: 0
+        files_total:
+          type: integer
+          minimum: 0
+        chunks_created:
+          type: integer
+          minimum: 0
+        elapsed_seconds:
+          type: number
+          format: double
+        run_id:
+          type: string
+
+    IndexProgressResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [idle, indexing, completed, cancelled, failed, running]
+          description: |
+            `idle` — no session ever / fallback unavailable.
+            `indexing` — session active.
+            `completed`/`cancelled`/`failed`/`running` — last-run status from `index_runs`.
+        progress:
+          $ref: "#/components/schemas/IndexProgressInfo"
+
+    IndexProgressEvent:
+      type: object
+      description: |
+        One event in the NDJSON stream emitted by `POST /index/files` when
+        the client sends `Accept: application/x-ndjson`. The `event` field
+        discriminates the variant; other fields are populated as relevant.
+      required: [event]
+      properties:
+        event:
+          type: string
+          enum:
+            - file_started
+            - file_chunked
+            - file_embedded
+            - file_done
+            - file_error
+            - heartbeat
+            - batch_done
+            - error
+        run_id:
+          type: string
+        path:
+          type: string
+        file_index:
+          type: integer
+        batch_size:
+          type: integer
+        chunks:
+          type: integer
+        embed_ms:
+          type: integer
+          format: int64
+        ts:
+          type: string
+          format: date-time
+        message:
+          type: string
+        fatal:
+          type: boolean
+        files_accepted:
+          type: integer
+        chunks_created:
+          type: integer
+        files_processed_total:
+          type: integer
