@@ -139,6 +139,71 @@ func (s *Service) List(ctx context.Context) ([]User, error) {
 	return out, rows.Err()
 }
 
+// UserWithStats decorates User with admin-table aggregates: latest session
+// timestamp + counts of non-expired sessions and non-revoked api keys.
+type UserWithStats struct {
+	User
+	LastLoginAt         *time.Time
+	ActiveSessionsCount int
+	APIKeysCount        int
+}
+
+// ListWithStats returns users joined with three aggregates used by the
+// dashboard's admin /users table: last_login_at (= newest session
+// created_at), active_sessions_count (= non-expired sessions),
+// api_keys_count (= non-revoked api_keys). Performed as one query with
+// correlated subqueries; per-user counts mean the n+1 stays inside SQLite.
+func (s *Service) ListWithStats(ctx context.Context) ([]UserWithStats, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	const q = `
+		SELECT id, email, role, must_change_password, created_at, updated_at, disabled_at,
+			(SELECT MAX(created_at) FROM sessions WHERE user_id = users.id),
+			(SELECT COUNT(1) FROM sessions WHERE user_id = users.id AND expires_at > ?),
+			(SELECT COUNT(1) FROM api_keys WHERE owner_user_id = users.id AND revoked_at IS NULL)
+		FROM users ORDER BY created_at ASC`
+	rows, err := s.DB.QueryContext(ctx, q, now)
+	if err != nil {
+		return nil, fmt.Errorf("list users with stats: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UserWithStats
+	for rows.Next() {
+		var (
+			u                       User
+			mcp                     int
+			createdAt, updatedAt    string
+			disabledAt              sql.NullString
+			lastLogin               sql.NullString
+			activeSessions, apiKeys int
+		)
+		if err := rows.Scan(
+			&u.ID, &u.Email, &u.Role, &mcp, &createdAt, &updatedAt, &disabledAt,
+			&lastLogin, &activeSessions, &apiKeys,
+		); err != nil {
+			return nil, err
+		}
+		u.MustChangePassword = mcp == 1
+		u.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		u.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		if disabledAt.Valid {
+			t, _ := time.Parse(time.RFC3339Nano, disabledAt.String)
+			u.DisabledAt = &t
+		}
+		ws := UserWithStats{
+			User:                u,
+			ActiveSessionsCount: activeSessions,
+			APIKeysCount:        apiKeys,
+		}
+		if lastLogin.Valid {
+			t, _ := time.Parse(time.RFC3339Nano, lastLogin.String)
+			ws.LastLoginAt = &t
+		}
+		out = append(out, ws)
+	}
+	return out, rows.Err()
+}
+
 // Authenticate verifies email+password. Returns ErrInvalidLogin for any
 // auth failure (bad password OR missing user) — never leak which one.
 // Disabled accounts return ErrUserDisabled.

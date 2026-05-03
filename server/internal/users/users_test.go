@@ -2,9 +2,11 @@ package users
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/db"
 )
@@ -146,5 +148,104 @@ func TestAuthenticate_NoUserDoesNotPanic(t *testing.T) {
 	_, err := s.Authenticate(context.Background(), "nobody@example.com", "anything")
 	if err == nil || !strings.Contains(err.Error(), "invalid email or password") {
 		t.Errorf("err = %v, want ErrInvalidLogin", err)
+	}
+}
+
+// TestListWithStats verifies the joined aggregates: last_login_at (newest
+// session), active_sessions_count (non-expired only), api_keys_count
+// (non-revoked only). All three feed the dashboard's admin /users table.
+func TestListWithStats(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+	now := time.Now().UTC()
+
+	// Three users: alice (active session + 2 keys, 1 revoked), bob (expired
+	// session + 1 active key), carol (no sessions, no keys).
+	alice, err := s.Create(ctx, "alice@b.com", "password1234", RoleAdmin, false)
+	if err != nil {
+		t.Fatalf("create alice: %v", err)
+	}
+	bob, err := s.Create(ctx, "bob@b.com", "password1234", RoleViewer, false)
+	if err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+	carol, err := s.Create(ctx, "carol@b.com", "password1234", RoleViewer, false)
+	if err != nil {
+		t.Fatalf("create carol: %v", err)
+	}
+
+	insertSession := func(userID string, created, expires time.Time) {
+		_, err := s.DB.ExecContext(ctx,
+			`INSERT INTO sessions (id, user_id, created_at, expires_at, last_seen_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			"sess-"+userID+"-"+created.Format("150405.999999999"),
+			userID,
+			created.Format(time.RFC3339Nano),
+			expires.Format(time.RFC3339Nano),
+			created.Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			t.Fatalf("insert session for %s: %v", userID, err)
+		}
+	}
+	insertKey := func(userID, name string, revoked bool) {
+		var revokedAt sql.NullString
+		if revoked {
+			revokedAt = sql.NullString{Valid: true, String: now.Format(time.RFC3339Nano)}
+		}
+		_, err := s.DB.ExecContext(ctx,
+			`INSERT INTO api_keys (id, owner_user_id, name, prefix, hash, created_at, revoked_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"ak-"+userID+"-"+name, userID, name,
+			"cix_"+name[:4], "hash-"+userID+"-"+name,
+			now.Format(time.RFC3339Nano), revokedAt,
+		)
+		if err != nil {
+			t.Fatalf("insert key for %s: %v", userID, err)
+		}
+	}
+
+	// Alice: 2 sessions (newer = "now", older = 1 hour ago), both active.
+	insertSession(alice.ID, now.Add(-1*time.Hour), now.Add(13*24*time.Hour))
+	aliceLatest := now.Add(-5 * time.Minute)
+	insertSession(alice.ID, aliceLatest, now.Add(14*24*time.Hour))
+	insertKey(alice.ID, "live1", false)
+	insertKey(alice.ID, "live2", false)
+	insertKey(alice.ID, "deadx", true)
+
+	// Bob: 1 expired session, 1 active key. last_login_at still set
+	// (expired session still counts as a past login event).
+	bobOnly := now.Add(-30 * 24 * time.Hour)
+	insertSession(bob.ID, bobOnly, now.Add(-16*24*time.Hour))
+	insertKey(bob.ID, "bobok", false)
+
+	// Carol: nothing.
+	_ = carol
+
+	got, err := s.ListWithStats(ctx)
+	if err != nil {
+		t.Fatalf("ListWithStats: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+
+	by := map[string]UserWithStats{}
+	for _, u := range got {
+		by[u.Email] = u
+	}
+
+	if a := by["alice@b.com"]; a.ActiveSessionsCount != 2 || a.APIKeysCount != 2 ||
+		a.LastLoginAt == nil || !a.LastLoginAt.Equal(aliceLatest.Truncate(time.Nanosecond)) {
+		t.Errorf("alice stats wrong: sess=%d keys=%d last=%v (want sess=2 keys=2 last=%v)",
+			a.ActiveSessionsCount, a.APIKeysCount, a.LastLoginAt, aliceLatest)
+	}
+	if b := by["bob@b.com"]; b.ActiveSessionsCount != 0 || b.APIKeysCount != 1 || b.LastLoginAt == nil {
+		t.Errorf("bob stats wrong: sess=%d keys=%d last=%v (want sess=0 keys=1 last set)",
+			b.ActiveSessionsCount, b.APIKeysCount, b.LastLoginAt)
+	}
+	if c := by["carol@b.com"]; c.ActiveSessionsCount != 0 || c.APIKeysCount != 0 || c.LastLoginAt != nil {
+		t.Errorf("carol stats wrong: sess=%d keys=%d last=%v (want all zero/nil)",
+			c.ActiveSessionsCount, c.APIKeysCount, c.LastLoginAt)
 	}
 }
