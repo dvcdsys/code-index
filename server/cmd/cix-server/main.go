@@ -195,18 +195,16 @@ func run() error {
 		// `localhost` is good enough here: the server binds 0.0.0.0 by
 		// default, but the operator is almost always reading this on the
 		// same host they're about to click on.
-		//
-		// /dashboard is intentionally NOT advertised yet — the route
-		// lands in PR-B alongside the React SPA; advertising a 401-only
-		// URL today would be misleading.
 		base := fmt.Sprintf("http://localhost:%d", cfg.Port)
 		logger.Info("server ready",
+			"dashboard", base+"/dashboard",
 			"api_docs", base+"/docs",
 			"openapi_spec", base+"/openapi.json",
 			"health", base+"/health",
 		)
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  cix-server is ready 🟢")
+		fmt.Fprintln(os.Stderr, "    Dashboard:    "+base+"/dashboard")
 		fmt.Fprintln(os.Stderr, "    API docs:     "+base+"/docs")
 		fmt.Fprintln(os.Stderr, "    OpenAPI spec: "+base+"/openapi.json")
 		fmt.Fprintln(os.Stderr, "")
