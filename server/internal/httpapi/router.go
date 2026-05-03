@@ -11,9 +11,12 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
+	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -41,15 +44,16 @@ type Deps struct {
 	Backend        string
 	EmbeddingModel string
 	Logger         *slog.Logger
-	// APIKey is the shared secret compared against the `Authorization: Bearer`
-	// header on every authenticated route. Required unless AuthDisabled=true.
-	APIKey string
-	// AuthDisabled, when true, omits the requireAPIKey middleware entirely —
-	// every route becomes reachable without credentials. Off by default.
-	// Toggle via CIX_AUTH_DISABLED=true (config.go) for local dev or tests.
-	// In production this MUST stay false; main.go's Validate refuses to
-	// start with an empty APIKey unless this is explicitly true.
+	// AuthDisabled, when true, omits the auth middleware entirely — every
+	// route becomes reachable without credentials. Off by default. Toggle
+	// via CIX_AUTH_DISABLED=true (config.go) for local dev or tests.
 	AuthDisabled bool
+	// Users / Sessions / APIKeys back the dashboard auth model. Required
+	// in production; tests may pass nil + AuthDisabled=true to skip the
+	// gate.
+	Users    *users.Service
+	Sessions *sessions.Service
+	APIKeys  *apikeys.Service
 	// EmbeddingSvc is the in-process embeddings service. May be nil when the
 	// server is started with CIX_EMBEDDINGS_ENABLED=false (e.g. in router
 	// tests). Phase 5 uses it for semantic search.
@@ -82,15 +86,14 @@ func NewRouter(d Deps) http.Handler {
 
 	srv := &Server{Deps: d}
 
-	// Auth — the middleware is installed ONLY when an API key is configured
-	// AND auth is not explicitly disabled. config.Validate refuses to start
-	// the server when APIKey is empty without the AuthDisabled flag, so by
-	// the time we reach NewRouter exactly one of the two branches below is
-	// the legitimate state.
+	// Auth — the middleware is installed unless AuthDisabled is true. Every
+	// authenticated route accepts EITHER an active session cookie OR a
+	// Bearer API key; admin-only routes additionally require role=admin.
+	// requireAuth skips public paths (see isPublicPath in middleware.go):
+	// /health, /docs, /docs/*, /openapi.json plus the bootstrap-status and
+	// login endpoints.
 	if !d.AuthDisabled {
-		// requireAPIKey skips public paths (see isPublicPath in middleware.go):
-		// /health, /docs, /docs/*, /openapi.json.
-		r.Use(requireAPIKey(d.APIKey))
+		r.Use(requireAuth(d))
 	} else if d.Logger != nil {
 		// Loud signal — every authenticated request will pass without checks.
 		// The startup banner in main.go also logs this; we duplicate here so

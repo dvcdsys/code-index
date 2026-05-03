@@ -15,12 +15,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	"github.com/dvcdsys/code-index/server/internal/chunker"
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/httpapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
+	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
 
@@ -70,12 +73,12 @@ func run() error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
-	// Validate already refused an empty API key without CIX_AUTH_DISABLED=true,
-	// so reaching this point means either auth is properly configured or the
-	// operator explicitly opted out. Log loudly when we are about to serve
-	// without auth so it shows up in container logs / Portainer.
+	// CIX_AUTH_DISABLED=true skips ALL auth — log loudly so the warning
+	// shows up in container logs / Portainer. Bootstrap (further below)
+	// also enforces "no users + no bootstrap env = fatal", so this branch
+	// is the only path to a legitimately auth-free deployment.
 	if cfg.AuthDisabled {
-		logger.Warn("auth disabled (CIX_AUTH_DISABLED=true) — every endpoint is reachable without an API key")
+		logger.Warn("auth disabled (CIX_AUTH_DISABLED=true) — every endpoint is reachable without authentication")
 	}
 
 	chunker.Configure(cfg.Languages)
@@ -144,6 +147,17 @@ func run() error {
 	// leak for up to 1h past shutdown. m8 fix.
 	defer idx.Shutdown()
 
+	// Dashboard auth services. Built once and shared with the router.
+	usrSvc := users.New(database)
+	sessSvc := sessions.New(database)
+	akSvc := apikeys.New(database)
+
+	if !cfg.AuthDisabled {
+		if err := bootstrapAuth(context.Background(), cfg, logger, usrSvc, akSvc); err != nil {
+			return fmt.Errorf("bootstrap auth: %w", err)
+		}
+	}
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		DB:             database,
 		ServerVersion:  version,
@@ -151,8 +165,10 @@ func run() error {
 		Backend:        backend,
 		EmbeddingModel: cfg.EmbeddingModel,
 		Logger:         logger,
-		APIKey:         cfg.APIKey,
 		AuthDisabled:   cfg.AuthDisabled,
+		Users:          usrSvc,
+		Sessions:       sessSvc,
+		APIKeys:        akSvc,
 		EmbeddingSvc:   embedSvc,
 		VectorStore:    vs,
 		Indexer:        idx,
@@ -173,6 +189,27 @@ func run() error {
 			"version", version,
 			"embedding_model", cfg.EmbeddingModel,
 		)
+		// Public surface — emit as one structured line so JSON-aware log
+		// shippers (Loki, GCP Cloud Logging) keep them grouped, plus a
+		// plaintext banner to stderr for humans tailing the terminal.
+		// `localhost` is good enough here: the server binds 0.0.0.0 by
+		// default, but the operator is almost always reading this on the
+		// same host they're about to click on.
+		//
+		// /dashboard is intentionally NOT advertised yet — the route
+		// lands in PR-B alongside the React SPA; advertising a 401-only
+		// URL today would be misleading.
+		base := fmt.Sprintf("http://localhost:%d", cfg.Port)
+		logger.Info("server ready",
+			"api_docs", base+"/docs",
+			"openapi_spec", base+"/openapi.json",
+			"health", base+"/health",
+		)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  cix-server is ready 🟢")
+		fmt.Fprintln(os.Stderr, "    API docs:     "+base+"/docs")
+		fmt.Fprintln(os.Stderr, "    OpenAPI spec: "+base+"/openapi.json")
+		fmt.Fprintln(os.Stderr, "")
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}

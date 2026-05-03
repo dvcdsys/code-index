@@ -7,13 +7,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	apidb "github.com/dvcdsys/code-index/server/internal/db"
+	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/users"
 )
 
-// newDocsTestServer wires a router with a configured API key so we can
+// newDocsTestServer wires a router with full auth services so we can
 // verify that the docs endpoints are reachable WITHOUT credentials —
 // otherwise a passing test could just be the dev-mode skip in
-// requireAPIKey.
+// requireAuth.
 func newDocsTestServer(t *testing.T) http.Handler {
 	t.Helper()
 	database, err := apidb.Open(":memory:")
@@ -25,7 +28,9 @@ func newDocsTestServer(t *testing.T) http.Handler {
 		DB:            database,
 		ServerVersion: "0.0.0-test",
 		APIVersion:    "v1",
-		APIKey:        "secret-key",
+		Users:         users.New(database),
+		Sessions:      sessions.New(database),
+		APIKeys:       apikeys.New(database),
 	})
 }
 
