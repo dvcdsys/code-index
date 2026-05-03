@@ -20,6 +20,12 @@ var ErrNotFound = errors.New("project not found")
 // ErrConflict is returned when a project with the same path already exists.
 var ErrConflict = errors.New("project already exists")
 
+// ErrOverlap is returned when the new project path is nested inside an
+// existing project (or vice versa). Overlapping projects double-index the
+// same files, blow up storage, and make search results ambiguous —
+// always indicates a registration mistake the operator should resolve.
+var ErrOverlap = errors.New("project path overlaps an existing project")
+
 // Settings mirrors Python ProjectSettings.
 type Settings struct {
 	ExcludePatterns []string `json:"exclude_patterns"`
@@ -81,7 +87,7 @@ func hashPath(path string) string {
 	b := h.Sum(nil)
 	const hexchars = "0123456789abcdef"
 	out := make([]byte, 16)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		out[i*2] = hexchars[b[i]>>4]
 		out[i*2+1] = hexchars[b[i]&0xf]
 	}
@@ -92,7 +98,9 @@ func hashPath(path string) string {
 // CRUD
 // ---------------------------------------------------------------------------
 
-// Create inserts a new project. Returns ErrConflict if the path already exists.
+// Create inserts a new project. Returns ErrConflict if the path already
+// exists, or ErrOverlap if the path is a parent or descendant of any existing
+// project.
 //
 // We pass host_path through unchanged to match Python
 // (api/app/routers/projects.py). Normalising here (e.g. stripping trailing
@@ -101,6 +109,12 @@ func hashPath(path string) string {
 func Create(ctx context.Context, db *sql.DB, req CreateRequest) (*Project, error) {
 	hostPath := req.HostPath
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	if conflict, err := findOverlap(ctx, db, hostPath); err != nil {
+		return nil, fmt.Errorf("check overlap: %w", err)
+	} else if conflict != "" {
+		return nil, fmt.Errorf("%w: %s already registered", ErrOverlap, conflict)
+	}
 
 	defaultSettings := DefaultSettings()
 	settingsJSON, err := json.Marshal(defaultSettings)
@@ -125,6 +139,46 @@ func Create(ctx context.Context, db *sql.DB, req CreateRequest) (*Project, error
 		return nil, fmt.Errorf("insert project: %w", err)
 	}
 	return Get(ctx, db, hostPath)
+}
+
+// findOverlap returns the host_path of the first existing project that is a
+// parent or descendant of `candidate`, or "" if none. Same path is treated as
+// "no overlap" — the unique-index on host_path raises ErrConflict for that
+// case with a more specific message.
+//
+// Path comparison strips a single trailing slash from both sides and then
+// requires either:
+//   - existing is a prefix of candidate followed by '/' (existing is parent), or
+//   - candidate is a prefix of existing followed by '/' (existing is descendant)
+//
+// Symlinks are intentionally NOT resolved: storing canonical paths would
+// silently change identifiers across machines and break stored hashes.
+func findOverlap(ctx context.Context, db *sql.DB, candidate string) (string, error) {
+	cand := strings.TrimSuffix(candidate, "/")
+	if cand == "" {
+		return "", nil
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT host_path FROM projects`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var existing string
+		if err := rows.Scan(&existing); err != nil {
+			return "", err
+		}
+		ex := strings.TrimSuffix(existing, "/")
+		if ex == "" || ex == cand {
+			continue
+		}
+		if strings.HasPrefix(cand, ex+"/") || strings.HasPrefix(ex, cand+"/") {
+			return existing, nil
+		}
+	}
+	return "", rows.Err()
 }
 
 // Get retrieves a project by its host_path. Returns ErrNotFound if absent.
