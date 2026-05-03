@@ -1,8 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
 import { Toaster } from '@/ui/sonner';
+import { TooltipProvider } from '@/ui/tooltip';
 import { AuthProvider } from '@/auth/AuthProvider';
 import { ApiError } from '@/api/client';
+import { ThemeProvider } from './ThemeProvider';
 
 // One place to wire app-level providers — order matters:
 //   1. QueryClient: needed before AuthProvider, which uses useQuery for /me.
@@ -37,9 +39,13 @@ export function AppProviders({ children }: { children: ReactNode }) {
   );
 
   return (
-    <QueryClientProvider client={client}>
-      <AuthProvider>{children}</AuthProvider>
-      <Toaster />
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={client}>
+        <TooltipProvider delayDuration={200}>
+          <AuthProvider>{children}</AuthProvider>
+          <Toaster />
+        </TooltipProvider>
+      </QueryClientProvider>
+    </ThemeProvider>
   );
 }

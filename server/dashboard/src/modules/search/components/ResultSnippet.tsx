@@ -3,6 +3,7 @@ import type { FileMatch, NestedHit } from '@/api/types';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
 import { cn } from '@/lib/cn';
+import { openInEditor } from '@/lib/editorPreference';
 
 export function ResultSnippet({
   filePath,
@@ -79,26 +80,14 @@ export function OpenInEditorButton({
   line?: number;
   className?: string;
 }) {
-  function open() {
-    // Try Cursor first, then VS Code. Browsers will silently no-op if no
-    // handler is registered. A user-configurable preference moves to PR-D.
-    const lineSuffix = line ? `:${line}` : '';
-    const cursor = `cursor://file/${path}${lineSuffix}`;
-    const vscode = `vscode://file/${path}${lineSuffix}`;
-    window.location.href = cursor;
-    setTimeout(() => {
-      window.location.href = vscode;
-    }, 250);
-  }
-
   return (
     <Button
       type="button"
       size="sm"
       variant="ghost"
       className={cn('h-6 px-2 text-xs', className)}
-      onClick={open}
-      title="Open in editor (Cursor → VS Code)"
+      onClick={() => openInEditor(path, line)}
+      title="Open in editor (configure in Settings)"
     >
       <ExternalLink className="mr-1 h-3 w-3" />
       Open
