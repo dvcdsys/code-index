@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Phase 7 CUDA Dockerfile — distroless runtime, glibc + CUDA libs only.
 #
-# Stage 1: compile Go binary (pure static, no CGO)
+# Stage 0: build the React dashboard (node:20-alpine)
+# Stage 1: compile Go binary (pure static, no CGO) — embeds the dashboard
 # Stage 2: pull llama.cpp CUDA binaries
 # Stage 3: install CUDA shared libs in nvidia/cuda → extract individual .so
 # Stage 4: distroless/cc runtime — no shell, no apt, no tar/dpkg
@@ -12,10 +13,29 @@
 # Build:
 #   docker buildx build --builder cix-builder --platform linux/amd64 \
 #     --pull --build-arg VERSION=$(git describe --tags --always) \
+#     --build-context openapi=../doc \
 #     -f server/Dockerfile.cuda -t dvcdsys/code-index:go-cu128 \
 #     --push server/
+#
+# `--build-context openapi=../doc` mounts the repo-root doc/ folder so the
+# dashboard stage can read openapi.yaml without us widening the build
+# context (which would balloon image-build time).
 
 ARG VERSION=0.0.0-dev
+
+# ── Stage 0: build the React dashboard ─────────────────────────────────────
+FROM --platform=linux/amd64 node:20-alpine AS dashboard
+WORKDIR /src
+RUN apk upgrade --no-cache
+# Install deps first for warm cache.
+COPY dashboard/package.json dashboard/package-lock.json* ./dashboard/
+RUN cd dashboard && npm ci --no-audit --no-fund
+# Pull in the spec from the named context, then the rest of the dashboard.
+COPY --from=openapi openapi.yaml /spec/openapi.yaml
+COPY dashboard/ ./dashboard/
+RUN cd dashboard && \
+    npx openapi-typescript /spec/openapi.yaml -o src/api/generated.ts && \
+    npm run build
 
 # ── Stage 1: compile the Go binary ─────────────────────────────────────────
 FROM --platform=linux/amd64 golang:1.25-alpine AS builder
@@ -27,6 +47,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# Drop the built dashboard into the embed root so `go build` includes it.
+COPY --from=dashboard /src/internal/httpapi/dashboard/dist/ ./internal/httpapi/dashboard/dist/
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \

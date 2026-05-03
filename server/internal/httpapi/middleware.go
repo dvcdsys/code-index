@@ -27,12 +27,15 @@ func serverVersionHeader(version string) func(http.Handler) http.Handler {
 
 // publicPaths is the set of HTTP paths that bypass the auth check.
 // Includes the bootstrap probe + login (callers MUST be able to reach
-// these without a valid session) plus the documentation and health
-// endpoints. PR-B will add /dashboard here when the SPA route lands.
+// these without a valid session) plus the documentation, health, and
+// dashboard static-asset endpoints. The dashboard's API calls still go
+// through the auth gate — only the SPA shell + Vite-built assets are
+// public so the login form can render.
 var publicPaths = map[string]struct{}{
 	"/health":                       {},
 	"/docs":                         {},
 	"/openapi.json":                 {},
+	"/dashboard":                    {},
 	"/api/v1/auth/bootstrap-status": {},
 	"/api/v1/auth/login":            {},
 }
@@ -147,6 +150,9 @@ func isPublicPath(p string) bool {
 		return true
 	}
 	if strings.HasPrefix(p, "/docs/") {
+		return true
+	}
+	if strings.HasPrefix(p, "/dashboard/") {
 		return true
 	}
 	return false

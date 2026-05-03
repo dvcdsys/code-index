@@ -1,0 +1,7 @@
+node_modules/
+.vite/
+.cache/
+*.log
+
+# Type-gen output is reproducible — never commit
+src/api/generated.ts

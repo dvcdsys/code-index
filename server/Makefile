@@ -36,11 +36,18 @@ SCOUT_TAG   ?= scout-$(shell date +%Y%m%d-%H%M)
 
 .PHONY: help build test test-gate fetch-llama bundle run docker-build-cuda \
         docker-build-cuda-dev scout-cuda scout-cpu promote-cuda clean \
-        openapi-gen openapi-check swagger-ui-fetch
+        openapi-gen openapi-check swagger-ui-fetch \
+        dashboard-deps dashboard-gen-types dashboard-build dashboard-dev dashboard-clean
 
 # Pin the Swagger UI bundle version. Bumping this is a deliberate commit:
 # update the version, run `make swagger-ui-fetch`, eyeball the diff, ship.
 SWAGGER_UI_VERSION ?= 5.18.2
+
+# Dashboard frontend — Vite project under server/dashboard/. Output lands in
+# internal/httpapi/dashboard/dist/ and is picked up automatically by the Go
+# embed.FS in dashboard/embed.go.
+DASHBOARD_DIR := $(ROOT)/dashboard
+DASHBOARD_OUT := $(ROOT)/internal/httpapi/dashboard/dist
 
 help:
 	@echo "Targets:"
@@ -58,6 +65,11 @@ help:
 	@echo "  openapi-gen        — regenerate internal/httpapi/openapi/openapi.gen.go from doc/openapi.yaml"
 	@echo "  openapi-check      — fail if openapi.gen.go is out of sync with doc/openapi.yaml (CI)"
 	@echo "  swagger-ui-fetch   — refresh internal/httpapi/docs/swagger-ui/ from jsdelivr (SWAGGER_UI_VERSION=$(SWAGGER_UI_VERSION))"
+	@echo "  dashboard-deps     — npm ci inside server/dashboard/"
+	@echo "  dashboard-gen-types — regenerate src/api/generated.ts from doc/openapi.yaml"
+	@echo "  dashboard-build    — build the React dashboard into $(DASHBOARD_OUT)"
+	@echo "  dashboard-dev      — run vite dev server on :5173 (proxies /api to :21847)"
+	@echo "  dashboard-clean    — remove built dashboard artefacts (keeps PLACEHOLDER.html)"
 	@echo "  clean              — remove dist/"
 
 build:
@@ -119,6 +131,7 @@ docker-build-cuda:
 	  --provenance=mode=max \
 	  --sbom=true \
 	  --build-arg VERSION=$(VERSION) \
+	  --build-context openapi=$(ROOT)/../doc \
 	  -f $(ROOT)/Dockerfile.cuda \
 	  -t $(IMAGE_REPO):$(IMAGE_TAG) \
 	  --push \
@@ -141,6 +154,7 @@ docker-build-cuda-dev:
 	  --provenance=mode=max \
 	  --sbom=true \
 	  --build-arg VERSION=$(VERSION)-dev-$(GIT_SHA) \
+	  --build-context openapi=$(ROOT)/../doc \
 	  -f $(ROOT)/Dockerfile.cuda \
 	  -t $(IMAGE_REPO):$(DEV_TAG) \
 	  --push \
@@ -167,6 +181,7 @@ scout-cuda:
 	  --provenance=mode=max \
 	  --sbom=true \
 	  --build-arg VERSION=$(VERSION) \
+	  --build-context openapi=$(ROOT)/../doc \
 	  -f $(ROOT)/Dockerfile.cuda \
 	  -t $(IMAGE_REPO):$(SCOUT_TAG) \
 	  --push \
@@ -189,6 +204,7 @@ scout-cpu:
 	docker buildx build \
 	  --load \
 	  --build-arg VERSION=$(VERSION) \
+	  --build-context openapi=$(ROOT)/../doc \
 	  -t $(IMAGE_REPO):scout-cpu-tmp \
 	  -f $(ROOT)/Dockerfile \
 	  $(ROOT)
@@ -228,3 +244,39 @@ swagger-ui-fetch:
 	    curl -fsSL -o "$(SWAGGER_UI_DIR)/$$f" "$(SWAGGER_UI_BASE)/$$f" || { echo "FAIL: $$f"; exit 1; }; \
 	done
 	@echo "✓ Swagger UI bundle refreshed. index.html is hand-maintained — review the diff before committing."
+
+# Dashboard frontend — Vite + React project under server/dashboard/.
+#
+# Output lives at $(DASHBOARD_OUT) (= internal/httpapi/dashboard/dist) which
+# is referenced by `//go:embed dist` in dashboard/embed.go. After
+# `dashboard-build` finishes, a regular `go build` picks up the bundle
+# automatically — no extra wiring.
+
+dashboard-deps:
+	cd $(DASHBOARD_DIR) && npm ci
+
+dashboard-gen-types:
+	cd $(DASHBOARD_DIR) && npm run gen:api
+
+# `dashboard-deps` runs `npm ci` which is strict about lockfile match. For
+# day-to-day rebuilds where node_modules already exists this is wasteful;
+# fall through to a no-op when node_modules is present and the lockfile
+# hasn't changed since the last install.
+dashboard-build:
+	@if [ ! -d "$(DASHBOARD_DIR)/node_modules" ]; then \
+	    echo "→ npm ci (no node_modules/)"; \
+	    cd $(DASHBOARD_DIR) && npm ci; \
+	fi
+	cd $(DASHBOARD_DIR) && npm run gen:api && npm run build
+
+dashboard-dev: dashboard-gen-types
+	cd $(DASHBOARD_DIR) && npm run dev
+
+dashboard-clean:
+	@# Wipe everything in dist/ except the committed .gitkeep so that
+	@# `//go:embed all:dist` still has at least one entry afterwards
+	@# (otherwise `go build` would fail with "embed: no matching files").
+	@if [ -d "$(DASHBOARD_OUT)" ]; then \
+	    find $(DASHBOARD_OUT) -mindepth 1 ! -name .gitkeep -exec rm -rf {} +; \
+	    echo "→ Cleaned $(DASHBOARD_OUT) (kept .gitkeep)"; \
+	fi
