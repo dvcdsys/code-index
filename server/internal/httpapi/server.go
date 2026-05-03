@@ -98,7 +98,7 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := projects.Create(r.Context(), s.Deps.DB, projects.CreateRequest{HostPath: body.HostPath})
 	if err != nil {
-		if errors.Is(err, projects.ErrConflict) {
+		if errors.Is(err, projects.ErrConflict) || errors.Is(err, projects.ErrOverlap) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -447,6 +447,7 @@ func (s *Server) GetProjectSummary(w http.ResponseWriter, r *http.Request, path 
 	}
 
 	writeJSON(w, http.StatusOK, openapi.ProjectSummary{
+		PathHash:       projects.HashPath(p.HostPath),
 		HostPath:       p.HostPath,
 		Status:         p.Status,
 		Languages:      langs,
@@ -867,6 +868,7 @@ func projectToOpenAPI(p *projects.Project) openapi.Project {
 		}
 	}
 	return openapi.Project{
+		PathHash:      projects.HashPath(p.HostPath),
 		HostPath:      p.HostPath,
 		ContainerPath: p.ContainerPath,
 		Languages:     langs,
