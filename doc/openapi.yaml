@@ -11,10 +11,26 @@ info:
 
     ## Authentication
 
-    Every endpoint except `GET /health`, `GET /docs`, and `GET /openapi.yaml`
-    requires a Bearer token matching `CIX_API_KEY`. When the server is started
-    with an empty `CIX_API_KEY` it skips the check (dev mode); a startup log
-    line warns about this.
+    Two parallel auth paths back the same identity model:
+
+    - **Browsers / dashboard**: `POST /api/v1/auth/login` with email +
+      password issues an HttpOnly cookie `cix_session`. The cookie is sent
+      automatically on subsequent same-origin requests. Sessions roll
+      forward 14 days from the last request.
+    - **CLI / SDK**: `Authorization: Bearer <api_key>` where the key was
+      issued by `POST /api/v1/api-keys`. Keys are owner-scoped and can be
+      revoked individually without affecting other clients.
+
+    Public endpoints (no auth required): `GET /health`, `GET /docs`,
+    `GET /openapi.yaml`, `GET /api/v1/auth/bootstrap-status`,
+    `POST /api/v1/auth/login`. Setting `CIX_AUTH_DISABLED=true` skips the
+    check on every endpoint (development only — a warning is logged).
+
+    When the server starts with an empty users table it requires
+    `CIX_BOOTSTRAP_ADMIN_EMAIL` + `CIX_BOOTSTRAP_ADMIN_PASSWORD` to seed
+    the first admin (forced to change password on first login). A legacy
+    `CIX_API_KEY` set on a fresh database is imported as a single
+    `env-bootstrap` API key owned by that admin.
 
     ## Project addressing
 
@@ -58,6 +74,12 @@ tags:
     description: Three-phase indexing protocol
   - name: docs
     description: API documentation
+  - name: auth
+    description: Sessions, login/logout, password change, current user
+  - name: admin
+    description: Admin-only user management
+  - name: api-keys
+    description: Issue and revoke owner-scoped API keys for CLI/SDK use
 
 paths:
   /health:
@@ -102,6 +124,331 @@ paths:
                 $ref: "#/components/schemas/StatusResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/bootstrap-status:
+    get:
+      operationId: getBootstrapStatus
+      tags: [auth]
+      summary: Whether the dashboard needs first-run bootstrap (public)
+      description: |
+        Returns `{"needs_bootstrap": true}` when the users table is empty.
+        The dashboard renders an explanatory screen in that case ("ask the
+        operator to deploy with CIX_BOOTSTRAP_ADMIN_* env vars and
+        restart"). No authentication required.
+      security: []
+      responses:
+        "200":
+          description: Bootstrap status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapStatusResponse"
+
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Exchange email + password for a session cookie (public)
+      description: |
+        On success, sets `Set-Cookie: cix_session=<id>; HttpOnly;
+        SameSite=Strict; Path=/`. Returns the user payload plus a
+        `must_change_password` flag — when true, the dashboard forces a
+        change-password screen before any other action.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Logged in
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: Session cookie (HttpOnly, SameSite=Strict)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: End the current session
+      description: |
+        Deletes the server-side session row and instructs the browser to
+        clear `cix_session` via `Set-Cookie: cix_session=; Max-Age=0`.
+      responses:
+        "204":
+          description: Session ended
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Current authenticated user
+      description: |
+        Returns the user attached to the active session OR API key.
+        Includes `must_change_password` so the dashboard knows whether to
+        gate further navigation behind a change-password screen.
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/change-password:
+    post:
+      operationId: changePassword
+      tags: [auth]
+      summary: Change the current user's password
+      description: |
+        Verifies `current_password`, updates to `new_password`, clears
+        `must_change_password`, and revokes every other session of this
+        user (the cookie carrying the change-password request is kept
+        alive). Does NOT touch API keys — those are revoked individually.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "204":
+          description: Password updated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/auth/sessions:
+    get:
+      operationId: listMySessions
+      tags: [auth]
+      summary: Active sessions of the current user
+      description: |
+        Returns every non-expired session of the caller, newest-first, with
+        `last_seen_at`, `last_seen_ip`, and `last_seen_ua` so the user can
+        spot unfamiliar logins. The `is_current` flag marks the session
+        carrying this request.
+      responses:
+        "200":
+          description: Session list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/sessions/{id}:
+    delete:
+      operationId: deleteMySession
+      tags: [auth]
+      summary: End one of my sessions (sign out a single device)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Session ended
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/users:
+    get:
+      operationId: listUsers
+      tags: [admin]
+      summary: List all users (admin only)
+      responses:
+        "200":
+          description: User list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createUser
+      tags: [admin]
+      summary: Invite a new user (admin only)
+      description: |
+        The admin sets an `initial_password` and shares it out-of-band.
+        The new user is flagged `must_change_password=true` and will be
+        forced to change it on first login.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/admin/users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      operationId: updateUser
+      tags: [admin]
+      summary: Change role or disabled flag (admin only)
+      description: |
+        Refuses to demote or disable the last enabled admin in the system.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+    delete:
+      operationId: deleteUser
+      tags: [admin]
+      summary: Delete a user (admin only)
+      description: |
+        Cascades to the user's sessions and API keys. Refuses to delete
+        the last enabled admin.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/api-keys:
+    get:
+      operationId: listApiKeys
+      tags: [api-keys]
+      summary: List my API keys (or all keys if admin)
+      parameters:
+        - name: owner
+          in: query
+          required: false
+          description: |
+            `all` — admin-only, returns every key in the system.
+            Anything else (or unset) returns the caller's keys.
+          schema:
+            type: string
+            enum: [all]
+      responses:
+        "200":
+          description: Key list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createApiKey
+      tags: [api-keys]
+      summary: Issue a new API key
+      description: |
+        Returns the **plaintext** `full_key` exactly once in the response.
+        The dashboard shows it with a copy button and a "this is the only
+        time you will see this value" warning. Subsequent reads only
+        return the `prefix`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiKeyRequest"
+      responses:
+        "201":
+          description: Key created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/api-keys/{id}:
+    delete:
+      operationId: revokeApiKey
+      tags: [api-keys]
+      summary: Revoke an API key
+      description: |
+        The owner can revoke their own keys. An admin can revoke any
+        key. Revoking is permanent — the row stays in the table marked
+        with `revoked_at` so the audit trail is preserved, but
+        subsequent Bearer auth attempts with the value fail with 401.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /api/v1/projects:
     post:
@@ -662,6 +1009,18 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Authenticated, but lacks the required role
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Resource already exists (e.g. email taken)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
 
   schemas:
     Error:
@@ -670,6 +1029,236 @@ components:
       properties:
         detail:
           type: string
+
+    BootstrapStatusResponse:
+      type: object
+      required: [needs_bootstrap]
+      properties:
+        needs_bootstrap:
+          type: boolean
+          description: True when the users table is empty.
+
+    User:
+      type: object
+      required: [id, email, role, must_change_password, created_at, updated_at, disabled]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, viewer]
+        must_change_password:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        disabled:
+          type: boolean
+          description: |
+            True when `disabled_at` is set. Disabled users cannot
+            authenticate via password OR API key.
+        disabled_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    UserListResponse:
+      type: object
+      required: [users, total]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+        total:
+          type: integer
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+
+    LoginResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+
+    MeResponse:
+      type: object
+      required: [user, auth_method]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        auth_method:
+          type: string
+          enum: [session, api_key]
+          description: |
+            Tells the dashboard whether to surface "logout" (session) or
+            hide it (api_key access — there's nothing to log out of).
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+          minLength: 1
+        new_password:
+          type: string
+          minLength: 8
+          description: Minimum 8 characters. No upper bound.
+
+    CreateUserRequest:
+      type: object
+      required: [email, initial_password, role]
+      properties:
+        email:
+          type: string
+          format: email
+        initial_password:
+          type: string
+          minLength: 8
+          description: |
+            One-time password the new user must change on first login.
+            The admin shares this out-of-band.
+        role:
+          type: string
+          enum: [admin, viewer]
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [admin, viewer]
+          description: |
+            New role for the user. Refused for the last enabled admin
+            when set to `viewer`.
+        disabled:
+          type: boolean
+          description: |
+            When true, the user can no longer authenticate. Refused for
+            the last enabled admin when set to true.
+
+    Session:
+      type: object
+      required: [id, created_at, expires_at, last_seen_at, is_current]
+      properties:
+        id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        last_seen_ip:
+          type: string
+          nullable: true
+        last_seen_ua:
+          type: string
+          nullable: true
+        is_current:
+          type: boolean
+          description: True for the session carrying this request.
+
+    SessionListResponse:
+      type: object
+      required: [sessions, total]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Session"
+        total:
+          type: integer
+
+    ApiKey:
+      type: object
+      required: [id, owner_user_id, name, prefix, created_at, revoked]
+      properties:
+        id:
+          type: string
+        owner_user_id:
+          type: string
+        name:
+          type: string
+        prefix:
+          type: string
+          description: |
+            Display-only prefix of the full key (e.g. `cix_a1b2c3d4`).
+            Long enough to recognise in lists, short enough that it
+            cannot reconstruct the original.
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_used_ip:
+          type: string
+          nullable: true
+        last_used_ua:
+          type: string
+          nullable: true
+        revoked:
+          type: boolean
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ApiKeyListResponse:
+      type: object
+      required: [api_keys, total]
+      properties:
+        api_keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiKey"
+        total:
+          type: integer
+
+    CreateApiKeyRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: |
+            Human-friendly label shown in the dashboard. The full key
+            value is generated server-side and returned exactly once.
+
+    ApiKeyCreated:
+      type: object
+      required: [api_key, full_key]
+      properties:
+        api_key:
+          $ref: "#/components/schemas/ApiKey"
+        full_key:
+          type: string
+          description: |
+            The plaintext key value. **Returned exactly once.** Store it
+            securely — there is no way to retrieve it later.
 
     HealthResponse:
       type: object

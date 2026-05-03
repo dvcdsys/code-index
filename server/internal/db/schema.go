@@ -82,6 +82,52 @@ CREATE TABLE IF NOT EXISTS index_runs (
     error_message TEXT,
     FOREIGN KEY (project_path) REFERENCES projects(host_path) ON DELETE CASCADE
 );
+
+-- Dashboard auth: users/sessions/api_keys.
+-- Added in the dashboard branch when the single-CIX_API_KEY model was
+-- replaced with per-user accounts and named API keys. Old deployments are
+-- still expected to come up cleanly: the bootstrap flow in main.go creates
+-- the first admin from CIX_BOOTSTRAP_ADMIN_{EMAIL,PASSWORD} on a fresh DB.
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'viewer',
+    must_change_password INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    disabled_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    last_seen_ip TEXT,
+    last_seen_ua TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    owner_user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    last_used_ip TEXT,
+    last_used_ua TEXT,
+    revoked_at TEXT,
+    FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_apikeys_owner ON api_keys(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_apikeys_hash ON api_keys(hash);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -92,4 +138,7 @@ var ExpectedTables = []string{
 	"symbols",
 	"refs",
 	"index_runs",
+	"users",
+	"sessions",
+	"api_keys",
 }
