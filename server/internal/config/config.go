@@ -56,6 +56,15 @@ type Config struct {
 	// not present in the registry are warned-and-ignored at startup.
 	// Source: CIX_LANGUAGES (comma-separated, case-insensitive).
 	Languages []string
+
+	// Dashboard auth bootstrap. When the users table is empty AND both of
+	// these are set, main.go creates the first admin from these values.
+	// The user is flagged must_change_password=1 so the env-supplied
+	// password is never the long-term credential. Both ignored if the
+	// users table already has rows. Sources: CIX_BOOTSTRAP_ADMIN_EMAIL +
+	// CIX_BOOTSTRAP_ADMIN_PASSWORD.
+	BootstrapAdminEmail    string
+	BootstrapAdminPassword string
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -190,6 +199,9 @@ func Load() (*Config, error) {
 		}
 	}
 
+	c.BootstrapAdminEmail = getenv("CIX_BOOTSTRAP_ADMIN_EMAIL", "")
+	c.BootstrapAdminPassword = getenv("CIX_BOOTSTRAP_ADMIN_PASSWORD", "")
+
 	return c, nil
 }
 
@@ -204,13 +216,12 @@ func Load() (*Config, error) {
 // developer having to set an env var. This is a deliberate PoC ergonomic —
 // it is silent when the file is missing and the HF downloader picks up.
 func (c *Config) Validate() error {
-	// Auth gating — explicit-or-die. Server refuses to start with no key
-	// and no opt-out flag, so a forgotten env var fails loud at boot
-	// instead of silently exposing every endpoint.
-	if c.APIKey == "" && !c.AuthDisabled {
-		return fmt.Errorf("CIX_API_KEY is empty and CIX_AUTH_DISABLED is not set: refuse to start with open auth. " +
-			"Set CIX_API_KEY=<secret> for production, or CIX_AUTH_DISABLED=true for local dev")
-	}
+	// NOTE: the old "CIX_API_KEY required unless CIX_AUTH_DISABLED" check is
+	// gone. Auth gating moved into the bootstrap path in main.go: the server
+	// now refuses to start when the users table is empty AND no
+	// CIX_BOOTSTRAP_ADMIN_{EMAIL,PASSWORD} were supplied. CIX_API_KEY is now
+	// optional (it's imported as a legacy api_keys row at first boot if set).
+	// CIX_AUTH_DISABLED still works and bypasses auth wholesale.
 	if c.LlamaTransport != "unix" && c.LlamaTransport != "tcp" {
 		return fmt.Errorf("CIX_LLAMA_TRANSPORT=%q, must be 'unix' or 'tcp'", c.LlamaTransport)
 	}

@@ -126,23 +126,23 @@ func TestValidateBadCtx(t *testing.T) {
 	}
 }
 
-// TestValidate_AuthGate covers the explicit-or-die rule: an empty CIX_API_KEY
-// is only allowed when CIX_AUTH_DISABLED=true. This is the central guarantee
-// that prevents accidentally-open deployments after the implicit empty-key
-// bypass was removed.
-func TestValidate_AuthGate(t *testing.T) {
+// TestValidate_NoLongerGuardsAuth — the explicit-or-die check on
+// CIX_API_KEY moved out of config.Validate when the dashboard branch
+// introduced per-user accounts. Auth gating is now main.go's job (it
+// refuses to start with an empty users table and no
+// CIX_BOOTSTRAP_ADMIN_* env). This test pins down the new permissive
+// behaviour so a future revert wouldn't sneak past CI.
+func TestValidate_NoLongerGuardsAuth(t *testing.T) {
 	cases := []struct {
-		name        string
-		apiKey      string
-		authOff     string // "" means env var unset
-		wantLoadErr bool
-		wantValErr  bool
+		name    string
+		apiKey  string
+		authOff string
 	}{
-		{name: "no key, no flag → Validate fails", apiKey: "", authOff: "", wantValErr: true},
-		{name: "no key, flag=false → Validate fails", apiKey: "", authOff: "false", wantValErr: true},
-		{name: "no key, flag=true → ok", apiKey: "", authOff: "true"},
-		{name: "key set, no flag → ok", apiKey: "secret"},
-		{name: "key set, flag=true → ok (flag wins)", apiKey: "secret", authOff: "true"},
+		{name: "no key, no flag", apiKey: "", authOff: ""},
+		{name: "no key, flag=false", apiKey: "", authOff: "false"},
+		{name: "no key, flag=true", apiKey: "", authOff: "true"},
+		{name: "key set, no flag", apiKey: "secret"},
+		{name: "key set, flag=true", apiKey: "secret", authOff: "true"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -154,17 +154,32 @@ func TestValidate_AuthGate(t *testing.T) {
 				t.Setenv("CIX_AUTH_DISABLED", tc.authOff)
 			}
 			c, err := Load()
-			if (err != nil) != tc.wantLoadErr {
-				t.Fatalf("Load err=%v, wantErr=%v", err, tc.wantLoadErr)
-			}
 			if err != nil {
-				return
+				t.Fatalf("Load: %v", err)
 			}
-			err = c.Validate()
-			if (err != nil) != tc.wantValErr {
-				t.Errorf("Validate err=%v, wantErr=%v", err, tc.wantValErr)
+			if err := c.Validate(); err != nil {
+				t.Errorf("Validate must not block on auth fields, got %v", err)
 			}
 		})
+	}
+}
+
+// TestLoadBootstrapFields ensures the new CIX_BOOTSTRAP_ADMIN_* env vars
+// land on the Config. The actual seed-or-skip decision lives in main.go
+// where it has access to the users service.
+func TestLoadBootstrapFields(t *testing.T) {
+	unsetAll(t)
+	t.Setenv("CIX_BOOTSTRAP_ADMIN_EMAIL", "admin@example.com")
+	t.Setenv("CIX_BOOTSTRAP_ADMIN_PASSWORD", "changeme")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.BootstrapAdminEmail != "admin@example.com" {
+		t.Errorf("BootstrapAdminEmail = %q", c.BootstrapAdminEmail)
+	}
+	if c.BootstrapAdminPassword != "changeme" {
+		t.Errorf("BootstrapAdminPassword not loaded")
 	}
 }
 
@@ -207,6 +222,9 @@ func unsetAll(t *testing.T) {
 		// CIX_AUTH_DISABLED=true would silently make Validate succeed
 		// on tests that expect a missing-key failure.
 		"CIX_AUTH_DISABLED",
+		// Bootstrap — wipe so the Load tests don't accidentally inherit
+		// a developer's local bootstrap-admin shell vars.
+		"CIX_BOOTSTRAP_ADMIN_EMAIL", "CIX_BOOTSTRAP_ADMIN_PASSWORD",
 	} {
 		t.Setenv(k, "sentinel")
 		osUnsetenv(k)
