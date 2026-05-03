@@ -1,0 +1,27 @@
+# Files / dirs the cix indexer skips for this repo.
+# Pattern syntax mirrors .gitignore.
+
+# Frontend toolchain noise — don't index 50k+ files of node_modules / build output
+server/dashboard/node_modules/
+server/internal/httpapi/dashboard/dist/
+
+# Build artefacts
+server/dist/
+cli/build/
+cli/dist/
+
+# Generated code (regenerate with `npm run gen:api`)
+server/dashboard/src/api/generated.ts
+
+# Embedded vendored bundles already covered by the linked sources elsewhere
+server/internal/httpapi/docs/swagger-ui/
+
+# Local data / runtime state
+data/
+.local-data/
+*.db
+*.db-wal
+*.db-shm
+
+# Legacy archived tree (see commit 063a14e)
+legacy/python-api/
