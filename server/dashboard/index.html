@@ -5,6 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>cix dashboard</title>
+    <script>
+      // Anti-flash: applies the persisted theme synchronously before React
+      // mounts. Without this, a saved 'dark' choice would briefly flash light.
+      // Storage key + values must match src/lib/theme.ts.
+      (function () {
+        try {
+          var t = localStorage.getItem('cix.theme') || 'system';
+          var dark =
+            t === 'dark' ||
+            (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          if (dark) document.documentElement.classList.add('dark');
+        } catch (_e) {
+          /* localStorage may be unavailable in some browsers — no-op */
+        }
+      })();
+    </script>
   </head>
   <body class="bg-background text-foreground antialiased">
     <div id="root"></div>
