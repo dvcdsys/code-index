@@ -16,6 +16,33 @@ export type ApiKeyCreated = components['schemas']['ApiKeyCreated'];
 
 export type Project = components['schemas']['Project'];
 export type ProjectSummary = components['schemas']['ProjectSummary'];
+export type ProjectStats = components['schemas']['ProjectStats'];
+export type ProjectSettings = components['schemas']['ProjectSettings'];
+export type ProjectListResponse = components['schemas']['ProjectListResponse'];
+export type DirEntry = components['schemas']['DirEntry'];
+export type SymbolEntry = components['schemas']['SymbolEntry'];
+
+export type SemanticSearchRequest = components['schemas']['SemanticSearchRequest'];
+export type SemanticSearchResponse = components['schemas']['SemanticSearchResponse'];
+export type FileGroupResult = components['schemas']['FileGroupResult'];
+export type FileMatch = components['schemas']['FileMatch'];
+export type NestedHit = components['schemas']['NestedHit'];
+
+export type SymbolSearchRequest = components['schemas']['SymbolSearchRequest'];
+export type SymbolSearchResponse = components['schemas']['SymbolSearchResponse'];
+export type SymbolResultItem = components['schemas']['SymbolResultItem'];
+
+export type DefinitionRequest = components['schemas']['DefinitionRequest'];
+export type DefinitionResponse = components['schemas']['DefinitionResponse'];
+export type DefinitionItem = components['schemas']['DefinitionItem'];
+
+export type ReferenceRequest = components['schemas']['ReferenceRequest'];
+export type ReferenceResponse = components['schemas']['ReferenceResponse'];
+export type ReferenceItem = components['schemas']['ReferenceItem'];
+
+export type FileSearchRequest = components['schemas']['FileSearchRequest'];
+export type FileSearchResponse = components['schemas']['FileSearchResponse'];
+export type FileResultItem = components['schemas']['FileResultItem'];
 
 export type LoginRequest = components['schemas']['LoginRequest'];
 export type LoginResponse = components['schemas']['LoginResponse'];

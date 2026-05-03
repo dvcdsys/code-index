@@ -1342,6 +1342,7 @@ components:
     Project:
       type: object
       required:
+        - path_hash
         - host_path
         - container_path
         - languages
@@ -1352,6 +1353,10 @@ components:
         - updated_at
         - last_indexed_at
       properties:
+        path_hash:
+          type: string
+          pattern: "^[a-f0-9]{16}$"
+          description: First 16 hex chars of SHA1(host_path) — stable URL identifier.
         host_path:
           type: string
           description: Absolute filesystem path on the operator's machine.
@@ -1430,6 +1435,7 @@ components:
     ProjectSummary:
       type: object
       required:
+        - path_hash
         - host_path
         - status
         - languages
@@ -1439,6 +1445,10 @@ components:
         - top_directories
         - recent_symbols
       properties:
+        path_hash:
+          type: string
+          pattern: "^[a-f0-9]{16}$"
+          description: First 16 hex chars of SHA1(host_path) — stable URL identifier.
         host_path:
           type: string
         status:

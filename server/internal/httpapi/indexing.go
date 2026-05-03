@@ -133,6 +133,16 @@ func indexFilesStreamingHandler(
 		return
 	}
 
+	// Indexing batches dominate on GPU embed time and routinely exceed the
+	// global http.Server.WriteTimeout (60s). The zero deadline disables it
+	// for this request only — the streamCtx + heartbeat watchdog still bound
+	// runaway sessions.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		d.Logger.Warn("streaming: clearing write deadline failed (continuing)",
+			"run_id", runID, "err", err)
+	}
+
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
