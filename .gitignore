@@ -44,6 +44,16 @@ cli/dist/
 server/dist/
 server/exec.log
 
+# Dashboard build output — produced by `make dashboard-build`.
+# A committed `.gitkeep` keeps dist/ non-empty so `//go:embed all:dist` works
+# on a fresh clone (the embed.FS needs at least one entry). The real
+# index.html + assets/ tree is produced by `make dashboard-build` and never
+# tracked. The handler in dashboard.go returns an inline "please build"
+# placeholder when index.html is absent.
+server/dashboard/node_modules/
+server/internal/httpapi/dashboard/dist/*
+!server/internal/httpapi/dashboard/dist/.gitkeep
+
 # uv
 .python-version
 

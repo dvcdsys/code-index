@@ -107,6 +107,13 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/docs/*", docsAssetsHandler)
 	r.Get("/openapi.json", openapiSpecHandler)
 
+	// Dashboard — embedded React SPA (Vite build under
+	// internal/httpapi/dashboard/dist). Static assets are public; every API
+	// call the SPA makes still travels through requireAuth above, so the
+	// pages render but show the login screen until /auth/me succeeds.
+	r.Get("/dashboard", dashboardIndexHandler)
+	r.Get("/dashboard/*", dashboardAssetsHandler)
+
 	// All API operations — chi.HandlerFromMux walks the spec and registers
 	// one chi route per OpenAPI operation, dispatching to Server methods.
 	openapi.HandlerFromMux(srv, r)
