@@ -343,3 +343,73 @@ func TestApiKey_ListForOwnerHidesOthers(t *testing.T) {
 		t.Errorf("viewer sees total = %d, want 1 (own key only)", body.Total)
 	}
 }
+
+// TestListUsers_IncludesStats — admin-list payload must carry the three
+// aggregate columns the dashboard's Users table renders. Round-trip the
+// JSON to ensure field names match the OpenAPI contract verbatim.
+func TestListUsers_IncludesStats(t *testing.T) {
+	f := newAuthFixture(t)
+	cookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	// Seed a viewer + give them an api-key so the row is non-trivial.
+	v, err := f.Deps.Users.Create(context.Background(), "v@b.com", "viewerpass1", users.RoleViewer, false)
+	if err != nil {
+		t.Fatalf("seed viewer: %v", err)
+	}
+	if _, _, err := f.Deps.APIKeys.Generate(context.Background(), v.ID, "k"); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+
+	req := withCookie(httptest.NewRequest(http.MethodGet, "/api/v1/admin/users", nil), cookie)
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d (body=%s)", rr.Code, rr.Body.String())
+	}
+
+	var body struct {
+		Total int `json:"total"`
+		Users []struct {
+			Email               string  `json:"email"`
+			LastLoginAt         *string `json:"last_login_at"`
+			ActiveSessionsCount int     `json:"active_sessions_count"`
+			ApiKeysCount        int     `json:"api_keys_count"`
+		} `json:"users"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, rr.Body.String())
+	}
+	if body.Total != 2 {
+		t.Fatalf("total = %d, want 2", body.Total)
+	}
+	by := map[string]int{}
+	var viewerRow *struct {
+		Email               string  `json:"email"`
+		LastLoginAt         *string `json:"last_login_at"`
+		ActiveSessionsCount int     `json:"active_sessions_count"`
+		ApiKeysCount        int     `json:"api_keys_count"`
+	}
+	for i := range body.Users {
+		by[body.Users[i].Email] = i
+		if body.Users[i].Email == "v@b.com" {
+			viewerRow = &body.Users[i]
+		}
+	}
+	if viewerRow == nil {
+		t.Fatalf("viewer row missing in payload: %s", rr.Body.String())
+	}
+	if viewerRow.ApiKeysCount != 1 {
+		t.Errorf("viewer api_keys_count = %d, want 1", viewerRow.ApiKeysCount)
+	}
+	if viewerRow.LastLoginAt != nil {
+		t.Errorf("viewer last_login_at = %v, want null (never logged in)", *viewerRow.LastLoginAt)
+	}
+	// Admin: just-logged-in via loginRR → 1 active session.
+	admin := body.Users[by["admin@example.com"]]
+	if admin.ActiveSessionsCount < 1 {
+		t.Errorf("admin active_sessions_count = %d, want >=1", admin.ActiveSessionsCount)
+	}
+	if admin.LastLoginAt == nil {
+		t.Errorf("admin last_login_at should be set after login")
+	}
+}

@@ -44,6 +44,29 @@ func userToPayload(u users.User) userPayload {
 	return p
 }
 
+// userWithStatsPayload mirrors the OpenAPI `UserWithStats` schema. Returned
+// only by the admin /users list endpoint — keeps the per-request /auth/me
+// shape free of N+1 aggregate columns.
+type userWithStatsPayload struct {
+	userPayload
+	LastLoginAt         *string `json:"last_login_at"`
+	ActiveSessionsCount int     `json:"active_sessions_count"`
+	APIKeysCount        int     `json:"api_keys_count"`
+}
+
+func userWithStatsToPayload(u users.UserWithStats) userWithStatsPayload {
+	p := userWithStatsPayload{
+		userPayload:         userToPayload(u.User),
+		ActiveSessionsCount: u.ActiveSessionsCount,
+		APIKeysCount:        u.APIKeysCount,
+	}
+	if u.LastLoginAt != nil {
+		s := u.LastLoginAt.UTC().Format(time.RFC3339Nano)
+		p.LastLoginAt = &s
+	}
+	return p
+}
+
 type sessionPayload struct {
 	ID         string  `json:"id"`
 	CreatedAt  string  `json:"created_at"`
@@ -316,14 +339,14 @@ func (s *Server) ListUsers(w http.ResponseWriter, r *http.Request) {
 	if _, ok := mustBeAdmin(w, r); !ok {
 		return
 	}
-	list, err := s.Deps.Users.List(r.Context())
+	list, err := s.Deps.Users.ListWithStats(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not list users")
 		return
 	}
-	out := make([]userPayload, 0, len(list))
+	out := make([]userWithStatsPayload, 0, len(list))
 	for _, u := range list {
-		out = append(out, userToPayload(u))
+		out = append(out, userWithStatsToPayload(u))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"users": out,
