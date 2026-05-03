@@ -85,6 +85,46 @@ func TestCreate_Conflict(t *testing.T) {
 	}
 }
 
+// TestCreate_RejectsOverlap covers both directions and a few cosmetic
+// variants (trailing slash) of the parent/descendant containment check.
+// Sibling and string-prefix-but-not-path-prefix cases must succeed —
+// otherwise we'd block legitimate adjacent projects.
+func TestCreate_RejectsOverlap(t *testing.T) {
+	cases := []struct {
+		name           string
+		seed, attempt  string
+		wantOverlapErr bool
+	}{
+		{"new path is descendant", "/repo", "/repo/server", true},
+		{"new path is ancestor", "/repo/server", "/repo", true},
+		{"deep nesting still caught", "/repo", "/repo/a/b/c/d", true},
+		{"trailing slash on seed", "/repo/", "/repo/server", true},
+		{"trailing slash on candidate", "/repo", "/repo/server/", true},
+		{"sibling is fine", "/repo/server", "/repo/cli", false},
+		// "/repo-other" shares "/repo" as a string prefix but NOT as a path
+		// prefix — must not be rejected.
+		{"prefix-but-not-path-prefix is fine", "/repo", "/repo-other", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDB(t)
+			ctx := context.Background()
+			if _, err := Create(ctx, d, CreateRequest{HostPath: tc.seed}); err != nil {
+				t.Fatalf("seed Create(%q) failed: %v", tc.seed, err)
+			}
+			_, err := Create(ctx, d, CreateRequest{HostPath: tc.attempt})
+			if tc.wantOverlapErr {
+				if !errors.Is(err, ErrOverlap) {
+					t.Fatalf("Create(%q) error = %v, want ErrOverlap", tc.attempt, err)
+				}
+			} else if err != nil {
+				t.Fatalf("Create(%q) failed unexpectedly: %v", tc.attempt, err)
+			}
+		})
+	}
+}
+
 func TestGet_NotFound(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
