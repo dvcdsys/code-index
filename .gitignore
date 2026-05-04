@@ -8,7 +8,11 @@ __pycache__/
 *$py.class
 *.egg-info/
 *.egg
-dist/
+# Note: the bare `dist/` rule was scoped to /dist/ (root only) so the
+# server/internal/httpapi/dashboard/dist/.gitkeep negation below
+# actually works — Git can't re-include a file if a parent directory
+# is broadly excluded.
+/dist/
 build/
 .eggs/
 *.whl
