@@ -1044,12 +1044,12 @@ paths:
     post:
       operationId: indexCancel
       tags: [indexing]
-      summary: Cancel any active indexing session (admin only, idempotent)
+      summary: Cancel any active indexing session (idempotent)
       description: |
-        Admin-only. Returns `{"cancelled": true}` if a session was killed,
-        `false` if none was active. Cancelling someone else's running run
-        is a denial-of-service vector against indexing operators, so the
-        endpoint is gated behind the admin role.
+        Open to any authenticated user. Returns `{"cancelled": true}` if a
+        session was killed, `false` if none was active. The CLI calls this
+        in defer-cleanup on early exit, so gating it on admin would leave
+        run locks hanging for viewers until the 1-hour TTL.
       responses:
         "200":
           description: Cancellation result
@@ -1059,8 +1059,6 @@ paths:
                 $ref: "#/components/schemas/IndexCancelResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
