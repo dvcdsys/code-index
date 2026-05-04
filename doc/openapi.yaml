@@ -371,6 +371,125 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/admin/runtime-config:
+    get:
+      operationId: getRuntimeConfig
+      tags: [admin]
+      summary: Read effective runtime config (admin only)
+      description: |
+        Returns the resolved runtime config (DB row → env → recommended) the
+        sidecar is currently configured against, plus a `source` map labelling
+        each field's origin so the dashboard can render the "DB" / "Env" /
+        "Recommended" pill next to every value.
+      responses:
+        "200":
+          description: Effective runtime config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      operationId: putRuntimeConfig
+      tags: [admin]
+      summary: Save runtime config overrides (admin only)
+      description: |
+        Replaces the runtime_settings row. Fields omitted from the request
+        clear their override (= fall back to env / recommended on next Get).
+        Does NOT restart the sidecar — the dashboard issues a separate
+        POST /admin/sidecar/restart after a successful PUT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeConfigUpdate"
+      responses:
+        "200":
+          description: Updated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/admin/sidecar/restart:
+    post:
+      operationId: restartSidecar
+      tags: [admin]
+      summary: Restart the llama-server sidecar (admin only)
+      description: |
+        Drains the embedding queue (30s timeout), terminates the current
+        child process, and respawns with the latest runtime config.
+        Returns 202 immediately; poll GET /admin/sidecar/status to observe
+        the running → restarting → running transition. In-flight indexing
+        batches at the moment of restart will fail with ErrSupervisor and
+        must be re-driven by the operator (`cix reindex <project>`).
+      responses:
+        "202":
+          description: Restart accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RestartAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Embeddings disabled at boot — restart is a no-op
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/admin/sidecar/status:
+    get:
+      operationId: getSidecarStatus
+      tags: [admin]
+      summary: Sidecar process status (admin only)
+      responses:
+        "200":
+          description: Status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SidecarStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/models:
+    get:
+      operationId: listModels
+      tags: [admin]
+      summary: List GGUF model files cached on disk (admin only)
+      description: |
+        Walks `CIX_GGUF_CACHE_DIR` and returns one entry per .gguf file. Used
+        by the dashboard's embedding-model picker so admins don't have to
+        type HF repo IDs by hand. Empty list when the cache is empty —
+        dashboard falls back to a free-text path input in that case.
+      responses:
+        "200":
+          description: Cached model list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /api/v1/api-keys:
     get:
       operationId: listApiKeys
@@ -519,7 +638,11 @@ paths:
     patch:
       operationId: updateProject
       tags: [projects]
-      summary: Patch project settings
+      summary: Patch project settings (admin only)
+      description: |
+        Admin-only. Settings changes can shrink the indexing surface
+        (exclude_patterns, max_file_size); viewers must not be able to
+        silently de-index a project.
       requestBody:
         required: true
         content:
@@ -535,6 +658,8 @@ paths:
                 $ref: "#/components/schemas/Project"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "422":
@@ -544,12 +669,18 @@ paths:
     delete:
       operationId: deleteProject
       tags: [projects]
-      summary: Delete a project (and all its indexed data)
+      summary: Delete a project and all its indexed data (admin only)
+      description: |
+        Admin-only. Drops the project plus its symbols, refs, file hashes,
+        and embeddings. Destructive enough that viewer-scoped sessions and
+        API keys must not reach it.
       responses:
         "204":
           description: Deleted (no body)
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -913,11 +1044,12 @@ paths:
     post:
       operationId: indexCancel
       tags: [indexing]
-      summary: Cancel any active indexing session (idempotent)
+      summary: Cancel any active indexing session (admin only, idempotent)
       description: |
-        Returns `{"cancelled": true}` if a session was killed, `false` if
-        none was active. Safe to call unconditionally — used by the CLI's
-        startup stale-session guard.
+        Admin-only. Returns `{"cancelled": true}` if a session was killed,
+        `false` if none was active. Cancelling someone else's running run
+        is a denial-of-service vector against indexing operators, so the
+        endpoint is gated behind the admin role.
       responses:
         "200":
           description: Cancellation result
@@ -927,6 +1059,8 @@ paths:
                 $ref: "#/components/schemas/IndexCancelResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -1176,6 +1310,164 @@ components:
             When true, the user can no longer authenticate. Refused for
             the last enabled admin when set to true.
 
+    RuntimeConfig:
+      type: object
+      required:
+        - embedding_model
+        - llama_ctx_size
+        - llama_n_gpu_layers
+        - llama_n_threads
+        - max_embedding_concurrency
+        - llama_batch_size
+        - source
+      properties:
+        embedding_model:
+          type: string
+          description: HF repo ID or absolute filesystem path to a .gguf file.
+        llama_ctx_size:
+          type: integer
+          minimum: 1
+        llama_n_gpu_layers:
+          type: integer
+          description: -1 = all layers (Metal/CUDA), 0 = CPU only.
+        llama_n_threads:
+          type: integer
+          minimum: 0
+          description: 0 = let llama-server auto-detect.
+        max_embedding_concurrency:
+          type: integer
+          minimum: 1
+        llama_batch_size:
+          type: integer
+          minimum: 1
+        source:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [db, env, recommended]
+          description: |
+            Per-field origin label so the dashboard can render a "DB" /
+            "Env" / "Recommended" pill next to each value. Keys match the
+            other field names: `embedding_model`, `llama_ctx_size`, ...
+        recommended:
+          $ref: "#/components/schemas/RuntimeConfigRecommended"
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the runtime_settings row was last written, or null when only env/recommended are in effect.
+        updated_by:
+          type: string
+          nullable: true
+          description: Who issued the last PUT, captured from the active session.
+
+    RuntimeConfigRecommended:
+      type: object
+      required:
+        - embedding_model
+        - llama_ctx_size
+        - llama_n_gpu_layers
+        - llama_n_threads
+        - max_embedding_concurrency
+        - llama_batch_size
+      properties:
+        embedding_model: { type: string }
+        llama_ctx_size: { type: integer }
+        llama_n_gpu_layers: { type: integer }
+        llama_n_threads: { type: integer }
+        max_embedding_concurrency: { type: integer }
+        llama_batch_size: { type: integer }
+
+    RuntimeConfigUpdate:
+      type: object
+      description: |
+        All fields optional. Send a value to set/replace the override for
+        that field, send `""` (string fields) or `0` (numeric fields) to
+        CLEAR the override (next read falls back to env / recommended).
+        Omitted fields keep their current value.
+      properties:
+        embedding_model:
+          type: string
+          nullable: true
+        llama_ctx_size:
+          type: integer
+          nullable: true
+        llama_n_gpu_layers:
+          type: integer
+          nullable: true
+        llama_n_threads:
+          type: integer
+          nullable: true
+        max_embedding_concurrency:
+          type: integer
+          nullable: true
+        llama_batch_size:
+          type: integer
+          nullable: true
+
+    SidecarStatus:
+      type: object
+      required: [state, ready, in_flight]
+      properties:
+        state:
+          type: string
+          enum: [running, starting, restarting, failed, disabled]
+        pid:
+          type: integer
+          minimum: 0
+          description: 0 when no child process is alive (failed / disabled).
+        uptime_seconds:
+          type: integer
+          minimum: 0
+        model:
+          type: string
+        ready:
+          type: boolean
+        last_error:
+          type: string
+        in_flight:
+          type: integer
+          minimum: 0
+          description: Embedding queue depth at the moment of sampling.
+        restart_in_flight:
+          type: boolean
+          description: True between accept of POST /sidecar/restart and respawn completion.
+
+    RestartAccepted:
+      type: object
+      required: [restart_id]
+      properties:
+        restart_id:
+          type: string
+          description: Opaque ID; future versions may expose per-restart progress under this id.
+
+    ModelEntry:
+      type: object
+      required: [id, path, size_bytes]
+      properties:
+        id:
+          type: string
+          description: HF repo ID derived from the cache directory name (e.g. owner/model).
+        path:
+          type: string
+          description: Absolute path to the .gguf file on disk.
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+
+    ModelList:
+      type: object
+      required: [models, cache_dir]
+      properties:
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelEntry"
+        cache_dir:
+          type: string
+          description: The CIX_GGUF_CACHE_DIR that was scanned. Empty list with non-empty cache_dir = no .gguf files found.
+
     Session:
       type: object
       required: [id, created_at, expires_at, last_seen_at, is_current]
@@ -1405,6 +1697,31 @@ components:
           type: string
           format: date-time
           nullable: true
+        indexed_with_model:
+          type: string
+          nullable: true
+          description: |
+            Embedding model identifier active when this project was last
+            (re)indexed. NULL on rows that pre-date drift tracking — the
+            dashboard treats NULL as "Unknown" rather than as drift.
+        sqlite_path:
+          type: string
+          nullable: true
+          description: Resolved SQLite database path for the active model. NULL on dashboards that don't expose storage info.
+        chroma_path:
+          type: string
+          nullable: true
+          description: Resolved chromem-go collection directory for this project. NULL when not computed.
+        sqlite_size_bytes:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+        chroma_size_bytes:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
 
     ProjectListResponse:
       type: object
