@@ -12,12 +12,50 @@ services:
       - CIX_SQLITE_PATH=/data/sqlite/projects.db
       - CIX_MAX_FILE_SIZE=${CIX_MAX_FILE_SIZE:-524288}
       - CIX_EXCLUDED_DIRS=${CIX_EXCLUDED_DIRS:-node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store}
+      # GGUF cache lives on the named volume below — survives `docker compose
+      # down` (without -v) and is owned by the image's 1001:1001 user, so the
+      # cix-server process can always write to it regardless of host
+      # bind-mount permissions.
       - CIX_GGUF_CACHE_DIR=/data/models
       - CIX_LLAMA_BIN_DIR=/app
       - CIX_LLAMA_STARTUP_TIMEOUT=120
       - CIX_EMBEDDINGS_ENABLED=${CIX_EMBEDDINGS_ENABLED:-true}
+      # ── First-boot admin seed (required when the DB has no users yet) ──
+      # cix-server refuses to start when the users table is empty AND these
+      # are unset. Set BOTH in your .env, log in once, change the password
+      # immediately (the user is flagged must_change_password=true).
+      - CIX_BOOTSTRAP_ADMIN_EMAIL=${CIX_BOOTSTRAP_ADMIN_EMAIL:-}
+      - CIX_BOOTSTRAP_ADMIN_PASSWORD=${CIX_BOOTSTRAP_ADMIN_PASSWORD:-}
+      # ── PR-E runtime tunables (all DB-overridable from /dashboard/server) ──
+      # 0 = auto. Threads → runtime.NumCPU()/2; batch → match n_ctx.
+      - CIX_LLAMA_THREADS=${CIX_LLAMA_THREADS:-0}
+      - CIX_LLAMA_BATCH=${CIX_LLAMA_BATCH:-0}
+      # Embedding queue parallelism. Default 5 (was 1) — pipelines host-side
+      # prep with device inference. Drop to 1 if you observe contention.
+      - CIX_MAX_EMBEDDING_CONCURRENCY=${CIX_MAX_EMBEDDING_CONCURRENCY:-5}
+      - CIX_EMBEDDING_QUEUE_TIMEOUT=${CIX_EMBEDDING_QUEUE_TIMEOUT:-300}
+      # Optional: skip the first-boot HF download by pointing at a GGUF
+      # file the operator already has on disk. cix copies it into the
+      # cix-models named volume once (atomic .partial → rename) and never
+      # touches the source again. Subsequent boots find the file in cache
+      # and ignore the env. See volumes block below for an example bind.
+      - CIX_BOOTSTRAP_GGUF_PATH=${CIX_BOOTSTRAP_GGUF_PATH:-}
     volumes:
+      # Operator-managed bind for sqlite + chroma so backups and inspection
+      # are one `cd` away on the host. Make sure the directory is owned by
+      # 1001:1001 OR use `user: "0:0"` — see CLAUDE.md.
       - ${HOME}/.cix/data:/data
+      # Docker-managed named volume layered ON TOP of /data/models. This
+      # isolates the GGUF cache from host-side bind permission issues and
+      # guarantees the model is downloaded exactly once across container
+      # recreates (`docker compose up --force-recreate`, image bumps, etc.).
+      - cix-models:/data/models
+      # Optional bootstrap: bind a host-side .gguf read-only into
+      # /bootstrap/model.gguf and set CIX_BOOTSTRAP_GGUF_PATH=/bootstrap/model.gguf
+      # in your .env. cix imports it into the cix-models cache on first boot,
+      # then ignores both the env and the bind. After verifying the cache is
+      # seeded, the bind can be removed entirely.
+      # - /Users/me/.cache/huggingface/hub/.../coderankembed-q8_0.gguf:/bootstrap/model.gguf:ro
     deploy:
       resources:
         limits:
@@ -26,8 +64,13 @@ services:
         reservations:
           memory: 1G
     healthcheck:
-      test: ["/cix-server", "-healthcheck"]
+      test: ["CMD", "/cix-server", "-healthcheck"]
       interval: 30s
       timeout: 10s
       start_period: 120s
       retries: 3
+
+volumes:
+  cix-models:
+    # GGUF model cache. Persisted by Docker; only `docker compose down -v`
+    # (or explicit `docker volume rm cix_cix-models`) wipes it.
