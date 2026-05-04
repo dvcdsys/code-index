@@ -31,6 +31,11 @@ import (
 // header behaviour are unchanged.
 type Server struct {
 	Deps Deps
+
+	// loginLimiter throttles POST /auth/login. Initialised by NewRouter
+	// so each test fixture (and each running server) gets its own
+	// in-memory state.
+	loginLimiter *loginLimiter
 }
 
 // Compile-time assertion that Server implements the generated interface.
@@ -206,8 +211,13 @@ func dirSizeBytes(dir string) (int64, bool) {
 	return total, true
 }
 
-// UpdateProject — PATCH /api/v1/projects/{path}.
+// UpdateProject — PATCH /api/v1/projects/{path}. Admin-only: settings
+// changes can shrink the indexing surface (exclude_patterns, max_file_size)
+// and viewers should not be able to silently de-index a project.
 func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	p := s.lookupProject(w, r, path)
 	if p == nil {
 		return
@@ -233,8 +243,13 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request, path open
 	writeJSON(w, http.StatusOK, projectToOpenAPI(updated))
 }
 
-// DeleteProject — DELETE /api/v1/projects/{path}.
+// DeleteProject — DELETE /api/v1/projects/{path}. Admin-only: dropping a
+// project also wipes its symbols/refs/embeddings and is destructive enough
+// that it must not be reachable from a viewer-scoped session or API key.
 func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	p := s.lookupProject(w, r, path)
 	if p == nil {
 		return
@@ -835,8 +850,13 @@ func (s *Server) IndexFinish(w http.ResponseWriter, r *http.Request, path openap
 	})
 }
 
-// IndexCancel — POST /api/v1/projects/{path}/index/cancel.
+// IndexCancel — POST /api/v1/projects/{path}/index/cancel. Admin-only:
+// cancelling someone else's running index run is a denial-of-service
+// vector against indexing operators.
 func (s *Server) IndexCancel(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	p := s.lookupProject(w, r, path)
 	if p == nil {
 		return

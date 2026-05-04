@@ -170,6 +170,13 @@ func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "email and password are required")
 		return
 	}
+	ip := clientIP(r)
+	if s.loginLimiter != nil {
+		if ok, retry := s.loginLimiter.allow(ip, body.Email); !ok {
+			writeRateLimited(w, retry)
+			return
+		}
+	}
 	u, err := s.Deps.Users.Authenticate(r.Context(), body.Email, body.Password)
 	if err != nil {
 		switch {
@@ -182,12 +189,16 @@ func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	sess, err := s.Deps.Sessions.Create(r.Context(), u.ID, clientIP(r), r.UserAgent())
+	created, err := s.Deps.Sessions.Create(r.Context(), u.ID, ip, r.UserAgent())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create session")
 		return
 	}
-	setSessionCookie(w, r, sess.ID, sess.ExpiresAt)
+	if s.loginLimiter != nil {
+		s.loginLimiter.reset(ip, body.Email)
+	}
+	// The cookie carries the raw token; only sha256(token) is in the DB.
+	setSessionCookie(w, r, created.RawToken, created.Session.ExpiresAt)
 	writeJSON(w, http.StatusOK, map[string]any{"user": userToPayload(u)})
 }
 
@@ -321,7 +332,18 @@ func (s *Server) DeleteMySession(w http.ResponseWriter, r *http.Request, id stri
 // Admin user endpoints
 // ---------------------------------------------------------------------------
 
-func mustBeAdmin(w http.ResponseWriter, r *http.Request) (*authContext, bool) {
+// mustBeAdmin enforces the admin role on a handler. Returns the auth
+// context on success; on failure writes the error response and returns
+// (nil, false) so the caller can `if _, ok := s.s.mustBeAdmin(w, r); !ok { return }`.
+//
+// CIX_AUTH_DISABLED dev mode short-circuits both checks: when the operator
+// turned auth off entirely, "admin-only" loses meaning and every endpoint
+// behaves as if the caller is admin. Production deployments leave the
+// flag off; the requireAuth middleware then guarantees a context exists.
+func (s *Server) mustBeAdmin(w http.ResponseWriter, r *http.Request) (*authContext, bool) {
+	if s.Deps.AuthDisabled {
+		return nil, true
+	}
 	ac, ok := authFromCtx(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "Authentication required")
@@ -336,7 +358,7 @@ func mustBeAdmin(w http.ResponseWriter, r *http.Request) (*authContext, bool) {
 
 // ListUsers — GET /api/v1/admin/users (admin only).
 func (s *Server) ListUsers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := mustBeAdmin(w, r); !ok {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
 	list, err := s.Deps.Users.ListWithStats(r.Context())
@@ -356,7 +378,7 @@ func (s *Server) ListUsers(w http.ResponseWriter, r *http.Request) {
 
 // CreateUser — POST /api/v1/admin/users (admin only).
 func (s *Server) CreateUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := mustBeAdmin(w, r); !ok {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
 	var body struct {
@@ -390,7 +412,7 @@ func (s *Server) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 // UpdateUser — PATCH /api/v1/admin/users/{id} (admin only).
 func (s *Server) UpdateUser(w http.ResponseWriter, r *http.Request, id string) {
-	if _, ok := mustBeAdmin(w, r); !ok {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
 	var body struct {
@@ -423,7 +445,7 @@ func (s *Server) UpdateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 // DeleteUser — DELETE /api/v1/admin/users/{id} (admin only).
 func (s *Server) DeleteUser(w http.ResponseWriter, r *http.Request, id string) {
-	if _, ok := mustBeAdmin(w, r); !ok {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
 	if err := s.Deps.Users.Delete(r.Context(), id); err != nil {
