@@ -7,6 +7,10 @@ services:
       - "${PORT:-21847}:21847"
     environment:
       - CIX_API_KEY=${CIX_API_KEY}
+      # Defense in depth — the image already defaults to 21847 but
+      # pinning it here keeps the host:container port mapping honest
+      # if a third-party fork or custom build sets a different default.
+      - CIX_PORT=${CIX_PORT:-21847}
       - CIX_EMBEDDING_MODEL=${CIX_EMBEDDING_MODEL:-awhiteside/CodeRankEmbed-Q8_0-GGUF}
       - CIX_CHROMA_PERSIST_DIR=/data/chroma
       - CIX_SQLITE_PATH=/data/sqlite/projects.db
