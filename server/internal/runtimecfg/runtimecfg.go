@@ -107,7 +107,7 @@ func (s *Service) Recommended() Snapshot {
 		LlamaCtxSize:            2048,
 		LlamaNGpuLayers:         defaultGpu,
 		LlamaNThreads:           runtime.NumCPU() / 2,
-		MaxEmbeddingConcurrency: 1,
+		MaxEmbeddingConcurrency: 5,
 		LlamaBatchSize:          2048,
 		Source:                  map[string]string{},
 	}
