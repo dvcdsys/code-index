@@ -22,6 +22,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/httpapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
+	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
@@ -96,6 +97,34 @@ func run() error {
 		}
 	}()
 
+	// PR-E — overlay dashboard-saved runtime overrides onto the env-loaded
+	// config before any code path reads its fields. The DB row may not
+	// exist yet (fresh install); resolution falls through to env / recommended
+	// in that case so behaviour matches pre-PR-E exactly.
+	rcfg := runtimecfg.New(database, cfg)
+	snap, err := rcfg.Get(context.Background())
+	if err != nil {
+		return fmt.Errorf("load runtime_settings: %w", err)
+	}
+	snap.ApplyTo(cfg)
+	logger.Info("runtime config resolved",
+		"embedding_model", cfg.EmbeddingModel,
+		"llama_ctx", cfg.LlamaCtxSize,
+		"n_gpu_layers", cfg.LlamaNGpuLayers,
+		"n_threads", cfg.LlamaNThreads,
+		"max_concurrency", cfg.MaxEmbeddingConcurrency,
+		"batch", cfg.LlamaBatchSize,
+		"sources", snap.Source,
+	)
+	// DynamicSQLitePath embeds ModelSafeName(); if the dashboard switched the
+	// model, the storage path resolved a moment ago is for the OLD model. The
+	// already-opened DB is still correct (it's the OLD model's state) but the
+	// chroma vectorstore opened below needs to honour the NEW model. Recompute
+	// dbPath only matters if we want to re-open under the new model — for PR-E
+	// we deliberately keep the old DB so historical projects keep their
+	// indexed_with_model and the dashboard can show the drift. Sidecar +
+	// vectorstore use the new model.
+
 	// Embeddings service. When disabled we still build the value so router
 	// wiring stays consistent — Service methods return ErrDisabled in that case.
 	// Startup is bounded by a context derived from LlamaStartupSec plus a grace
@@ -140,6 +169,9 @@ func run() error {
 
 	idx := indexer.New(database, vs, embedSvc, logger)
 	idx.SetEmbedIncludePath(cfg.EmbedIncludePath)
+	// PR-E — record the active embedding model on every indexed project so the
+	// dashboard can highlight stale vectors when the runtime model changes.
+	idx.SetEmbeddingModel(cfg.EmbeddingModel)
 	if cfg.EmbedIncludePath {
 		logger.Info("embedding format: path-aware preamble enabled (CIX_EMBED_INCLUDE_PATH=true) — full reindex required if upgrading")
 	}
@@ -172,6 +204,7 @@ func run() error {
 		EmbeddingSvc:   embedSvc,
 		VectorStore:    vs,
 		Indexer:        idx,
+		RuntimeCfg:     rcfg,
 	})
 
 	srv := &http.Server{

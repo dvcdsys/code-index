@@ -56,3 +56,11 @@ export type UserListResponse = components['schemas']['UserListResponse'];
 export type CreateApiKeyRequest = components['schemas']['CreateApiKeyRequest'];
 export type SessionListResponse = components['schemas']['SessionListResponse'];
 export type BootstrapStatusResponse = components['schemas']['BootstrapStatusResponse'];
+
+export type RuntimeConfig = components['schemas']['RuntimeConfig'];
+export type RuntimeConfigUpdate = components['schemas']['RuntimeConfigUpdate'];
+export type RuntimeConfigRecommended = components['schemas']['RuntimeConfigRecommended'];
+export type SidecarStatus = components['schemas']['SidecarStatus'];
+export type ModelEntry = components['schemas']['ModelEntry'];
+export type ModelList = components['schemas']['ModelList'];
+export type RestartAccepted = components['schemas']['RestartAccepted'];

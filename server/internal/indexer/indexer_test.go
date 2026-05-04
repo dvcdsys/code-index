@@ -439,6 +439,70 @@ func TestFinishIndexing_UpdatesProject(t *testing.T) {
 	}
 }
 
+// TestFinishIndexing_CapturesEmbeddingModel ensures FinishIndexing writes the
+// model identifier set via SetEmbeddingModel into projects.indexed_with_model.
+// Empty model (default for tests that don't call the setter) keeps the column
+// NULL so the dashboard treats those projects as "indexed before drift
+// tracking existed" rather than as stale.
+func TestFinishIndexing_CapturesEmbeddingModel(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, "/proj")
+
+	ctx := context.Background()
+	vs := newStore(t)
+	svc := New(d, vs, &fakeEmbedder{dim: 8}, nil)
+	svc.SetEmbeddingModel("test/model-v1")
+
+	runID, _, err := svc.BeginIndexing(ctx, "/proj", false)
+	if err != nil {
+		t.Fatalf("BeginIndexing: %v", err)
+	}
+	goFile := "package main\nfunc X() {}\n"
+	if _, _, _, err := svc.ProcessFiles(ctx, "/proj", runID, []FilePayload{
+		{Path: "/proj/a.go", Content: goFile, ContentHash: sha256hex(goFile), Language: "go"},
+	}); err != nil {
+		t.Fatalf("ProcessFiles: %v", err)
+	}
+	if _, _, _, err := svc.FinishIndexing(ctx, "/proj", runID, nil, 1); err != nil {
+		t.Fatalf("FinishIndexing: %v", err)
+	}
+
+	var model sql.NullString
+	if err := d.QueryRowContext(ctx,
+		`SELECT indexed_with_model FROM projects WHERE host_path = ?`, "/proj",
+	).Scan(&model); err != nil {
+		t.Fatalf("select indexed_with_model: %v", err)
+	}
+	if !model.Valid || model.String != "test/model-v1" {
+		t.Errorf("indexed_with_model = %+v, want test/model-v1", model)
+	}
+
+	// Round 2: another project, no setter call → column stays NULL.
+	seedProject(t, d, "/proj2")
+	svc2 := New(d, vs, &fakeEmbedder{dim: 8}, nil) // no SetEmbeddingModel
+	runID2, _, err := svc2.BeginIndexing(ctx, "/proj2", false)
+	if err != nil {
+		t.Fatalf("BeginIndexing /proj2: %v", err)
+	}
+	if _, _, _, err := svc2.ProcessFiles(ctx, "/proj2", runID2, []FilePayload{
+		{Path: "/proj2/b.go", Content: goFile, ContentHash: sha256hex(goFile), Language: "go"},
+	}); err != nil {
+		t.Fatalf("ProcessFiles /proj2: %v", err)
+	}
+	if _, _, _, err := svc2.FinishIndexing(ctx, "/proj2", runID2, nil, 1); err != nil {
+		t.Fatalf("FinishIndexing /proj2: %v", err)
+	}
+	var model2 sql.NullString
+	if err := d.QueryRowContext(ctx,
+		`SELECT indexed_with_model FROM projects WHERE host_path = ?`, "/proj2",
+	).Scan(&model2); err != nil {
+		t.Fatalf("select indexed_with_model /proj2: %v", err)
+	}
+	if model2.Valid {
+		t.Errorf("indexed_with_model /proj2 = %q, want NULL", model2.String)
+	}
+}
+
 func TestFinishIndexing_DeletesPaths(t *testing.T) {
 	d := openTestDB(t)
 	seedProject(t, d, "/proj")

@@ -62,6 +62,11 @@ type Project struct {
 	CreatedAt     string
 	UpdatedAt     string
 	LastIndexedAt *string
+	// IndexedWithModel is the embedding model identifier captured at the
+	// last successful FinishIndexing. nil for projects that have never been
+	// indexed under PR-E (or never indexed at all). The dashboard renders
+	// nil as a neutral "Unknown" badge, NOT as drift.
+	IndexedWithModel *string
 }
 
 // CreateRequest mirrors Python ProjectCreate.
@@ -184,7 +189,7 @@ func findOverlap(ctx context.Context, db *sql.DB, candidate string) (string, err
 // Get retrieves a project by its host_path. Returns ErrNotFound if absent.
 func Get(ctx context.Context, db *sql.DB, hostPath string) (*Project, error) {
 	row := db.QueryRowContext(ctx,
-		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at
+		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model
 		 FROM projects WHERE host_path = ?`, hostPath,
 	)
 	return scanProject(hostPath, row)
@@ -212,7 +217,7 @@ func GetByHash(ctx context.Context, db *sql.DB, pathHash string) (*Project, erro
 // List returns all projects ordered by created_at descending.
 func List(ctx context.Context, db *sql.DB) ([]Project, error) {
 	rows, err := db.QueryContext(ctx,
-		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at
+		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model
 		 FROM projects ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -272,16 +277,17 @@ func Delete(ctx context.Context, db *sql.DB, hostPath string) error {
 
 func scanProject(hostPath string, row *sql.Row) (*Project, error) {
 	var (
-		hp, containerPath         string
-		langsJSON, settingsJSON   string
-		statsJSON, status         string
-		createdAt, updatedAt      string
-		lastIndexedAt             *string
+		hp, containerPath       string
+		langsJSON, settingsJSON string
+		statsJSON, status       string
+		createdAt, updatedAt    string
+		lastIndexedAt           *string
+		indexedWithModel        *string
 	)
 	err := row.Scan(
 		&hp, &containerPath,
 		&langsJSON, &settingsJSON, &statsJSON,
-		&status, &createdAt, &updatedAt, &lastIndexedAt,
+		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, hostPath)
@@ -289,7 +295,7 @@ func scanProject(hostPath string, row *sql.Row) (*Project, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan project row: %w", err)
 	}
-	return buildProject(hp, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt)
+	return buildProject(hp, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel)
 }
 
 func scanProjectRow(rows *sql.Rows) (*Project, error) {
@@ -297,20 +303,21 @@ func scanProjectRow(rows *sql.Rows) (*Project, error) {
 		hostPath, containerPath string
 		langsJSON, settingsJSON string
 		statsJSON, status       string
-		createdAt, updatedAt   string
+		createdAt, updatedAt    string
 		lastIndexedAt           *string
+		indexedWithModel        *string
 	)
 	if err := rows.Scan(
 		&hostPath, &containerPath,
 		&langsJSON, &settingsJSON, &statsJSON,
-		&status, &createdAt, &updatedAt, &lastIndexedAt,
+		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel,
 	); err != nil {
 		return nil, fmt.Errorf("scan project: %w", err)
 	}
-	return buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt)
+	return buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel)
 }
 
-func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt string, lastIndexedAt *string) (*Project, error) {
+func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt string, lastIndexedAt, indexedWithModel *string) (*Project, error) {
 	var langs []string
 	if err := json.Unmarshal([]byte(langsJSON), &langs); err != nil {
 		langs = nil
@@ -327,14 +334,15 @@ func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, s
 	}
 
 	return &Project{
-		HostPath:      hostPath,
-		ContainerPath: containerPath,
-		Languages:     langs,
-		Settings:      settings,
-		Stats:         stats,
-		Status:        status,
-		CreatedAt:     createdAt,
-		UpdatedAt:     updatedAt,
-		LastIndexedAt: lastIndexedAt,
+		HostPath:         hostPath,
+		ContainerPath:    containerPath,
+		Languages:        langs,
+		Settings:         settings,
+		Stats:            stats,
+		Status:           status,
+		CreatedAt:        createdAt,
+		UpdatedAt:        updatedAt,
+		LastIndexedAt:    lastIndexedAt,
+		IndexedWithModel: indexedWithModel,
 	}, nil
 }

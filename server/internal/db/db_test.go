@@ -134,6 +134,73 @@ func TestOpenMigratesPreM7DB(t *testing.T) {
 	}
 }
 
+// TestOpenMigratesPreEDB simulates a pre-PR-E database (projects table without
+// indexed_with_model column, no runtime_settings table) and verifies Open
+// migrates it cleanly + the new column is queryable on existing rows.
+func TestOpenMigratesPreEDB(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "pre-e.db")
+
+	// Stage a pre-PR-E projects table that already has path_hash (post-m7)
+	// but lacks indexed_with_model. No runtime_settings table at all.
+	seed, err := sql.Open(DriverName, "file:"+tmp)
+	if err != nil {
+		t.Fatalf("seed Open: %v", err)
+	}
+	if _, err := seed.Exec(`CREATE TABLE projects (
+		host_path TEXT PRIMARY KEY,
+		container_path TEXT NOT NULL,
+		languages TEXT DEFAULT '[]',
+		settings TEXT DEFAULT '{}',
+		stats TEXT DEFAULT '{}',
+		status TEXT DEFAULT 'created',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		last_indexed_at TEXT,
+		path_hash TEXT
+	)`); err != nil {
+		t.Fatalf("seed CREATE TABLE: %v", err)
+	}
+	if _, err := seed.Exec(
+		`INSERT INTO projects (host_path, container_path, created_at, updated_at, path_hash)
+		 VALUES ('/legacy/proj', '/legacy/proj', '2024-01-01', '2024-01-01', 'abc')`,
+	); err != nil {
+		t.Fatalf("seed INSERT: %v", err)
+	}
+	seed.Close()
+
+	database, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("Open migrates pre-PR-E DB: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(tmp)
+
+	// indexed_with_model column exists and is queryable. Pre-existing rows
+	// must stay NULL — UI relies on this to render the neutral "Unknown"
+	// badge instead of the destructive drift highlight.
+	var model sql.NullString
+	if err := database.QueryRow(
+		`SELECT indexed_with_model FROM projects WHERE host_path = ?`, "/legacy/proj",
+	).Scan(&model); err != nil {
+		t.Fatalf("select indexed_with_model: %v", err)
+	}
+	if model.Valid {
+		t.Errorf("legacy row indexed_with_model = %q, want NULL", model.String)
+	}
+
+	// runtime_settings table exists with the single-row CHECK in place.
+	if _, err := database.Exec(
+		`INSERT INTO runtime_settings (id, embedding_model, updated_at) VALUES (1, 'foo', '2026-01-01')`,
+	); err != nil {
+		t.Fatalf("runtime_settings insert: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO runtime_settings (id, embedding_model, updated_at) VALUES (2, 'bar', '2026-01-01')`,
+	); err == nil {
+		t.Error("expected CHECK(id=1) violation on second row, got nil")
+	}
+}
+
 func TestSymbolsIndexExists(t *testing.T) {
 	database, err := Open(":memory:")
 	if err != nil {

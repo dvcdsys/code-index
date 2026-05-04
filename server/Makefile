@@ -51,7 +51,7 @@ DASHBOARD_OUT := $(ROOT)/internal/httpapi/dashboard/dist
 
 help:
 	@echo "Targets:"
-	@echo "  build              — go build cmd/cix-server into dist/$(BUNDLE_NAME)/cix-server"
+	@echo "  build              — dashboard-build + go build cmd/cix-server into dist/$(BUNDLE_NAME)/cix-server"
 	@echo "  test               — go test ./... (no llama-server required)"
 	@echo "  fetch-llama        — download + SHA256-verify llama.cpp $(LLAMA_VERSION) for $(OS)-$(ARCH)"
 	@echo "  bundle             — build + fetch-llama, assemble dist/$(BUNDLE_NAME)/ tree"
@@ -72,7 +72,9 @@ help:
 	@echo "  dashboard-clean    — remove built dashboard artefacts (keeps PLACEHOLDER.html)"
 	@echo "  clean              — remove dist/"
 
-build:
+# `go build` embeds internal/httpapi/dashboard/dist/ via go:embed — the
+# dashboard must be built first so the binary picks up fresh assets.
+build: dashboard-build
 	mkdir -p $(BUNDLE_DIR)
 	$(GO) build $(GOFLAGS) -o $(BUNDLE_DIR)/cix-server ./cmd/cix-server
 
@@ -116,11 +118,18 @@ run: bundle
 	    "$(BUNDLE_DIR)/cix-server"
 
 test-gate:
-	@# The gate depends on a local GGUF and a fetched llama-server. The dev
-	@# fallback inside config.Validate reads bench/results/reference_gguf_path.txt
-	@# when CIX_GGUF_PATH is unset, so this target Just Works on the dev
-	@# machine that produced the reference vectors.
+	@# The gate depends on a local GGUF and a fetched llama-server. PR-E
+	@# removed the implicit config.Validate fallback that used to read
+	@# bench/results/reference_gguf_path.txt — the dashboard now requires
+	@# operators to pick a model source explicitly, so we do the same here:
+	@# read the file (if it exists) and stamp CIX_GGUF_PATH for the test
+	@# run only.
+	@if [ ! -f bench/results/reference_gguf_path.txt ]; then \
+		echo "ERROR: bench/results/reference_gguf_path.txt missing — run bench/emit_reference_embeddings.py first."; \
+		exit 1; \
+	fi
 	CIX_LLAMA_BIN_DIR=$(LLAMA_DIR) \
+	CIX_GGUF_PATH="$$(cat bench/results/reference_gguf_path.txt)" \
 	$(GO) test -tags=embed_gate -v -run TestEmbeddingParity ./internal/embeddings/...
 
 docker-build-cuda:
