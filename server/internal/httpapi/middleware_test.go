@@ -141,3 +141,38 @@ func TestAuth_DisabledFlagSkipsCheck(t *testing.T) {
 		t.Fatalf("status = %d, want 200 with AuthDisabled=true", rr.Code)
 	}
 }
+
+// TestLimitBodySize_RejectsLargePayloadAtLogin sends a request with a
+// declared Content-Length above the default 1 MiB cap and expects 413
+// before the login handler ever runs. Crucially, this fires at the
+// public /auth/login path so an unauthenticated attacker cannot force
+// the server to read an unbounded body.
+func TestLimitBodySize_RejectsLargePayloadAtLogin(t *testing.T) {
+	f := newAuthFixture(t)
+	// The body itself doesn't matter — the middleware checks
+	// Content-Length first and returns 413 without reading.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", http.NoBody)
+	req.ContentLength = (2 << 20) // 2 MiB > 1 MiB default
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestLimitBodySize_AllowsLargerIndexingPayload confirms the per-route
+// override: the indexing endpoint accepts payloads up to 32 MiB, well
+// past the 1 MiB default. Sending exactly 2 MiB should pass the size
+// check and reach the auth handler (which 401s for an unauthenticated
+// request — but past the 413 gate, which is what we're testing).
+func TestLimitBodySize_AllowsLargerIndexingPayload(t *testing.T) {
+	f := newAuthFixture(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/abc123/index/files", http.NoBody)
+	req.ContentLength = (2 << 20) // 2 MiB
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code == http.StatusRequestEntityTooLarge {
+		t.Fatalf("indexing endpoint should not 413 at 2 MiB (got %d)", rr.Code)
+	}
+}

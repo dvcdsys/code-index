@@ -25,6 +25,44 @@ func serverVersionHeader(version string) func(http.Handler) http.Handler {
 	}
 }
 
+// Request body size caps. The default of 1 MiB covers every auth/admin/
+// search/project endpoint generously — JSON payloads on those are kilobytes
+// at most. /index/files is the one outlier: at default config (batch=20,
+// max-file=512 KiB) a real payload is ~11 MiB. The 64 MiB cap also fits
+// operator-tuned worst case (batch=50 × max-file=1 MiB ≈ 55 MiB) with
+// headroom; pathological configs above that fail loud with HTTP 413.
+const (
+	defaultMaxBodyBytes  int64 = 1 << 20  // 1 MiB
+	indexingMaxBodyBytes int64 = 64 << 20 // 64 MiB
+)
+
+// bodySizeFor picks the right cap for a request path. The indexing endpoint
+// is the only one that legitimately receives multi-megabyte JSON.
+func bodySizeFor(path string) int64 {
+	if strings.Contains(path, "/index/files") {
+		return indexingMaxBodyBytes
+	}
+	return defaultMaxBodyBytes
+}
+
+// limitBodySize wraps r.Body with http.MaxBytesReader so handlers cannot
+// be forced to read unbounded JSON, and rejects oversize requests up-front
+// when the client honestly declared Content-Length. The fast path keeps
+// CPU off the bcrypt and parser code paths during a flood.
+func limitBodySize() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			limit := bodySizeFor(r.URL.Path)
+			if r.ContentLength > limit {
+				writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // publicPaths is the set of HTTP paths that bypass the auth check.
 // Includes the bootstrap probe + login (callers MUST be able to reach
 // these without a valid session) plus the documentation, health, and
@@ -158,10 +196,14 @@ func isPublicPath(p string) bool {
 	return false
 }
 
-// clientIP returns the best-effort remote IP for audit logging. Honours
-// X-Forwarded-For (first hop) when present, otherwise falls back to the
-// raw RemoteAddr. Not used for any security decision — only stored as
-// metadata in sessions.last_seen_ip / api_keys.last_used_ip.
+// clientIP returns the best-effort remote IP. Honours X-Forwarded-For
+// (first hop) when present, otherwise falls back to the raw RemoteAddr.
+//
+// Used for audit metadata (sessions.last_seen_ip, api_keys.last_used_ip)
+// AND as the per-IP key for the login rate limiter. Production deployments
+// MUST sit behind a reverse proxy that replaces (not appends to) the
+// inbound XFF — otherwise an attacker can rotate a forged header per
+// request to bypass the per-IP cap. See doc/SECURITY_DEPLOYMENT.md.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.IndexByte(xff, ','); i > 0 {
