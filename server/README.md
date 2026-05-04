@@ -49,7 +49,7 @@ All are optional; defaults match `api/app/config.py` except `CIX_PORT`.
 | `CIX_SQLITE_PATH` | `/data/sqlite/projects.db` | Suffixed with model-safe name on open |
 | `CIX_MAX_FILE_SIZE` | `524288` | |
 | `CIX_EXCLUDED_DIRS` | see config.go | Comma-separated |
-| `CIX_MAX_EMBEDDING_CONCURRENCY` | `1` | |
+| `CIX_MAX_EMBEDDING_CONCURRENCY` | `5` | Embedding queue parallelism. Recommended for both CPU and single-GPU setups. |
 | `CIX_EMBEDDING_QUEUE_TIMEOUT` | `300` | Seconds |
 | `CIX_MAX_CHUNK_TOKENS` | `1500` | |
 

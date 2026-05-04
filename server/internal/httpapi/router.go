@@ -87,8 +87,9 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(serverVersionHeader(d.ServerVersion))
 	r.Use(structuredLogger(d.Logger))
+	r.Use(limitBodySize())
 
-	srv := &Server{Deps: d}
+	srv := &Server{Deps: d, loginLimiter: newLoginLimiter()}
 
 	// Auth — the middleware is installed unless AuthDisabled is true. Every
 	// authenticated route accepts EITHER an active session cookie OR a

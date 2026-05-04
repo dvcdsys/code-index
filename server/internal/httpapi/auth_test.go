@@ -87,6 +87,59 @@ func TestLogin_WrongPassword(t *testing.T) {
 	}
 }
 
+// TestLogin_RateLimit_BlocksAfterRepeatedFailures fires N+1 wrong-password
+// attempts at the live router and expects the (N+1)th to be 429 with a
+// Retry-After header. The fixture's loginLimiter starts with the default
+// policy (5/15min per email); the test follows that contract.
+func TestLogin_RateLimit_BlocksAfterRepeatedFailures(t *testing.T) {
+	f := newAuthFixture(t)
+	for i := range 5 {
+		rr := loginRR(t, f.Router, "admin@example.com", "WRONG")
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want 401", i+1, rr.Code)
+		}
+	}
+	rr := loginRR(t, f.Router, "admin@example.com", "WRONG")
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("6th attempt status = %d, want 429 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if ra := rr.Result().Header.Get("Retry-After"); ra == "" {
+		t.Errorf("Retry-After header missing on 429")
+	}
+	// Even a CORRECT password is now blocked — the limiter checks before
+	// authenticating, which is what we want for credential-stuffing
+	// resistance.
+	rr = loginRR(t, f.Router, "admin@example.com", "secret-password")
+	if rr.Code != http.StatusTooManyRequests {
+		t.Errorf("correct password while rate-limited status = %d, want 429", rr.Code)
+	}
+}
+
+// TestLogin_RateLimit_ResetOnSuccess verifies that a user who fat-fingers
+// their password a few times then logs in correctly does not stay locked
+// out — the per-(IP, email) counter clears on a successful authentication.
+func TestLogin_RateLimit_ResetOnSuccess(t *testing.T) {
+	f := newAuthFixture(t)
+	for i := range 4 {
+		rr := loginRR(t, f.Router, "admin@example.com", "WRONG")
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("warmup attempt %d: status = %d", i+1, rr.Code)
+		}
+	}
+	rr := loginRR(t, f.Router, "admin@example.com", "secret-password")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("correct password status = %d, want 200", rr.Code)
+	}
+	// Counter is now reset; we should be able to fail again 4 more times
+	// before the next 429 (without the reset, we would hit 5 immediately).
+	for i := range 4 {
+		rr := loginRR(t, f.Router, "admin@example.com", "WRONG")
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("post-reset attempt %d: status = %d, want 401", i+1, rr.Code)
+		}
+	}
+}
+
 func TestLogin_MissingFields(t *testing.T) {
 	f := newAuthFixture(t)
 	rr := loginRR(t, f.Router, "", "")
@@ -342,6 +395,106 @@ func TestApiKey_ListForOwnerHidesOthers(t *testing.T) {
 	if body.Total != 1 {
 		t.Errorf("viewer sees total = %d, want 1 (own key only)", body.Total)
 	}
+}
+
+// TestProjectMutations_AdminOnly verifies that PATCH/DELETE on a project
+// and POST /index/cancel are gated behind the admin role. The admin
+// fixture seeds an admin; a separate viewer is created mid-test, and we
+// assert viewer → 403 and admin → 2xx for each of the three endpoints.
+func TestProjectMutations_AdminOnly(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	// Admin creates a project to act on. CreateProject is intentionally
+	// not admin-only — viewers can register their own projects.
+	createBody, _ := json.Marshal(map[string]string{"host_path": "/tmp/test-proj"})
+	req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewReader(createBody)), adminCookie)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("admin create project status = %d (body=%s)", rr.Code, rr.Body.String())
+	}
+	var created struct{ PathHash string `json:"path_hash"` }
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+	if created.PathHash == "" {
+		t.Fatalf("created project payload missing path_hash: %s", rr.Body.String())
+	}
+
+	// Seed a viewer + log in as them.
+	viewerBody, _ := json.Marshal(map[string]string{
+		"email": "viewer@example.com", "initial_password": "viewerpass1", "role": "viewer",
+	})
+	req = withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(viewerBody)), adminCookie)
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed viewer status = %d (body=%s)", rr.Code, rr.Body.String())
+	}
+	viewerCookie := sessionCookie(loginRR(t, f.Router, "viewer@example.com", "viewerpass1"))
+
+	// Each gated endpoint must 403 for the viewer, then succeed for the
+	// admin. Tested in this order: PATCH first (mutates settings), then
+	// /index/cancel (idempotent), then DELETE last (destructive).
+	cases := []struct {
+		name        string
+		method      string
+		path        string
+		body        []byte
+		adminStatus int
+	}{
+		{
+			name:   "patch settings",
+			method: http.MethodPatch,
+			path:   "/api/v1/projects/" + created.PathHash,
+			body: mustJSON(t, map[string]any{
+				"settings": map[string]any{"exclude_patterns": []string{"vendor"}},
+			}),
+			adminStatus: http.StatusOK,
+		},
+		{
+			name:        "cancel index run",
+			method:      http.MethodPost,
+			path:        "/api/v1/projects/" + created.PathHash + "/index/cancel",
+			adminStatus: http.StatusOK, // idempotent — returns 200 even when no run is active
+		},
+		{
+			name:        "delete project",
+			method:      http.MethodDelete,
+			path:        "/api/v1/projects/" + created.PathHash,
+			adminStatus: http.StatusNoContent,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name+"/viewer-forbidden", func(t *testing.T) {
+			req := withCookie(httptest.NewRequest(c.method, c.path, bytes.NewReader(c.body)), viewerCookie)
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			f.Router.ServeHTTP(rr, req)
+			if rr.Code != http.StatusForbidden {
+				t.Errorf("viewer %s %s status = %d, want 403", c.method, c.path, rr.Code)
+			}
+		})
+		t.Run(c.name+"/admin-allowed", func(t *testing.T) {
+			req := withCookie(httptest.NewRequest(c.method, c.path, bytes.NewReader(c.body)), adminCookie)
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			f.Router.ServeHTTP(rr, req)
+			if rr.Code != c.adminStatus {
+				t.Errorf("admin %s %s status = %d, want %d (body=%s)", c.method, c.path, rr.Code, c.adminStatus, rr.Body.String())
+			}
+		})
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
 }
 
 // TestListUsers_IncludesStats — admin-list payload must carry the three

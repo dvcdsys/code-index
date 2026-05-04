@@ -134,7 +134,7 @@ func Load() (*Config, error) {
 	}
 	c.MaxFileSize = maxFileSize
 
-	maxConc, err := getenvInt("CIX_MAX_EMBEDDING_CONCURRENCY", 1)
+	maxConc, err := getenvInt("CIX_MAX_EMBEDDING_CONCURRENCY", 5)
 	if err != nil {
 		return nil, err
 	}

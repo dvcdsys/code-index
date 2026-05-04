@@ -81,7 +81,7 @@ func snapshotToPayload(snap runtimecfg.Snapshot, rec runtimecfg.Snapshot) runtim
 
 // GetRuntimeConfig — GET /api/v1/admin/runtime-config (admin only).
 func (s *Server) GetRuntimeConfig(w http.ResponseWriter, r *http.Request) {
-	if _, ok := mustBeAdmin(w, r); !ok {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
 	if s.Deps.RuntimeCfg == nil {
@@ -102,7 +102,7 @@ func (s *Server) GetRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 // supplied"; the value tells us what to do with it (zero = clear override,
 // non-zero = set override). nil pointers leave the existing override alone.
 func (s *Server) PutRuntimeConfig(w http.ResponseWriter, r *http.Request) {
-	ac, ok := mustBeAdmin(w, r)
+	ac, ok := s.mustBeAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -188,7 +188,7 @@ var restartInFlight atomic.Bool
 // drains, terminates, and respawns. The dashboard polls GET /sidecar/status
 // to observe the running → restarting → running transition.
 func (s *Server) RestartSidecar(w http.ResponseWriter, r *http.Request) {
-	if _, ok := mustBeAdmin(w, r); !ok {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
 	if s.Deps.EmbeddingSvc == nil {
@@ -239,7 +239,7 @@ func (s *Server) RestartSidecar(w http.ResponseWriter, r *http.Request) {
 
 // GetSidecarStatus — GET /api/v1/admin/sidecar/status (admin only).
 func (s *Server) GetSidecarStatus(w http.ResponseWriter, r *http.Request) {
-	if _, ok := mustBeAdmin(w, r); !ok {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
 	if s.Deps.EmbeddingSvc == nil {
@@ -298,7 +298,7 @@ func (s *Server) GetSidecarStatus(w http.ResponseWriter, r *http.Request) {
 // directory name (we encode HF "owner/model" as "owner__model" to stay
 // filesystem-safe).
 func (s *Server) ListModels(w http.ResponseWriter, r *http.Request) {
-	if _, ok := mustBeAdmin(w, r); !ok {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
 	cacheDir := embeddings.CacheDirFromService(s.Deps.EmbeddingSvc)
