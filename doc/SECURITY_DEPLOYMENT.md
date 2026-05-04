@@ -154,7 +154,7 @@ or accept the risk:
 - **WAF / IDS.** No IP allowlisting, no anomaly detection. Use your
   reverse proxy or a host-level firewall.
 - **Multi-tenant project ownership.** All authenticated users see all
-  projects. Destructive mutations (PATCH/DELETE/index-cancel) are admin-
+  projects. Destructive mutations (PATCH/DELETE) are admin-
   only; create/list/search are open to any authenticated user. If you
   need true tenant separation, run separate cix-server instances per
   tenant.
