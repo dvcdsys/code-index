@@ -667,8 +667,11 @@ idle draw. Embedding calls do not spike VRAM the way fp16 PyTorch attention
 used to — sequence length and batch size only change latency, not peak memory.
 
 `MAX_CHUNK_TOKENS` still caps the length of each code chunk (1 token ≈ 4 chars)
-and must stay ≤ `n_ctx` (8192). `MAX_EMBEDDING_CONCURRENCY` should stay at `1`
-for single-GPU setups — llama.cpp serialises through one context.
+and must stay ≤ `n_ctx` (8192). `MAX_EMBEDDING_CONCURRENCY` defaults to `5` —
+the indexing queue ships chunks in parallel; the llama-server sidecar still
+serialises requests through one context, but pipelining host-side prep with
+device inference at this depth saturates the GPU without measurable latency
+cost. Drop to `1` only if you observe contention.
 
 See [`doc/vram-profiling.md`](doc/vram-profiling.md) for methodology and numbers.
 
