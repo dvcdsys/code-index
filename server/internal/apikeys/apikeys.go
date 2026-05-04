@@ -278,20 +278,33 @@ func (s *Service) Touch(ctx context.Context, id, ip, ua string) error {
 
 // --- helpers ---
 
-// newKey returns a fresh `cix_<32 random base64url chars>` token.
-// 32 base64url chars carry 192 bits of entropy — well above any
-// brute-force threshold.
+// newKey returns a fresh `cix_<43 random base64url chars>` token.
+// 32 random bytes → 43 base64url chars = 256 bits of entropy. The
+// length matches GitHub-class personal-access-token verbosity and
+// puts brute-force comfortably out of reach for any attacker, on
+// any timescale, even against a non-stretched hash. Older keys
+// issued at the previous 192-bit length keep working — the hash
+// column is the lookup key, not the length.
 func newKey() (string, error) {
-	var b [24]byte // 24 bytes -> 32 base64url chars
+	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
 	return KeyPrefix + base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
-// hashKey returns hex(sha256(fullKey)). sha256 is sufficient because the
-// pre-image is 192 bits of entropy (cannot be brute-forced); we just
-// need a deterministic lookup column.
+// hashKey returns hex(sha256(fullKey)). SHA-256 is the right
+// primitive here — NOT bcrypt/argon2/PBKDF2 — because the pre-image
+// is 256 bits of CSPRNG output (server-issued; never user-chosen).
+// At that entropy floor, brute-forcing the hash is computationally
+// indistinguishable from brute-forcing the underlying random bytes,
+// and adding a slow KDF would only tax every authenticated request
+// (~25–250 ms each at typical bcrypt costs) without raising the
+// security floor a single bit. This is the same pattern GitHub /
+// Stripe / AWS use for their API tokens. CodeQL's
+// `go/insufficient-password-hash` rule is heuristic and treats any
+// SHA-256 over a string-typed value as a password hash — that
+// heuristic does not apply to high-entropy machine-issued tokens.
 func hashKey(fullKey string) string {
 	h := sha256.Sum256([]byte(fullKey))
 	return hex.EncodeToString(h[:])

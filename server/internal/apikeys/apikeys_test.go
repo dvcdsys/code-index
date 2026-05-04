@@ -40,9 +40,10 @@ func TestGenerate_FormatAndAuthenticate(t *testing.T) {
 	if !strings.HasPrefix(full, KeyPrefix) {
 		t.Errorf("full key %q missing %s prefix", full, KeyPrefix)
 	}
-	// Body of the key past the prefix is base64url(24 bytes) = 32 chars.
-	if len(full)-len(KeyPrefix) != 32 {
-		t.Errorf("body length = %d, want 32", len(full)-len(KeyPrefix))
+	// Body of the key past the prefix is base64url(32 bytes) = 43 chars
+	// (256 bits of entropy — GitHub-class).
+	if len(full)-len(KeyPrefix) != 43 {
+		t.Errorf("body length = %d, want 43", len(full)-len(KeyPrefix))
 	}
 	if ak.Prefix != full[:PrefixDisplayLen] {
 		t.Errorf("stored prefix %q does not match key head %q", ak.Prefix, full[:PrefixDisplayLen])
