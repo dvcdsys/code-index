@@ -47,13 +47,24 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o /out/cix-server \
     ./cmd/cix-server
 
+# Pre-create an empty /data tree so the final stage can COPY it in with
+# nonroot (uid 65532) ownership. Without this, a fresh Docker named volume
+# initialises root-owned and the distroless nonroot uid in the runtime
+# stage cannot `mkdir /data/sqlite` on first boot.
+RUN mkdir -p /out/data
+
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /
 COPY --from=builder /out/cix-server /cix-server
 
-# Default port; override with CIX_PORT at runtime.
-ENV CIX_PORT=8001
-EXPOSE 8001
+# Default port — matches CIX_PORT in docker-compose.yml port mapping
+# (21847:21847) and the CUDA image (Dockerfile.cuda). The earlier 8001
+# default was a Python-FastAPI compat carry-over from the migration era;
+# the Python backend was archived 2026-04, so the parity is no longer
+# meaningful and the mismatch caused fresh `docker compose up -d` runs
+# to leave the host port pointing at a non-listening container port.
+ENV CIX_PORT=21847
+EXPOSE 21847
 
 # Container data layout — pin paths under /data so the named volume in
 # portainer-stack.yml / docker-compose receives both SQLite and chromem-go
@@ -61,6 +72,13 @@ EXPOSE 8001
 # inappropriate inside distroless where there is no usable HOME.
 ENV CIX_SQLITE_PATH=/data/sqlite/projects.db
 ENV CIX_CHROMA_PERSIST_DIR=/data/chroma
+
+# Pre-owned /data directory (distroless has no shell to mkdir+chown).
+# A fresh Docker named volume mounted onto /data inherits the 65532:65532
+# ownership baked here, so the nonroot runtime user can write the sqlite
+# and chroma trees on first boot. Bind mounts still need host-side chown
+# to 65532:65532 — see doc/SECURITY_DEPLOYMENT.md.
+COPY --from=builder --chown=65532:65532 /out/data /data
 VOLUME ["/data"]
 
 USER nonroot:nonroot

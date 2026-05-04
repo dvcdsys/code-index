@@ -12,9 +12,11 @@ import (
 	"strings"
 )
 
-// Config holds all runtime settings. Defaults match api/app/config.py except
-// for Port, which is 8001 by default so the Go server does not collide with
-// the Python server (21847) during parallel PoC rollout.
+// Config holds all runtime settings. Port defaults to 21847 — the same
+// value the Docker images bake into ENV CIX_PORT and the same the
+// docker-compose templates map on the host side. The earlier 8001
+// default was a Python-FastAPI parallel-rollout carry-over; the Python
+// backend was archived 2026-04 and the parity is no longer meaningful.
 type Config struct {
 	APIKey                  string
 	// AuthDisabled, when true, makes the server skip the API-key check on
@@ -122,7 +124,7 @@ func Load() (*Config, error) {
 	}
 	c.AuthDisabled = authOff
 
-	port, err := getenvInt("CIX_PORT", 8001)
+	port, err := getenvInt("CIX_PORT", 21847)
 	if err != nil {
 		return nil, err
 	}
