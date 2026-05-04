@@ -84,6 +84,11 @@ jobs:
           provenance: mode=max
           sbom: true
           build-args: VERSION=${{ steps.ver.outputs.version }}
+          # `openapi=doc` mounts the repo-root doc/ folder so the dashboard
+          # build stage can `COPY --from=openapi openapi.yaml` without us
+          # widening the primary build context (which is `server/`).
+          build-contexts: |
+            openapi=doc
           tags: ${{ steps.tags.outputs.tags }}
 
   docker-cuda:
@@ -139,6 +144,11 @@ jobs:
           provenance: mode=max
           sbom: true
           build-args: VERSION=${{ steps.ver.outputs.version }}
+          # `openapi=doc` mounts the repo-root doc/ folder so the dashboard
+          # build stage can `COPY --from=openapi openapi.yaml` without us
+          # widening the primary build context (which is `server/`).
+          build-contexts: |
+            openapi=doc
           tags: ${{ steps.tags.outputs.tags }}
 
   release:
