@@ -41,8 +41,21 @@ type Config struct {
 	LlamaTransport    string // CIX_LLAMA_TRANSPORT; "unix" or "tcp".
 	LlamaCtxSize      int    // CIX_LLAMA_CTX; defaults to MaxChunkTokens + 128 when unset.
 	LlamaNGpuLayers   int    // CIX_N_GPU_LAYERS; -1 on darwin (Metal all layers), 0 elsewhere.
+	LlamaNThreads     int    // CIX_LLAMA_THREADS; CPU thread count for llama-server (--threads). 0 = auto.
+	LlamaBatchSize    int    // CIX_LLAMA_BATCH; llama-server logical batch size (-b). 0 = match LlamaCtxSize.
 	LlamaStartupSec   int    // CIX_LLAMA_STARTUP_TIMEOUT; readiness probe ceiling in seconds.
 	EmbeddingsEnabled bool   // CIX_EMBEDDINGS_ENABLED; test hook to bypass sidecar entirely.
+
+	// BootstrapGGUFPath, when set, points at a .gguf file outside the cix
+	// cache that should be imported on first boot — atomically copied into
+	// `<GGUFCacheDir>/<safe_repo>/<basename>` so subsequent restarts use
+	// the cache without re-downloading. Idempotent: if the target file
+	// already exists, the import is skipped. Source: CIX_BOOTSTRAP_GGUF_PATH.
+	//
+	// Typical use: a Docker bind-mounting an existing HF cache file as
+	// read-only (`/bootstrap/model.gguf:ro`) so the named cix-models volume
+	// gets seeded once, then the bind can be removed.
+	BootstrapGGUFPath string
 
 	// EmbedIncludePath toggles a path+language+symbol preamble in front of
 	// each chunk before sending it to the embedder. Improves retrieval for
@@ -173,6 +186,25 @@ func Load() (*Config, error) {
 	}
 	c.LlamaNGpuLayers = gpuLayers
 
+	// CIX_LLAMA_THREADS: when 0 (default), llama-server picks the count via
+	// std::thread::hardware_concurrency. The dashboard runtime config can
+	// override at runtime; an explicit env value still acts as the bootstrap
+	// default the runtime layer falls back to.
+	threads, err := getenvInt("CIX_LLAMA_THREADS", 0)
+	if err != nil {
+		return nil, err
+	}
+	c.LlamaNThreads = threads
+
+	// CIX_LLAMA_BATCH: when 0 (default), the supervisor uses LlamaCtxSize so
+	// a single chunk fits in one batch (matches the prior --ubatch-size=ctx
+	// behaviour). Lower values trade throughput for memory.
+	batch, err := getenvInt("CIX_LLAMA_BATCH", 0)
+	if err != nil {
+		return nil, err
+	}
+	c.LlamaBatchSize = batch
+
 	startup, err := getenvInt("CIX_LLAMA_STARTUP_TIMEOUT", 60)
 	if err != nil {
 		return nil, err
@@ -184,6 +216,8 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.EmbeddingsEnabled = enabled
+
+	c.BootstrapGGUFPath = getenv("CIX_BOOTSTRAP_GGUF_PATH", "")
 
 	includePath, err := getenvBool("CIX_EMBED_INCLUDE_PATH", true)
 	if err != nil {
@@ -205,16 +239,20 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// Validate sanity-checks the Phase 3 fields and applies the dev-fallback rule
-// for CIX_GGUF_PATH. It must be called after Load (main.go invokes it before
-// constructing the embeddings service). Returns an error only for values that
-// cannot be made safe with a default.
+// Validate sanity-checks the Phase 3 fields. It must be called after Load
+// (main.go invokes it before constructing the embeddings service). Returns
+// an error only for values that cannot be made safe with a default.
 //
-// Dev fallback: when EmbeddingsEnabled is true and GGUFPath is empty, we look
-// for `bench/results/reference_gguf_path.txt` relative to the CWD. If present,
-// we use its contents as the GGUF path so the parity gate works without the
-// developer having to set an env var. This is a deliberate PoC ergonomic —
-// it is silent when the file is missing and the HF downloader picks up.
+// PR-E removed the implicit `bench/results/reference_gguf_path.txt` dev
+// fallback that used to silently stamp `cfg.GGUFPath` here. The dashboard's
+// runtime-config UI now requires the operator to pick exactly one of:
+// (a) HF repo ID → cix downloads to its own cache, or (b) absolute path →
+// used as-is. There is no longer a "magic file the user didn't paste"
+// resolution branch — it confused the UI ("No cached models" while the
+// sidecar happily ran an out-of-cache GGUF) and made provenance opaque.
+// Parity-gate developers must set CIX_GGUF_PATH explicitly (the test-gate
+// Makefile target now reads bench/results/reference_gguf_path.txt and
+// passes it through as an env var instead of relying on this code path).
 func (c *Config) Validate() error {
 	// NOTE: the old "CIX_API_KEY required unless CIX_AUTH_DISABLED" check is
 	// gone. Auth gating moved into the bootstrap path in main.go: the server
@@ -230,11 +268,6 @@ func (c *Config) Validate() error {
 	}
 	if c.LlamaStartupSec <= 0 {
 		return fmt.Errorf("CIX_LLAMA_STARTUP_TIMEOUT=%d, must be positive", c.LlamaStartupSec)
-	}
-	if c.EmbeddingsEnabled && c.GGUFPath == "" {
-		if path := readDevFallbackGGUF(); path != "" {
-			c.GGUFPath = path
-		}
 	}
 	return nil
 }
@@ -317,28 +350,6 @@ func defaultLlamaBinDir() string {
 // short. PID-based naming avoids collisions across concurrent test runs.
 func defaultLlamaSocketPath() string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("cix-llama-%d.sock", os.Getpid()))
-}
-
-// readDevFallbackGGUF reads bench/results/reference_gguf_path.txt relative to
-// the CWD if it exists. Empty return means "no fallback available"; callers
-// then rely on HF download.
-func readDevFallbackGGUF() string {
-	const refFile = "bench/results/reference_gguf_path.txt"
-	data, err := os.ReadFile(refFile)
-	if err != nil {
-		return ""
-	}
-	path := strings.TrimSpace(string(data))
-	if path == "" {
-		return ""
-	}
-	// Only use the fallback when the file actually exists on disk. Otherwise
-	// we'd stamp a non-existent path and the supervisor would fail later with
-	// a less friendly error.
-	if _, err := os.Stat(path); err != nil {
-		return ""
-	}
-	return path
 }
 
 func getenv(key, def string) string {

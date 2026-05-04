@@ -18,7 +18,12 @@ CREATE TABLE IF NOT EXISTS projects (
     -- O(n) GetByHash scan with an O(log n) index lookup. Computed in Go on
     -- insert; the column is nullable here so migrating databases can backfill
     -- lazily via Open's ALTER+UPDATE hook.
-    path_hash TEXT
+    path_hash TEXT,
+    -- indexed_with_model is the embedding model identifier active when the
+    -- project was last indexed. NULL on legacy rows (pre-PR-E) until next
+    -- reindex. Compared against the live runtime model to surface a "stale
+    -- model" badge on the dashboard project list.
+    indexed_with_model TEXT
 );
 
 -- NOTE: CREATE INDEX on path_hash is intentionally NOT here. Pre-m7 databases
@@ -128,6 +133,22 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_apikeys_owner ON api_keys(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_apikeys_hash ON api_keys(hash);
+
+-- runtime_settings holds the single dashboard-overridable runtime config row
+-- (PR-E). NULL columns mean "fall through to env / recommended". The
+-- CHECK(id=1) constraint enforces a single-row table; UPSERT uses
+-- INSERT OR REPLACE on id=1.
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    embedding_model TEXT,
+    llama_ctx_size INTEGER,
+    llama_n_gpu_layers INTEGER,
+    llama_n_threads INTEGER,
+    max_embedding_concurrency INTEGER,
+    llama_batch_size INTEGER,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
+);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -141,4 +162,5 @@ var ExpectedTables = []string{
 	"users",
 	"sessions",
 	"api_keys",
+	"runtime_settings",
 }

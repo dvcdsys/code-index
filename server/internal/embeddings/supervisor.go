@@ -34,14 +34,20 @@ const restartWindow = 5 * time.Minute
 // talk to llama-server. It is populated by Service.New from *config.Config
 // so the supervisor does not import the config package directly.
 type supervisorConfig struct {
-	BinDir       string // where llama-server + dylibs live
-	GGUFPath     string // absolute path to the model file
-	SocketPath   string // unix socket path (only used when Transport == "unix")
-	Transport    string // "unix" or "tcp"
-	CtxSize      int
-	NGpuLayers   int
-	StartupSec   int
-	TCPPort      int // 0 = auto-pick, only relevant for tcp transport
+	BinDir     string // where llama-server + dylibs live
+	GGUFPath   string // absolute path to the model file
+	SocketPath string // unix socket path (only used when Transport == "unix")
+	Transport  string // "unix" or "tcp"
+	CtxSize    int
+	NGpuLayers int
+	NThreads   int // 0 = let llama-server auto-detect via hardware_concurrency
+	BatchSize  int // 0 = match CtxSize (preserves prior --ubatch-size behaviour)
+	StartupSec int
+	TCPPort    int // 0 = auto-pick, only relevant for tcp transport
+	// Model is the human-readable identifier (HF repo id or absolute path)
+	// that the dashboard surfaces in the sidecar status card. The supervisor
+	// does not act on this field — it's recorded for observability only.
+	Model string
 }
 
 // supervisor owns the llama-server child process. It is responsible for:
@@ -70,6 +76,11 @@ type supervisor struct {
 	readySignal chan struct{}
 
 	waiterDone chan struct{} // closed after the exit-watcher goroutine returns
+
+	// lastSpawnErr is the most recent spawn() / readiness error, surfaced by
+	// Status() so the dashboard can render "Sidecar failed to start: ..."
+	// without grepping logs. Cleared on the next successful spawn.
+	lastSpawnErr atomic.Value // string
 }
 
 // newSupervisor validates the config, clamps the transport if needed, and
@@ -178,6 +189,18 @@ func (s *supervisor) spawn(ctx context.Context) error {
 		"--ubatch-size", strconv.Itoa(s.cfg.CtxSize),
 		"--n-gpu-layers", strconv.Itoa(s.cfg.NGpuLayers),
 	}
+	// PR-E — only pass --threads when the operator explicitly set one. With
+	// 0 we let llama-server pick via std::thread::hardware_concurrency, which
+	// is the saner default for unknown deployment shapes.
+	if s.cfg.NThreads > 0 {
+		argv = append(argv, "--threads", strconv.Itoa(s.cfg.NThreads))
+	}
+	// PR-E — logical batch size override. Default keeps the prior --ubatch =
+	// ctx-size invariant intact. Passing a value <= ctx-size is safe; >
+	// ctx-size is rejected by llama-server itself.
+	if s.cfg.BatchSize > 0 {
+		argv = append(argv, "-b", strconv.Itoa(s.cfg.BatchSize))
+	}
 	switch s.cfg.Transport {
 	case "unix":
 		// Clear any stale socket file from a previous crashed run.
@@ -244,11 +267,13 @@ func (s *supervisor) spawn(ctx context.Context) error {
 	defer cancel()
 	if err := s.waitReady(readyCtx); err != nil {
 		s.logger.Error("llama-server readiness probe failed, killing child", "err", err)
+		s.lastSpawnErr.Store(err.Error())
 		s.killGroup()
 		<-s.waiterDone
 		return fmt.Errorf("%w: %v", ErrNotReady, err)
 	}
 	close(s.readySignal)
+	s.lastSpawnErr.Store("") // clear any stale error from a prior failed start
 	s.logger.Info("llama-server ready", "elapsed", time.Since(s.startedAt).String())
 	return nil
 }
@@ -439,6 +464,110 @@ func (s *supervisor) killGroup() {
 	if s.cfg.Transport == "unix" {
 		_ = os.Remove(s.cfg.SocketPath)
 	}
+}
+
+// Restart tears the current child down and respawns with newCfg. The caller
+// (Service.Restart) is responsible for draining the embedding queue first so
+// in-flight HTTP calls don't fail mid-request.
+//
+// Restart fully resets state that the auto-restart-on-crash machinery may
+// have left in place: the stopping flag is cleared so the new exit-watcher
+// goroutine treats subsequent crashes as crashes (not as deliberate stops),
+// the dead flag is cleared so Embed callers stop short-circuiting with
+// ErrSupervisor, and restartAt is wiped so the operator's intentional cycle
+// doesn't count against the 3-strikes-in-5-minutes budget.
+//
+// On spawn failure, dead is set: the operator's new config is broken and the
+// supervisor needs another deliberate Restart (with corrected config) to
+// recover. The caller surfaces this as a destructive toast in the UI.
+func (s *supervisor) Restart(ctx context.Context, newCfg supervisorConfig) error {
+	// Stop the current child. Use a deadline carved from ctx so a stuck
+	// SIGTERM can't hold up the whole restart.
+	stopCtx, stopCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := s.Stop(stopCtx); err != nil {
+		stopCancel()
+		s.logger.Warn("supervisor: stop during restart returned error (continuing)", "err", err)
+	} else {
+		stopCancel()
+	}
+
+	// Reset state. Stop has already drained the prior waiter via waiterDone.
+	s.mu.Lock()
+	s.cfg = newCfg
+	s.restartAt = nil
+	s.mu.Unlock()
+	s.dead.Store(false)
+	s.stopping.Store(false)
+
+	// Re-validate: a different model path / transport may now be invalid.
+	if err := validateSupervisorConfig(&newCfg, s.logger); err != nil {
+		s.dead.Store(true)
+		s.lastSpawnErr.Store(err.Error())
+		return fmt.Errorf("validate restart config: %w", err)
+	}
+	s.mu.Lock()
+	s.cfg = newCfg
+	// Same transport? Keep the existing client. A transport switch is not
+	// supported via Restart — config validates that field as immutable above
+	// (Transport is stamped from env at boot and can't be overridden via the
+	// dashboard runtime-config surface).
+	s.mu.Unlock()
+
+	if err := s.spawn(ctx); err != nil {
+		s.dead.Store(true)
+		// spawn already stored a more granular error via lastSpawnErr; only
+		// set the umbrella one if it didn't.
+		if v, _ := s.lastSpawnErr.Load().(string); v == "" {
+			s.lastSpawnErr.Store(err.Error())
+		}
+		return err
+	}
+	return nil
+}
+
+// SupervisorStatus is the dashboard-facing view of the sidecar process.
+// Returned by Service.Status and rendered in the SidecarSection card. Fields
+// are deliberately scalar so the JSON body is stable across versions.
+type SupervisorStatus struct {
+	State     string // "running" | "failed" | "starting" | "disabled"
+	PID       int    // 0 when not started or already reaped
+	Uptime    time.Duration
+	Model     string
+	Ready     bool
+	LastError string // last spawn / readiness error; "" when healthy
+	InFlight  int    // queue.InFlight() at the moment Status was sampled
+}
+
+// Status returns a snapshot of the supervisor's current state. Safe to call
+// concurrently with Restart and Embed*.
+func (s *supervisor) Status() SupervisorStatus {
+	st := SupervisorStatus{Model: s.cfg.Model}
+	if v, _ := s.lastSpawnErr.Load().(string); v != "" {
+		st.LastError = v
+	}
+	if s.dead.Load() {
+		st.State = "failed"
+		return st
+	}
+	s.mu.RLock()
+	cmd := s.cmd
+	startedAt := s.startedAt
+	readyCh := s.readySignal
+	s.mu.RUnlock()
+	if cmd != nil && cmd.Process != nil {
+		st.PID = cmd.Process.Pid
+	}
+	if !startedAt.IsZero() {
+		st.Uptime = time.Since(startedAt)
+	}
+	select {
+	case <-readyCh:
+		st.Ready = true
+		st.State = "running"
+	default:
+		st.State = "starting"
+	}
+	return st
 }
 
 // Ready blocks until the current child is ready or ctx expires.

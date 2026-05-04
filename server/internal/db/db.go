@@ -67,6 +67,15 @@ func Open(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrate path_hash: %w", err)
 	}
 
+	// PR-E — add indexed_with_model to projects on pre-PR-E databases. Same
+	// PRAGMA-table_info pattern as migratePathHash; no backfill (NULL means
+	// "indexed before drift tracking landed" — UI renders this as Unknown,
+	// not as a stale-model warning).
+	if err := migrateIndexedWithModel(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate indexed_with_model: %w", err)
+	}
+
 	return db, nil
 }
 
@@ -130,6 +139,42 @@ func migratePathHash(db *sql.DB) error {
 		if _, err := db.Exec(`UPDATE projects SET path_hash = ? WHERE host_path = ?`, HashHostPath(hp), hp); err != nil {
 			return fmt.Errorf("backfill path_hash: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateIndexedWithModel adds projects.indexed_with_model to pre-PR-E
+// databases. Idempotent: PRAGMA table_info first; ALTER only if absent. Rows
+// stay NULL — the dashboard treats NULL as "indexed before drift tracking
+// existed" and renders a neutral Unknown badge rather than the destructive
+// drift highlight.
+func migrateIndexedWithModel(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(projects)`)
+	if err != nil {
+		return fmt.Errorf("table_info: %w", err)
+	}
+	have := false
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "indexed_with_model" {
+			have = true
+		}
+	}
+	rows.Close()
+	if have {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE projects ADD COLUMN indexed_with_model TEXT`); err != nil {
+		return fmt.Errorf("add indexed_with_model column: %w", err)
 	}
 	return nil
 }

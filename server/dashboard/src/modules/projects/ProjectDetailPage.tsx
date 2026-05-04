@@ -1,4 +1,4 @@
-import { AlertCircle, ArrowLeft, Search } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowLeft, Search } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '@/api/client';
 import type { Project } from '@/api/types';
@@ -9,7 +9,9 @@ import { Button } from '@/ui/button';
 import { Card, CardContent } from '@/ui/card';
 import { Skeleton } from '@/ui/skeleton';
 import { formatDateTime, formatRelative } from '@/lib/formatDate';
+import { useRuntimeModel } from '@/lib/useServerStatus';
 import { DeleteProjectDialog } from './components/DeleteProjectDialog';
+import { ProjectInfoCard } from './components/ProjectInfoCard';
 import { useProject, useProjectSummary } from './hooks';
 
 const STATUS_VARIANT: Record<Project['status'], 'default' | 'secondary' | 'destructive' | 'outline'> = {
@@ -25,6 +27,7 @@ export function ProjectDetailPage() {
   const isAdmin = user?.role === 'admin';
   const project = useProject(id);
   const summary = useProjectSummary(id);
+  const currentModel = useRuntimeModel();
 
   if (project.isLoading) return <DetailSkeleton />;
   if (project.error || !project.data) {
@@ -49,6 +52,7 @@ export function ProjectDetailPage() {
 
   const p = project.data;
   const s = summary.data;
+  const drift = !!p.indexed_with_model && !!currentModel && p.indexed_with_model !== currentModel;
 
   return (
     <div className="space-y-8">
@@ -97,12 +101,34 @@ export function ProjectDetailPage() {
         </div>
       </header>
 
+      {drift ? (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Indexed with a stale embedding model</AlertTitle>
+          <AlertDescription className="space-y-2">
+            <div>
+              This project's vectors were produced under{' '}
+              <code className="rounded bg-background/40 px-1 py-0.5 text-xs">{p.indexed_with_model}</code>,
+              but the sidecar is currently running{' '}
+              <code className="rounded bg-background/40 px-1 py-0.5 text-xs">{currentModel}</code>.
+              Search results may be incorrect or empty until the project is reindexed.
+            </div>
+            <div className="text-xs">
+              Reindex from your terminal:{' '}
+              <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {p.host_path}</code>
+            </div>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Files indexed" value={p.stats.indexed_files} sub={`of ${p.stats.total_files} total`} />
         <StatCard label="Chunks" value={p.stats.total_chunks} />
         <StatCard label="Symbols" value={s?.total_symbols ?? p.stats.total_symbols} />
         <StatCard label="Languages" value={p.languages.length} />
       </section>
+
+      <ProjectInfoCard project={p} />
 
       <section className="grid gap-6 lg:grid-cols-2">
         <div>
