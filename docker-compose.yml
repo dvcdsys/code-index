@@ -7,15 +7,20 @@ services:
       - "${PORT:-21847}:21847"
     environment:
       - CIX_API_KEY=${CIX_API_KEY}
+      # Defense in depth — the image already defaults to 21847 (since
+      # v0.5.1) but pinning it here keeps the host:container port mapping
+      # honest if a third-party fork or custom build sets a different
+      # default.
+      - CIX_PORT=${CIX_PORT:-21847}
       - CIX_EMBEDDING_MODEL=${CIX_EMBEDDING_MODEL:-awhiteside/CodeRankEmbed-Q8_0-GGUF}
       - CIX_CHROMA_PERSIST_DIR=/data/chroma
       - CIX_SQLITE_PATH=/data/sqlite/projects.db
       - CIX_MAX_FILE_SIZE=${CIX_MAX_FILE_SIZE:-524288}
       - CIX_EXCLUDED_DIRS=${CIX_EXCLUDED_DIRS:-node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store}
       # GGUF cache lives on the named volume below — survives `docker compose
-      # down` (without -v) and is owned by the image's 1001:1001 user, so the
-      # cix-server process can always write to it regardless of host
-      # bind-mount permissions.
+      # down` (without -v) and is owned by the image's 65532:65532 (nonroot)
+      # user on the CPU image, so the cix-server process can always write to
+      # it regardless of host bind-mount permissions.
       - CIX_GGUF_CACHE_DIR=/data/models
       - CIX_LLAMA_BIN_DIR=/app
       - CIX_LLAMA_STARTUP_TIMEOUT=120
@@ -42,8 +47,10 @@ services:
       - CIX_BOOTSTRAP_GGUF_PATH=${CIX_BOOTSTRAP_GGUF_PATH:-}
     volumes:
       # Operator-managed bind for sqlite + chroma so backups and inspection
-      # are one `cd` away on the host. Make sure the directory is owned by
-      # 1001:1001 OR use `user: "0:0"` — see CLAUDE.md.
+      # are one `cd` away on the host. The CPU image runs as
+      # nonroot:nonroot (uid 65532) — chown your bind directory to
+      # 65532:65532 OR add `user: "0:0"` to fall back to root. See
+      # doc/SECURITY_DEPLOYMENT.md.
       - ${HOME}/.cix/data:/data
       # Docker-managed named volume layered ON TOP of /data/models. This
       # isolates the GGUF cache from host-side bind permission issues and

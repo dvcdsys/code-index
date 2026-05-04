@@ -1,7 +1,8 @@
-# api-go-poc — cix-server (Go)
+# cix-server (Go)
 
-Phase 1 scaffold of the Go rewrite of `api/` (Python/FastAPI). Runs in parallel
-to Python during the PoC — default port is **8001** (Python uses 21847).
+The Go HTTP server backing cix's indexing + dashboard. Default port is
+**21847** (was 8001 during the Python parallel-rollout era; the Python
+backend was archived 2026-04 and the parity is no longer meaningful).
 
 ## Layout
 
@@ -16,24 +17,27 @@ Dockerfile            CPU multi-stage, distroless runtime
 ## Build / run / test
 
 ```bash
-cd api-go-poc
+cd server
 go build ./...
 go vet ./...
 go test ./...
 
-# Local run (binds :8001 by default)
-CIX_SQLITE_PATH=/tmp/cix-phase1.db ./cix-server
+# Local run (binds :21847 by default)
+CIX_SQLITE_PATH=/tmp/cix.db ./cix-server
 # Or with version injected:
-go build -ldflags "-X main.version=0.2.0-go" -o cix-server ./cmd/cix-server
+go build -ldflags "-X main.version=v0.5.1" -o cix-server ./cmd/cix-server
 ```
 
 ## Docker
 
 ```bash
-docker build -t cix-server-go:phase1 --build-arg VERSION=0.2.0-go .
-docker run --rm -p 8001:8001 \
+docker build -t cix-server-go:dev --build-arg VERSION=v0.5.1 .
+docker run --rm -p 21847:21847 \
+  -e CIX_API_KEY=cix_<hex> \
+  -e CIX_BOOTSTRAP_ADMIN_EMAIL=admin@example.com \
+  -e CIX_BOOTSTRAP_ADMIN_PASSWORD=<pw> \
   -v cix-data:/data \
-  cix-server-go:phase1
+  cix-server-go:dev
 ```
 
 ## Environment variables
@@ -43,7 +47,7 @@ All are optional; defaults match `api/app/config.py` except `CIX_PORT`.
 | Var | Default | Notes |
 |---|---|---|
 | `CIX_API_KEY` | `""` | Warned at startup if empty; enforced from Phase 2 |
-| `CIX_PORT` | `8001` | Python uses 21847 — different to allow parallel run |
+| `CIX_PORT` | `21847` | Listen port. Both Docker images bake this in. |
 | `CIX_EMBEDDING_MODEL` | `awhiteside/CodeRankEmbed-Q8_0-GGUF` | |
 | `CIX_CHROMA_PERSIST_DIR` | `/data/chroma` | Name kept for compat; backend changes in Phase 4 |
 | `CIX_SQLITE_PATH` | `/data/sqlite/projects.db` | Suffixed with model-safe name on open |

@@ -15,8 +15,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.Port != 8001 {
-		t.Errorf("Port default = %d, want 8001", c.Port)
+	if c.Port != 21847 {
+		t.Errorf("Port default = %d, want 21847", c.Port)
 	}
 	if c.EmbeddingModel != "awhiteside/CodeRankEmbed-Q8_0-GGUF" {
 		t.Errorf("EmbeddingModel default = %q", c.EmbeddingModel)
