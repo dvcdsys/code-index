@@ -102,6 +102,12 @@ type Service struct {
 	// "<chunk_type>: <content>" formatting for projects that have not been
 	// reindexed under the new format.
 	embedIncludePath bool
+
+	// embeddingModel is the active embedding model identifier persisted on
+	// projects.indexed_with_model at FinishIndexing. Set via
+	// SetEmbeddingModel from main; empty string keeps the column NULL so
+	// unit tests that skip the setter don't need to know about drift.
+	embeddingModel string
 }
 
 // New constructs a Service. All deps are required except logger (falls back to
@@ -132,6 +138,14 @@ func (s *Service) Shutdown() {
 // are not interchangeable with vectors trained on bare content.
 func (s *Service) SetEmbedIncludePath(v bool) {
 	s.embedIncludePath = v
+}
+
+// SetEmbeddingModel records the model identifier the indexer will write to
+// projects.indexed_with_model at FinishIndexing. Called from main once the
+// runtime config is resolved; empty string disables the write (the column
+// stays NULL — desired for tests that don't care about drift tracking).
+func (s *Service) SetEmbeddingModel(model string) {
+	s.embeddingModel = model
 }
 
 // ---------------------------------------------------------------------------
@@ -717,12 +731,17 @@ func (s *Service) FinishIndexing(
 	)
 	langsJSON := marshalJSONStringArray(langs)
 
+	// PR-E — capture the active embedding model so the dashboard can flag
+	// projects whose vectors were produced under a different model than the
+	// one currently loaded in the sidecar. NULLIF keeps the column NULL when
+	// SetEmbeddingModel was never called (tests / pre-PR-E codepaths).
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE projects
 		 SET stats = ?, languages = ?, status = 'indexed',
-		     last_indexed_at = ?, updated_at = ?
+		     last_indexed_at = ?, updated_at = ?,
+		     indexed_with_model = NULLIF(?, '')
 		 WHERE host_path = ?`,
-		statsJSON, langsJSON, now, now, projectPath,
+		statsJSON, langsJSON, now, now, s.embeddingModel, projectPath,
 	); err != nil {
 		return "", 0, 0, fmt.Errorf("update project stats: %w", err)
 	}

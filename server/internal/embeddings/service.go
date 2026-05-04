@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -60,7 +62,10 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*Service
 		Transport:  cfg.LlamaTransport,
 		CtxSize:    cfg.LlamaCtxSize,
 		NGpuLayers: cfg.LlamaNGpuLayers,
+		NThreads:   cfg.LlamaNThreads,
+		BatchSize:  cfg.LlamaBatchSize,
 		StartupSec: cfg.LlamaStartupSec,
+		Model:      cfg.EmbeddingModel,
 	}
 
 	sup, err := newSupervisor(ctx, supCfg, logger)
@@ -77,6 +82,28 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*Service
 	}, nil
 }
 
+// Config returns the *config.Config the service was constructed with. The
+// pointer is shared; callers that mutate it in place must understand they
+// are racing the supervisor — only the dashboard restart path is supposed
+// to do this, and it does so behind queue.BlockNew + sup.Restart.
+func (s *Service) Config() *config.Config {
+	if s == nil {
+		return nil
+	}
+	return s.cfg
+}
+
+// CacheDirFromService returns the GGUF cache directory the dashboard's
+// /admin/models handler should walk. Returns "" when the EmbeddingsQuerier
+// isn't a *Service (test fakes) or when the service is disabled.
+func CacheDirFromService(q any) string {
+	s, ok := q.(*Service)
+	if !ok || s == nil || s.cfg == nil {
+		return ""
+	}
+	return s.cfg.GGUFCacheDir
+}
+
 // Stop tears the supervisor down within the ctx deadline. Safe to call on a
 // disabled or partially-initialised Service.
 func (s *Service) Stop(ctx context.Context) error {
@@ -84,6 +111,93 @@ func (s *Service) Stop(ctx context.Context) error {
 		return nil
 	}
 	return s.sup.Stop(ctx)
+}
+
+// Status returns a snapshot of the sidecar process state for the dashboard.
+// Returns SupervisorStatus{State: "disabled"} when the service was started
+// with embeddings turned off — the dashboard renders a banner in that case
+// and disables the runtime-config save buttons.
+func (s *Service) Status() SupervisorStatus {
+	if s == nil || s.disabled {
+		return SupervisorStatus{State: "disabled"}
+	}
+	if s.sup == nil {
+		return SupervisorStatus{State: "failed", LastError: "supervisor not initialised"}
+	}
+	st := s.sup.Status()
+	if s.queue != nil {
+		// Annotate with in-flight count so the UI can show "draining (N)"
+		// during a restart cycle.
+		st.InFlight = s.queue.InFlight()
+	}
+	return st
+}
+
+// Restart drains the embedding queue, stops the current sidecar child, and
+// spawns a new one with the new config. cfg is the freshly-resolved
+// runtimecfg-on-top-of-env Config snapshot — Restart does not consult any
+// stored boot config.
+//
+// On success, the new sidecar is ready to serve embeddings before this
+// returns. On failure, the supervisor enters the "failed" state and the
+// queue is reopened (so callers get the existing ErrSupervisor / ErrBusy
+// rather than a permanent block).
+func (s *Service) Restart(ctx context.Context, cfg *config.Config) error {
+	if s == nil || s.disabled {
+		return ErrDisabled
+	}
+	if s.sup == nil {
+		return ErrSupervisor
+	}
+
+	// Drain: refuse new acquires, then wait for in-flight to settle. 30s
+	// matches the documented restart UX in the dashboard plan; longer values
+	// would let a stuck embedding call block the operator's intentional
+	// restart indefinitely.
+	s.queue.BlockNew()
+	defer s.queue.Resume()
+	drainCtx, drainCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := s.queue.WaitDrain(drainCtx); err != nil {
+		drainCancel()
+		s.logger.Warn("embeddings: drain timed out, proceeding with restart anyway",
+			"in_flight", s.queue.InFlight(), "err", err,
+		)
+	} else {
+		drainCancel()
+	}
+
+	// Resolve the (possibly new) GGUF path before tearing down the current
+	// child — if resolution fails, we stay on the running sidecar instead of
+	// crashing it for a config we can't honour.
+	ggufPath, err := resolveGGUFPath(ctx, cfg, s.logger)
+	if err != nil {
+		return fmt.Errorf("resolve gguf for restart: %w", err)
+	}
+
+	// Update queue concurrency / prefix to match the new model. The buffered
+	// slot channel can't be resized in place; we swap the queue, but only
+	// AFTER drain so no caller is mid-Acquire/Release on the old channel.
+	if cfg.MaxEmbeddingConcurrency != cap(s.queue.slots) {
+		s.queue = NewQueue(cfg.MaxEmbeddingConcurrency, time.Duration(cfg.EmbeddingQueueTimeout)*time.Second)
+		// New queue starts unblocked; that's fine because we hold the
+		// *previous* queue's blocked state via deferred Resume. The previous
+		// queue is now garbage and won't see any callers.
+	}
+	s.prefix = ResolveQueryPrefix(cfg.EmbeddingModel)
+
+	supCfg := supervisorConfig{
+		BinDir:     cfg.LlamaBinDir,
+		GGUFPath:   ggufPath,
+		SocketPath: cfg.LlamaSocketPath,
+		Transport:  cfg.LlamaTransport,
+		CtxSize:    cfg.LlamaCtxSize,
+		NGpuLayers: cfg.LlamaNGpuLayers,
+		NThreads:   cfg.LlamaNThreads,
+		BatchSize:  cfg.LlamaBatchSize,
+		StartupSec: cfg.LlamaStartupSec,
+		Model:      cfg.EmbeddingModel,
+	}
+	return s.sup.Restart(ctx, supCfg)
 }
 
 // Ready reports whether the embeddings pipeline is currently able to serve a
@@ -299,12 +413,20 @@ func (s *Service) embedRaw(ctx context.Context, texts []string) ([][]float32, er
 }
 
 // resolveGGUFPath walks the precedence chain:
-//  1. CIX_GGUF_PATH (already applied to cfg.GGUFPath before Validate).
-//  2. bench/results/reference_gguf_path.txt dev fallback (Validate handles it).
-//  3. Cached file under cfg.GGUFCacheDir/<safe-repo>/*.gguf.
-//  4. HuggingFace download (this is the path that actually writes to disk).
+//  1. CIX_GGUF_PATH (absolute path env override, validated by Stat).
+//  2. cfg.EmbeddingModel as absolute path — when the dashboard's "Local
+//     path" mode wrote it through to the runtime_settings row.
+//  3. Cached file under cfg.GGUFCacheDir/<safe-repo>/*.gguf when
+//     cfg.EmbeddingModel is an HF repo ID.
+//  4. CIX_BOOTSTRAP_GGUF_PATH one-shot import — copies the file into
+//     the cache layout, then behaves like step 3 forever after.
+//  5. HuggingFace download into the same cix cache (this is the path
+//     that actually writes to disk).
 //
-// Only step 4 can be expensive; all others are stat-only.
+// PR-E removed the implicit `bench/results/reference_gguf_path.txt` dev
+// fallback that used to short-circuit step 2 — operators must now make
+// the choice explicitly via env or the dashboard. Only step 5 is
+// expensive; all others are stat-only or one-time copies.
 func resolveGGUFPath(ctx context.Context, cfg *config.Config, logger *slog.Logger) (string, error) {
 	if cfg.GGUFPath != "" {
 		if _, err := os.Stat(cfg.GGUFPath); err != nil {
@@ -312,11 +434,19 @@ func resolveGGUFPath(ctx context.Context, cfg *config.Config, logger *slog.Logge
 		}
 		return cfg.GGUFPath, nil
 	}
-	// The embedding model is an HF repo id like "awhiteside/CodeRankEmbed-Q8_0-GGUF".
-	// Only repo ids contain a slash; a raw filesystem path would have been
-	// captured by the CIX_GGUF_PATH branch above.
+	// PR-E — the dashboard's "Local path" mode writes an absolute path into
+	// embedding_model. Treat it as such instead of trying to interpret it
+	// as an HF repo id (which would fail the slash check or, worse, send
+	// the path to api.huggingface.co).
+	if filepath.IsAbs(cfg.EmbeddingModel) {
+		if _, err := os.Stat(cfg.EmbeddingModel); err != nil {
+			return "", fmt.Errorf("embedding model path %s: %w", cfg.EmbeddingModel, err)
+		}
+		return cfg.EmbeddingModel, nil
+	}
+	// HF repo ids look like "<owner>/<repo>" — exactly one slash, no leading "/".
 	if !strings.Contains(cfg.EmbeddingModel, "/") {
-		return "", fmt.Errorf("embedding model %q is neither a path nor an HF repo id", cfg.EmbeddingModel)
+		return "", fmt.Errorf("embedding model %q is neither an absolute path nor an HF repo id (owner/repo)", cfg.EmbeddingModel)
 	}
 
 	// Cache-hit short-circuit: if we already downloaded a .gguf from this repo
@@ -327,7 +457,100 @@ func resolveGGUFPath(ctx context.Context, cfg *config.Config, logger *slog.Logge
 		return cached, nil
 	}
 
+	// CIX_BOOTSTRAP_GGUF_PATH — one-time import path. Used so a fresh
+	// container with a freshly-mounted cache volume doesn't have to
+	// re-download a 280 MB GGUF the operator already has on disk. Once
+	// the file lands in the cache layout, the next boot satisfies the
+	// findCachedGGUF branch above and the bootstrap path is never read
+	// again (idempotent — repeated boots with the same env are no-ops).
+	if cfg.BootstrapGGUFPath != "" {
+		imported, err := importBootstrapGGUF(cfg.GGUFCacheDir, cfg.EmbeddingModel, cfg.BootstrapGGUFPath, logger)
+		if err != nil {
+			logger.Warn("bootstrap gguf import failed; falling through to HF download",
+				"src", cfg.BootstrapGGUFPath, "err", err)
+		} else if imported != "" {
+			return imported, nil
+		}
+	}
+
 	return DownloadGGUF(ctx, cfg.EmbeddingModel, cfg.GGUFCacheDir, logger)
+}
+
+// importBootstrapGGUF copies srcPath into <cacheDir>/<safe_repo>/<basename>
+// atomically (write to .partial, fsync, rename). Returns the final path
+// on success, "" if the source is missing (caller falls through to HF
+// download), or an error for IO problems we should surface to the operator.
+//
+// safe_repo derived from the HF repo id (`owner/repo` → `owner__repo`)
+// to match DownloadGGUF's layout exactly — so subsequent boots' cache
+// scan finds the imported file under the same name HF would have used.
+func importBootstrapGGUF(cacheDir, repo, srcPath string, logger *slog.Logger) (string, error) {
+	if cacheDir == "" || repo == "" {
+		return "", nil
+	}
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		// Missing file is not a hard error — the operator may have set
+		// the env optimistically with a path that lives on a host they
+		// haven't mounted yet. Let the caller fall through to download.
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("stat bootstrap gguf %s: %w", srcPath, err)
+	}
+	if srcInfo.IsDir() {
+		return "", fmt.Errorf("bootstrap gguf %s is a directory, expected file", srcPath)
+	}
+
+	safeRepo := strings.ReplaceAll(repo, "/", "__")
+	targetDir := filepath.Join(cacheDir, safeRepo)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir cache dir: %w", err)
+	}
+	finalPath := filepath.Join(targetDir, filepath.Base(srcPath))
+
+	// Idempotency: if a previous boot already imported the same file,
+	// trust it — re-importing would be wasted IO and could race with a
+	// concurrent boot of a sibling container against a shared volume.
+	if _, err := os.Stat(finalPath); err == nil {
+		return finalPath, nil
+	}
+
+	logger.Info("importing bootstrap gguf into cache",
+		"src", srcPath, "dst", finalPath, "size", srcInfo.Size())
+
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("open bootstrap gguf: %w", err)
+	}
+	defer src.Close()
+
+	partial := finalPath + ".partial"
+	dst, err := os.OpenFile(partial, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return "", fmt.Errorf("create cache target: %w", err)
+	}
+
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		_ = os.Remove(partial)
+		return "", fmt.Errorf("copy bootstrap gguf: %w", err)
+	}
+	if err := dst.Sync(); err != nil {
+		_ = dst.Close()
+		_ = os.Remove(partial)
+		return "", fmt.Errorf("fsync bootstrap gguf: %w", err)
+	}
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(partial)
+		return "", fmt.Errorf("close bootstrap gguf: %w", err)
+	}
+	if err := os.Rename(partial, finalPath); err != nil {
+		_ = os.Remove(partial)
+		return "", fmt.Errorf("atomic rename bootstrap gguf: %w", err)
+	}
+	logger.Info("bootstrap gguf imported", "path", finalPath)
+	return finalPath, nil
 }
 
 // findCachedGGUF looks for a previously-downloaded .gguf under the standard
