@@ -850,13 +850,13 @@ func (s *Server) IndexFinish(w http.ResponseWriter, r *http.Request, path openap
 	})
 }
 
-// IndexCancel — POST /api/v1/projects/{path}/index/cancel. Admin-only:
-// cancelling someone else's running index run is a denial-of-service
-// vector against indexing operators.
+// IndexCancel — POST /api/v1/projects/{path}/index/cancel. Open to any
+// authenticated user. The CLI calls this in its defer-cleanup on early
+// exit (Ctrl-C, network drop), so gating it on admin would leave run
+// locks hanging for viewers until the 1-hour TTL — worse UX than the
+// theoretical DoS we'd be preventing. If you need owner-scoped semantics
+// later, key off projects.indexing_run.started_by_user_id.
 func (s *Server) IndexCancel(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	if _, ok := s.mustBeAdmin(w, r); !ok {
-		return
-	}
 	p := s.lookupProject(w, r, path)
 	if p == nil {
 		return
