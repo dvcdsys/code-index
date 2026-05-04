@@ -1,9 +1,10 @@
 import { Link } from 'react-router-dom';
-import { ChevronRight, Database, FileText } from 'lucide-react';
+import { AlertTriangle, ChevronRight, Database, FileText } from 'lucide-react';
 import type { Project } from '@/api/types';
 import { Badge } from '@/ui/badge';
 import { Card, CardContent } from '@/ui/card';
 import { formatRelative } from '@/lib/formatDate';
+import { useRuntimeModel } from '@/lib/useServerStatus';
 
 function basename(p: string): string {
   const parts = p.replace(/\/+$/, '').split('/');
@@ -18,9 +19,24 @@ const STATUS_VARIANT: Record<Project['status'], 'default' | 'secondary' | 'destr
 };
 
 export function ProjectCard({ project }: { project: Project }) {
+  const currentModel = useRuntimeModel();
+  // Drift = the project was indexed under a different model than the one
+  // the sidecar is running right now. NULL indexed_with_model is a legacy
+  // row from before drift tracking landed — not drift, just unknown.
+  const drift =
+    !!project.indexed_with_model &&
+    !!currentModel &&
+    project.indexed_with_model !== currentModel;
+
   return (
     <Link to={`/projects/${project.path_hash}`} className="group">
-      <Card className="h-full transition-colors hover:border-foreground/30">
+      <Card
+        className={`h-full transition-colors ${
+          drift
+            ? 'border-destructive/60 hover:border-destructive'
+            : 'hover:border-foreground/30'
+        }`}
+      >
         <CardContent className="space-y-3 p-5">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
@@ -37,6 +53,12 @@ export function ProjectCard({ project }: { project: Project }) {
             <Badge variant={STATUS_VARIANT[project.status]} className="capitalize">
               {project.status}
             </Badge>
+            {drift ? (
+              <Badge variant="destructive" className="gap-1">
+                <AlertTriangle className="h-3 w-3" />
+                Stale model
+              </Badge>
+            ) : null}
             {project.languages.slice(0, 4).map((l) => (
               <Badge key={l} variant="outline" className="font-normal text-xs">
                 {l}

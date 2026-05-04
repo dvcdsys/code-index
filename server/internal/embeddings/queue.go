@@ -3,6 +3,7 @@ package embeddings
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,9 +29,17 @@ type Queue struct {
 	slots   chan struct{}
 	timeout time.Duration
 
-	mu             sync.Mutex
-	avgBatchSec    float64
-	estFinishAtMs  int64 // unix millis; 0 when no batch is in flight
+	mu            sync.Mutex
+	avgBatchSec   float64
+	estFinishAtMs int64 // unix millis; 0 when no batch is in flight
+
+	// blocked is set by BlockNew to make Acquire fail fast with ErrBusy. Used
+	// during a sidecar Restart so a queued caller doesn't get its request
+	// dispatched against a child process that's about to be killed.
+	blocked atomic.Bool
+	// inFlight is incremented by Acquire and decremented by Release. WaitDrain
+	// polls this to know when the queue has fully quiesced.
+	inFlight atomic.Int64
 }
 
 // NewQueue constructs a queue with the given max concurrency and acquire
@@ -50,7 +59,14 @@ func NewQueue(concurrency int, timeout time.Duration) *Queue {
 // Acquire blocks until a slot is free, the context is cancelled, or the
 // per-queue timeout fires. On timeout it returns *ErrBusy with a RetryAfter
 // hint derived from the EMA — callers surface this as HTTP 503.
+//
+// When the queue is in BlockNew state (Service.Restart drain), Acquire fails
+// fast with ErrBusy so the dashboard's Save & Restart doesn't deadlock
+// against a queue full of waiting callers.
 func (q *Queue) Acquire(ctx context.Context) error {
+	if q.blocked.Load() {
+		return &ErrBusy{RetryAfter: minRetryAfterSec}
+	}
 	var (
 		cancel context.CancelFunc
 		qctx   = ctx
@@ -64,6 +80,7 @@ func (q *Queue) Acquire(ctx context.Context) error {
 	// so the busy response can tell clients roughly how long to wait.
 	select {
 	case q.slots <- struct{}{}:
+		q.inFlight.Add(1)
 		q.markBatchStart()
 		return nil
 	case <-qctx.Done():
@@ -83,8 +100,44 @@ func (q *Queue) Acquire(ctx context.Context) error {
 // is caught in tests rather than silently leaking slots.
 func (q *Queue) Release(start time.Time) {
 	<-q.slots
+	q.inFlight.Add(-1)
 	q.updateEMA(time.Since(start))
 }
+
+// BlockNew puts the queue in drain mode: subsequent Acquire calls fail fast
+// with ErrBusy. Idempotent. Used by Service.Restart so a sidecar swap can
+// proceed without contending with new HTTP-driven embed requests.
+func (q *Queue) BlockNew() { q.blocked.Store(true) }
+
+// Resume lifts the BlockNew gate so Acquire works again. Idempotent.
+func (q *Queue) Resume() { q.blocked.Store(false) }
+
+// WaitDrain blocks until in-flight Acquire holders all release their slot, or
+// ctx fires. Returns ctx.Err() on timeout — caller can decide whether to
+// proceed with the restart anyway (forcing in-flight calls to fail mid-call)
+// or abort. Polls every 50ms; cheap because in-flight is an atomic counter.
+func (q *Queue) WaitDrain(ctx context.Context) error {
+	if q.inFlight.Load() == 0 {
+		return nil
+	}
+	t := time.NewTicker(50 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			if q.inFlight.Load() == 0 {
+				return nil
+			}
+		}
+	}
+}
+
+// InFlight reports the current number of acquired-but-not-released slots.
+// Exposed for the sidecar status payload so the dashboard can render
+// "draining (N in flight)" during a restart.
+func (q *Queue) InFlight() int { return int(q.inFlight.Load()) }
 
 // EstimatedWaitSec returns the EMA-based wait estimate. Exposed for tests and
 // for debug endpoints that want to surface queue health.

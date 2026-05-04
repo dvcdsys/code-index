@@ -15,6 +15,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
+	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
@@ -64,6 +65,9 @@ type Deps struct {
 	// Indexer drives the three-phase index protocol (Phase 5). Nil-safe: the
 	// indexing endpoints return 503 when absent.
 	Indexer *indexer.Service
+	// RuntimeCfg backs the dashboard's /admin/runtime-config endpoints. Nil
+	// in router-only tests; admin handlers return 503 when absent.
+	RuntimeCfg *runtimecfg.Service
 }
 
 // NewRouter builds the chi router with middleware and the generated

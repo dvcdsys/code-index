@@ -63,6 +63,11 @@ func collectionName(projectPath string) string {
 	return fmt.Sprintf("project_%x", h)
 }
 
+// CollectionName is the exported alias for the per-project chromem-go
+// collection identifier. The dashboard's project-detail card uses it to
+// resolve the on-disk directory under cfg.DynamicChromaPersistDir().
+func CollectionName(projectPath string) string { return collectionName(projectPath) }
+
 // docID format: "{md5hex(filePath)[:12]}:{startLine}-{endLine}:{idx}"
 //
 // The positional `idx` is required because overlapping-window or repeated

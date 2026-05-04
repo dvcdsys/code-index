@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/langdetect"
 	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/symbolindex"
+	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
 
 // Server is the chi-server implementation generated from doc/openapi.yaml.
@@ -69,13 +72,23 @@ func (s *Server) GetStatus(w http.ResponseWriter, r *http.Request) {
 		modelLoaded = s.Deps.EmbeddingSvc.Ready(readyCtx) == nil
 		cancel()
 	}
+	// PR-E — embedding_model must reflect the LIVE config (after any
+	// dashboard runtime override + restart), not the boot-time value
+	// stamped into Deps. Fall back to Deps when the service is a fake or
+	// disabled, so test fixtures still get a stable string.
+	model := s.Deps.EmbeddingModel
+	if es, ok := s.Deps.EmbeddingSvc.(*embeddings.Service); ok && es != nil {
+		if cfg := es.Config(); cfg != nil && cfg.EmbeddingModel != "" {
+			model = cfg.EmbeddingModel
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":               "ok",
 		"backend":              s.Deps.Backend,
 		"server_version":       s.Deps.ServerVersion,
 		"api_version":          s.Deps.APIVersion,
 		"model_loaded":         modelLoaded,
-		"embedding_model":      s.Deps.EmbeddingModel,
+		"embedding_model":      model,
 		"projects":             projectCount,
 		"active_indexing_jobs": activeJobs,
 	})
@@ -131,7 +144,66 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request, path openapi
 	if p == nil {
 		return
 	}
-	writeJSON(w, http.StatusOK, projectToOpenAPI(p))
+	out := projectToOpenAPI(p)
+	s.enrichProjectStorage(&out, p)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// enrichProjectStorage fills the storage-related Project fields. Skipped
+// when embeddings are disabled / unavailable — callers see those as nil and
+// the dashboard hides the section. Per-call os.Stat is cheap enough for the
+// single-project endpoint; we deliberately do NOT enrich the list endpoint
+// (would multiply stat calls × N projects on every page load).
+func (s *Server) enrichProjectStorage(out *openapi.Project, p *projects.Project) {
+	es, ok := s.Deps.EmbeddingSvc.(*embeddings.Service)
+	if !ok || es == nil {
+		return
+	}
+	cfg := es.Config()
+	if cfg == nil {
+		return
+	}
+	sqlitePath := cfg.DynamicSQLitePath()
+	if sqlitePath != "" {
+		out.SqlitePath = ptrString(sqlitePath)
+		if info, err := os.Stat(sqlitePath); err == nil {
+			sz := info.Size()
+			out.SqliteSizeBytes = &sz
+		}
+	}
+	if cfg.ChromaPersistDir != "" {
+		col := vectorstore.CollectionName(p.HostPath)
+		dir := filepath.Join(cfg.DynamicChromaPersistDir(), col)
+		out.ChromaPath = ptrString(dir)
+		if sz, ok := dirSizeBytes(dir); ok {
+			out.ChromaSizeBytes = &sz
+		}
+	}
+}
+
+// dirSizeBytes walks dir and sums regular-file sizes. Returns (0,false) on
+// any error (missing dir, permission, etc.) so callers can decide to omit
+// the field rather than report a misleading 0.
+func dirSizeBytes(dir string) (int64, bool) {
+	var total int64
+	walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	if walkErr != nil {
+		return 0, false
+	}
+	return total, true
 }
 
 // UpdateProject — PATCH /api/v1/projects/{path}.
@@ -867,7 +939,7 @@ func projectToOpenAPI(p *projects.Project) openapi.Project {
 			lastIndexed = &t
 		}
 	}
-	return openapi.Project{
+	out := openapi.Project{
 		PathHash:      projects.HashPath(p.HostPath),
 		HostPath:      p.HostPath,
 		ContainerPath: p.ContainerPath,
@@ -887,6 +959,11 @@ func projectToOpenAPI(p *projects.Project) openapi.Project {
 		UpdatedAt:     updated,
 		LastIndexedAt: lastIndexed,
 	}
+	if p.IndexedWithModel != nil {
+		v := *p.IndexedWithModel
+		out.IndexedWithModel = &v
+	}
+	return out
 }
 
 // topNDirs sorts a path→count map descending and returns the top n entries

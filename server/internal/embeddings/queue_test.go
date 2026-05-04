@@ -150,3 +150,85 @@ func TestNewQueueClampsConcurrency(t *testing.T) {
 		t.Errorf("slots cap = %d, want 1", cap(q.slots))
 	}
 }
+
+// TestQueueBlockNew_RejectsNewAcquires covers the PR-E sidecar restart drain
+// path: BlockNew makes Acquire fail fast with ErrBusy so an admin's Save &
+// Restart doesn't deadlock against a backlog of waiting search calls.
+func TestQueueBlockNew_RejectsNewAcquires(t *testing.T) {
+	q := NewQueue(2, time.Second)
+	q.BlockNew()
+	err := q.Acquire(context.Background())
+	var busy *ErrBusy
+	if !errors.As(err, &busy) {
+		t.Fatalf("Acquire after BlockNew = %v, want ErrBusy", err)
+	}
+	q.Resume()
+	if err := q.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire after Resume = %v, want nil", err)
+	}
+	q.Release(time.Now())
+}
+
+// TestQueueWaitDrain_BlocksUntilInFlightZero verifies the drain primitive
+// the PR-E Service.Restart relies on: WaitDrain returns once every Acquire
+// has been released, regardless of how many slots the queue has.
+func TestQueueWaitDrain_BlocksUntilInFlightZero(t *testing.T) {
+	q := NewQueue(3, time.Second)
+	startA, startB := time.Now(), time.Now()
+	if err := q.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire A: %v", err)
+	}
+	if err := q.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire B: %v", err)
+	}
+	if got := q.InFlight(); got != 2 {
+		t.Fatalf("InFlight = %d, want 2", got)
+	}
+
+	// WaitDrain must block while slots are held — release them on a
+	// goroutine and ensure WaitDrain returns shortly after.
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		done <- q.WaitDrain(ctx)
+	}()
+
+	time.Sleep(80 * time.Millisecond)
+	q.Release(startA)
+	time.Sleep(40 * time.Millisecond)
+	q.Release(startB)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("WaitDrain after both releases: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("WaitDrain did not return after slots fully released")
+	}
+	if got := q.InFlight(); got != 0 {
+		t.Errorf("InFlight after drain = %d, want 0", got)
+	}
+}
+
+// TestQueueWaitDrain_RespectsContext ensures the drain timeout we use during
+// Restart actually fires — without it a stuck embed call could wedge the
+// admin's intentional restart forever.
+func TestQueueWaitDrain_RespectsContext(t *testing.T) {
+	q := NewQueue(1, time.Second)
+	hold := time.Now()
+	if err := q.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer q.Release(hold)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	if err := q.WaitDrain(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("WaitDrain err = %v, want DeadlineExceeded", err)
+	}
+}
+
+// Avoid unused-var lint while keeping the suppress simple.
+var _ = sync.Mutex{}
