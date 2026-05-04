@@ -397,10 +397,10 @@ func TestApiKey_ListForOwnerHidesOthers(t *testing.T) {
 	}
 }
 
-// TestProjectMutations_AdminOnly verifies that PATCH/DELETE on a project
-// and POST /index/cancel are gated behind the admin role. The admin
-// fixture seeds an admin; a separate viewer is created mid-test, and we
-// assert viewer → 403 and admin → 2xx for each of the three endpoints.
+// TestProjectMutations_AdminOnly verifies that PATCH and DELETE on a
+// project are gated behind the admin role. POST /index/cancel is
+// intentionally NOT gated — see comment on IndexCancel for why — and is
+// covered separately by TestIndexCancel_AnyAuthenticatedUser.
 func TestProjectMutations_AdminOnly(t *testing.T) {
 	f := newAuthFixture(t)
 	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
@@ -435,8 +435,7 @@ func TestProjectMutations_AdminOnly(t *testing.T) {
 	viewerCookie := sessionCookie(loginRR(t, f.Router, "viewer@example.com", "viewerpass1"))
 
 	// Each gated endpoint must 403 for the viewer, then succeed for the
-	// admin. Tested in this order: PATCH first (mutates settings), then
-	// /index/cancel (idempotent), then DELETE last (destructive).
+	// admin. PATCH first (mutates settings), DELETE last (destructive).
 	cases := []struct {
 		name        string
 		method      string
@@ -452,12 +451,6 @@ func TestProjectMutations_AdminOnly(t *testing.T) {
 				"settings": map[string]any{"exclude_patterns": []string{"vendor"}},
 			}),
 			adminStatus: http.StatusOK,
-		},
-		{
-			name:        "cancel index run",
-			method:      http.MethodPost,
-			path:        "/api/v1/projects/" + created.PathHash + "/index/cancel",
-			adminStatus: http.StatusOK, // idempotent — returns 200 even when no run is active
 		},
 		{
 			name:        "delete project",
@@ -495,6 +488,47 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+// TestIndexCancel_AnyAuthenticatedUser pins the policy that /index/cancel
+// is open to any authenticated user. The CLI calls cancel in defer-cleanup
+// on early exit (Ctrl-C, network drop), and gating it behind admin would
+// strand viewer-owned run locks until the 1-hour TTL.
+func TestIndexCancel_AnyAuthenticatedUser(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	// Seed a viewer + a project they can cancel against.
+	viewerBody, _ := json.Marshal(map[string]string{
+		"email": "viewer@example.com", "initial_password": "viewerpass1", "role": "viewer",
+	})
+	req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(viewerBody)), adminCookie)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed viewer status = %d (body=%s)", rr.Code, rr.Body.String())
+	}
+	viewerCookie := sessionCookie(loginRR(t, f.Router, "viewer@example.com", "viewerpass1"))
+
+	createBody, _ := json.Marshal(map[string]string{"host_path": "/tmp/cancel-test"})
+	req = withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewReader(createBody)), viewerCookie)
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("viewer create project status = %d (body=%s)", rr.Code, rr.Body.String())
+	}
+	var created struct{ PathHash string `json:"path_hash"` }
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+
+	// Viewer cancels — must NOT 403 (idempotent 200 even when no run is active).
+	req = withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+created.PathHash+"/index/cancel", nil), viewerCookie)
+	rr = httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("viewer cancel status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
 }
 
 // TestListUsers_IncludesStats — admin-list payload must carry the three
