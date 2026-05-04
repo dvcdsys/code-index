@@ -280,7 +280,7 @@ func (s *Server) SearchSymbols(w http.ResponseWriter, r *http.Request, path open
 		writeError(w, http.StatusUnprocessableEntity, "query is required")
 		return
 	}
-	limit := derefIntOrDefault(body.Limit, 20)
+	limit := clampLimit(body.Limit, 20)
 	kinds := derefStringSlice(body.Kinds)
 
 	symbols, err := symbolindex.SearchByName(r.Context(), s.Deps.DB, p.HostPath, body.Query, kinds, limit)
@@ -322,7 +322,7 @@ func (s *Server) SearchDefinitions(w http.ResponseWriter, r *http.Request, path 
 		writeError(w, http.StatusUnprocessableEntity, "symbol is required")
 		return
 	}
-	limit := derefIntOrDefault(body.Limit, 10)
+	limit := clampLimit(body.Limit, 10)
 	kind := derefString(body.Kind)
 	filePath := derefString(body.FilePath)
 
@@ -365,7 +365,7 @@ func (s *Server) SearchReferences(w http.ResponseWriter, r *http.Request, path o
 		writeError(w, http.StatusUnprocessableEntity, "symbol is required")
 		return
 	}
-	limit := derefIntOrDefault(body.Limit, 50)
+	limit := clampLimit(body.Limit, 50)
 	filePath := derefString(body.FilePath)
 
 	refs, err := symbolindex.SearchReferences(r.Context(), s.Deps.DB, p.HostPath, body.Symbol, filePath, limit)
@@ -406,7 +406,7 @@ func (s *Server) SearchFiles(w http.ResponseWriter, r *http.Request, path openap
 		writeError(w, http.StatusUnprocessableEntity, "query is required")
 		return
 	}
-	limit := derefIntOrDefault(body.Limit, 20)
+	limit := clampLimit(body.Limit, 20)
 
 	rows, err := s.Deps.DB.QueryContext(r.Context(),
 		`SELECT file_path FROM file_hashes WHERE project_path = ? AND file_path LIKE ? ORDER BY file_path LIMIT ?`,
@@ -569,7 +569,7 @@ func (s *Server) SemanticSearch(w http.ResponseWriter, r *http.Request, path ope
 		writeError(w, http.StatusUnprocessableEntity, "query is required")
 		return
 	}
-	limit := derefIntOrDefault(body.Limit, 10)
+	limit := clampLimit(body.Limit, 10)
 	languages := derefStringSlice(body.Languages)
 	paths := derefStringSlice(body.Paths)
 	excludes := derefStringSlice(body.Excludes)
@@ -1048,4 +1048,23 @@ func derefIntOrDefault(p *int, def int) int {
 		return def
 	}
 	return *p
+}
+
+// maxResultLimit caps user-supplied limit values to a sane upper bound.
+// Anchored at 1000 — far above any legitimate dashboard / CLI page size,
+// well below any value that would balloon a slice allocation or stall a
+// LIMIT-clause query. CodeQL flags raw user-int → make() or SQL LIMIT
+// flows; clampLimit is the chokepoint.
+const maxResultLimit = 1000
+
+// clampLimit is derefIntOrDefault that additionally caps the result at
+// maxResultLimit. Use this for any value that goes into a slice
+// allocation or a SQL LIMIT clause; use derefIntOrDefault when the int
+// is just metadata.
+func clampLimit(p *int, def int) int {
+	n := derefIntOrDefault(p, def)
+	if n > maxResultLimit {
+		return maxResultLimit
+	}
+	return n
 }
