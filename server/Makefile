@@ -95,6 +95,16 @@ bundle: fetch-llama build
 	@# filepath.Dir(os.Executable())/llama default resolves correctly.
 	mkdir -p $(BUNDLE_DIR)/llama
 	cp -R $(LLAMA_DIR)/. $(BUNDLE_DIR)/llama/
+ifeq ($(OS),darwin)
+	@# macOS Sequoia (26+) tightened amfid: ad-hoc-signed binaries whose
+	@# linked dylibs carry stale signatures or a com.apple.provenance
+	@# xattr from the previous bundle get SIGKILL'd within milliseconds
+	@# of execve — supervisor sees "signal: killed" with empty stderr.
+	@# `cp -R` creates new files macOS treats as untrusted, so the strip
+	@# + deep re-sign must run on every bundle, not just first install.
+	@xattr -cr $(BUNDLE_DIR)/llama/
+	@codesign --force --deep --sign - $(BUNDLE_DIR)/llama/llama-server
+endif
 	@echo "Bundle ready: $(BUNDLE_DIR)"
 	@echo "Optional:    tar czf $(DIST_DIR)/$(BUNDLE_NAME).tar.gz -C $(DIST_DIR) $(BUNDLE_NAME)"
 
