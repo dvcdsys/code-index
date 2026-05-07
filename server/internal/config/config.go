@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds all runtime settings. Port defaults to 21847 — the same
@@ -80,6 +81,18 @@ type Config struct {
 	// CIX_BOOTSTRAP_ADMIN_PASSWORD.
 	BootstrapAdminEmail    string
 	BootstrapAdminPassword string
+
+	// Version-check feature — periodic GitHub poll that surfaces a
+	// "newer release available" banner in the dashboard. Off entirely when
+	// CIX_VERSION_CHECK_ENABLED=false (no outbound HTTP at all). Repo is
+	// configurable so forks can point at their own GitHub project; the tag
+	// filter is hardcoded to `server/v` since this is the server binary.
+	// Sources: CIX_VERSION_CHECK_ENABLED (default true),
+	// CIX_VERSION_CHECK_INTERVAL (default 6h, Go duration string),
+	// CIX_VERSION_CHECK_REPO (default "dvcdsys/code-index").
+	VersionCheckEnabled  bool
+	VersionCheckInterval time.Duration
+	VersionCheckRepo     string
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -238,6 +251,20 @@ func Load() (*Config, error) {
 	c.BootstrapAdminEmail = getenv("CIX_BOOTSTRAP_ADMIN_EMAIL", "")
 	c.BootstrapAdminPassword = getenv("CIX_BOOTSTRAP_ADMIN_PASSWORD", "")
 
+	vcEnabled, err := getenvBool("CIX_VERSION_CHECK_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
+	c.VersionCheckEnabled = vcEnabled
+
+	vcInterval, err := getenvDuration("CIX_VERSION_CHECK_INTERVAL", 6*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	c.VersionCheckInterval = vcInterval
+
+	c.VersionCheckRepo = getenv("CIX_VERSION_CHECK_REPO", "dvcdsys/code-index")
+
 	return c, nil
 }
 
@@ -383,4 +410,16 @@ func getenvBool(key string, def bool) (bool, error) {
 		return false, fmt.Errorf("env %s: %w", key, err)
 	}
 	return b, nil
+}
+
+func getenvDuration(key string, def time.Duration) (time.Duration, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("env %s: %w", key, err)
+	}
+	return d, nil
 }
