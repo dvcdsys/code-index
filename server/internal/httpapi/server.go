@@ -87,7 +87,7 @@ func (s *Server) GetStatus(w http.ResponseWriter, r *http.Request) {
 			model = cfg.EmbeddingModel
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":               "ok",
 		"backend":              s.Deps.Backend,
 		"server_version":       s.Deps.ServerVersion,
@@ -96,7 +96,38 @@ func (s *Server) GetStatus(w http.ResponseWriter, r *http.Request) {
 		"embedding_model":      model,
 		"projects":             projectCount,
 		"active_indexing_jobs": activeJobs,
-	})
+	}
+	// Version-check fields — folded in only when the service is wired.
+	// `update_available` is always present (false when unknown) so the
+	// dashboard can branch without a null check; the optional URL/version
+	// fields stay nullable so the banner knows when there's nothing to
+	// link to yet.
+	if s.Deps.VersionCheck != nil {
+		snap := s.Deps.VersionCheck.Latest()
+		resp["update_available"] = snap.UpdateAvailable
+		resp["latest_version"] = nilIfEmpty(snap.LatestVersion)
+		resp["release_url"] = nilIfEmpty(snap.ReleaseURL)
+		vc := map[string]any{
+			"enabled": snap.Enabled,
+			"error":   nilIfEmpty(snap.LastError),
+		}
+		if snap.CheckedAt.IsZero() {
+			vc["checked_at"] = nil
+		} else {
+			vc["checked_at"] = snap.CheckedAt.Format(time.RFC3339)
+		}
+		resp["version_check"] = vc
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// nilIfEmpty returns nil for an empty string so writeJSON emits `null`
+// rather than `""`. Lets the dashboard branch on `field !== null`.
+func nilIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // ---------------------------------------------------------------------------

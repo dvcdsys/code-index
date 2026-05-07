@@ -26,6 +26,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
+	"github.com/dvcdsys/code-index/server/internal/versioncheck"
 )
 
 func runHealthcheck() {
@@ -190,6 +191,20 @@ func run() error {
 		}
 	}
 
+	// Background version-check poller. The 60s initial delay keeps GitHub
+	// off the boot path; the goroutine exits cleanly when bgCtx is canceled
+	// in the shutdown branch below.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	vcSvc := versioncheck.New(versioncheck.Config{
+		Enabled:        cfg.VersionCheckEnabled,
+		Interval:       cfg.VersionCheckInterval,
+		InitialDelay:   60 * time.Second,
+		Repo:           cfg.VersionCheckRepo,
+		CurrentVersion: version,
+	}, logger)
+	go vcSvc.Run(bgCtx)
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		DB:             database,
 		ServerVersion:  version,
@@ -205,6 +220,7 @@ func run() error {
 		VectorStore:    vs,
 		Indexer:        idx,
 		RuntimeCfg:     rcfg,
+		VersionCheck:   vcSvc,
 	})
 
 	srv := &http.Server{
