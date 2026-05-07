@@ -19,6 +19,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
+	"github.com/dvcdsys/code-index/server/internal/versioncheck"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -68,6 +69,9 @@ type Deps struct {
 	// RuntimeCfg backs the dashboard's /admin/runtime-config endpoints. Nil
 	// in router-only tests; admin handlers return 503 when absent.
 	RuntimeCfg *runtimecfg.Service
+	// VersionCheck polls GitHub for newer server releases. Nil = feature
+	// off; GetStatus then omits the version-check fields entirely.
+	VersionCheck *versioncheck.Service
 }
 
 // NewRouter builds the chi router with middleware and the generated
