@@ -250,6 +250,66 @@ func TestCompareSemverEdgeCases(t *testing.T) {
 	}
 }
 
+// TestRunBacksOffOnFailureThenResets exercises the full Run() loop:
+// the first two GitHub responses fail with 502, the third succeeds.
+// Verifies the loop eventually recovers (latest version flows into
+// the snapshot) without burning the whole budget on tight retries.
+func TestRunBacksOffOnFailureThenResets(t *testing.T) {
+	var calls atomic.Int32
+	srv := fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n <= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		mustEncode(t, w, []githubRelease{
+			{TagName: "server/v0.6.0", HTMLURL: "u-060"},
+		})
+	})
+
+	s := New(Config{
+		Enabled:        true,
+		Interval:       50 * time.Millisecond,
+		BackoffInitial: 5 * time.Millisecond,
+		BackoffMax:     20 * time.Millisecond,
+		BaseURL:        srv.URL,
+		Repo:           "owner/repo",
+		CurrentVersion: "0.5.0",
+		HTTPTimeout:    100 * time.Millisecond,
+	}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		s.Run(ctx)
+		close(done)
+	}()
+
+	deadline := time.After(1 * time.Second)
+	for s.Latest().LatestVersion != "0.6.0" {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatalf("did not recover from failure streak; calls=%d snapshot=%+v",
+				calls.Load(), s.Latest())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	<-done
+
+	if got := calls.Load(); got < 3 {
+		t.Errorf("expected at least 3 GitHub calls (2 fails + success), got %d", got)
+	}
+	if got := s.Latest().LastError; got != "" {
+		t.Errorf("LastError after recovery = %q, want empty (success must clear)", got)
+	}
+}
+
 func TestNetworkErrorPopulatesLastError(t *testing.T) {
 	// Point at an unroutable address; the request must fail before timeout.
 	s := New(Config{

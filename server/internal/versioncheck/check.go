@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sethvargo/go-retry"
 )
 
 // Config configures the version-check service. Zero-value fields fall back
@@ -35,6 +37,17 @@ type Config struct {
 	CurrentVersion string // e.g. "0.5.1" or "0.0.0-dev"
 	HTTPTimeout    time.Duration
 	UserAgent      string
+
+	// BackoffInitial — first retry delay after a failure. Default 1m.
+	// Successive failures double the delay (with ±10s jitter) up to BackoffMax.
+	// A successful poll resets the streak and the next attempt waits the
+	// regular Interval. Set to 0 to disable adaptive backoff entirely (the
+	// next attempt then waits the full Interval — pre-backoff behaviour).
+	BackoffInitial time.Duration
+	// BackoffMax — cap on the per-attempt delay during a failure streak.
+	// Default 30m. Should stay <= Interval/2 so the regular schedule still
+	// dominates once GitHub recovers.
+	BackoffMax time.Duration
 }
 
 // Snapshot is a point-in-time view of the cached version-check state.
@@ -78,6 +91,15 @@ func New(cfg Config, logger *slog.Logger) *Service {
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = "cix-server/" + cfg.CurrentVersion
 	}
+	if cfg.BackoffInitial <= 0 {
+		cfg.BackoffInitial = time.Minute
+	}
+	if cfg.BackoffMax <= 0 {
+		cfg.BackoffMax = 30 * time.Minute
+	}
+	if cfg.BackoffMax < cfg.BackoffInitial {
+		cfg.BackoffMax = cfg.BackoffInitial
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -99,8 +121,10 @@ func (s *Service) Latest() Snapshot {
 	return s.snapshot
 }
 
-// Run loops on a ticker, refreshing the cache. Returns immediately when
-// the feature is disabled. Exits cleanly on ctx.Done().
+// Run polls in a loop, sleeping Interval between successes and applying an
+// exponential backoff (BackoffInitial → BackoffMax with jitter) during a
+// failure streak. Returns immediately when the feature is disabled. Exits
+// cleanly on ctx.Done().
 func (s *Service) Run(ctx context.Context) {
 	if !s.cfg.Enabled {
 		s.logger.Info("version check disabled (CIX_VERSION_CHECK_ENABLED=false)")
@@ -119,23 +143,51 @@ func (s *Service) Run(ctx context.Context) {
 		}
 	}
 
-	if err := s.CheckNow(ctx); err != nil {
-		s.logger.Warn("initial version check failed", "err", err)
+	// newBackoff returns a fresh exponential schedule. Re-created when a
+	// failure streak begins so the first retry uses BackoffInitial again
+	// after each successful poll.
+	newBackoff := func() retry.Backoff {
+		// Jitter is min(10s, BackoffInitial/2) so tests with sub-second
+		// initial delays don't drown the schedule in noise.
+		jitter := 10 * time.Second
+		if half := s.cfg.BackoffInitial / 2; half < jitter {
+			jitter = half
+		}
+		b := retry.NewExponential(s.cfg.BackoffInitial)
+		b = retry.WithJitter(jitter, b)
+		b = retry.WithCappedDuration(s.cfg.BackoffMax, b)
+		return b
 	}
 
-	if s.cfg.Interval <= 0 {
-		return // one-shot mode (mainly for tests)
-	}
-	ticker := time.NewTicker(s.cfg.Interval)
-	defer ticker.Stop()
+	var backoff retry.Backoff // nil = no active failure streak
+
 	for {
+		err := s.CheckNow(ctx)
+
+		var wait time.Duration
+		if err != nil {
+			if s.cfg.Interval <= 0 {
+				return // one-shot mode (tests)
+			}
+			if backoff == nil {
+				backoff = newBackoff()
+			}
+			next, _ := backoff.Next()
+			wait = next
+			s.logger.Warn("version check failed — backing off",
+				"err", err, "next_attempt_in", wait.String())
+		} else {
+			backoff = nil // reset streak
+			if s.cfg.Interval <= 0 {
+				return
+			}
+			wait = s.cfg.Interval
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := s.CheckNow(ctx); err != nil {
-				s.logger.Warn("version check failed", "err", err)
-			}
+		case <-time.After(wait):
 		}
 	}
 }

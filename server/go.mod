@@ -9,6 +9,7 @@ require (
 	github.com/oapi-codegen/runtime v1.4.0
 	github.com/odvcencio/gotreesitter v0.0.0-20260423084729-38e2b42712f2
 	github.com/philippgille/chromem-go v0.7.0
+	github.com/sethvargo/go-retry v0.3.0
 	golang.org/x/crypto v0.50.0
 	modernc.org/sqlite v1.34.1
 )
