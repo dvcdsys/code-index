@@ -5,6 +5,16 @@ interface StatusPayload {
   server_version: string;
   embedding_model: string;
   model_loaded: boolean;
+  // Version-check fields are present only when the server has the
+  // versioncheck service wired (see CIX_VERSION_CHECK_ENABLED).
+  update_available?: boolean;
+  latest_version?: string | null;
+  release_url?: string | null;
+  version_check?: {
+    enabled: boolean;
+    checked_at?: string | null;
+    error?: string | null;
+  };
 }
 
 // useServerStatus polls /api/v1/status every 30 seconds. The footer
