@@ -310,6 +310,68 @@ func TestRunBacksOffOnFailureThenResets(t *testing.T) {
 	}
 }
 
+// TestRunStreakExhaustedAnchorsToInterval verifies that after
+// MaxBackoffAttempts consecutive failures, the loop stops retrying
+// on the backoff schedule and instead waits until streakStart+Interval
+// (the regular schedule, anchored to the FIRST attempt of the streak).
+func TestRunStreakExhaustedAnchorsToInterval(t *testing.T) {
+	var calls atomic.Int32
+	srv := fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	})
+
+	// MaxBackoffAttempts=3, BackoffInitial=2ms, BackoffMax=8ms, Interval=150ms.
+	// Expected timeline:
+	//   T=0     #1 fail, wait ~2ms
+	//   T=+2    #2 fail, wait ~4ms
+	//   T=+6    #3 fail, EXHAUSTED → anchor wait = 150 - 6 = 144ms
+	//   T=+150  #4 fail (new streak)
+	s := New(Config{
+		Enabled:            true,
+		Interval:           150 * time.Millisecond,
+		BackoffInitial:     2 * time.Millisecond,
+		BackoffMax:         8 * time.Millisecond,
+		MaxBackoffAttempts: 3,
+		BaseURL:            srv.URL,
+		Repo:               "owner/repo",
+		CurrentVersion:     "0.5.0",
+		HTTPTimeout:        100 * time.Millisecond,
+	}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		s.Run(ctx)
+		close(done)
+	}()
+
+	// After streak exhaustion the loop must be sleeping until Interval.
+	// Sample halfway through the anchor wait — call count should still be
+	// at exactly MaxBackoffAttempts.
+	time.Sleep(80 * time.Millisecond)
+	mid := calls.Load()
+	if mid != 3 {
+		cancel()
+		<-done
+		t.Fatalf("after 80ms expected exactly 3 attempts (streak exhausted, anchored sleep), got %d", mid)
+	}
+
+	// After Interval elapses since streakStart, the next attempt fires.
+	time.Sleep(120 * time.Millisecond) // total ~200ms > 150ms anchor
+	end := calls.Load()
+	if end < 4 {
+		cancel()
+		<-done
+		t.Fatalf("after 200ms expected at least 4 attempts (anchored retry fired), got %d", end)
+	}
+
+	cancel()
+	<-done
+}
+
 func TestNetworkErrorPopulatesLastError(t *testing.T) {
 	// Point at an unroutable address; the request must fail before timeout.
 	s := New(Config{

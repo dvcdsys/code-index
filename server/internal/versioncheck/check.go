@@ -48,6 +48,11 @@ type Config struct {
 	// Default 30m. Should stay <= Interval/2 so the regular schedule still
 	// dominates once GitHub recovers.
 	BackoffMax time.Duration
+	// MaxBackoffAttempts — stop retrying after this many consecutive
+	// failures and resume the regular Interval schedule, anchored to the
+	// FIRST attempt of the streak (so a streak that exhausts at T+15m
+	// schedules the next try at T0+Interval, not "now"+Interval). Default 5.
+	MaxBackoffAttempts int
 }
 
 // Snapshot is a point-in-time view of the cached version-check state.
@@ -99,6 +104,9 @@ func New(cfg Config, logger *slog.Logger) *Service {
 	}
 	if cfg.BackoffMax < cfg.BackoffInitial {
 		cfg.BackoffMax = cfg.BackoffInitial
+	}
+	if cfg.MaxBackoffAttempts <= 0 {
+		cfg.MaxBackoffAttempts = 5
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -160,8 +168,11 @@ func (s *Service) Run(ctx context.Context) {
 	}
 
 	var backoff retry.Backoff // nil = no active failure streak
+	var streakStart time.Time
+	var attempts int
 
 	for {
+		attemptStart := time.Now()
 		err := s.CheckNow(ctx)
 
 		var wait time.Duration
@@ -171,11 +182,35 @@ func (s *Service) Run(ctx context.Context) {
 			}
 			if backoff == nil {
 				backoff = newBackoff()
+				streakStart = attemptStart
+				attempts = 0
 			}
-			next, _ := backoff.Next()
-			wait = next
-			s.logger.Warn("version check failed — backing off",
-				"err", err, "next_attempt_in", wait.String())
+			attempts++
+
+			if attempts >= s.cfg.MaxBackoffAttempts {
+				// Streak exhausted — anchor the next attempt to the FIRST
+				// failure's timestamp + Interval. Keeps the long-term
+				// schedule on its 6h grid even when a backoff streak ate
+				// up to ~30m of it. If the streak somehow ran longer than
+				// Interval (degenerate config), fire immediately.
+				elapsed := time.Since(streakStart)
+				wait = s.cfg.Interval - elapsed
+				if wait < 0 {
+					wait = 0
+				}
+				s.logger.Warn("version check streak exhausted — anchoring to schedule",
+					"err", err,
+					"attempts", attempts,
+					"next_attempt_in", wait.String())
+				backoff = nil
+			} else {
+				next, _ := backoff.Next()
+				wait = next
+				s.logger.Warn("version check failed — backing off",
+					"err", err,
+					"attempt", attempts,
+					"next_attempt_in", wait.String())
+			}
 		} else {
 			backoff = nil // reset streak
 			if s.cfg.Interval <= 0 {
