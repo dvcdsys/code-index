@@ -1622,6 +1622,42 @@ components:
           type: integer
           minimum: 0
           description: Currently-running `index_runs` rows.
+        update_available:
+          type: boolean
+          description: |
+            True when the version-check service has found a `server/v*`
+            release on GitHub strictly newer than the running server.
+            Field is omitted entirely when version-check is not wired
+            (set `CIX_VERSION_CHECK_ENABLED=false` to disable polling).
+        latest_version:
+          type: string
+          nullable: true
+          description: |
+            Latest released server version (without the `server/v` prefix,
+            e.g. `0.5.1`). Null until the first successful poll completes.
+        release_url:
+          type: string
+          nullable: true
+          description: GitHub release page URL for `latest_version`. Null when unknown.
+        version_check:
+          $ref: "#/components/schemas/VersionCheckStatus"
+
+    VersionCheckStatus:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether the periodic GitHub poll is running.
+        checked_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Last poll timestamp (UTC, RFC 3339). Null before the first poll.
+        error:
+          type: string
+          nullable: true
+          description: Last error message, if the most recent poll failed. Null on success.
 
     ProjectSettings:
       type: object
