@@ -18,19 +18,31 @@ Semantic code search and navigation for Claude Code, powered by the
   invoke it (`/cix:search`, `/cix-skill`, or auto-trigger on a relevant
   prompt). Stays in context for the rest of the session — never
   duplicated.
-- **Behavioral nudges (hooks):**
+- **Behavioral nudges (5 hooks):**
   - **SessionStart** — calls `cix status` (2 s timeout). Caches the
-    yes/no verdict in `$CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID`,
-    injects a one-line reminder on success, stays silent on failure.
-  - **PreToolUse(Grep|Glob)** — reads the SessionStart cache only; no
-    inline `cix` calls. If the verdict is "yes" (`1`), suggests
-    `cix search` instead of Grep, throttled with exponential backoff
-    (fires on call #1, 2, 4, 8, 16, …). If the verdict is "no" (`0`)
-    or missing, **stays silent for the entire session** — by design,
-    so a flaky server doesn't cause intermittent nudges.
-  - **SessionEnd** — deletes the per-session cache files when the
-    session terminates. Best-effort cleanup; the 30-day GC inside
+    yes/no verdict in `$CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID-$DIR_HASH`,
+    injects a one-line reminder on success.
+  - **CwdChanged** — when Claude `cd`s into another directory mid-session,
+    re-runs `cix status` for the new dir and caches the verdict. Silent
+    (no reminder); PreToolUse handles the first-Grep-in-new-project
+    nudge through its per-project backoff.
+  - **PreToolUse(Grep|Glob)** — reads the cache for the current
+    `(session, project_dir)` pair; no inline `cix` calls. If the
+    verdict is "yes" (`1`), suggests `cix search` with exponential
+    backoff per project (fires on call #1, 2, 4, 8, …). Missing cache
+    or "no" (`0`) → silent for the rest of the session in that project.
+  - **PostCompact** — after auto-compaction in long sessions, re-injects
+    the SessionStart reminder if the current project is cix-aware
+    (skill body itself survives compaction natively; the SessionStart
+    one-liner does not).
+  - **SessionEnd** — glob-deletes every per-(session, dir) cache file
+    when the session terminates. Best-effort; the 30-day GC inside
     SessionStart catches markers left over from forced kills.
+
+The cache key includes a project-dir hash (`shasum -a 256` first 8
+chars), so per-session, per-project state is isolated — Claude can
+move between projects mid-session and each one keeps its own verdict
+and backoff counter.
 
 ## Install
 
