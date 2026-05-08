@@ -1,6 +1,6 @@
 module github.com/dvcdsys/code-index/server
 
-go 1.25.9
+go 1.25.10
 
 require (
 	github.com/getkin/kin-openapi v0.135.0
