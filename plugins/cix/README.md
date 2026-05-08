@@ -19,16 +19,15 @@ Semantic code search and navigation for Claude Code, powered by the
   prompt). Stays in context for the rest of the session — never
   duplicated.
 - **Behavioral nudges (hooks):**
-  - **SessionStart** — at session start, calls `cix status` (with a 2 s
-    timeout) to ask whether the project is registered with the
-    cix-server. On success, injects a one-line reminder and caches the
-    decision in `/tmp/cix-aware-$SESSION_ID` for the rest of the session.
-  - **PreToolUse(Grep|Glob)** — reads the SessionStart cache (no `cix`
-    re-query) and, if the project is indexed, occasionally suggests
-    `cix search` instead. Throttled with **exponential backoff** (fires
-    on call #1, 2, 4, 8, 16, 32, 64, …) — at most ~7 nudges per 100-Grep
-    session. Falls back to checking `.cixignore` if the cache is missing
-    (resumed session).
+  - **SessionStart** — calls `cix status` (2 s timeout). Caches the
+    yes/no verdict in `$CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID`,
+    injects a one-line reminder on success, stays silent on failure.
+  - **PreToolUse(Grep|Glob)** — reads the SessionStart cache only; no
+    inline `cix` calls. If the verdict is "yes" (`1`), suggests
+    `cix search` instead of Grep, throttled with exponential backoff
+    (fires on call #1, 2, 4, 8, 16, …). If the verdict is "no" (`0`)
+    or missing, **stays silent for the entire session** — by design,
+    so a flaky server doesn't cause intermittent nudges.
 
 ## Install
 
@@ -101,13 +100,16 @@ enabling the plugin.
 
 ### Hook state cleanup
 
-Two per-session cache files live in `/tmp`:
-- `/tmp/cix-aware-$SESSION_ID` — written by SessionStart, read by
+Two per-session marker files live in `$CLAUDE_PLUGIN_DATA`
+(resolves to `~/.claude/plugins/data/cix-code-index/`):
+- `cix-aware-$SESSION_ID` — written by SessionStart, read by
   PreToolUse. Single-byte file (`0` or `1`).
-- `/tmp/cix-grep-count-$SESSION_ID` — counter for the exponential
-  backoff. A few bytes.
+- `cix-grep-count-$SESSION_ID` — counter for the exponential backoff.
 
-`/tmp` is cleaned on reboot, so no manual cleanup is needed.
+This directory is plugin-managed and **not** cleaned by the OS
+(unlike `/tmp`, which macOS purges daily). SessionStart opportunistically
+deletes its own markers older than 30 days on each invocation, so files
+don't accumulate forever.
 
 ## Files
 
