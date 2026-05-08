@@ -146,67 +146,62 @@ teardown() { teardown_test_env; }
     [ -f "$TEST_CACHE_DIR/some-subdir/inner.txt" ]
 }
 
-# ─── Security: path validation guard ──────────────────────────────────────────
+# ─── Custom cache dirs (no whitelist — accept any reachable directory) ────────
+# We do not whitelist parent paths. Safety comes from -type f + exact
+# -name pattern, not from where the cache dir lives.
 
-@test "guard: refuses to operate when CLAUDE_PLUGIN_DATA=/" {
-    run env \
-        PATH="$TEST_MOCK_BIN:$PATH" \
-        CLAUDE_PLUGIN_DATA="/" \
-        CLAUDE_PROJECT_DIR="$TEST_PROJECT_DIR" \
-        bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"evil\"}"
-
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing to operate"* ]]
-}
-
-@test "guard: refuses CLAUDE_PLUGIN_DATA=\$HOME" {
-    run env \
-        PATH="$TEST_MOCK_BIN:$PATH" \
-        CLAUDE_PLUGIN_DATA="$HOME" \
-        CLAUDE_PROJECT_DIR="$TEST_PROJECT_DIR" \
-        bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"evil\"}"
-
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing to operate"* ]]
-}
-
-@test "guard: refuses CLAUDE_PLUGIN_DATA=/etc" {
-    run env \
-        PATH="$TEST_MOCK_BIN:$PATH" \
-        CLAUDE_PLUGIN_DATA="/etc" \
-        CLAUDE_PROJECT_DIR="$TEST_PROJECT_DIR" \
-        bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"evil\"}"
-
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing to operate"* ]]
-}
-
-@test "guard: allows CLAUDE_PLUGIN_DATA in plugin-data dir" {
-    local fake_plugin_data="$HOME/.claude/plugins/data/cix-test-bats"
-    mkdir -p "$fake_plugin_data"
-
+@test "accepts custom CLAUDE_PLUGIN_DATA in non-standard location" {
+    # Simulate a corp / XDG-style cache dir under /opt or /var.
+    local custom_dir
+    custom_dir="$(mktemp -d "${BATS_TMPDIR}/custom-cache-XXXXXX")"
     export MOCK_CIX_EXIT=0
+
     run env \
         PATH="$TEST_MOCK_BIN:$PATH" \
-        CLAUDE_PLUGIN_DATA="$fake_plugin_data" \
+        CLAUDE_PLUGIN_DATA="$custom_dir" \
         CLAUDE_PROJECT_DIR="$TEST_PROJECT_DIR" \
-        bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"ok\"}"
+        bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"custom\"}"
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"hookSpecificOutput"* ]]
 
-    # Cleanup
-    rm -rf "$fake_plugin_data"
+    rm -rf "$custom_dir"
 }
 
-@test "guard: allows CLAUDE_PLUGIN_DATA=/tmp/something" {
-    export MOCK_CIX_EXIT=0
-    run env \
-        PATH="$TEST_MOCK_BIN:$PATH" \
-        CLAUDE_PLUGIN_DATA="/tmp/cix-bats-test-$$" \
-        CLAUDE_PROJECT_DIR="$TEST_PROJECT_DIR" \
-        bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"tmp-ok\"}"
+@test "GC never deletes files outside the cix-aware-* / cix-grep-count-* prefixes — even in same dir" {
+    # Even if cache dir contains thousands of unrelated files, none of
+    # them should be touched. Strictness enforced by `-name` pattern in
+    # the find call.
+    local many_unrelated_files=(
+        "config.yaml"
+        "credentials.json"
+        ".bashrc"
+        "important_log_file"
+        "some-other-plugin-data"
+        "AWARE-MISTAKEN-CASE"           # different case
+        "cix-other-pattern"             # different prefix
+        "cix"                           # too short to match cix-aware-* / cix-grep-count-*
+        "X-cix-aware-fake-aaaa"         # prefixed with junk before cix-
+    )
 
-    [ "$status" -eq 0 ]
-    rm -rf "/tmp/cix-bats-test-$$"
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        local old_ts; old_ts=$(date -v-90d +%Y%m%d%H%M)
+    else
+        local old_ts; old_ts=$(date -d "90 days ago" +%Y%m%d%H%M)
+    fi
+
+    for f in "${many_unrelated_files[@]}"; do
+        touch -t "$old_ts" "$TEST_CACHE_DIR/$f"
+    done
+
+    export MOCK_CIX_EXIT=0
+    run_hook session-start.sh "non-destructive-test" "$TEST_PROJECT_DIR"
+
+    # Every unrelated file should still be there, regardless of age.
+    for f in "${many_unrelated_files[@]}"; do
+        [ -f "$TEST_CACHE_DIR/$f" ] || {
+            echo "FAILED: $f was unexpectedly deleted" >&2
+            return 1
+        }
+    done
 }

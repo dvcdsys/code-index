@@ -28,29 +28,38 @@ cleans up after itself — no state leaks between tests.
 
 | Suite | Focus |
 |---|---|
-| `session-start.bats` | cix-status flow, cache write, GC, **path validation guards** |
+| `session-start.bats` | cix-status flow, cache write, 30-day GC, **non-matching files preserved** |
 | `cwd-changed.bats` | First-cd evaluation, no-op on cached dir, multi-dir state |
 | `grep-nudge.bats` | Exponential backoff (1, 2, 4, 8, 16), per-(session, dir) counters |
 | `post-compact.bats` | Re-injection only when cache="1" |
-| `session-end.bats` | **Security:** glob deletion never leaks beyond own session, beyond non-cix files, or beyond expected dirs |
+| `session-end.bats` | **Security:** deletion never leaks to other sessions, non-cix files, or subdirs — even with custom `$CLAUDE_PLUGIN_DATA` |
 | `cix-wrapper.bats` | System-cix passthrough, exit code propagation, self-recursion guard |
 
 ## Security tests (the most important ones)
 
-Bash scripts that call `find -delete` and `rm` get extra scrutiny.
-The `session-end.bats` and `session-start.bats` suites contain explicit
+Bash scripts that call `find -delete` get extra scrutiny. Safety comes
+from **what** we delete (strict `-name` patterns + `-type f` +
+`-maxdepth 1`), not **where** the cache dir lives. The plugin
+deliberately does not whitelist parent paths, so users with custom
+`$CLAUDE_PLUGIN_DATA` (corporate setups, XDG-style layouts) are
+supported.
+
+`session-end.bats` and `session-start.bats` suites contain explicit
 adversarial cases:
 
-- `CLAUDE_PLUGIN_DATA=/` → script must `exit 1` with "refusing to operate"
-- `CLAUDE_PLUGIN_DATA=$HOME` → same refusal
-- `CLAUDE_PLUGIN_DATA=/etc` → same refusal
 - Other sessions' cache files → must NOT be touched
-- Random non-cix files in cache dir → must NOT be touched
-- Subdirectories in cache dir → must NOT be touched (only `-maxdepth 1`)
-- 30-day GC → must spare files outside the `cix-aware-*` / `cix-grep-count-*`
-  patterns, even if they're old
+- Files with confusable names (`cix-other-pattern`,
+  `X-cix-aware-fake-...`, `cix` alone) → must NOT be touched
+- Random files (`config.yaml`, `.env`, `secrets.json`) in cache dir
+  → must NOT be touched
+- Subdirectories in cache dir + nested files → must NOT be touched
+  (only `-maxdepth 1`)
+- 30-day GC → must spare files outside the `cix-aware-*` /
+  `cix-grep-count-*` prefixes, even if they're old
 - `session_id` containing shell metacharacters → must NOT trigger
   command injection (canary file survives)
+- Custom non-standard `$CLAUDE_PLUGIN_DATA` → script proceeds without
+  refusing, deletes only matching files
 
 If any of these fail in CI, the offending change cannot land.
 
