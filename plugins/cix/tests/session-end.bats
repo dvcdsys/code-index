@@ -109,36 +109,59 @@ teardown() { teardown_test_env; }
     [ -f "$TEST_CACHE_DIR/some-subdir/inner.txt" ]
 }
 
-# ─── Security: path validation guard ──────────────────────────────────────────
+# ─── Security: works on custom cache dirs without harming other files ────────
 
-@test "GUARD: refuses to operate when CLAUDE_PLUGIN_DATA=/" {
+@test "SECURITY: in a non-standard cache dir, only matching files are deleted" {
+    # User has a custom CLAUDE_PLUGIN_DATA. The dir contains all sorts
+    # of unrelated files. session-end must never touch any of them.
+    local custom_dir
+    custom_dir="$(mktemp -d "${BATS_TMPDIR}/corp-cache-XXXXXX")"
+
+    # OUR session's files — should be deleted
+    local hash; hash=$(compute_hash "$TEST_PROJECT_DIR")
+    touch "$custom_dir/cix-aware-our-sess-$hash"
+    touch "$custom_dir/cix-grep-count-our-sess-$hash"
+
+    # Non-matching files — must survive
+    local non_matching=(
+        "kubeconfig.yaml"
+        ".env"
+        "secrets.json"
+        "deploy.sh"
+        "important_user_data.bin"
+        "cix"                            # too short
+        "cix-other-prefix"               # different shape
+        "X-cix-aware-fake-aaaa"          # has cix-aware mid-name, but not at start
+    )
+    for f in "${non_matching[@]}"; do
+        touch "$custom_dir/$f"
+    done
+
+    # Subdir + nested file — must not be touched (no recursion)
+    mkdir "$custom_dir/secret-subdir"
+    touch "$custom_dir/secret-subdir/important.txt"
+
     run env \
         PATH="$TEST_MOCK_BIN:$PATH" \
-        CLAUDE_PLUGIN_DATA="/" \
-        bash "$TEST_PLUGIN_ROOT/scripts/session-end.sh" <<<"{\"session_id\":\"evil\"}"
+        CLAUDE_PLUGIN_DATA="$custom_dir" \
+        bash "$TEST_PLUGIN_ROOT/scripts/session-end.sh" <<<"{\"session_id\":\"our-sess\"}"
 
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing to operate"* ]]
-}
+    [ "$status" -eq 0 ]
+    # Ours gone
+    [ ! -f "$custom_dir/cix-aware-our-sess-$hash" ]
+    [ ! -f "$custom_dir/cix-grep-count-our-sess-$hash" ]
+    # Non-matching survived
+    for f in "${non_matching[@]}"; do
+        [ -f "$custom_dir/$f" ] || {
+            echo "FAILED: $f was unexpectedly deleted" >&2
+            return 1
+        }
+    done
+    # Subdir untouched
+    [ -d "$custom_dir/secret-subdir" ]
+    [ -f "$custom_dir/secret-subdir/important.txt" ]
 
-@test "GUARD: refuses CLAUDE_PLUGIN_DATA=\$HOME" {
-    run env \
-        PATH="$TEST_MOCK_BIN:$PATH" \
-        CLAUDE_PLUGIN_DATA="$HOME" \
-        bash "$TEST_PLUGIN_ROOT/scripts/session-end.sh" <<<"{\"session_id\":\"evil\"}"
-
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing to operate"* ]]
-}
-
-@test "GUARD: refuses CLAUDE_PLUGIN_DATA=/etc" {
-    run env \
-        PATH="$TEST_MOCK_BIN:$PATH" \
-        CLAUDE_PLUGIN_DATA="/etc" \
-        bash "$TEST_PLUGIN_ROOT/scripts/session-end.sh" <<<"{\"session_id\":\"evil\"}"
-
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing to operate"* ]]
+    rm -rf "$custom_dir"
 }
 
 # ─── Security: shell-injection resistance ─────────────────────────────────────

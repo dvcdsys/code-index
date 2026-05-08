@@ -45,34 +45,12 @@ fi
 
 # ── Resolve cache directory ───────────────────────────────────────────────────
 # Prefer plugin-persistent storage; fall back to /tmp for ad-hoc/test invocations.
+# We do NOT whitelist parent paths — users can have non-standard layouts
+# (custom $CLAUDE_PLUGIN_DATA, XDG dirs, corporate setups). Safety comes
+# from the file-level checks below: -maxdepth 1, -type f, exact -name
+# patterns matching only our session-id-prefixed markers.
 CACHE_DIR="${CLAUDE_PLUGIN_DATA:-/tmp}"
 mkdir -p "$CACHE_DIR" 2>/dev/null || CACHE_DIR="/tmp"
-
-# ── Safety guard: refuse to operate outside known-safe locations ──────────────
-# This script later runs `find -delete` for the 30-day GC. If
-# CLAUDE_PLUGIN_DATA is somehow misconfigured to point at $HOME, /, /etc,
-# etc., we MUST refuse to proceed. Whitelist:
-#   - $HOME/.claude/plugins/data/* — official plugin-persistent dir
-#   - /tmp or /tmp/*               — ad-hoc / installer fallback
-#   - $TMPDIR/*                    — macOS BATS_TMPDIR for tests
-case "$CACHE_DIR" in
-    "$HOME/.claude/plugins/data"|"$HOME/.claude/plugins/data/"*) ;;
-    "/tmp"|"/tmp/"*) ;;
-    *)
-        if [ -n "${TMPDIR:-}" ]; then
-            case "$CACHE_DIR" in
-                "${TMPDIR%/}"|"${TMPDIR%/}"/*) ;;
-                *)
-                    echo "cix plugin (session-start): refusing to operate on cache dir outside whitelist: $CACHE_DIR" >&2
-                    exit 1
-                    ;;
-            esac
-        else
-            echo "cix plugin (session-start): refusing to operate on cache dir outside whitelist: $CACHE_DIR" >&2
-            exit 1
-        fi
-        ;;
-esac
 [ -d "$CACHE_DIR" ] || exit 0
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
@@ -90,7 +68,19 @@ CACHE_FILE="$CACHE_DIR/cix-aware-$SESSION_ID-$DIR_HASH"
 # ── Light maintenance: clear markers older than 30 days ───────────────────────
 # Long-running Claude Code installs would accumulate one-byte markers
 # otherwise. Cheap, runs once per session. Failures ignored.
-find "$CACHE_DIR" -maxdepth 1 -type f \( -name 'cix-aware-*' -o -name 'cix-grep-count-*' \) -mtime +30 -delete 2>/dev/null || true
+#
+# Safety constraints on the find:
+#   -maxdepth 1                — never recurse into subdirectories
+#   -type f                    — files only (skips dirs, symlinks)
+#   -name 'cix-aware-*' OR
+#   -name 'cix-grep-count-*'   — exact prefix match on our marker names
+#   -mtime +30                 — older than 30 days
+#
+# A file outside this prefix is invisible to find — it's never even
+# considered for deletion, regardless of how the cache dir is configured.
+find "$CACHE_DIR" -maxdepth 1 -type f \
+    \( -name 'cix-aware-*' -o -name 'cix-grep-count-*' \) \
+    -mtime +30 -delete 2>/dev/null || true
 
 # ── Resolve a working `cix` binary ────────────────────────────────────────────
 CIX_BIN=""
