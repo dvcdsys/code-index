@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "cix",
+  "version": "0.1.0",
+  "description": "Semantic code search and navigation for Claude Code via the cix index. Bundles the cix CLI (auto-installs if missing) and nudges Claude to prefer cix over Grep for semantic queries.",
+  "author": {
+    "name": "dvcdsys",
+    "email": "dvcdsys@gmail.com"
+  },
+  "homepage": "https://github.com/dvcdsys/code-index",
+  "repository": "https://github.com/dvcdsys/code-index",
+  "license": "MIT",
+  "keywords": ["search", "code-search", "semantic", "navigation", "indexing", "embeddings", "ai"]
+}
