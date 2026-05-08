@@ -418,35 +418,37 @@ re-open Claude Code.
 ## Security & testing
 
 The plugin runs bash scripts on every Claude Code session, with calls
-that include `find -delete` and writes to `$CLAUDE_PLUGIN_DATA`. Three
-defensive layers protect against accidental damage:
+that include `find -delete` against `$CLAUDE_PLUGIN_DATA`. Safety comes
+from **what we delete**, not **where the directory lives** — every
+deletion is gated by file-level filters that practically cannot match
+anything except our own marker files:
 
-1. **Path validation guards.** Before any deletion, `session-start.sh`
-   and `session-end.sh` check that `$CLAUDE_PLUGIN_DATA` falls inside
-   one of the whitelisted prefixes:
-   - `$HOME/.claude/plugins/data/*` (the official plugin-data dir)
-   - `/tmp` or `/tmp/*`
-   - `$TMPDIR/*` (macOS test sandboxes)
+1. **Restrictive find filters.** Every `find -delete` uses:
+   - `-maxdepth 1` — never recurses into subdirectories
+   - `-type f` — files only (skips dirs and symlinks)
+   - `-name 'cix-aware-*'` / `-name 'cix-grep-count-*'` — exact prefix
+     match on our marker names; for `session-end.sh` the pattern also
+     embeds the current `$SESSION_ID` (a Claude-Code-assigned UUID),
+     so it cannot match other sessions' files
 
-   If the cache dir is outside this whitelist (e.g. `/`, `$HOME`,
-   `/etc`), the script prints a refusal message and exits non-zero
-   without touching anything.
+   `rm -rf` is not used anywhere in the plugin. There is no path on
+   which a hook script could touch a file that doesn't already match
+   the strict name pattern, regardless of how `$CLAUDE_PLUGIN_DATA` is
+   configured. This means **custom data dirs work fine** — corporate
+   setups, XDG-style layouts, or alternative paths are all supported.
 
-2. **Restrictive `find` patterns.** Every `find -delete` uses
-   `-maxdepth 1`, `-type f`, and a tight `-name` filter
-   (`cix-aware-*` / `cix-grep-count-*`). Subdirectories, symlinks,
-   and unrelated files are never touched, even within the whitelisted
-   cache dir. We deliberately avoid `rm -rf` anywhere in the plugin.
-
-3. **Automated test suite.** `plugins/cix/tests/` contains 46
+2. **Automated test suite.** `plugins/cix/tests/` contains 41
    [bats-core](https://bats-core.readthedocs.io/) tests covering all 6
-   hook scripts. The test matrix includes adversarial cases:
-   - `CLAUDE_PLUGIN_DATA=/`, `=$HOME`, `=/etc` — guard must refuse
+   hook scripts. Adversarial cases include:
    - `session_id` containing shell metacharacters — must not inject
      commands (canary file survives)
    - Other sessions' cache files — must not be touched
-   - Random non-cix files in cache dir — must not be touched
+   - Files with similar-but-different names (`cix-other-pattern`,
+     `X-cix-aware-fake-...`, `cix` alone) — must not be touched
+   - Subdirectories in the cache dir — must not be touched (no recursion)
    - 30-day GC — must spare files outside the cix-prefixed patterns
+   - Custom non-standard `$CLAUDE_PLUGIN_DATA` — must work without
+     deleting unrelated files in that dir
    - Path-with-spaces project dirs — must hash correctly
 
    GitHub Actions runs the suite on Ubuntu and macOS for every PR

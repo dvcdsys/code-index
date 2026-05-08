@@ -28,33 +28,23 @@ fi
 [ -z "$SESSION_ID" ] && exit 0
 
 CACHE_DIR="${CLAUDE_PLUGIN_DATA:-/tmp}"
-
-# ── Safety guard (mirror of session-start.sh) ─────────────────────────────────
-# Refuse to operate outside known-safe locations before invoking find -delete.
-case "$CACHE_DIR" in
-    "$HOME/.claude/plugins/data"|"$HOME/.claude/plugins/data/"*) ;;
-    "/tmp"|"/tmp/"*) ;;
-    *)
-        if [ -n "${TMPDIR:-}" ]; then
-            case "$CACHE_DIR" in
-                "${TMPDIR%/}"|"${TMPDIR%/}"/*) ;;
-                *)
-                    echo "cix plugin (session-end): refusing to operate on cache dir outside whitelist: $CACHE_DIR" >&2
-                    exit 1
-                    ;;
-            esac
-        else
-            echo "cix plugin (session-end): refusing to operate on cache dir outside whitelist: $CACHE_DIR" >&2
-            exit 1
-        fi
-        ;;
-esac
 [ -d "$CACHE_DIR" ] || exit 0
 
-# Glob-delete every per-(session, dir) marker. Use find for safe handling
-# of patterns when there are no matches (avoids "rm: ... no such file" noise).
-# -maxdepth 1 + -type f + restrictive -name patterns ensures we only touch
-# our own one-byte marker files.
+# Glob-delete every per-(session, dir) marker for this session.
+#
+# Safety is enforced by the find filters, not by where the cache dir is:
+#   -maxdepth 1             — never recurse into subdirectories
+#   -type f                 — files only (skips dirs and symlinks)
+#   -name 'cix-aware-$SESSION_ID-*'      — exact prefix + this session_id
+#   -name 'cix-grep-count-$SESSION_ID-*' — exact prefix + this session_id
+#
+# $SESSION_ID is a UUID assigned by Claude Code, so the patterns
+# practically cannot match anything but our own marker files even in
+# unusual cache-dir locations.
+#
+# We never use `rm -rf` and never recurse — there's no path on which
+# this script could touch a file that doesn't already match the strict
+# name pattern.
 find "$CACHE_DIR" -maxdepth 1 -type f \
     \( -name "cix-aware-$SESSION_ID-*" -o -name "cix-grep-count-$SESSION_ID-*" \) \
     -delete 2>/dev/null || true
