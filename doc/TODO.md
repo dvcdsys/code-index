@@ -105,5 +105,46 @@ updates in `CLAUDE-CODE-PLUGIN.md`, manual test scenario covering
 
 ## Server / CLI
 
-(none currently tracked here; server and CLI roadmap is in their
-respective changelogs and release-server.yml / release-cli.yml workflows)
+### Bump Go to 1.25.10+ to clear two stdlib vulnerabilities
+
+**Status:** open. Not blocking, but `Security / govulncheck (server)`
+has been failing on `main` since at least 2026-05-08.
+
+**Vulnerabilities (both fixed in go1.25.10):**
+
+- **GO-2026-4971** — Panic in `Dial` and `LookupPort` when handling
+  NUL byte on Windows in `net`. Reachable from
+  `internal/embeddings/client.go` (HTTP client to llama-server) and
+  `internal/embeddings/supervisor.go` (port picking).
+- **GO-2026-4918** — Infinite loop in HTTP/2 transport when given bad
+  `SETTINGS_MAX_FRAME_SIZE` in `golang.org/x/net/http2`. Reachable from
+  `internal/embeddings/client.go` and `cmd/cix-server/main.go`
+  healthcheck.
+
+**Fix:**
+
+```bash
+# server/go.mod currently says: go 1.25.9
+# Bump to 1.25.10 (or whatever's latest in the 1.25.x line)
+sed -i '' 's/^go 1.25.9$/go 1.25.10/' server/go.mod
+cd server && go mod tidy
+
+# Verify locally
+go install golang.org/x/vuln/cmd/govulncheck@latest
+govulncheck ./...   # should report no findings now
+```
+
+CI workflow uses `go-version-file: server/go.mod` so bumping the
+manifest is enough — no workflow changes needed.
+
+**Reachability assessment:**
+
+- GO-2026-4971: macOS / Linux deployments unaffected at runtime
+  (Windows-only code path), but govulncheck still flags it because the
+  call site exists. Bumping Go is the cleanest fix.
+- GO-2026-4918: HTTP/2 transport — affects every cix-server instance
+  if a malicious peer sends bad SETTINGS frames. Real risk on exposed
+  servers. Should fix.
+
+**Estimate:** 5 minutes + run server tests + scout-cuda before tagging
+the next release.

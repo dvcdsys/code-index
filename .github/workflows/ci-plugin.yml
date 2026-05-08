@@ -15,6 +15,11 @@ on:
       - '.claude-plugin/**'
       - '.github/workflows/ci-plugin.yml'
 
+# Minimum permissions required by the workflow (CodeQL workflow-permissions advisory).
+# Read-only on repo contents is enough — we don't push code, comments, or releases.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: bats + shellcheck on ${{ matrix.os }}
