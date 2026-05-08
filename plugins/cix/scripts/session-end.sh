@@ -29,8 +29,32 @@ fi
 
 CACHE_DIR="${CLAUDE_PLUGIN_DATA:-/tmp}"
 
+# ── Safety guard (mirror of session-start.sh) ─────────────────────────────────
+# Refuse to operate outside known-safe locations before invoking find -delete.
+case "$CACHE_DIR" in
+    "$HOME/.claude/plugins/data"|"$HOME/.claude/plugins/data/"*) ;;
+    "/tmp"|"/tmp/"*) ;;
+    *)
+        if [ -n "${TMPDIR:-}" ]; then
+            case "$CACHE_DIR" in
+                "${TMPDIR%/}"|"${TMPDIR%/}"/*) ;;
+                *)
+                    echo "cix plugin (session-end): refusing to operate on cache dir outside whitelist: $CACHE_DIR" >&2
+                    exit 1
+                    ;;
+            esac
+        else
+            echo "cix plugin (session-end): refusing to operate on cache dir outside whitelist: $CACHE_DIR" >&2
+            exit 1
+        fi
+        ;;
+esac
+[ -d "$CACHE_DIR" ] || exit 0
+
 # Glob-delete every per-(session, dir) marker. Use find for safe handling
 # of patterns when there are no matches (avoids "rm: ... no such file" noise).
+# -maxdepth 1 + -type f + restrictive -name patterns ensures we only touch
+# our own one-byte marker files.
 find "$CACHE_DIR" -maxdepth 1 -type f \
     \( -name "cix-aware-$SESSION_ID-*" -o -name "cix-grep-count-$SESSION_ID-*" \) \
     -delete 2>/dev/null || true

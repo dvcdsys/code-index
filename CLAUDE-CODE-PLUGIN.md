@@ -415,6 +415,57 @@ re-open Claude Code.
 
 ---
 
+## Security & testing
+
+The plugin runs bash scripts on every Claude Code session, with calls
+that include `find -delete` and writes to `$CLAUDE_PLUGIN_DATA`. Three
+defensive layers protect against accidental damage:
+
+1. **Path validation guards.** Before any deletion, `session-start.sh`
+   and `session-end.sh` check that `$CLAUDE_PLUGIN_DATA` falls inside
+   one of the whitelisted prefixes:
+   - `$HOME/.claude/plugins/data/*` (the official plugin-data dir)
+   - `/tmp` or `/tmp/*`
+   - `$TMPDIR/*` (macOS test sandboxes)
+
+   If the cache dir is outside this whitelist (e.g. `/`, `$HOME`,
+   `/etc`), the script prints a refusal message and exits non-zero
+   without touching anything.
+
+2. **Restrictive `find` patterns.** Every `find -delete` uses
+   `-maxdepth 1`, `-type f`, and a tight `-name` filter
+   (`cix-aware-*` / `cix-grep-count-*`). Subdirectories, symlinks,
+   and unrelated files are never touched, even within the whitelisted
+   cache dir. We deliberately avoid `rm -rf` anywhere in the plugin.
+
+3. **Automated test suite.** `plugins/cix/tests/` contains 46
+   [bats-core](https://bats-core.readthedocs.io/) tests covering all 6
+   hook scripts. The test matrix includes adversarial cases:
+   - `CLAUDE_PLUGIN_DATA=/`, `=$HOME`, `=/etc` — guard must refuse
+   - `session_id` containing shell metacharacters — must not inject
+     commands (canary file survives)
+   - Other sessions' cache files — must not be touched
+   - Random non-cix files in cache dir — must not be touched
+   - 30-day GC — must spare files outside the cix-prefixed patterns
+   - Path-with-spaces project dirs — must hash correctly
+
+   GitHub Actions runs the suite on Ubuntu and macOS for every PR
+   that touches `plugins/cix/` or `.claude-plugin/`. ShellCheck runs
+   alongside, gating warnings.
+
+To run tests locally:
+
+```bash
+brew install bats-core jq shellcheck     # macOS
+sudo apt-get install bats jq shellcheck  # Debian / Ubuntu
+
+bats plugins/cix/tests/*.bats
+shellcheck --severity=warning plugins/cix/scripts/*.sh
+```
+
+See [`plugins/cix/tests/README.md`](plugins/cix/tests/README.md) for
+the full test matrix and instructions for adding new cases.
+
 ## Roadmap
 
 **v0.2** (after v0.1 feedback):

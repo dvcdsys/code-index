@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Mock cix CLI for testing the cix plugin hooks.
+#
+# Behavior controlled by environment variables (set by individual tests):
+#   MOCK_CIX_EXIT     — exit code to return (default: 0)
+#   MOCK_CIX_DELAY    — sleep this many seconds before exit (for timeout test)
+#   MOCK_CIX_LOG_FILE — append the invocation (cmd + args) to this file
+#                       (so tests can assert "was cix called with the
+#                       expected args?")
+
+if [ -n "${MOCK_CIX_LOG_FILE:-}" ]; then
+    {
+        printf 'cix'
+        for arg in "$@"; do
+            printf ' %s' "$arg"
+        done
+        printf '\n'
+    } >> "$MOCK_CIX_LOG_FILE" 2>/dev/null || true
+fi
+
+if [ -n "${MOCK_CIX_DELAY:-}" ] && [ "$MOCK_CIX_DELAY" != "0" ]; then
+    sleep "$MOCK_CIX_DELAY"
+fi
+
+exit "${MOCK_CIX_EXIT:-0}"
