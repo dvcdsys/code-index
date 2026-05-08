@@ -350,7 +350,30 @@ Config file: `~/.cix/config.yaml`
 
 ### Claude Code
 
-Install the bundled skill so Claude knows to use `cix` automatically:
+Two integration paths — pick whichever fits your setup.
+
+#### Option A — Plugin (recommended)
+
+The official `cix` Claude Code plugin bundles the skill, slash commands
+(`/cix:search`, `/cix:def`, `/cix:refs`, `/cix:init`, `/cix:status`,
+`/cix:summary`), the CLI auto-bootstrap, and behavioral hooks that nudge
+Claude to prefer `cix` over Grep for semantic queries.
+
+```bash
+claude plugin marketplace add dvcdsys/code-index --sparse .claude-plugin plugins
+claude plugin install cix@code-index --scope user
+```
+
+> The server still runs separately, and the CLI must be configured to
+> point at it (steps above in [Quick Start](#quick-start)).
+>
+> See **[CLAUDE-CODE-PLUGIN.md](CLAUDE-CODE-PLUGIN.md)** for full details:
+> prerequisites, install paths (branch / tag / local clone),
+> verification, configuration, uninstall, and troubleshooting.
+
+#### Option B — Skill (manual, legacy)
+
+For environments without plugin support, copy the bundled skill manually:
 
 ```bash
 cp -r skills/cix ~/.claude/skills/cix
