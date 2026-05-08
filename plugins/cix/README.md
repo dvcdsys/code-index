@@ -28,6 +28,9 @@ Semantic code search and navigation for Claude Code, powered by the
     (fires on call #1, 2, 4, 8, 16, …). If the verdict is "no" (`0`)
     or missing, **stays silent for the entire session** — by design,
     so a flaky server doesn't cause intermittent nudges.
+  - **SessionEnd** — deletes the per-session cache files when the
+    session terminates. Best-effort cleanup; the 30-day GC inside
+    SessionStart catches markers left over from forced kills.
 
 ## Install
 
@@ -107,9 +110,13 @@ Two per-session marker files live in `$CLAUDE_PLUGIN_DATA`
 - `cix-grep-count-$SESSION_ID` — counter for the exponential backoff.
 
 This directory is plugin-managed and **not** cleaned by the OS
-(unlike `/tmp`, which macOS purges daily). SessionStart opportunistically
-deletes its own markers older than 30 days on each invocation, so files
-don't accumulate forever.
+(unlike `/tmp`, which macOS purges daily). The plugin manages cleanup
+in two tiers:
+1. **SessionEnd hook** — deletes both markers when the session
+   terminates normally. Covers the common case.
+2. **30-day GC in SessionStart** — opportunistically deletes markers
+   older than 30 days at every session start. Catches markers left
+   over from sessions that exited forcibly (kill -9, OOM).
 
 ## Files
 

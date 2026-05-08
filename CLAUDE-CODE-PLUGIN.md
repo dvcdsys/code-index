@@ -43,6 +43,10 @@ project automatically gets:
     100-Grep session. **Strict policy:** if the cache is missing or
     says `0`, the hook stays silent for the entire session. No
     `.cixignore` fallback, no inline `cix status` retries.
+  - **`SessionEnd`** — when the session terminates, deletes both
+    cache files (`cix-aware-*` and `cix-grep-count-*`) for that
+    session. Best-effort cleanup; survives forced kills via the 30-day
+    GC sweep that SessionStart performs.
 
 The strict cache contract means: a session that started while the
 cix-server was unreachable will stay in "silent" mode even if the
@@ -53,8 +57,11 @@ Restart the Claude Code session to re-evaluate.
 State location: `$CLAUDE_PLUGIN_DATA` is plugin-persistent storage
 (resolves to `~/.claude/plugins/data/cix-code-index/`) — it survives
 plugin updates and is **not** cleaned by the OS, unlike `/tmp` (macOS
-purges 3-day-old files daily; Linux clears on reboot). SessionStart
-also opportunistically deletes its own markers older than 30 days.
+purges 3-day-old files daily; Linux clears on reboot). Cleanup is
+two-tiered: the SessionEnd hook removes per-session markers when a
+session terminates normally, and SessionStart opportunistically deletes
+markers older than 30 days as a safety net for sessions that exited
+forcibly (kill -9, OOM, panic).
 
 ---
 
