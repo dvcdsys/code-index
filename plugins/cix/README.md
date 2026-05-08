@@ -19,14 +19,16 @@ Semantic code search and navigation for Claude Code, powered by the
   prompt). Stays in context for the rest of the session — never
   duplicated.
 - **Behavioral nudges (hooks):**
-  - **SessionStart** — at session start, if the current project has a
-    `.cix/` index, injects a one-line reminder telling Claude that
-    semantic search is available.
-  - **PreToolUse(Grep|Glob)** — when Claude is about to use Grep/Glob
-    in an indexed project, occasionally suggests `cix search` instead.
-    Throttled with **exponential backoff** (fires on call #1, 2, 4, 8,
-    16, 32, 64, …) so the reminder doesn't become noise — at most ~7
-    nudges per 100-Grep session.
+  - **SessionStart** — at session start, calls `cix status` (with a 2 s
+    timeout) to ask whether the project is registered with the
+    cix-server. On success, injects a one-line reminder and caches the
+    decision in `/tmp/cix-aware-$SESSION_ID` for the rest of the session.
+  - **PreToolUse(Grep|Glob)** — reads the SessionStart cache (no `cix`
+    re-query) and, if the project is indexed, occasionally suggests
+    `cix search` instead. Throttled with **exponential backoff** (fires
+    on call #1, 2, 4, 8, 16, 32, 64, …) — at most ~7 nudges per 100-Grep
+    session. Falls back to checking `.cixignore` if the cache is missing
+    (resumed session).
 
 ## Install
 
@@ -99,9 +101,13 @@ enabling the plugin.
 
 ### Hook state cleanup
 
-The PreToolUse hook keeps a per-session counter at
-`/tmp/cix-grep-count-$SESSION_ID`. These are zero-byte markers that
-`/tmp` cleans up on reboot. No manual cleanup needed.
+Two per-session cache files live in `/tmp`:
+- `/tmp/cix-aware-$SESSION_ID` — written by SessionStart, read by
+  PreToolUse. Single-byte file (`0` or `1`).
+- `/tmp/cix-grep-count-$SESSION_ID` — counter for the exponential
+  backoff. A few bytes.
+
+`/tmp` is cleaned on reboot, so no manual cleanup is needed.
 
 ## Files
 
