@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # PreToolUse(Grep|Glob) hook for the cix plugin.
 #
-# Behavior: if SessionStart concluded the project is cix-indexed
-# ($CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID == "1"), occasionally
-# inject a system reminder pointing toward `cix search` instead of
-# Grep/Glob. Otherwise stay completely silent.
+# Behavior: if SessionStart (or CwdChanged) concluded the current
+# project is cix-indexed (cache file for this (session, project_dir)
+# pair contains "1"), occasionally inject a system reminder pointing
+# toward `cix search` instead of Grep/Glob. Otherwise stay silent.
 #
 # This hook does NOT call `cix status` itself — it relies entirely on
-# the cache written by SessionStart. Trade-off: a session that started
-# before the cix-server came up will stay in "silent" mode for the rest
-# of its life, even if the server is now reachable. That's intentional:
-# we'd rather miss a few opportunities to nudge than spam a developer
-# whose server is offline.
+# the cache written by SessionStart and refreshed by CwdChanged.
+# Trade-off: a session that started before the cix-server came up will
+# stay in "silent" mode for the rest of its life in that project, even
+# if the server later comes back online. Intentional: better to miss a
+# few nudge opportunities than spam a developer whose server is down.
+#
+# Per-(session, project) backoff: each project Claude visits has its
+# own exponential-backoff counter. A new `cd` into a fresh project
+# starts the backoff from scratch (call #1 → nudge), so the first Grep
+# in a new cix-aware project always gets a reminder.
 #
 # Throttling: exponential backoff. Reminders fire on the 1st, 2nd, 4th,
-# 8th, 16th, 32nd, 64th, ... Grep/Glob invocation in the session.
-# A 100-Grep session sees ~7 reminders total (~560 bytes), loud at the
-# start, fading to silence as the session wears on.
+# 8th, 16th, 32nd, 64th, ... Grep/Glob invocation in the current
+# project. ~7 reminders per 100-Grep span, loud at the start, fading
+# as the model "learns" the workflow.
 
 set -euo pipefail
 
@@ -30,10 +35,18 @@ fi
 # No session_id → can't read the SessionStart cache. Stay silent.
 [ -z "$SESSION_ID" ] && exit 0
 
-# ── Read SessionStart's verdict ───────────────────────────────────────────────
-# Strict policy: only "1" allows nudges. Missing file or "0" → silent.
 CACHE_DIR="${CLAUDE_PLUGIN_DATA:-/tmp}"
-CACHE_FILE="$CACHE_DIR/cix-aware-$SESSION_ID"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+
+# Compute per-project hash — same algorithm as session-start.sh.
+DIR_HASH=$(printf '%s' "$PROJECT_DIR" | shasum -a 256 2>/dev/null | cut -c1-8)
+if [ -z "$DIR_HASH" ]; then
+    DIR_HASH=$(printf '%s' "$PROJECT_DIR" | tr -c 'a-zA-Z0-9' '-' | tail -c 16)
+fi
+
+# ── Read SessionStart's verdict for THIS project ──────────────────────────────
+# Strict policy: only "1" allows nudges. Missing file or "0" → silent.
+CACHE_FILE="$CACHE_DIR/cix-aware-$SESSION_ID-$DIR_HASH"
 
 if [ ! -f "$CACHE_FILE" ]; then
     exit 0
@@ -42,8 +55,8 @@ if [ "$(cat "$CACHE_FILE" 2>/dev/null)" != "1" ]; then
     exit 0
 fi
 
-# ── Increment per-session counter ─────────────────────────────────────────────
-COUNTER_FILE="$CACHE_DIR/cix-grep-count-$SESSION_ID"
+# ── Increment per-(session, project) counter ──────────────────────────────────
+COUNTER_FILE="$CACHE_DIR/cix-grep-count-$SESSION_ID-$DIR_HASH"
 COUNT=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
 case "$COUNT" in
     ''|*[!0-9]*) COUNT=0 ;;

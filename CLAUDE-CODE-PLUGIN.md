@@ -29,39 +29,54 @@ project automatically gets:
   cix vs Grep, query patterns, scoring landscape, CLI flags). **Lazy-loaded**
   by Claude Code — enters context only when invoked, stays once per
   session.
-- **Behavioral hooks:**
-  - **`SessionStart`** — at session start, runs `cix status` (with a
-    2-second timeout) to ask the cix-server whether the current
-    project is registered. The result (`1` or `0`) is cached in
-    `$CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID` for the rest of the
-    session. On `1`, injects a one-line reminder telling Claude that
-    semantic search is available; on `0`, stays silent.
-  - **`PreToolUse(Grep|Glob)`** — reads the SessionStart cache (~1 ms,
-    no cix call). If the cache says `1`, occasionally suggests
-    `cix search` instead of Grep, throttled with **exponential backoff**
-    (fires on call #1, 2, 4, 8, 16, 32, 64, …) — at most ~7 nudges per
-    100-Grep session. **Strict policy:** if the cache is missing or
-    says `0`, the hook stays silent for the entire session. No
-    `.cixignore` fallback, no inline `cix status` retries.
-  - **`SessionEnd`** — when the session terminates, deletes both
-    cache files (`cix-aware-*` and `cix-grep-count-*`) for that
-    session. Best-effort cleanup; survives forced kills via the 30-day
-    GC sweep that SessionStart performs.
+- **Behavioral hooks (5 total):**
+  - **`SessionStart`** — at session start, runs `cix status` (2-second
+    timeout) to ask the cix-server whether the current project is
+    registered. The verdict (`1` or `0`) is cached in
+    `$CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID-$DIR_HASH`. On `1`,
+    injects a one-line reminder.
+  - **`CwdChanged`** — when Claude changes working directory mid-session
+    (e.g. via `cd ../other-project`), evaluates cix-awareness for the
+    NEW directory and caches the verdict. Silent (no reminder) — the
+    next Grep/Glob call will fire the standard backoff nudge if
+    appropriate. No-op if the new directory was already evaluated in
+    this session (Claude bouncing back to a known project).
+  - **`PreToolUse(Grep|Glob)`** — reads the cache for the current
+    `(session, project_dir)` pair (~1 ms, no cix call). If the cache
+    says `1`, occasionally suggests `cix search` instead of Grep,
+    throttled with **exponential backoff** (fires on call #1, 2, 4, 8,
+    16, 32, 64, … *per project*). Each project visited in a session
+    starts a fresh backoff counter, so the first Grep in a new
+    cix-aware project always gets a nudge. **Strict policy:** missing
+    cache or `0` → silent for the entire session in that project.
+  - **`PostCompact`** — after Claude Code compacts the conversation
+    (long-running sessions), re-injects the SessionStart reminder if
+    the current project is cix-aware. Skill bodies survive compaction
+    natively, but the SessionStart `additionalContext` does not — this
+    hook keeps cix-awareness alive after compaction without relying on
+    the skill being invoked yet.
+  - **`SessionEnd`** — when the session terminates, deletes every
+    cache file belonging to this session (glob: all `(session, *)`
+    pairs across every project visited).
+
+**Cache key includes a project-dir hash** (`shasum -a 256` first 8
+chars), so a single Claude Code session that traverses multiple
+projects keeps a separate verdict per project — fresh backoff per
+project, correct cix-aware state per directory.
 
 The strict cache contract means: a session that started while the
-cix-server was unreachable will stay in "silent" mode even if the
-server comes back online. That's intentional — we'd rather miss a
-few nudge opportunities than pester a developer whose server is down.
-Restart the Claude Code session to re-evaluate.
+cix-server was unreachable will stay in "silent" mode for that project
+even if the server comes back online. Restart the Claude Code session
+or `cd` away and back to re-evaluate. Better to miss a few nudges than
+to pester a developer whose server is down.
 
 State location: `$CLAUDE_PLUGIN_DATA` is plugin-persistent storage
-(resolves to `~/.claude/plugins/data/cix-code-index/`) — it survives
-plugin updates and is **not** cleaned by the OS, unlike `/tmp` (macOS
-purges 3-day-old files daily; Linux clears on reboot). Cleanup is
-two-tiered: the SessionEnd hook removes per-session markers when a
-session terminates normally, and SessionStart opportunistically deletes
-markers older than 30 days as a safety net for sessions that exited
-forcibly (kill -9, OOM, panic).
+(`~/.claude/plugins/data/cix-code-index/`) — it survives plugin updates
+and is **not** cleaned by the OS, unlike `/tmp` (macOS purges 3-day-old
+files daily; Linux clears on reboot). Cleanup is two-tiered: SessionEnd
+removes per-session markers on normal exit; SessionStart opportunistically
+deletes markers older than 30 days as a safety net for forced kills
+(kill -9, OOM, panic).
 
 ---
 

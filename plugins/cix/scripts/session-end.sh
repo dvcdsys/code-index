@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # SessionEnd hook for the cix plugin.
 #
-# Behavior: when the Claude Code session terminates, remove this
-# session's cache files from $CLAUDE_PLUGIN_DATA. Cleanup is best-effort:
+# Behavior: when the Claude Code session terminates, remove every
+# cache file belonging to this session from $CLAUDE_PLUGIN_DATA.
+# A single session may have visited multiple projects (via `cd`), so
+# we glob-delete by session_id prefix. Cleanup is best-effort:
 # SessionEnd may not fire if the process was killed forcibly (kill -9,
-# OOM, panic), which is why session-start.sh also runs a 30-day GC sweep.
+# OOM, panic) — session-start.sh also runs a 30-day GC sweep as a
+# safety net.
 #
-# Files removed (per session_id):
-#   $CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID       (verdict cache)
-#   $CLAUDE_PLUGIN_DATA/cix-grep-count-$SESSION_ID  (backoff counter)
+# Files removed (per session_id, all directory hashes):
+#   $CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID-*       (verdict caches)
+#   $CLAUDE_PLUGIN_DATA/cix-grep-count-$SESSION_ID-*  (backoff counters)
 #
-# Output: nothing. Failures are silently ignored — there's no useful
-# action Claude could take if cleanup fails, and a noisy hook here would
-# leak into the user's last view of the session.
+# Output: nothing. Failures are silently ignored.
 
 set -euo pipefail
 
@@ -28,9 +29,10 @@ fi
 
 CACHE_DIR="${CLAUDE_PLUGIN_DATA:-/tmp}"
 
-rm -f \
-    "$CACHE_DIR/cix-aware-$SESSION_ID" \
-    "$CACHE_DIR/cix-grep-count-$SESSION_ID" \
-    2>/dev/null || true
+# Glob-delete every per-(session, dir) marker. Use find for safe handling
+# of patterns when there are no matches (avoids "rm: ... no such file" noise).
+find "$CACHE_DIR" -maxdepth 1 -type f \
+    \( -name "cix-aware-$SESSION_ID-*" -o -name "cix-grep-count-$SESSION_ID-*" \) \
+    -delete 2>/dev/null || true
 
 exit 0
