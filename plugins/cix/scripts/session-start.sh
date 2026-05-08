@@ -48,6 +48,33 @@ fi
 CACHE_DIR="${CLAUDE_PLUGIN_DATA:-/tmp}"
 mkdir -p "$CACHE_DIR" 2>/dev/null || CACHE_DIR="/tmp"
 
+# ── Safety guard: refuse to operate outside known-safe locations ──────────────
+# This script later runs `find -delete` for the 30-day GC. If
+# CLAUDE_PLUGIN_DATA is somehow misconfigured to point at $HOME, /, /etc,
+# etc., we MUST refuse to proceed. Whitelist:
+#   - $HOME/.claude/plugins/data/* — official plugin-persistent dir
+#   - /tmp or /tmp/*               — ad-hoc / installer fallback
+#   - $TMPDIR/*                    — macOS BATS_TMPDIR for tests
+case "$CACHE_DIR" in
+    "$HOME/.claude/plugins/data"|"$HOME/.claude/plugins/data/"*) ;;
+    "/tmp"|"/tmp/"*) ;;
+    *)
+        if [ -n "${TMPDIR:-}" ]; then
+            case "$CACHE_DIR" in
+                "${TMPDIR%/}"|"${TMPDIR%/}"/*) ;;
+                *)
+                    echo "cix plugin (session-start): refusing to operate on cache dir outside whitelist: $CACHE_DIR" >&2
+                    exit 1
+                    ;;
+            esac
+        else
+            echo "cix plugin (session-start): refusing to operate on cache dir outside whitelist: $CACHE_DIR" >&2
+            exit 1
+        fi
+        ;;
+esac
+[ -d "$CACHE_DIR" ] || exit 0
+
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 # Hash the project dir so the cache file name is short and stable.
