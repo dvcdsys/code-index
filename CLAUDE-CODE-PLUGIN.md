@@ -30,16 +30,21 @@ project automatically gets:
   by Claude Code — enters context only when invoked, stays once per
   session.
 - **Behavioral hooks:**
-  - **`SessionStart`** — at session start, if the project is cix-indexed
-    (has `.cixignore`), injects a one-line reminder telling Claude that
-    semantic search is available.
-  - **`PreToolUse(Grep|Glob)`** — when Claude is about to use Grep/Glob
-    in a cix-indexed project, occasionally suggests `cix search` instead.
+  - **`SessionStart`** — at session start, runs `cix status` (with a
+    2-second timeout) to ask the cix-server whether the current
+    project is registered. If yes, injects a one-line reminder telling
+    Claude that semantic search is available, and caches the decision
+    in `/tmp/cix-aware-$SESSION_ID`.
+  - **`PreToolUse(Grep|Glob)`** — when Claude is about to use Grep/Glob,
+    reads the SessionStart cache (no `cix` call here, ~1 ms) and, if
+    the project is indexed, occasionally suggests `cix search` instead.
     Throttled with **exponential backoff** (fires on call #1, 2, 4, 8,
     16, 32, 64, …) so the reminder doesn't become noise — at most ~7
-    nudges per 100-Grep session.
+    nudges per 100-Grep session. Falls back to checking `.cixignore`
+    if the cache is missing (e.g. resumed session).
 
-In projects **without** a cix index, all hooks are silent — the plugin
+In projects **without** a cix index (or when the cix-server is
+unreachable at session start), all hooks are silent — the plugin
 adds zero context overhead.
 
 ---
@@ -269,16 +274,24 @@ the plugin doesn't write to it. Configure the CLI once (see
 
 ### Per-project trigger threshold
 
-The plugin only nudges Claude in projects with a `.cixignore` file at
-the project root. If your project is indexed but doesn't have one,
-create an empty `.cixignore`:
+The plugin nudges Claude in projects that `cix status` reports as
+**indexed**. The check runs once per session at SessionStart (against
+the cix-server) and is cached for the remainder of the session. If the
+cix-server is unreachable at session start, the plugin treats the
+project as not-indexed and stays silent for the whole session.
+
+For resumed sessions where SessionStart didn't run, the plugin falls
+back to checking for a `.cixignore` file at the project root. If you
+want a "manual" trigger (e.g. on a host where the cix-server is
+intermittent and you want the nudges anyway), drop an empty
+`.cixignore`:
 
 ```bash
 touch .cixignore
 ```
 
-This is also the recommended way to give cix per-project ignore patterns
-(it follows `.gitignore` syntax).
+This file also follows `.gitignore` syntax and is the recommended way
+to give cix per-project ignore patterns.
 
 ---
 
@@ -316,14 +329,22 @@ If the symlink is missing, reinstall:
 
 ### Hooks silent in indexed project
 
-The hooks gate on `.cixignore` at the project root. Verify:
+The hooks rely on `cix status` succeeding at session start. Verify:
 
 ```bash
-ls -la $(pwd)/.cixignore
+cix status -p $(pwd)        # must exit 0
+echo "exit=$?"
 ```
 
-If it's missing but the project IS indexed, create an empty one
-(`touch .cixignore`) and restart your Claude Code session.
+If `cix status` fails:
+- Server unreachable: `curl http://localhost:21847/health`
+- API key not set: `cix config show`
+- Project not registered: `cix init`
+
+If `cix status` succeeds but hooks are still silent, restart your
+Claude Code session — SessionStart cached "not indexed" earlier and
+won't re-query until next session. As a workaround, drop an empty
+`.cixignore` at the project root for the fallback path to fire.
 
 ### Hooks too loud / too quiet
 
