@@ -32,20 +32,29 @@ project automatically gets:
 - **Behavioral hooks:**
   - **`SessionStart`** — at session start, runs `cix status` (with a
     2-second timeout) to ask the cix-server whether the current
-    project is registered. If yes, injects a one-line reminder telling
-    Claude that semantic search is available, and caches the decision
-    in `/tmp/cix-aware-$SESSION_ID`.
-  - **`PreToolUse(Grep|Glob)`** — when Claude is about to use Grep/Glob,
-    reads the SessionStart cache (no `cix` call here, ~1 ms) and, if
-    the project is indexed, occasionally suggests `cix search` instead.
-    Throttled with **exponential backoff** (fires on call #1, 2, 4, 8,
-    16, 32, 64, …) so the reminder doesn't become noise — at most ~7
-    nudges per 100-Grep session. Falls back to checking `.cixignore`
-    if the cache is missing (e.g. resumed session).
+    project is registered. The result (`1` or `0`) is cached in
+    `$CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID` for the rest of the
+    session. On `1`, injects a one-line reminder telling Claude that
+    semantic search is available; on `0`, stays silent.
+  - **`PreToolUse(Grep|Glob)`** — reads the SessionStart cache (~1 ms,
+    no cix call). If the cache says `1`, occasionally suggests
+    `cix search` instead of Grep, throttled with **exponential backoff**
+    (fires on call #1, 2, 4, 8, 16, 32, 64, …) — at most ~7 nudges per
+    100-Grep session. **Strict policy:** if the cache is missing or
+    says `0`, the hook stays silent for the entire session. No
+    `.cixignore` fallback, no inline `cix status` retries.
 
-In projects **without** a cix index (or when the cix-server is
-unreachable at session start), all hooks are silent — the plugin
-adds zero context overhead.
+The strict cache contract means: a session that started while the
+cix-server was unreachable will stay in "silent" mode even if the
+server comes back online. That's intentional — we'd rather miss a
+few nudge opportunities than pester a developer whose server is down.
+Restart the Claude Code session to re-evaluate.
+
+State location: `$CLAUDE_PLUGIN_DATA` is plugin-persistent storage
+(resolves to `~/.claude/plugins/data/cix-code-index/`) — it survives
+plugin updates and is **not** cleaned by the OS, unlike `/tmp` (macOS
+purges 3-day-old files daily; Linux clears on reboot). SessionStart
+also opportunistically deletes its own markers older than 30 days.
 
 ---
 
@@ -276,22 +285,14 @@ the plugin doesn't write to it. Configure the CLI once (see
 
 The plugin nudges Claude in projects that `cix status` reports as
 **indexed**. The check runs once per session at SessionStart (against
-the cix-server) and is cached for the remainder of the session. If the
-cix-server is unreachable at session start, the plugin treats the
-project as not-indexed and stays silent for the whole session.
+the cix-server) and is cached for the remainder of the session.
+PreToolUse(Grep|Glob) only ever reads the cache — it never makes its
+own `cix` calls.
 
-For resumed sessions where SessionStart didn't run, the plugin falls
-back to checking for a `.cixignore` file at the project root. If you
-want a "manual" trigger (e.g. on a host where the cix-server is
-intermittent and you want the nudges anyway), drop an empty
-`.cixignore`:
-
-```bash
-touch .cixignore
-```
-
-This file also follows `.gitignore` syntax and is the recommended way
-to give cix per-project ignore patterns.
+If the cix-server is unreachable at session start, the project is
+locked into "silent" mode for the rest of the session. Restart Claude
+Code (Cmd+Q + reopen, or `/reload` in CLI) once the server is back to
+re-evaluate.
 
 ---
 
@@ -329,7 +330,7 @@ If the symlink is missing, reinstall:
 
 ### Hooks silent in indexed project
 
-The hooks rely on `cix status` succeeding at session start. Verify:
+The hooks rely on `cix status` succeeding at SessionStart. Verify:
 
 ```bash
 cix status -p $(pwd)        # must exit 0
@@ -341,10 +342,18 @@ If `cix status` fails:
 - API key not set: `cix config show`
 - Project not registered: `cix init`
 
-If `cix status` succeeds but hooks are still silent, restart your
-Claude Code session — SessionStart cached "not indexed" earlier and
-won't re-query until next session. As a workaround, drop an empty
-`.cixignore` at the project root for the fallback path to fire.
+Once `cix status` exits 0, **restart the Claude Code session** —
+SessionStart cached the previous "not indexed" verdict and the
+PreToolUse hook reads only that cache. There's no inline retry by
+design (a flaky server shouldn't cause intermittent nudges).
+
+To inspect the current verdict from outside Claude Code:
+
+```bash
+ls -la ~/.claude/plugins/data/cix-code-index/cix-aware-*
+cat ~/.claude/plugins/data/cix-code-index/cix-aware-<your-session-id>
+# "1" → nudges allowed; "0" → silent
+```
 
 ### Hooks too loud / too quiet
 
