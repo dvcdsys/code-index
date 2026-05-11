@@ -367,6 +367,128 @@ func TestGithubTokens_ListRepos(t *testing.T) {
 	}
 }
 
+// TestGithubTokens_ListAccountsAndScopedRepos covers the new
+// add-repo flow: the dashboard fetches the accounts visible to a PAT,
+// then asks for repos scoped to a specific account. Both paths must
+// keep the PAT plaintext server-side and use the right GitHub endpoint.
+func TestGithubTokens_ListAccountsAndScopedRepos(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	sec, err := secrets.Open(secrets.OpenOptions{DataDir: t.TempDir(), AllowGenerate: true})
+	if err != nil {
+		t.Fatalf("open secrets: %v", err)
+	}
+
+	// Records which path GitHub was hit on so the test can assert
+	// account-scoped requests reach the right endpoint.
+	var hitPath string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitPath = r.URL.Path
+		switch r.URL.Path {
+		case "/user":
+			w.Header().Set("X-OAuth-Scopes", "repo")
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case "/user/orgs":
+			_, _ = w.Write([]byte(`[{"login":"acme"}]`))
+		case "/orgs/acme/repos":
+			_, _ = w.Write([]byte(`[{"full_name":"acme/api","default_branch":"main","private":true,"html_url":"https://github.com/acme/api"}]`))
+		case "/users/alice/repos":
+			_, _ = w.Write([]byte(`[{"full_name":"alice/dotfiles","default_branch":"main","private":false,"html_url":"https://github.com/alice/dotfiles"}]`))
+		case "/user/repos":
+			_, _ = w.Write([]byte(`[
+				{"full_name":"alice/personal","default_branch":"main","private":false,"html_url":"https://github.com/alice/personal"},
+				{"full_name":"acme/shared","default_branch":"main","private":true,"html_url":"https://github.com/acme/shared"}
+			]`))
+		default:
+			http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(stub.Close)
+
+	router := NewRouter(Deps{
+		DB:                d,
+		ServerVersion:     "test",
+		APIVersion:        "v1",
+		Backend:           "go",
+		AuthDisabled:      true,
+		Users:             seedlessUsers(d),
+		Sessions:          seedlessSessions(d),
+		APIKeys:           seedlessAPIKeys(d),
+		WorkspacesEnabled: true,
+		Workspaces:        workspaces.New(d),
+		GithubTokens:      githubtokens.New(d, sec),
+		GithubAPIBaseURL:  stub.URL,
+	})
+
+	// Create token.
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/github-tokens", map[string]any{
+		"name": "personal", "token": "ghp_x",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create token: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created githubTokenPayload
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+
+	// List accounts.
+	rr = doJSON(t, router, http.MethodGet, "/api/v1/github-tokens/"+created.ID+"/accounts", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list accounts: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var accResp struct {
+		Accounts []struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"accounts"`
+		Total int `json:"total"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &accResp)
+	if accResp.Total != 2 ||
+		accResp.Accounts[0].Login != "alice" || accResp.Accounts[0].Type != "user" ||
+		accResp.Accounts[1].Login != "acme" || accResp.Accounts[1].Type != "org" {
+		t.Fatalf("unexpected accounts payload: %+v", accResp)
+	}
+
+	// Account-scoped repos (org).
+	rr = doJSON(t, router, http.MethodGet,
+		"/api/v1/github-tokens/"+created.ID+"/repos?account=acme&account_type=org", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped org repos: %d", rr.Code)
+	}
+	if hitPath != "/orgs/acme/repos" {
+		t.Fatalf("expected GitHub /orgs/acme/repos hit, got %q", hitPath)
+	}
+
+	// Account-scoped repos (user).
+	rr = doJSON(t, router, http.MethodGet,
+		"/api/v1/github-tokens/"+created.ID+"/repos?account=alice&account_type=user", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped user repos: %d", rr.Code)
+	}
+	if hitPath != "/users/alice/repos" {
+		t.Fatalf("expected GitHub /users/alice/repos hit, got %q", hitPath)
+	}
+
+	// No account → legacy aggregated /user/repos.
+	rr = doJSON(t, router, http.MethodGet,
+		"/api/v1/github-tokens/"+created.ID+"/repos", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unscoped: %d", rr.Code)
+	}
+	if hitPath != "/user/repos" {
+		t.Fatalf("expected GitHub /user/repos hit, got %q", hitPath)
+	}
+
+	// account without account_type → 422.
+	rr = doJSON(t, router, http.MethodGet,
+		"/api/v1/github-tokens/"+created.ID+"/repos?account=acme", nil)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing account_type should 422, got %d", rr.Code)
+	}
+}
+
 func TestGithubTokens_RejectMissingFields(t *testing.T) {
 	router := workspaceRouter(t, true)
 
