@@ -36,12 +36,42 @@ const (
 	StatusFailed   = "failed"   // last attempt errored (see LastError)
 )
 
+// Webhook modes. The legacy AutoWebhook bool stays in the struct for
+// backwards compatibility with old API consumers, but new code should
+// consult WebhookMode — it carries the operator's stated intent (auto
+// vs manual-pending vs deliberately disabled).
+const (
+	WebhookModeManual   = "manual"
+	WebhookModeAuto     = "auto"
+	WebhookModeDisabled = "disabled"
+)
+
+// NormaliseWebhookMode rejects unknown values up front so the database
+// only ever stores one of the three documented states. Empty input maps
+// to the default ('manual'), so old API clients that omit the field
+// keep working unchanged.
+func NormaliseWebhookMode(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return WebhookModeManual, nil
+	case WebhookModeManual:
+		return WebhookModeManual, nil
+	case WebhookModeAuto:
+		return WebhookModeAuto, nil
+	case WebhookModeDisabled:
+		return WebhookModeDisabled, nil
+	default:
+		return "", ErrInvalidWebhookMode
+	}
+}
+
 // Errors.
 var (
-	ErrNotFound      = errors.New("workspace repo not found")
-	ErrDuplicate     = errors.New("repo is already in this workspace on that branch")
-	ErrInvalidURL    = errors.New("github_url must be an https://github.com/owner/repo URL")
-	ErrBranchEmpty   = errors.New("branch is required")
+	ErrNotFound           = errors.New("workspace repo not found")
+	ErrDuplicate          = errors.New("repo is already in this workspace on that branch")
+	ErrInvalidURL         = errors.New("github_url must be an https://github.com/owner/repo URL")
+	ErrBranchEmpty        = errors.New("branch is required")
+	ErrInvalidWebhookMode = errors.New("webhook_mode must be one of manual, auto, disabled")
 )
 
 // WorkspaceRepo is the wire view. Tokens themselves are referenced by
@@ -56,6 +86,7 @@ type WorkspaceRepo struct {
 	WebhookSecret  string
 	WebhookID      *int64 // GitHub hook id (set by PR3 auto-register)
 	AutoWebhook    bool
+	WebhookMode    string // 'manual' | 'auto' | 'disabled'
 	Status         string
 	LastSHA        string
 	LastError      string
@@ -78,7 +109,8 @@ type CreateRequest struct {
 	GitHubURL   string
 	Branch      string
 	TokenID     string // optional
-	AutoWebhook bool   // PR3 will respect this; PR2 just stores it
+	AutoWebhook bool   // legacy: kept for old clients; new code uses WebhookMode
+	WebhookMode string // 'manual' | 'auto' | 'disabled'; empty = manual
 }
 
 // Create inserts a workspace_repo and generates a webhook secret. The
@@ -103,8 +135,19 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (WorkspaceRepo,
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	githubURL := canonicaliseURL(req.GitHubURL)
 
+	// WebhookMode is the source of truth in the DB; AutoWebhook stays
+	// derived so the legacy SELECT path keeps working until removed.
+	mode, merr := NormaliseWebhookMode(req.WebhookMode)
+	if merr != nil {
+		return WorkspaceRepo{}, merr
+	}
+	// If the caller used the legacy bool but left WebhookMode empty,
+	// honour the bool — otherwise mode wins.
+	if req.WebhookMode == "" && req.AutoWebhook {
+		mode = WebhookModeAuto
+	}
 	auto := 0
-	if req.AutoWebhook {
+	if mode == WebhookModeAuto {
 		auto = 1
 	}
 	tokenID := nullableString(req.TokenID)
@@ -112,11 +155,11 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (WorkspaceRepo,
 	_, err = s.DB.ExecContext(ctx,
 		`INSERT INTO workspace_repos (
 		   id, workspace_id, github_url, branch, project_path,
-		   token_id, webhook_secret, auto_webhook, status,
+		   token_id, webhook_secret, auto_webhook, webhook_mode, status,
 		   created_at, updated_at
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, req.WorkspaceID, githubURL, req.Branch, projectPath,
-		tokenID, secret, auto, StatusPending,
+		tokenID, secret, auto, mode, StatusPending,
 		now, now,
 	)
 	if err != nil {
@@ -217,7 +260,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 const selectColumns = `
 	SELECT id, workspace_id, github_url, branch, project_path,
 	       token_id, webhook_secret, webhook_id, auto_webhook,
-	       status, last_sha, last_error, last_indexed_at,
+	       webhook_mode, status, last_sha, last_error, last_indexed_at,
 	       created_at, updated_at
 	  FROM workspace_repos`
 
@@ -227,6 +270,7 @@ func scanRow(r interface{ Scan(dest ...any) error }) (WorkspaceRepo, error) {
 		tokenID       sql.NullString
 		webhookID     sql.NullInt64
 		autoWebhook   int
+		webhookMode   string
 		lastSHA       sql.NullString
 		lastError     sql.NullString
 		lastIndexed   sql.NullString
@@ -235,7 +279,7 @@ func scanRow(r interface{ Scan(dest ...any) error }) (WorkspaceRepo, error) {
 	)
 	err := r.Scan(&wr.ID, &wr.WorkspaceID, &wr.GitHubURL, &wr.Branch, &wr.ProjectPath,
 		&tokenID, &wr.WebhookSecret, &webhookID, &autoWebhook,
-		&wr.Status, &lastSHA, &lastError, &lastIndexed,
+		&webhookMode, &wr.Status, &lastSHA, &lastError, &lastIndexed,
 		&createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -249,6 +293,10 @@ func scanRow(r interface{ Scan(dest ...any) error }) (WorkspaceRepo, error) {
 		wr.WebhookID = &v
 	}
 	wr.AutoWebhook = autoWebhook == 1
+	wr.WebhookMode = webhookMode
+	if wr.WebhookMode == "" {
+		wr.WebhookMode = WebhookModeManual
+	}
 	wr.LastSHA = lastSHA.String
 	wr.LastError = lastError.String
 	if lastIndexed.Valid {

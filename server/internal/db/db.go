@@ -76,6 +76,15 @@ func Open(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrate indexed_with_model: %w", err)
 	}
 
+	// PR10 — extend workspace_repos with webhook_mode so the dashboard
+	// can distinguish manual/auto/disabled intents. Older databases get
+	// the column with a sensible default; rows where auto_webhook=1 are
+	// retro-fitted to 'auto' so they keep the same effective behaviour.
+	if err := migrateWebhookMode(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate webhook_mode: %w", err)
+	}
+
 	return db, nil
 }
 
@@ -175,6 +184,53 @@ func migrateIndexedWithModel(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`ALTER TABLE projects ADD COLUMN indexed_with_model TEXT`); err != nil {
 		return fmt.Errorf("add indexed_with_model column: %w", err)
+	}
+	return nil
+}
+
+// migrateWebhookMode adds workspace_repos.webhook_mode to pre-PR10
+// databases and backfills it from the older auto_webhook bool so rows
+// inserted before this migration keep their effective behaviour. Same
+// PRAGMA-table_info / ALTER-only-if-absent pattern as the other helpers.
+func migrateWebhookMode(db *sql.DB) error {
+	// workspace_repos may not exist yet on databases that pre-date the
+	// workspaces feature entirely — PRAGMA table_info returns no rows in
+	// that case and we have nothing to migrate.
+	rows, err := db.Query(`PRAGMA table_info(workspace_repos)`)
+	if err != nil {
+		return fmt.Errorf("table_info workspace_repos: %w", err)
+	}
+	have := false
+	tableExists := false
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		tableExists = true
+		if name == "webhook_mode" {
+			have = true
+		}
+	}
+	rows.Close()
+	if !tableExists || have {
+		return nil
+	}
+	if _, err := db.Exec(
+		`ALTER TABLE workspace_repos ADD COLUMN webhook_mode TEXT NOT NULL DEFAULT 'manual'`,
+	); err != nil {
+		return fmt.Errorf("add webhook_mode column: %w", err)
+	}
+	if _, err := db.Exec(
+		`UPDATE workspace_repos SET webhook_mode = 'auto' WHERE auto_webhook = 1`,
+	); err != nil {
+		return fmt.Errorf("backfill webhook_mode: %w", err)
 	}
 	return nil
 }
