@@ -278,6 +278,90 @@ func TestParseNextLink(t *testing.T) {
 	}
 }
 
+func TestListAccountsReturnsUserPlusOrgs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login":"alice","avatar_url":"https://x/avatars/alice"}`))
+		case "/user/orgs":
+			_, _ = w.Write([]byte(`[
+				{"login":"acme","avatar_url":"https://x/avatars/acme"},
+				{"login":"hooli","avatar_url":"https://x/avatars/hooli"}
+			]`))
+		default:
+			http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := New()
+	c.BaseURL = srv.URL
+
+	got, err := c.ListAccounts(context.Background(), "ghp_x")
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected user + 2 orgs, got %d: %+v", len(got), got)
+	}
+	if got[0].Login != "alice" || got[0].Type != AccountTypeUser {
+		t.Fatalf("first must be the PAT owner (user), got %+v", got[0])
+	}
+	if got[1].Login != "acme" || got[1].Type != AccountTypeOrg {
+		t.Fatalf("second must be org acme, got %+v", got[1])
+	}
+}
+
+func TestListAccountsSwallowsOrgsForbidden(t *testing.T) {
+	// SAML-protected PATs can 403 on /user/orgs even when /user works.
+	// We must still return the personal account so the dashboard can
+	// at least let the user pick a personal repo.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case "/user/orgs":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"saml enforced"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := New()
+	c.BaseURL = srv.URL
+
+	got, err := c.ListAccounts(context.Background(), "ghp_x")
+	if err != nil {
+		t.Fatalf("ListAccounts should swallow orgs-forbidden, got %v", err)
+	}
+	if len(got) != 1 || got[0].Type != AccountTypeUser {
+		t.Fatalf("expected just the user, got %+v", got)
+	}
+}
+
+func TestListReposForAccountUsesCorrectEndpoint(t *testing.T) {
+	var lastPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastPath = r.URL.Path
+		_, _ = w.Write([]byte(`[{"full_name":"x/y","default_branch":"main","private":false,"html_url":"https://github.com/x/y"}]`))
+	}))
+	t.Cleanup(srv.Close)
+	c := New()
+	c.BaseURL = srv.URL
+
+	if _, err := c.ListReposForAccount(context.Background(), "ghp", AccountTypeUser, "alice", 1); err != nil {
+		t.Fatalf("user: %v", err)
+	}
+	if lastPath != "/users/alice/repos" {
+		t.Fatalf("user account → /users/{login}/repos, got %q", lastPath)
+	}
+
+	if _, err := c.ListReposForAccount(context.Background(), "ghp", AccountTypeOrg, "acme", 1); err != nil {
+		t.Fatalf("org: %v", err)
+	}
+	if lastPath != "/orgs/acme/repos" {
+		t.Fatalf("org account → /orgs/{login}/repos, got %q", lastPath)
+	}
+}
+
 func TestParseOwnerRepo(t *testing.T) {
 	cases := map[string][2]string{
 		"https://github.com/spf13/cobra":      {"spf13", "cobra"},

@@ -79,21 +79,162 @@ type Repo struct {
 	Description   string `json:"description,omitempty"`
 }
 
-// ListUserRepos walks /user/repos pages, returning every repo the PAT
-// can see as owner / collaborator / org member. The endpoint is
-// inherently paginated (per_page=100 is the GitHub max) — we follow
-// the Link rel=next header up to maxPages so an outlier user with a
-// thousand affiliated repos still completes in bounded time.
-//
-// maxPages of 0 is interpreted as "no cap" (used in tests); production
-// callers should pass a sensible ceiling (typical: 5 = up to 500 repos).
-func (c *Client) ListUserRepos(ctx context.Context, pat string, maxPages int) ([]Repo, error) {
+// AccountType discriminates between a personal account (the PAT
+// owner) and a GitHub organization. The dashboard uses this to pick
+// the right repo-list endpoint when the user drills into an account.
+type AccountType string
+
+const (
+	AccountTypeUser AccountType = "user"
+	AccountTypeOrg  AccountType = "org"
+)
+
+// Account is the rendered shape of an entry in the account selector
+// — either the PAT owner's personal account or one of the orgs they
+// belong to. Reflects what GitHub returns from /user + /user/orgs.
+type Account struct {
+	Login     string      `json:"login"`
+	Type      AccountType `json:"type"`
+	AvatarURL string      `json:"avatar_url,omitempty"`
+}
+
+// ListAccounts returns the user that owns the PAT plus every org the
+// PAT can see via /user/orgs. The two calls are sequential — they
+// share a HTTP client but GitHub recommends one at a time to stay
+// within rate-limit-friendly behaviour. Errors from /user/orgs are
+// not fatal: an outdated PAT scope can return 200 with an empty list,
+// or 403 if SSO is required; either way we keep the personal account
+// in the response so the operator can still pick a personal repo.
+func (c *Client) ListAccounts(ctx context.Context, pat string) ([]Account, error) {
 	if pat == "" {
 		return nil, fmt.Errorf("PAT required")
 	}
-	pageURL := c.BaseURL + "/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member"
+
+	// Personal account — also doubles as a token-validity probe; if
+	// /user 401s the whole flow short-circuits.
+	user, err := c.fetchUser(ctx, pat)
+	if err != nil {
+		return nil, err
+	}
+	out := []Account{{
+		Login:     user.Login,
+		Type:      AccountTypeUser,
+		AvatarURL: user.AvatarURL,
+	}}
+
+	// Orgs — paginated like /user/repos.
+	pageURL := c.BaseURL + "/user/orgs?per_page=100"
+	for pageURL != "" {
+		req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+		if rerr != nil {
+			return nil, rerr
+		}
+		c.signRequest(req, pat)
+		resp, derr := c.HTTPClient.Do(req)
+		if derr != nil {
+			return nil, fmt.Errorf("github API: %w", derr)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusOK:
+			var batch []struct {
+				Login     string `json:"login"`
+				AvatarURL string `json:"avatar_url"`
+			}
+			if err := json.Unmarshal(body, &batch); err != nil {
+				return nil, fmt.Errorf("parse /user/orgs: %w", err)
+			}
+			for _, o := range batch {
+				out = append(out, Account{
+					Login:     o.Login,
+					Type:      AccountTypeOrg,
+					AvatarURL: o.AvatarURL,
+				})
+			}
+		case http.StatusUnauthorized, http.StatusForbidden:
+			// SSO-gated or insufficient-scope PATs can 403 here even
+			// when /user succeeded. The personal account is enough to
+			// continue, so swallow and return what we have.
+			return out, nil
+		default:
+			return nil, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(body))
+		}
+		pageURL = parseNextLink(resp.Header.Get("Link"))
+	}
+	return out, nil
+}
+
+// fetchUser is a small private helper for the two callsites (this
+// package's own ValidateToken and the new ListAccounts). Returns the
+// few fields we care about.
+func (c *Client) fetchUser(ctx context.Context, pat string) (struct {
+	Login     string `json:"login"`
+	AvatarURL string `json:"avatar_url"`
+}, error) {
+	type userResp struct {
+		Login     string `json:"login"`
+		AvatarURL string `json:"avatar_url"`
+	}
+	var u userResp
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/user", nil)
+	if err != nil {
+		return u, err
+	}
+	c.signRequest(req, pat)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return u, fmt.Errorf("github API: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if err := json.Unmarshal(body, &u); err != nil {
+			return u, fmt.Errorf("parse /user: %w", err)
+		}
+		return u, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return u, fmt.Errorf("%w: %s", ErrUnauthorized, githubMessage(body))
+	default:
+		return u, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(body))
+	}
+}
+
+// ListReposForAccount returns repos owned by a specific account. Use
+// AccountTypeUser to hit /users/{login}/repos (which lists that user's
+// public repos plus, when the caller IS that user, all repos they own
+// regardless of visibility) and AccountTypeOrg to hit /orgs/{login}/repos
+// (which respects the PAT's organization membership / SAML state).
+//
+// For the "all my repos" case, callers should fall back to
+// ListUserRepos — /user/repos returns the affiliations-aggregated view
+// in a single call, which is what we want when no account filter is set.
+func (c *Client) ListReposForAccount(ctx context.Context, pat string, accountType AccountType, login string, maxPages int) ([]Repo, error) {
+	if pat == "" {
+		return nil, fmt.Errorf("PAT required")
+	}
+	if login == "" {
+		return nil, fmt.Errorf("login required")
+	}
+	var base string
+	switch accountType {
+	case AccountTypeUser:
+		base = c.BaseURL + "/users/" + url.PathEscape(login) + "/repos?per_page=100&sort=pushed&type=all"
+	case AccountTypeOrg:
+		base = c.BaseURL + "/orgs/" + url.PathEscape(login) + "/repos?per_page=100&sort=pushed&type=all"
+	default:
+		return nil, fmt.Errorf("unknown account type %q", accountType)
+	}
+	return c.fetchRepoPages(ctx, pat, base, maxPages)
+}
+
+// fetchRepoPages is the shared paginator for any /repos-shaped GitHub
+// endpoint. Walks Link rel=next up to maxPages; 0 means no cap.
+func (c *Client) fetchRepoPages(ctx context.Context, pat, firstURL string, maxPages int) ([]Repo, error) {
 	out := []Repo{}
 	page := 0
+	pageURL := firstURL
 	for pageURL != "" {
 		page++
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
@@ -111,11 +252,13 @@ func (c *Client) ListUserRepos(ctx context.Context, pat string, maxPages int) ([
 		case http.StatusOK:
 			var batch []Repo
 			if err := json.Unmarshal(body, &batch); err != nil {
-				return nil, fmt.Errorf("parse /user/repos: %w", err)
+				return nil, fmt.Errorf("parse repos page: %w", err)
 			}
 			out = append(out, batch...)
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return nil, fmt.Errorf("%w: %s", ErrUnauthorized, githubMessage(body))
+		case http.StatusNotFound:
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, githubMessage(body))
 		default:
 			return nil, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(body))
 		}
@@ -125,6 +268,27 @@ func (c *Client) ListUserRepos(ctx context.Context, pat string, maxPages int) ([
 		pageURL = parseNextLink(resp.Header.Get("Link"))
 	}
 	return out, nil
+}
+
+// ListUserRepos walks /user/repos pages, returning every repo the PAT
+// can see as owner / collaborator / org member. The endpoint is
+// inherently paginated (per_page=100 is the GitHub max) — we follow
+// the Link rel=next header up to maxPages so an outlier user with a
+// thousand affiliated repos still completes in bounded time.
+//
+// maxPages of 0 is interpreted as "no cap" (used in tests); production
+// callers should pass a sensible ceiling (typical: 5 = up to 500 repos).
+//
+// Useful when the operator has not chosen a specific account in the
+// dashboard yet — /user/repos is GitHub's affiliations-aggregated view
+// and surfaces SAML-protected and collaborator repos that don't appear
+// under /orgs/{login}/repos.
+func (c *Client) ListUserRepos(ctx context.Context, pat string, maxPages int) ([]Repo, error) {
+	if pat == "" {
+		return nil, fmt.Errorf("PAT required")
+	}
+	first := c.BaseURL + "/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member"
+	return c.fetchRepoPages(ctx, pat, first, maxPages)
 }
 
 // parseNextLink extracts the URL of rel=next from a GitHub Link header.

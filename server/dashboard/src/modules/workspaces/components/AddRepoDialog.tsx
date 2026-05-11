@@ -23,6 +23,8 @@ import {
   SelectValue,
 } from '@/ui/select';
 import type {
+  GithubAccount,
+  GithubAccountListResponse,
   GithubRepo,
   GithubRepoListResponse,
   GithubToken,
@@ -35,6 +37,11 @@ import type {
 // Select forbids an empty-string item value, so we encode the no-token
 // choice as a distinct string and translate at the request boundary.
 const NO_TOKEN = '__none__';
+
+// Encodes the account-selector's "(all accessible)" choice — the
+// affiliations-aggregated view of /user/repos. Distinct from a
+// specific user/org account so the server can route the call.
+const ALL_ACCOUNTS = '__all__';
 
 // AddRepoDialog is a staged form: each step gates the next so the user
 // can't pick a repository before choosing a token, and can't submit
@@ -51,9 +58,17 @@ export function AddRepoDialog({
   const [tokens, setTokens] = useState<GithubToken[] | null>(null);
   const [tokenID, setTokenID] = useState<string>('');
 
+  // Account step — loaded after a token is picked. The first option
+  // is "(all accessible)" which keeps the original /user/repos
+  // behaviour; subsequent options scope the listing to a specific
+  // user or org so SAML-only repos surface.
+  const [accounts, setAccounts] = useState<GithubAccount[] | null>(null);
+  const [accountsErr, setAccountsErr] = useState<string | null>(null);
+  const [accountKey, setAccountKey] = useState<string>(ALL_ACCOUNTS);
+
   // The repo step. `repos` is the unfiltered fetch result; the visible
   // dropdown is filtered client-side by `repoQuery` so typing is
-  // instant and we only hit GitHub once per token selection.
+  // instant and we only hit GitHub once per account selection.
   const [repos, setRepos] = useState<GithubRepo[] | null>(null);
   const [reposErr, setReposErr] = useState<string | null>(null);
   const [reposLoading, setReposLoading] = useState(false);
@@ -79,21 +94,61 @@ export function AddRepoDialog({
       .catch(() => setTokens([]));
   }, [open]);
 
-  // When a token is picked, fetch the repos it can see. Switching
-  // tokens resets the picked repo + branch defaults so stale data
-  // doesn't carry over.
+  // When a token is picked, fetch the accounts visible to it. Repo
+  // load is gated on a chosen account so the user can drill into a
+  // specific org rather than mining /user/repos for SAML-protected
+  // repos that the aggregated endpoint omits.
   useEffect(() => {
     if (!tokenID || tokenID === NO_TOKEN) {
+      setAccounts(null);
+      setAccountKey(ALL_ACCOUNTS);
       setRepos(null);
       setSelectedRepo(null);
       return;
     }
     let cancelled = false;
+    setAccountsErr(null);
+    setAccountKey(ALL_ACCOUNTS);
+    setRepos(null);
+    setSelectedRepo(null);
+    api
+      .get<GithubAccountListResponse>(`/github-tokens/${tokenID}/accounts`)
+      .then((r) => {
+        if (!cancelled) setAccounts(r.accounts);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        const msg =
+          e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e);
+        setAccountsErr(msg);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tokenID]);
+
+  // When the account selection changes, load the corresponding repo
+  // list. ALL_ACCOUNTS uses the affiliations-aggregated endpoint; a
+  // specific account uses /users/{login}/repos or /orgs/{login}/repos
+  // per the account's type.
+  useEffect(() => {
+    if (!tokenID || tokenID === NO_TOKEN) return;
+    let cancelled = false;
     setReposLoading(true);
     setReposErr(null);
     setSelectedRepo(null);
+
+    const query: Record<string, string> = {};
+    if (accountKey !== ALL_ACCOUNTS && accounts) {
+      const acc = accounts.find((a) => `${a.type}:${a.login}` === accountKey);
+      if (acc) {
+        query.account = acc.login;
+        query.account_type = acc.type;
+      }
+    }
+
     api
-      .get<GithubRepoListResponse>(`/github-tokens/${tokenID}/repos`)
+      .get<GithubRepoListResponse>(`/github-tokens/${tokenID}/repos`, { query })
       .then((r) => {
         if (!cancelled) {
           setRepos(r.repos);
@@ -103,18 +158,14 @@ export function AddRepoDialog({
       .catch((e) => {
         if (cancelled) return;
         const msg =
-          e instanceof ApiError
-            ? e.detail
-            : e instanceof Error
-            ? e.message
-            : String(e);
+          e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e);
         setReposErr(msg);
         setReposLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [tokenID]);
+  }, [tokenID, accountKey, accounts]);
 
   const filteredRepos = useMemo(() => {
     if (!repos) return [];
@@ -162,6 +213,9 @@ export function AddRepoDialog({
 
   function reset() {
     setTokenID('');
+    setAccounts(null);
+    setAccountsErr(null);
+    setAccountKey(ALL_ACCOUNTS);
     setRepos(null);
     setReposErr(null);
     setSelectedRepo(null);
@@ -268,7 +322,40 @@ export function AddRepoDialog({
             )}
           </div>
 
-          {/* Step 2: repository — only shown once a token is chosen */}
+          {/* Step 2: account — only shown once a token is chosen and accounts
+              loaded. Lets the user drill into a specific org instead of
+              the affiliations-aggregated view. */}
+          {tokenID && tokenID !== NO_TOKEN && accounts !== null && (
+            <div className="space-y-1.5">
+              <Label htmlFor="acc">Account</Label>
+              <Select value={accountKey} onValueChange={setAccountKey}>
+                <SelectTrigger id="acc">
+                  <SelectValue placeholder="Choose an account…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_ACCOUNTS}>
+                    (all accessible · personal + org repos)
+                  </SelectItem>
+                  {accounts.map((a) => (
+                    <SelectItem
+                      key={`${a.type}:${a.login}`}
+                      value={`${a.type}:${a.login}`}
+                    >
+                      {a.login}
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        {a.type}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {accountsErr && (
+                <p className="text-xs text-destructive">{accountsErr}</p>
+              )}
+            </div>
+          )}
+
+          {/* Step 3: repository — only shown once a token is chosen */}
           {tokenID && tokenID !== NO_TOKEN && (
             <div className="space-y-1.5">
               <Label htmlFor="repo-search">Repository</Label>

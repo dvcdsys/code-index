@@ -1631,6 +1631,61 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/github-tokens/{id}/accounts:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listTokenAccounts
+      tags: [github-tokens]
+      summary: List the GitHub accounts visible to a stored PAT
+      description: |
+        Returns the PAT owner's personal account plus every organisation
+        the PAT can see. The dashboard renders this as the first step of
+        the add-repo flow so the operator can drill into a specific
+        account before picking a repository — useful when /user/repos
+        doesn't surface every org repo (e.g. SAML-protected orgs only
+        appear under /orgs/{login}/repos).
+
+        The PAT plaintext never leaves the server; the dashboard only
+        addresses the token by id.
+      responses:
+        "200":
+          description: A list of accounts (1 user + 0..N orgs)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts, total]
+                properties:
+                  accounts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/GithubAccount"
+                  total:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: GitHub rejected the token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Could not reach GitHub
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
   /api/v1/github-tokens/{id}/repos:
     parameters:
       - name: id
@@ -1643,14 +1698,22 @@ paths:
       tags: [github-tokens]
       summary: List GitHub repositories visible to a stored PAT
       description: |
-        Returns the repos the PAT can see as owner, collaborator, or
-        organisation member, ordered by most recently pushed. Used by
-        the dashboard's add-repo flow to populate the repo picker.
+        Returns the repos the PAT can see, ordered by most recently
+        pushed. Used by the dashboard's add-repo flow to populate the
+        repo picker.
+
+        When `account` is omitted the response is the affiliations-
+        aggregated view (GET /user/repos) — every repo the PAT can
+        see as owner, collaborator, or organization member. When
+        `account` is set the server hits `/users/{login}/repos` for
+        a user account or `/orgs/{login}/repos` for an org, depending
+        on `account_type`. Use the account-scoped call when /user/repos
+        misses an org repo (typical for SAML-protected orgs).
 
         The PAT plaintext never leaves the server; the dashboard only
         addresses the token by id. Up to 500 repos are returned (5 pages
         of 100). Larger affiliations should rely on client-side text
-        filtering or be reduced via PAT scope/visibility settings.
+        filtering or pick a more specific account.
       parameters:
         - name: q
           in: query
@@ -1658,6 +1721,22 @@ paths:
           description: Optional case-insensitive substring filter on full_name.
           schema:
             type: string
+        - name: account
+          in: query
+          required: false
+          description: |
+            Optional account login to scope the listing to. When set,
+            `account_type` must also be set.
+          schema:
+            type: string
+        - name: account_type
+          in: query
+          required: false
+          description: |
+            Required when `account` is set; ignored otherwise.
+          schema:
+            type: string
+            enum: [user, org]
       responses:
         "200":
           description: A list of repositories
@@ -3155,6 +3234,27 @@ components:
         html_url:
           type: string
         description:
+          type: string
+
+    GithubAccount:
+      type: object
+      required: [login, type]
+      description: |
+        A GitHub account the PAT can see. The user owning the PAT is
+        returned first, followed by every org accessible via /user/orgs.
+        The dashboard's add-repo flow shows these in a Select before
+        the repository picker so the operator can drill into a specific
+        org instead of relying on the affiliations-aggregated view.
+      properties:
+        login:
+          type: string
+          description: GitHub login (user name or org slug).
+        type:
+          type: string
+          enum: [user, org]
+          description: |
+            "user" for the PAT owner; "org" for organisations.
+        avatar_url:
           type: string
 
     WorkspaceRepoCreated:
