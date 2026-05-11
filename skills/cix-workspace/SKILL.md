@@ -55,29 +55,56 @@ yet. Either wait ~30s after the last repo finished indexing
 
 ## Commands
 
-### List workspaces
+The grammar is **name-first**: every workspace-scoped verb takes the
+workspace identifier (id OR case-insensitive name) as the *first*
+positional argument. The verb follows. This reads the way operators
+think about workspaces ("for THIS workspace, do THAT").
+
+### Discover what's available
 ```bash
-cix workspace list
-# or:
-cix ws list
+cix ws                       # default: list workspaces
+cix ws list                  # alternate form
+cix ws list --verbose        # include repo counts per workspace
+cix ws list --json           # machine-readable
 ```
 Prints `<id>  <name>  — <description>` per line. The id is the
 opaque ULID you'd use in scripts; the name works for ad-hoc shell use.
 
-### Search a workspace
+### Describe one workspace (start here when exploring)
 ```bash
-cix workspace search <workspace-name-or-id> "<query>"
-cix ws search platform "JWT validation"
-cix ws search platform "rate limiting" --top-communities 8 --top-chunks 30
-cix ws search platform "config loading" --json
+cix ws platform              # describe — shows attached repos + status
+cix ws platform describe     # explicit verb
+cix ws platform --json       # JSON for piping
+```
+Output bundles the workspace metadata with every attached repo,
+each with `✓` / `✗` / `…` status, branch, project_path, last
+indexed timestamp, and last error if any. **Use this before
+searching** — it tells you whether the workspace's indexes are
+actually built (`✓` count vs total).
+
+### List attached repos only
+```bash
+cix ws platform list         # list of indexed projects inside workspace
+cix ws platform repos        # alias for `list`
+cix ws platform list --verbose   # adds project_path, last_indexed_at, last_error
+cix ws platform list --json
 ```
 
-**Flags:**
-- `--top-communities N` — fan out to N centroids (default 5, max 50).
-  Increase for very broad questions; decrease for tight queries to
-  reduce stage-2 fanout.
-- `--top-chunks K` — return at most K chunks (default 20, max 200).
-- `--json` — emit the raw response for further processing.
+### Search a workspace
+```bash
+cix ws platform search "JWT validation"
+cix ws platform search "rate limiting" --top-communities 8 --top-chunks 30
+cix ws platform search "config loading" --json
+```
+
+**Flags (apply to any verb):**
+- `--top-communities N` — search only: fan out to N centroids
+  (default 5, max 50). Increase for very broad questions; decrease
+  for tight queries to reduce stage-2 fanout.
+- `--top-chunks K` — search only: return at most K chunks (default
+  20, max 200).
+- `--json` — emit raw JSON for any verb.
+- `--verbose` / `-v` — list / describe only: extra columns.
 
 ---
 
@@ -106,6 +133,28 @@ Top chunks:
 ---
 
 ## Patterns
+
+### Discovery-first workflow (the right reflex)
+
+When you don't already know which workspace to search, **start wide,
+narrow inward**:
+
+```bash
+# 1. What's available?
+cix ws
+
+# 2. What's in this one?
+cix ws platform
+
+# 3. Now I know the repos and that they're indexed — go.
+cix ws platform search "user login flow"
+```
+
+The `cix ws <name>` describe step is cheap (one API call, ~50 ms)
+and answers the two questions you'd otherwise hit `communities_not_built`
+or "wrong workspace" on:
+- Are repos actually indexed yet? (look for `✓`)
+- Is the feature I'm hunting plausibly in this workspace's repos?
 
 ### Tracing a cross-repo feature
 ```bash

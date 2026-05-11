@@ -48,6 +48,30 @@ type WorkspaceListResponse struct {
 	Total      int         `json:"total"`
 }
 
+// WorkspaceRepo mirrors the server's WorkspaceRepo payload — every
+// field the dashboard or `cix ws <name> list` would display.
+type WorkspaceRepo struct {
+	ID            string  `json:"id"`
+	WorkspaceID   string  `json:"workspace_id"`
+	GitHubURL     string  `json:"github_url"`
+	Branch        string  `json:"branch"`
+	ProjectPath   string  `json:"project_path"`
+	TokenID       *string `json:"token_id,omitempty"`
+	AutoWebhook   bool    `json:"auto_webhook"`
+	Status        string  `json:"status"`
+	LastSHA       *string `json:"last_sha,omitempty"`
+	LastError     *string `json:"last_error,omitempty"`
+	LastIndexedAt *string `json:"last_indexed_at,omitempty"`
+	CreatedAt     string  `json:"created_at"`
+	UpdatedAt     string  `json:"updated_at"`
+}
+
+// WorkspaceRepoListResponse is the GET /workspaces/{id}/repos shape.
+type WorkspaceRepoListResponse struct {
+	Repos []WorkspaceRepo `json:"repos"`
+	Total int             `json:"total"`
+}
+
 // ListWorkspaces — GET /api/v1/workspaces. Returns
 // ServiceUnavailable as a typed error so callers can render a hint when
 // CIX_WORKSPACES_ENABLED is off on the server side.
@@ -57,6 +81,22 @@ func (c *Client) ListWorkspaces() (*WorkspaceListResponse, error) {
 		return nil, err
 	}
 	var out WorkspaceListResponse
+	if err := parseResponse(resp, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListWorkspaceRepos — GET /api/v1/workspaces/{id}/repos. Returns
+// every attached repo with its current status (pending / cloning /
+// indexing / indexed / failed) so the CLI can render a readable
+// per-repo summary.
+func (c *Client) ListWorkspaceRepos(workspaceID string) (*WorkspaceRepoListResponse, error) {
+	resp, err := c.do("GET", "/api/v1/workspaces/"+url.PathEscape(workspaceID)+"/repos", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out WorkspaceRepoListResponse
 	if err := parseResponse(resp, &out); err != nil {
 		return nil, err
 	}
