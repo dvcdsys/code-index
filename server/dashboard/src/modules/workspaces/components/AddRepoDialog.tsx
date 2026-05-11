@@ -393,21 +393,24 @@ export function AddRepoDialog({
                             <li key={r.full_name}>
                               <button
                                 type="button"
+                                title={r.full_name}
                                 onClick={() => {
                                   setSelectedRepo(r);
                                   setBranch(r.default_branch || 'main');
                                 }}
-                                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted ${
+                                className={`flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted ${
                                   active ? 'bg-muted' : ''
                                 }`}
                               >
                                 {r.private ? (
-                                  <Lock className="size-3.5 text-muted-foreground" />
+                                  <Lock className="size-3.5 shrink-0 text-muted-foreground" />
                                 ) : (
-                                  <Unlock className="size-3.5 text-muted-foreground" />
+                                  <Unlock className="size-3.5 shrink-0 text-muted-foreground" />
                                 )}
-                                <span className="truncate font-medium">{r.full_name}</span>
-                                <span className="ml-auto truncate font-mono text-xs text-muted-foreground">
+                                <span className="min-w-0 flex-1 truncate font-medium">
+                                  {r.full_name}
+                                </span>
+                                <span className="shrink-0 font-mono text-xs text-muted-foreground">
                                   {r.default_branch}
                                 </span>
                               </button>
