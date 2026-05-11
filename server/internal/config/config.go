@@ -93,6 +93,33 @@ type Config struct {
 	VersionCheckEnabled  bool
 	VersionCheckInterval time.Duration
 	VersionCheckRepo     string
+
+	// WorkspacesEnabled gates the entire workspaces feature surface
+	// (workspaces / github_tokens CRUD; later releases add webhook receiver,
+	// jobs, communities, two-stage search). Default OFF — the feature is in
+	// active development on the feature branch and disabled in main releases
+	// until the full pipeline ships. Source: CIX_WORKSPACES_ENABLED (default
+	// false).
+	WorkspacesEnabled bool
+
+	// SecretKey / SecretKeyFile control encryption-at-rest for the
+	// workspaces feature's github_tokens. Resolution order:
+	//   1. CIX_SECRET_KEY (env var, hex or base64 32-byte value)
+	//   2. CIX_SECRET_KEYFILE (env var, path to a 0600-perm key file)
+	//   3. <DataDir>/.secret_key (auto-generated on first run; only used
+	//      when workspaces are enabled and the operator hasn't explicitly
+	//      pointed at a key)
+	// PR1 keeps both fields here for documentation — the actual resolution
+	// happens in internal/secrets.Open() which reads the env vars directly.
+	SecretKey     string
+	SecretKeyFile string
+
+	// SecretsDataDir is the directory used as the auto-generated keyfile
+	// destination when neither CIX_SECRET_KEY nor CIX_SECRET_KEYFILE is
+	// set. Defaults to the SQLite parent directory so the generated key
+	// lives alongside the encrypted data — losing one almost certainly
+	// means losing both.
+	SecretsDataDir string
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -264,6 +291,16 @@ func Load() (*Config, error) {
 	c.VersionCheckInterval = vcInterval
 
 	c.VersionCheckRepo = getenv("CIX_VERSION_CHECK_REPO", "dvcdsys/code-index")
+
+	workspacesOn, err := getenvBool("CIX_WORKSPACES_ENABLED", false)
+	if err != nil {
+		return nil, err
+	}
+	c.WorkspacesEnabled = workspacesOn
+
+	c.SecretKey = getenv("CIX_SECRET_KEY", "")
+	c.SecretKeyFile = getenv("CIX_SECRET_KEYFILE", "")
+	c.SecretsDataDir = getenv("CIX_SECRETS_DATA_DIR", filepath.Dir(c.SQLitePath))
 
 	return c, nil
 }

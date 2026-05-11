@@ -80,6 +80,19 @@ tags:
     description: Admin-only user management
   - name: api-keys
     description: Issue and revoke owner-scoped API keys for CLI/SDK use
+  - name: workspaces
+    description: |
+      Workspaces group GitHub repositories for cross-project semantic search.
+      Server-wide shared — every authenticated user can list, create, and
+      modify any workspace. PR1 ships CRUD only; repository attachment,
+      webhooks, and the two-stage search endpoint land in subsequent
+      releases of the workspaces feature branch.
+  - name: github-tokens
+    description: |
+      GitHub Personal Access Tokens used by the workspaces feature for
+      cloning private repos and (optionally) registering webhooks. Stored
+      encrypted-at-rest via AES-GCM; the plaintext is surfaced exactly
+      once on POST and never returned thereafter.
 
 paths:
   /health:
@@ -1090,6 +1103,200 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/workspaces:
+    get:
+      operationId: listWorkspaces
+      tags: [workspaces]
+      summary: List all workspaces
+      description: |
+        Returns every workspace in the system, newest first. Server-wide
+        shared visibility — the caller sees workspaces created by any user.
+      responses:
+        "200":
+          description: Workspace list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    post:
+      operationId: createWorkspace
+      tags: [workspaces]
+      summary: Create a new workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkspaceRequest"
+      responses:
+        "201":
+          description: Workspace created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workspace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Workspace ID (ULID-like string returned by createWorkspace).
+    get:
+      operationId: getWorkspace
+      tags: [workspaces]
+      summary: Get a single workspace
+      responses:
+        "200":
+          description: Workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workspace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    patch:
+      operationId: updateWorkspace
+      tags: [workspaces]
+      summary: Update workspace metadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWorkspaceRequest"
+      responses:
+        "200":
+          description: Updated workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workspace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    delete:
+      operationId: deleteWorkspace
+      tags: [workspaces]
+      summary: Delete a workspace
+      description: |
+        Removes the workspace row. PR1 has nothing else to cascade
+        (workspace_repos lands in PR2); future PRs will cascade repos,
+        communities, and the centroid Chroma collection.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/github-tokens:
+    get:
+      operationId: listGithubTokens
+      tags: [github-tokens]
+      summary: List stored GitHub PATs (metadata only)
+      description: |
+        Returns metadata for every stored token — name, scopes, timestamps.
+        Plaintext values are NEVER returned by this endpoint; the only time
+        plaintext is surfaced is the response to POST /api/v1/github-tokens.
+      responses:
+        "200":
+          description: Token list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubTokenListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    post:
+      operationId: createGithubToken
+      tags: [github-tokens]
+      summary: Store a new GitHub PAT (encrypted-at-rest)
+      description: |
+        Accepts a plaintext token in the request body. The server encrypts
+        it with AES-GCM via internal/secrets and persists only the
+        ciphertext. The response carries metadata only — the plaintext is
+        already in the caller's hands. Scope validation against the GitHub
+        API is deferred to a later release; PR1 stores the supplied scopes
+        verbatim if any.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGithubTokenRequest"
+      responses:
+        "201":
+          description: Token stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/github-tokens/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: deleteGithubToken
+      tags: [github-tokens]
+      summary: Delete a stored GitHub PAT
+      description: |
+        Permanently removes the encrypted blob. Subsequent workspaces
+        operations that reference this token id will fail. PR1 does not
+        block deletion when the token is referenced — workspace_repos
+        landing in PR2 will introduce that FK.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1149,6 +1356,14 @@ components:
             $ref: "#/components/schemas/Error"
     Conflict:
       description: Resource already exists (e.g. email taken)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WorkspacesDisabled:
+      description: |
+        Workspaces feature is disabled on this server. Set
+        `CIX_WORKSPACES_ENABLED=true` and restart to enable.
       content:
         application/json:
           schema:
@@ -2292,3 +2507,116 @@ components:
           type: integer
         files_processed_total:
           type: integer
+
+    Workspace:
+      type: object
+      required: [id, name, description, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          description: ULID-like opaque identifier.
+        name:
+          type: string
+          description: Unique workspace name.
+        description:
+          type: string
+          description: Free-form description. Empty string when absent.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    WorkspaceListResponse:
+      type: object
+      required: [workspaces, total]
+      properties:
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/Workspace"
+        total:
+          type: integer
+
+    CreateWorkspaceRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+          description: Optional free-form description.
+
+    UpdateWorkspaceRequest:
+      type: object
+      description: |
+        Both fields are optional — omitting a field leaves the existing
+        value unchanged. Passing an empty string for `description` clears
+        it. `name` must be non-empty when provided.
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+
+    GithubToken:
+      type: object
+      required: [id, name, scopes, created_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+          description: |
+            Best-effort scope list. PR1 stores whatever the client supplies;
+            later releases populate this by calling GitHub's /user endpoint
+            with the plaintext token.
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    GithubTokenListResponse:
+      type: object
+      required: [tokens, total]
+      properties:
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/GithubToken"
+        total:
+          type: integer
+
+    CreateGithubTokenRequest:
+      type: object
+      required: [name, token]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Human-friendly label shown in the dashboard.
+        token:
+          type: string
+          minLength: 1
+          description: |
+            The plaintext PAT. The server encrypts it with AES-GCM before
+            persisting; this is the only request body that ever carries
+            the plaintext value.
+        scopes:
+          type: array
+          items:
+            type: string
+          description: |
+            Optional scope hints. Best-effort metadata for the UI; real
+            scope enforcement happens at GitHub.

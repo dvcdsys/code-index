@@ -13,6 +13,7 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
@@ -20,6 +21,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
+	"github.com/dvcdsys/code-index/server/internal/workspaces"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -72,6 +74,16 @@ type Deps struct {
 	// VersionCheck polls GitHub for newer server releases. Nil = feature
 	// off; GetStatus then omits the version-check fields entirely.
 	VersionCheck *versioncheck.Service
+
+	// Workspaces enables the workspaces feature endpoints. Set via
+	// CIX_WORKSPACES_ENABLED=true. PR1 ships CRUD over workspaces and
+	// github_tokens behind this flag — when disabled, the handlers return
+	// 503 so the dashboard can render a "feature off" state without a 404
+	// confusion. Both Workspaces and GithubTokens services must be set
+	// together; either nil disables both endpoint groups.
+	WorkspacesEnabled bool
+	Workspaces        *workspaces.Service
+	GithubTokens      *githubtokens.Service
 }
 
 // NewRouter builds the chi router with middleware and the generated
