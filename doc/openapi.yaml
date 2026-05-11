@@ -1316,6 +1316,66 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/workspaces/{id}/search:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: workspaceSearch
+      tags: [workspaces]
+      summary: Two-stage semantic search across all repos in a workspace
+      description: |
+        Runs the query through the workspace's centroid index (stage 1)
+        to pick the top-N functional communities, then fans out to the
+        per-project chromem collections (stage 2) restricted to chunks
+        whose symbols belong to those communities. Returns a merged
+        global ranking.
+
+        Communities are populated by the background
+        `compute_workspace_communities` job — until that runs at least
+        once for a workspace, this endpoint returns an empty result with
+        `status: "communities_not_built"`. Add a repo + wait for the
+        debounced rebuild (30s after the last index_repo finishes).
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: top_communities
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 5
+        - name: top_chunks
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceSearchResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
   /api/v1/workspaces/{id}/repos/{repo_id}/webhook-info:
     parameters:
       - name: id
@@ -3104,4 +3164,77 @@ components:
           type: string
           enum: [enqueued, already_running, ignored, ping]
         repo_id:
+          type: string
+
+    WorkspaceSearchResponse:
+      type: object
+      required: [status, communities, chunks]
+      properties:
+        status:
+          type: string
+          enum: [ok, communities_not_built, empty]
+          description: |
+            `ok` — results follow. `communities_not_built` — the centroid
+            index has not been built yet (no successful
+            compute_workspace_communities run); both arrays are empty.
+            `empty` — communities exist but no chunks matched.
+        communities:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchCommunity"
+        chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchChunk"
+
+    WorkspaceSearchCommunity:
+      type: object
+      required: [id, label, score, project_paths, member_count]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        score:
+          type: number
+          format: float
+          description: Cosine similarity between the query and the centroid.
+        project_paths:
+          type: array
+          items:
+            type: string
+        member_count:
+          type: integer
+
+    WorkspaceSearchChunk:
+      type: object
+      required:
+        - project_path
+        - file_path
+        - start_line
+        - end_line
+        - score
+        - community_id
+        - content
+      properties:
+        project_path:
+          type: string
+        file_path:
+          type: string
+        start_line:
+          type: integer
+        end_line:
+          type: integer
+        symbol_name:
+          type: string
+        language:
+          type: string
+        score:
+          type: number
+          format: float
+        community_id:
+          type: string
+        community_label:
+          type: string
+        content:
           type: string
