@@ -192,6 +192,92 @@ func TestValidateTokenEmptyHeaderYieldsNilScopes(t *testing.T) {
 	}
 }
 
+func TestListUserReposFollowsLinkHeader(t *testing.T) {
+	// Two-page response: first page sends Link rel=next pointing at
+	// page 2, which has no further Link header → terminator.
+	var baseURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "", "1":
+			w.Header().Set("Link", `<`+baseURL+`/user/repos?page=2>; rel="next", <`+baseURL+`/user/repos?page=2>; rel="last"`)
+			_, _ = w.Write([]byte(`[{"full_name":"o/r1","default_branch":"main","private":false,"html_url":"https://github.com/o/r1"}]`))
+		case "2":
+			_, _ = w.Write([]byte(`[{"full_name":"o/r2","default_branch":"develop","private":true,"html_url":"https://github.com/o/r2"}]`))
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	baseURL = srv.URL
+	c := New()
+	c.BaseURL = srv.URL
+
+	repos, err := c.ListUserRepos(context.Background(), "ghp_x", 5)
+	if err != nil {
+		t.Fatalf("ListUserRepos: %v", err)
+	}
+	if len(repos) != 2 {
+		t.Fatalf("expected 2 repos across pages, got %d", len(repos))
+	}
+	if repos[0].FullName != "o/r1" || repos[1].FullName != "o/r2" {
+		t.Fatalf("unexpected repos: %+v", repos)
+	}
+	if !repos[1].Private {
+		t.Fatalf("private flag should round-trip, got %+v", repos[1])
+	}
+}
+
+func TestListUserReposHonoursMaxPages(t *testing.T) {
+	// Server claims an infinite next-page chain; ListUserRepos must
+	// stop after maxPages so we don't run forever on a misbehaving
+	// upstream.
+	var baseURL string
+	page := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		page++
+		w.Header().Set("Link", `<`+baseURL+`/user/repos?page=999>; rel="next"`)
+		_, _ = w.Write([]byte(`[{"full_name":"o/r","default_branch":"main"}]`))
+	}))
+	t.Cleanup(srv.Close)
+	baseURL = srv.URL
+	c := New()
+	c.BaseURL = srv.URL
+
+	_, err := c.ListUserRepos(context.Background(), "ghp_x", 3)
+	if err != nil {
+		t.Fatalf("ListUserRepos: %v", err)
+	}
+	if page != 3 {
+		t.Fatalf("expected exactly 3 page hits with maxPages=3, got %d", page)
+	}
+}
+
+func TestListUserReposUnauthorized(t *testing.T) {
+	c, _ := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message": "Bad credentials"}`))
+	}))
+	_, err := c.ListUserRepos(context.Background(), "bad", 1)
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestParseNextLink(t *testing.T) {
+	in := `<https://api.github.com/user/repos?page=2>; rel="next", <https://api.github.com/user/repos?page=10>; rel="last"`
+	want := "https://api.github.com/user/repos?page=2"
+	if got := parseNextLink(in); got != want {
+		t.Fatalf("parseNextLink(%q) = %q, want %q", in, got, want)
+	}
+	if got := parseNextLink(""); got != "" {
+		t.Fatalf("empty header should yield empty, got %q", got)
+	}
+	// rel=last only — there's no next, must terminate.
+	if got := parseNextLink(`<https://x>; rel="last"`); got != "" {
+		t.Fatalf("rel=last only should not advance, got %q", got)
+	}
+}
+
 func TestParseOwnerRepo(t *testing.T) {
 	cases := map[string][2]string{
 		"https://github.com/spf13/cobra":      {"spf13", "cobra"},

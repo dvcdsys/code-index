@@ -197,6 +197,13 @@ CREATE TABLE IF NOT EXISTS workspace_repos (
     webhook_secret  TEXT NOT NULL,
     webhook_id      INTEGER,
     auto_webhook    INTEGER NOT NULL DEFAULT 0,
+    -- webhook_mode is the operator's stated intent for how this repo gets
+    -- kept fresh: 'auto' (server calls GitHub to register the hook),
+    -- 'manual' (operator pastes the URL+secret into GitHub themselves),
+    -- 'disabled' (no auto-sync, reindex via the dashboard button only).
+    -- Stored separately from auto_webhook so the dashboard can distinguish
+    -- "manual, still pending operator action" from "deliberately disabled".
+    webhook_mode    TEXT NOT NULL DEFAULT 'manual',
     status          TEXT NOT NULL DEFAULT 'pending',
     last_sha        TEXT,
     last_error      TEXT,

@@ -134,6 +134,88 @@ func TestRepos_DuplicateRejected(t *testing.T) {
 	}
 }
 
+// TestRepos_WebhookModeStored covers the three-state webhook_mode
+// introduced for the add-repo UI. The DB column should round-trip the
+// chosen mode; the legacy auto_webhook bool is derived (true iff
+// mode == "auto") so old API clients keep behaving the same.
+func TestRepos_WebhookModeStored(t *testing.T) {
+	router, _ := reposRouter(t)
+	wsID := createWS(t, router, "platform")
+
+	cases := []struct {
+		name         string
+		body         map[string]any
+		wantMode     string
+		wantAutoBool bool
+	}{
+		{
+			name:         "manual explicit",
+			body:         map[string]any{"github_url": "https://github.com/a/manual", "branch": "main", "webhook_mode": "manual"},
+			wantMode:     "manual",
+			wantAutoBool: false,
+		},
+		{
+			name:         "auto explicit",
+			body:         map[string]any{"github_url": "https://github.com/a/auto", "branch": "main", "webhook_mode": "auto"},
+			wantMode:     "auto",
+			wantAutoBool: true,
+		},
+		{
+			name:         "disabled explicit",
+			body:         map[string]any{"github_url": "https://github.com/a/disabled", "branch": "main", "webhook_mode": "disabled"},
+			wantMode:     "disabled",
+			wantAutoBool: false,
+		},
+		{
+			name:         "legacy auto_webhook bool",
+			body:         map[string]any{"github_url": "https://github.com/a/legacy", "branch": "main", "auto_webhook": true},
+			wantMode:     "auto",
+			wantAutoBool: true,
+		},
+		{
+			name:         "default when omitted",
+			body:         map[string]any{"github_url": "https://github.com/a/default", "branch": "main"},
+			wantMode:     "manual",
+			wantAutoBool: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := doJSON(t, router, http.MethodPost, "/api/v1/workspaces/"+wsID+"/repos", tc.body)
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("add: %d (%s)", rr.Code, rr.Body.String())
+			}
+			var resp struct {
+				Repo workspaceRepoPayload `json:"repo"`
+			}
+			_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+			if resp.Repo.WebhookMode != tc.wantMode {
+				t.Fatalf("webhook_mode = %q, want %q", resp.Repo.WebhookMode, tc.wantMode)
+			}
+			if resp.Repo.AutoWebhook != tc.wantAutoBool {
+				t.Fatalf("auto_webhook = %v, want %v (for mode=%q)",
+					resp.Repo.AutoWebhook, tc.wantAutoBool, tc.wantMode)
+			}
+		})
+	}
+}
+
+// TestRepos_WebhookModeRejectsUnknown ensures the DB never receives an
+// unknown enum value — the dashboard's three radio buttons are the only
+// supported inputs.
+func TestRepos_WebhookModeRejectsUnknown(t *testing.T) {
+	router, _ := reposRouter(t)
+	wsID := createWS(t, router, "platform")
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/workspaces/"+wsID+"/repos", map[string]any{
+		"github_url":   "https://github.com/a/b",
+		"branch":       "main",
+		"webhook_mode": "totally-bogus",
+	})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 on unknown mode, got %d", rr.Code)
+	}
+}
+
 func TestRepos_BadURLRejected(t *testing.T) {
 	router, _ := reposRouter(t)
 	wsID := createWS(t, router, "platform")

@@ -25,6 +25,7 @@ type workspaceRepoPayload struct {
 	ProjectPath   string     `json:"project_path"`
 	TokenID       *string    `json:"token_id"`
 	AutoWebhook   bool       `json:"auto_webhook"`
+	WebhookMode   string     `json:"webhook_mode"`
 	Status        string     `json:"status"`
 	LastSHA       *string    `json:"last_sha"`
 	LastError     *string    `json:"last_error"`
@@ -49,6 +50,10 @@ func workspaceRepoToPayload(wr workspacerepos.WorkspaceRepo) workspaceRepoPayloa
 		v := wr.LastError
 		lastErr = &v
 	}
+	mode := wr.WebhookMode
+	if mode == "" {
+		mode = workspacerepos.WebhookModeManual
+	}
 	return workspaceRepoPayload{
 		ID:            wr.ID,
 		WorkspaceID:   wr.WorkspaceID,
@@ -57,6 +62,7 @@ func workspaceRepoToPayload(wr workspacerepos.WorkspaceRepo) workspaceRepoPayloa
 		ProjectPath:   wr.ProjectPath,
 		TokenID:       tokenID,
 		AutoWebhook:   wr.AutoWebhook,
+		WebhookMode:   mode,
 		Status:        wr.Status,
 		LastSHA:       lastSHA,
 		LastError:     lastErr,
@@ -144,6 +150,9 @@ func (s *Server) AddWorkspaceRepo(w http.ResponseWriter, r *http.Request, id str
 	if body.AutoWebhook != nil {
 		req.AutoWebhook = *body.AutoWebhook
 	}
+	if body.WebhookMode != nil {
+		req.WebhookMode = string(*body.WebhookMode)
+	}
 	wr, err := s.Deps.WorkspaceRepos.Create(r.Context(), req)
 	if err != nil {
 		switch {
@@ -151,6 +160,8 @@ func (s *Server) AddWorkspaceRepo(w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusUnprocessableEntity, "github_url must be an https://github.com/owner/repo URL")
 		case errors.Is(err, workspacerepos.ErrBranchEmpty):
 			writeError(w, http.StatusUnprocessableEntity, "branch is required")
+		case errors.Is(err, workspacerepos.ErrInvalidWebhookMode):
+			writeError(w, http.StatusUnprocessableEntity, "webhook_mode must be one of manual, auto, disabled")
 		case errors.Is(err, workspacerepos.ErrDuplicate):
 			writeError(w, http.StatusConflict, "this repo+branch is already attached to the workspace")
 		default:
