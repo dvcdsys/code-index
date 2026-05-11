@@ -193,6 +193,12 @@ func isPublicPath(p string) bool {
 	if strings.HasPrefix(p, "/dashboard/") {
 		return true
 	}
+	// GitHub webhook deliveries are authenticated by per-row HMAC secret,
+	// NOT by the cix Bearer/session auth — leave the prefix public so
+	// deliveries from github.com don't get 401'd at the gate.
+	if strings.HasPrefix(p, "/api/v1/webhooks/") {
+		return true
+	}
 	return false
 }
 
