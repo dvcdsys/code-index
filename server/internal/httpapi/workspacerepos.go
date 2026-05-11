@@ -1,12 +1,15 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/githubapi"
+	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/workspacejobs"
@@ -164,11 +167,82 @@ func (s *Server) AddWorkspaceRepo(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	webhookURL := s.buildWebhookURL(wr.ID)
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"repo":           workspaceRepoToPayload(wr),
-		"webhook_url":    webhookURL,
-		"webhook_secret": wr.WebhookSecret,
+	autoRegistered := false
+	autoNote := ""
+	if wr.AutoWebhook {
+		ok, note := s.tryAutoRegisterWebhook(r.Context(), wr, webhookURL)
+		autoRegistered = ok
+		autoNote = note
+		if ok {
+			// Reload so the response reflects the persisted webhook_id.
+			if fresh, ferr := s.Deps.WorkspaceRepos.GetByID(r.Context(), wr.ID); ferr == nil {
+				wr = fresh
+			}
+		}
+	}
+
+	resp := map[string]any{
+		"repo":            workspaceRepoToPayload(wr),
+		"webhook_url":     webhookURL,
+		"webhook_secret":  wr.WebhookSecret,
+		"auto_registered": autoRegistered,
+	}
+	if autoNote != "" {
+		resp["auto_register_note"] = autoNote
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+// tryAutoRegisterWebhook calls the GitHub API to register a push hook for
+// the given repo. Best-effort — failure does NOT roll back the
+// workspace_repos row; the operator can rerun manually via the
+// webhook-info endpoint. Returns (success, human-readable note).
+//
+// Public URL is required — without it GitHub would deliver to a path
+// that's not reachable. We refuse to attempt the call when PublicBaseURL
+// is empty and surface that as the note.
+func (s *Server) tryAutoRegisterWebhook(ctx context.Context, wr workspacerepos.WorkspaceRepo, deliveryURL string) (bool, string) {
+	logger := s.Deps.Logger
+	if !strings.HasPrefix(deliveryURL, "http") {
+		return false, "CIX_PUBLIC_URL is not set — register the webhook manually"
+	}
+	if wr.TokenID == "" {
+		return false, "auto_webhook=true requires a token_id with admin:repo_hook scope"
+	}
+	pat, err := s.Deps.GithubTokens.Reveal(ctx, wr.TokenID)
+	if err != nil {
+		if errors.Is(err, githubtokens.ErrNotFound) {
+			return false, "token_id not found"
+		}
+		return false, "could not decrypt the GitHub token"
+	}
+	_ = s.Deps.GithubTokens.Touch(ctx, wr.TokenID)
+
+	owner, repo, perr := githubapi.ParseOwnerRepo(wr.GitHubURL)
+	if perr != nil {
+		return false, "github_url is not a parseable owner/repo URL"
+	}
+	hr, herr := githubapi.New().CreateWebhook(ctx, githubapi.CreateWebhookOptions{
+		Owner:  owner,
+		Repo:   repo,
+		PAT:    pat,
+		URL:    deliveryURL,
+		Secret: wr.WebhookSecret,
 	})
+	if herr != nil {
+		if logger != nil {
+			logger.Warn("workspaces: auto-register webhook failed",
+				"repo_id", wr.ID, "owner", owner, "repo", repo, "err", herr)
+		}
+		if errors.Is(herr, githubapi.ErrUnauthorized) {
+			return false, "GitHub rejected the token — add admin:repo_hook scope or register manually"
+		}
+		return false, "GitHub API rejected the call: " + herr.Error()
+	}
+	if uerr := s.Deps.WorkspaceRepos.SetWebhookID(ctx, wr.ID, hr.ID); uerr != nil && logger != nil {
+		logger.Warn("workspaces: could not persist webhook id", "repo_id", wr.ID, "err", uerr)
+	}
+	return true, ""
 }
 
 // DeleteWorkspaceRepo — DELETE /api/v1/workspaces/{id}/repos/{repo_id}.

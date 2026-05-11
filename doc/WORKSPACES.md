@@ -1,0 +1,184 @@
+# Workspaces — operator guide
+
+The workspaces feature lets cix index a group of GitHub repositories
+together and serve cross-project semantic search against the union.
+This document covers everything an operator needs to enable, configure,
+and troubleshoot the feature in production.
+
+> **Status (PR1–PR3).** The skeleton, clone/index pipeline, and webhook
+> receiver are all in. Two-stage cross-project search is the deliverable
+> of PR4–PR6 — until those merge, `workspaces` behaves like a tag over
+> per-project indexes.
+
+## Quick start
+
+1. **Enable the feature flag.** Add to the cix-server environment:
+   ```
+   CIX_WORKSPACES_ENABLED=true
+   CIX_SECRET_KEY=<hex- or base64-encoded 32-byte key>  # see "Encryption"
+   ```
+   Restart the server. Without the flag every workspaces endpoint
+   returns `503 service unavailable`.
+2. **Open the dashboard** at `https://<host>/dashboard` and sign in.
+3. **Add a GitHub PAT** under **GitHub Tokens → Add token** if you need
+   to clone private repos. The plaintext value is encrypted before it
+   hits SQLite and is never returned in any subsequent response.
+4. **Create a workspace** under **Workspaces → New workspace**.
+5. **Attach a repository:** workspace detail → Add repo. Fill in URL,
+   branch, optional token, and choose **Auto-register webhook** if
+   your PAT carries `admin:repo_hook`. Otherwise check **I'll set it
+   up myself** and copy the displayed URL + secret into GitHub.
+6. The server clones the repo into `<CIX_WORKSPACES_DATA_DIR>/<repo_id>/`
+   and runs the existing indexer pipeline against it. Status transitions
+   visible on the workspace detail page: `pending → cloning → indexing → indexed`.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CIX_WORKSPACES_ENABLED` | `false` | Master switch for the feature. |
+| `CIX_SECRET_KEY` | (auto-generate) | 32-byte AES key encoding GitHub tokens. Hex or base64. |
+| `CIX_SECRET_KEYFILE` | unset | Alternative — path to a 0600-perm key file. |
+| `CIX_SECRETS_DATA_DIR` | `dirname(CIX_SQLITE_PATH)` | Where the auto-generated keyfile lives. |
+| `CIX_WORKSPACES_DATA_DIR` | `<sqlite parent>/repos` | Where cloned repos live. |
+| `CIX_WORKER_CONCURRENCY` | `2` | Parallel job workers. Clone+index is mostly IO-bound. |
+| `CIX_PUBLIC_URL` | unset | Externally-reachable URL used to build webhook delivery URLs. |
+
+### Encryption key resolution
+
+Resolution order:
+
+1. `CIX_SECRET_KEY` (hex or base64 32-byte value)
+2. `CIX_SECRET_KEYFILE` (path; file must be `0600`)
+3. `<CIX_SECRETS_DATA_DIR>/.secret_key` — auto-generated on first run
+   with `CIX_WORKSPACES_ENABLED=true`. The server **refuses to start**
+   if `github_tokens` is non-empty and the resolved key cannot decrypt
+   the first row — protects against accidental key rotation that would
+   silently brick all tokens.
+
+For production, supply `CIX_SECRET_KEY` explicitly or mount a keyfile
+via `CIX_SECRET_KEYFILE`. The auto-generated keyfile is a single-host
+convenience for dev.
+
+## Webhooks
+
+GitHub deliveries hit `POST /api/v1/webhooks/github/<workspace_repo_id>`.
+The endpoint is **public** in the auth sense (no Bearer/session check)
+but every delivery is HMAC-SHA256-validated against the per-row
+`webhook_secret`. The secret is shown exactly once on add-repo and on
+**Workspaces → Repo → Webhook info**.
+
+Supported events:
+
+| Event | Behaviour |
+|---|---|
+| `push` (tracked branch) | Enqueues `clone_repo` job — dedupe collapses bursts. |
+| `push` (other branch / delete) | 200 `{"status":"ignored"}`. |
+| `ping` | 200 `{"status":"ping"}`. Use to confirm setup. |
+| anything else | 200 `{"status":"ignored"}`, logged for audit. |
+
+### Cloudflare tunnel (recommended for self-hosted)
+
+Webhooks require a public URL. The simplest no-cost option is a
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
+On the cix-server host:
+
+```bash
+# One-time: install + log in
+brew install cloudflared
+cloudflared tunnel login
+
+# Create a named tunnel
+cloudflared tunnel create cix
+
+# Route a hostname to the tunnel (replace cix.example.com with yours)
+cloudflared tunnel route dns cix cix.example.com
+
+# Run the tunnel — replace 21847 with your CIX_PORT
+cloudflared tunnel --url http://localhost:21847 run cix
+```
+
+Then set `CIX_PUBLIC_URL=https://cix.example.com` and restart the server.
+The dashboard's add-repo dialog and the webhook-info endpoint will
+generate fully-qualified URLs that GitHub can reach.
+
+For ad-hoc testing without DNS:
+
+```bash
+cloudflared tunnel --url http://localhost:21847
+# prints a one-shot https://*.trycloudflare.com URL
+```
+
+Set `CIX_PUBLIC_URL` to whatever cloudflared prints and restart.
+Single-process tunnels are torn down with the parent — not suitable for
+production but perfect for the first end-to-end smoke test.
+
+### Manual webhook setup
+
+If `auto_webhook=false` (default) the dashboard surfaces the URL + secret
+after add-repo. Paste them into GitHub:
+
+1. Repo → **Settings → Webhooks → Add webhook**
+2. **Payload URL** = the value from the dashboard
+3. **Content type** = `application/json`
+4. **Secret** = the value from the dashboard
+5. **Which events?** → **Just the push event**
+6. **Active** ✓
+
+GitHub will send a `ping` immediately — the cix server returns 200, and
+GitHub's webhook page will mark the delivery green.
+
+### Auto-register
+
+When the PAT carries `admin:repo_hook` scope and `auto_webhook=true`,
+the server calls `POST /repos/{owner}/{repo}/hooks` on your behalf
+during add-repo and persists the resulting hook id (used to
+de-register on delete). Failure is non-fatal — the response includes
+`auto_registered: false` and an operator-facing note explaining the
+specific reason (missing scope, network error, etc.).
+
+## Background workers
+
+A single in-process worker pool drains a SQLite-backed queue (`jobs`
+table). Concurrency is `CIX_WORKER_CONCURRENCY` (default 2). Job types
+in PR2–PR3:
+
+- `clone_repo` — clones (or fetches+resets on reuse) via go-git;
+  registers `projects` row; chains `index_repo`.
+- `index_repo` — runs the existing 3-phase indexer in-process against
+  the clone directory; flips repo status to `indexed`.
+
+Future PRs add `build_call_graph` and `compute_workspace_communities`.
+
+### Inspecting the queue
+
+`GET /api/v1/jobs` lists recent jobs with optional `status=` / `type=` /
+`limit=` filters. Useful for diagnosing stuck repos.
+
+## Troubleshooting
+
+- **Status stuck at `cloning`** — check `GET /jobs?status=running` and
+  the cix-server logs. Most common cause: PAT missing `repo` scope on
+  a private repo, or network not reaching github.com.
+- **Status stuck at `failed`** with `last_error` set — the message
+  comes directly from go-git or the indexer. Common fixes: rotate the
+  PAT, confirm the branch name, verify the runtime model is loaded
+  (`GET /api/v1/admin/sidecar/status`).
+- **Webhook deliveries returning 401** — the secret in GitHub doesn't
+  match what cix stored. Click **Webhook info** in the dashboard to
+  see the canonical value, paste again. Secrets rotate when the
+  workspace_repo is recreated.
+- **Encryption key mismatch on startup** — operator-readable error in
+  the boot log. Recover the prior `CIX_SECRET_KEY` from your secrets
+  manager or wipe `github_tokens` manually before retrying.
+
+## What's coming (PR4 – PR7)
+
+- **PR4** — Intra-project call-graph extraction (`call_edges` table)
+  + eval harness so the rest of the pipeline can lean on it.
+- **PR5** — Louvain community detection per workspace; centroid
+  embeddings stored in a dedicated chromem collection.
+- **PR6** — Two-stage workspace search endpoint
+  (`GET /workspaces/{id}/search`).
+- **PR7** — CLI subcommand + `cix:workspace` Claude Code skill +
+  dashboard polish (per-repo status panels, search UI, graph viz).

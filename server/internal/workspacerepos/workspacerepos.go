@@ -177,6 +177,23 @@ func (s *Service) SetStatus(ctx context.Context, id, status string, lastSHA, las
 	return nil
 }
 
+// SetWebhookID persists the GitHub-side hook id returned by the
+// auto-register flow. ErrNotFound when the row is gone (race with
+// concurrent delete — caller can ignore).
+func (s *Service) SetWebhookID(ctx context.Context, id string, hookID int64) error {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE workspace_repos SET webhook_id = ?, updated_at = ? WHERE id = ?`,
+		hookID, time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return fmt.Errorf("set webhook_id: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Delete removes a workspace_repo. The on-disk clone, indexed project, and
 // associated rows are NOT cleaned up here — handlers should enqueue a
 // cleanup job (PR3+) or accept the orphan for now.
