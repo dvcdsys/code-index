@@ -272,6 +272,101 @@ func TestGithubTokens_RejectInvalidToken(t *testing.T) {
 	}
 }
 
+// TestGithubTokens_ListRepos exercises the new add-repo flow's first
+// step: the dashboard fetches the repos visible to a stored PAT so it
+// can render the repo picker. Validates that:
+//   - the PAT is never echoed in the response
+//   - the X-OAuth-Scopes-validated token survives long enough for the
+//     subsequent /repos call to use it
+//   - the optional q= filter is applied server-side
+func TestGithubTokens_ListRepos(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	sec, err := secrets.Open(secrets.OpenOptions{DataDir: t.TempDir(), AllowGenerate: true})
+	if err != nil {
+		t.Fatalf("open secrets: %v", err)
+	}
+
+	// Combined stub serves /user (for token validation) and /user/repos
+	// (for the new endpoint). Two repos returned so the q= filter test
+	// has something to discriminate.
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			w.Header().Set("X-OAuth-Scopes", "repo")
+			_, _ = w.Write([]byte(`{"login": "alice"}`))
+		case "/user/repos":
+			_, _ = w.Write([]byte(`[
+				{"full_name":"alice/services","default_branch":"main","private":true,"html_url":"https://github.com/alice/services"},
+				{"full_name":"alice/docs","default_branch":"main","private":false,"html_url":"https://github.com/alice/docs"}
+			]`))
+		default:
+			http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(stub.Close)
+
+	router := NewRouter(Deps{
+		DB:                d,
+		ServerVersion:     "test",
+		APIVersion:        "v1",
+		Backend:           "go",
+		AuthDisabled:      true,
+		Users:             seedlessUsers(d),
+		Sessions:          seedlessSessions(d),
+		APIKeys:           seedlessAPIKeys(d),
+		WorkspacesEnabled: true,
+		Workspaces:        workspaces.New(d),
+		GithubTokens:      githubtokens.New(d, sec),
+		GithubAPIBaseURL:  stub.URL,
+	})
+
+	// Create the token so we have an id to address.
+	const secret = "ghp_secret_value"
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/github-tokens", map[string]any{
+		"name":  "personal",
+		"token": secret,
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create token: expected 201, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created githubTokenPayload
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+
+	// Unfiltered list — two repos.
+	rr = doJSON(t, router, http.MethodGet, "/api/v1/github-tokens/"+created.ID+"/repos", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list repos: expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(secret)) {
+		t.Fatalf("CRITICAL: PAT plaintext leaked in repos list body")
+	}
+	var allResp struct {
+		Repos []struct {
+			FullName      string `json:"full_name"`
+			DefaultBranch string `json:"default_branch"`
+			Private       bool   `json:"private"`
+		} `json:"repos"`
+		Total int `json:"total"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &allResp)
+	if allResp.Total != 2 {
+		t.Fatalf("expected 2 repos, got %d (%s)", allResp.Total, rr.Body.String())
+	}
+
+	// Filtered list (q=docs) — server applies the substring filter.
+	rr = doJSON(t, router, http.MethodGet, "/api/v1/github-tokens/"+created.ID+"/repos?q=docs", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("filtered: expected 200, got %d", rr.Code)
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &allResp)
+	if allResp.Total != 1 || allResp.Repos[0].FullName != "alice/docs" {
+		t.Fatalf("expected only alice/docs, got %+v", allResp)
+	}
+}
+
 func TestGithubTokens_RejectMissingFields(t *testing.T) {
 	router := workspaceRouter(t, true)
 

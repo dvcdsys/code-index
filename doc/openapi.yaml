@@ -1631,6 +1631,67 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/github-tokens/{id}/repos:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listTokenRepos
+      tags: [github-tokens]
+      summary: List GitHub repositories visible to a stored PAT
+      description: |
+        Returns the repos the PAT can see as owner, collaborator, or
+        organisation member, ordered by most recently pushed. Used by
+        the dashboard's add-repo flow to populate the repo picker.
+
+        The PAT plaintext never leaves the server; the dashboard only
+        addresses the token by id. Up to 500 repos are returned (5 pages
+        of 100). Larger affiliations should rely on client-side text
+        filtering or be reduced via PAT scope/visibility settings.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: Optional case-insensitive substring filter on full_name.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A list of repositories
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [repos, total]
+                properties:
+                  repos:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/GithubRepo"
+                  total:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: GitHub rejected the token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Could not reach GitHub
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2969,6 +3030,7 @@ components:
         - project_path
         - status
         - auto_webhook
+        - webhook_mode
         - created_at
         - updated_at
       properties:
@@ -2995,7 +3057,19 @@ components:
             repo is public.
         auto_webhook:
           type: boolean
-          description: Whether the server should auto-register the webhook.
+          description: |
+            Legacy alias for `webhook_mode == "auto"`. Always present so
+            old clients keep working; new clients should consult
+            `webhook_mode` instead.
+        webhook_mode:
+          type: string
+          enum: [manual, auto, disabled]
+          description: |
+            Operator's intent for how this repo gets kept fresh. `auto`
+            asks the server to register the GitHub webhook; `manual`
+            means the operator pastes the URL+secret into GitHub
+            themselves; `disabled` skips auto-sync entirely — reindex
+            via the dashboard button only.
         status:
           type: string
           enum: [pending, cloning, indexing, indexed, failed]
@@ -3045,10 +3119,43 @@ components:
         auto_webhook:
           type: boolean
           default: false
+          deprecated: true
           description: |
-            When true, the server will try to register the webhook in
-            GitHub on the operator's behalf (PR3+). Requires the PAT to
-            carry admin:repo_hook scope.
+            Legacy field. New clients should send `webhook_mode` instead.
+            When both are provided, `webhook_mode` wins; when only the
+            bool is set, `true` is mapped to `webhook_mode = "auto"`.
+        webhook_mode:
+          type: string
+          enum: [manual, auto, disabled]
+          default: manual
+          description: |
+            How the server should keep this repo fresh:
+            - `auto` — server registers the webhook in GitHub on your
+              behalf (requires admin:repo_hook on the PAT).
+            - `manual` — server stores a webhook_secret and returns it
+              once; you paste the URL + secret into GitHub yourself.
+            - `disabled` — no auto-sync at all; reindex via the
+              dashboard button only.
+
+    GithubRepo:
+      type: object
+      required: [full_name, default_branch, private, html_url]
+      description: A repository visible to a stored PAT.
+      properties:
+        full_name:
+          type: string
+          description: "owner/name"
+        default_branch:
+          type: string
+          description: |
+            The repo's default branch; the dashboard pre-fills the branch
+            input with this when the user picks a repo from the list.
+        private:
+          type: boolean
+        html_url:
+          type: string
+        description:
+          type: string
 
     WorkspaceRepoCreated:
       type: object

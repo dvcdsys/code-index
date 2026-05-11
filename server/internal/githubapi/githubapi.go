@@ -67,6 +67,97 @@ func New() *Client {
 	}
 }
 
+// Repo is the slice of GET /user/repos we care about for the dashboard
+// add-repo flow. We deliberately keep this small — only the fields the
+// repo-picker UI actually renders — so we don't bloat the JSON payload
+// (a single user can have several hundred repos visible via a PAT).
+type Repo struct {
+	FullName      string `json:"full_name"`       // "owner/name"
+	DefaultBranch string `json:"default_branch"`  // used to auto-fill the branch input
+	Private       bool   `json:"private"`         // shown as a lock icon in the dropdown
+	HTMLURL       string `json:"html_url"`        // canonical https://github.com/... form
+	Description   string `json:"description,omitempty"`
+}
+
+// ListUserRepos walks /user/repos pages, returning every repo the PAT
+// can see as owner / collaborator / org member. The endpoint is
+// inherently paginated (per_page=100 is the GitHub max) — we follow
+// the Link rel=next header up to maxPages so an outlier user with a
+// thousand affiliated repos still completes in bounded time.
+//
+// maxPages of 0 is interpreted as "no cap" (used in tests); production
+// callers should pass a sensible ceiling (typical: 5 = up to 500 repos).
+func (c *Client) ListUserRepos(ctx context.Context, pat string, maxPages int) ([]Repo, error) {
+	if pat == "" {
+		return nil, fmt.Errorf("PAT required")
+	}
+	pageURL := c.BaseURL + "/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member"
+	out := []Repo{}
+	page := 0
+	for pageURL != "" {
+		page++
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.signRequest(req, pat)
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("github API: %w", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusOK:
+			var batch []Repo
+			if err := json.Unmarshal(body, &batch); err != nil {
+				return nil, fmt.Errorf("parse /user/repos: %w", err)
+			}
+			out = append(out, batch...)
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return nil, fmt.Errorf("%w: %s", ErrUnauthorized, githubMessage(body))
+		default:
+			return nil, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(body))
+		}
+		if maxPages > 0 && page >= maxPages {
+			break
+		}
+		pageURL = parseNextLink(resp.Header.Get("Link"))
+	}
+	return out, nil
+}
+
+// parseNextLink extracts the URL of rel=next from a GitHub Link header.
+// Format per RFC 5988: `<https://...?page=2>; rel="next", <...>; rel="last"`.
+// Empty string when no next page exists — that's the terminator for the
+// pagination loop in ListUserRepos.
+func parseNextLink(header string) string {
+	if header == "" {
+		return ""
+	}
+	for _, part := range strings.Split(header, ",") {
+		segs := strings.Split(strings.TrimSpace(part), ";")
+		if len(segs) < 2 {
+			continue
+		}
+		isNext := false
+		for _, p := range segs[1:] {
+			if strings.TrimSpace(p) == `rel="next"` {
+				isNext = true
+				break
+			}
+		}
+		if !isNext {
+			continue
+		}
+		u := strings.TrimSpace(segs[0])
+		u = strings.TrimPrefix(u, "<")
+		u = strings.TrimSuffix(u, ">")
+		return u
+	}
+	return ""
+}
+
 // CreateWebhookOptions parameterises a hook registration. Events defaults
 // to ["push"] when nil.
 type CreateWebhookOptions struct {

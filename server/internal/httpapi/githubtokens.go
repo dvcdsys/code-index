@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/githubapi"
@@ -130,6 +131,91 @@ func (s *Server) CreateGithubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, githubTokenToPayload(tok))
+}
+
+// ListTokenRepos — GET /api/v1/github-tokens/{id}/repos.
+//
+// Reveals the PAT server-side, calls GitHub's /user/repos paginated
+// endpoint, and returns the resulting list to the dashboard so it can
+// render a repo picker. The PAT never leaves the server.
+//
+// Up to 500 repos (5 pages × 100) so a worst-case org-member with lots
+// of affiliations doesn't have to deal with infinite scroll. If the
+// caller passes ?q=, results are filtered to repos whose full_name
+// contains q (case-insensitive). We keep filtering on the server so
+// the dashboard fetch stays a single round-trip.
+func (s *Server) ListTokenRepos(
+	w http.ResponseWriter,
+	r *http.Request,
+	id string,
+	params openapi.ListTokenReposParams,
+) {
+	if s.githubTokensUnavailable(w) {
+		return
+	}
+
+	pat, err := s.Deps.GithubTokens.Reveal(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, githubtokens.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "github token not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load github token")
+		return
+	}
+
+	const maxPages = 5
+	repos, lerr := s.githubAPI().ListUserRepos(r.Context(), pat, maxPages)
+	if lerr != nil {
+		if errors.Is(lerr, githubapi.ErrUnauthorized) {
+			writeError(w, http.StatusUnprocessableEntity,
+				"GitHub rejected the token: "+lerr.Error())
+			return
+		}
+		writeError(w, http.StatusBadGateway,
+			"could not list repos via GitHub: "+lerr.Error())
+		return
+	}
+	_ = s.Deps.GithubTokens.Touch(r.Context(), id)
+
+	// Optional client-supplied filter — applied here so the dashboard
+	// fetch is a single round-trip even for larger result sets.
+	if params.Q != nil && *params.Q != "" {
+		needle := strings.ToLower(*params.Q)
+		filtered := repos[:0]
+		for _, rp := range repos {
+			if strings.Contains(strings.ToLower(rp.FullName), needle) {
+				filtered = append(filtered, rp)
+			}
+		}
+		repos = filtered
+	}
+
+	out := make([]openapi.GithubRepo, 0, len(repos))
+	for _, rp := range repos {
+		desc := rp.Description
+		out = append(out, openapi.GithubRepo{
+			FullName:      rp.FullName,
+			DefaultBranch: rp.DefaultBranch,
+			Private:       rp.Private,
+			HtmlUrl:       rp.HTMLURL,
+			Description:   ptrStr(desc),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"repos": out,
+		"total": len(out),
+	})
+}
+
+// ptrStr returns nil for the empty string and &s otherwise, matching
+// the OpenAPI nullable + omitempty convention without leaking "" into
+// the wire format.
+func ptrStr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // DeleteGithubToken — DELETE /api/v1/github-tokens/{id}.
