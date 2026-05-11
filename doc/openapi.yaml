@@ -2951,9 +2951,13 @@ components:
           type: array
           items:
             type: string
+          deprecated: true
           description: |
-            Optional scope hints. Best-effort metadata for the UI; real
-            scope enforcement happens at GitHub.
+            Ignored. The server now derives real scopes from GitHub's
+            X-OAuth-Scopes response header by calling GET /user with the
+            supplied token, so user-supplied scope hints are no longer
+            consulted. Kept for backwards compatibility with older
+            clients that still send it.
 
     WorkspaceRepo:
       type: object

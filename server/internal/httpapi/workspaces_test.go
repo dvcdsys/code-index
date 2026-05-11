@@ -12,9 +12,38 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
+// fakeGithubAPIScopes is the comma-separated X-OAuth-Scopes value the
+// in-test GitHub stub returns from GET /user. Tests that need to check
+// scope-from-header propagation read this constant.
+const fakeGithubAPIScopes = "repo, admin:repo_hook"
+
+// fakeGithubAPI returns the base URL of an httptest server that
+// answers GET /user with 200 + a stable X-OAuth-Scopes header — the
+// minimum the token-creation handler needs to think a PAT is valid.
+// Exposed so individual tests can swap in different responses (e.g. a
+// 401 to exercise the rejection path) by overriding Deps.GithubAPIBaseURL.
+func fakeGithubAPI(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("X-OAuth-Scopes", fakeGithubAPIScopes)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"login": "test-user"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
 // workspaceRouter spins up a chi router with auth disabled, workspaces
 // enabled, and an in-memory backing store. Helpers stay tight; the
 // existing dbOpenMemory + seedless* shims live in auth_test.go.
+//
+// The token-creation handler now calls GET /user to validate the PAT
+// and read X-OAuth-Scopes. Tests get a deterministic stub via
+// fakeGithubAPI so we don't hit the real api.github.com.
 func workspaceRouter(t *testing.T, enabled bool) http.Handler {
 	t.Helper()
 	d, err := dbOpenMemory(t)
@@ -50,6 +79,7 @@ func workspaceRouter(t *testing.T, enabled bool) http.Handler {
 		WorkspacesEnabled: enabled,
 		Workspaces:        wsSvc,
 		GithubTokens:      ghSvc,
+		GithubAPIBaseURL:  fakeGithubAPI(t),
 	})
 }
 
@@ -153,10 +183,13 @@ func TestGithubTokens_CRUD_PlaintextNotEchoed(t *testing.T) {
 	router := workspaceRouter(t, true)
 
 	const secret = "ghp_super_secret_test_value_donotleak"
+	// User-supplied scopes in the body are deliberately wrong here;
+	// the server must ignore them and use what the (stubbed) GitHub
+	// API advertises via X-OAuth-Scopes.
 	rr := doJSON(t, router, http.MethodPost, "/api/v1/github-tokens", map[string]any{
 		"name":   "personal",
 		"token":  secret,
-		"scopes": []string{"repo", "admin:repo_hook"},
+		"scopes": []string{"deliberately-wrong-scope"},
 	})
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d (%s)", rr.Code, rr.Body.String())
@@ -169,8 +202,13 @@ func TestGithubTokens_CRUD_PlaintextNotEchoed(t *testing.T) {
 	if created.ID == "" || created.Name != "personal" {
 		t.Fatalf("unexpected payload: %+v", created)
 	}
-	if len(created.Scopes) != 2 {
-		t.Fatalf("scopes lost in round-trip: %+v", created.Scopes)
+	// Scopes must come from the stub's X-OAuth-Scopes header,
+	// not from the request body — that's the whole point of the
+	// validate-against-GitHub flow.
+	if len(created.Scopes) != 2 ||
+		created.Scopes[0] != "repo" ||
+		created.Scopes[1] != "admin:repo_hook" {
+		t.Fatalf("expected scopes from X-OAuth-Scopes header, got %v", created.Scopes)
 	}
 
 	// List must not contain plaintext anywhere.
@@ -186,6 +224,51 @@ func TestGithubTokens_CRUD_PlaintextNotEchoed(t *testing.T) {
 	rr = doJSON(t, router, http.MethodDelete, "/api/v1/github-tokens/"+created.ID, nil)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("delete: expected 204, got %d", rr.Code)
+	}
+}
+
+// TestGithubTokens_RejectInvalidToken — when GitHub answers 401 we must
+// surface a 422 with a clear message rather than persisting an unusable
+// token. Exercised with a one-off stub that always rejects.
+func TestGithubTokens_RejectInvalidToken(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	sec, err := secrets.Open(secrets.OpenOptions{DataDir: t.TempDir(), AllowGenerate: true})
+	if err != nil {
+		t.Fatalf("open secrets: %v", err)
+	}
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message": "Bad credentials"}`))
+	}))
+	t.Cleanup(stub.Close)
+
+	router := NewRouter(Deps{
+		DB:                d,
+		ServerVersion:     "test",
+		APIVersion:        "v1",
+		Backend:           "go",
+		AuthDisabled:      true,
+		Users:             seedlessUsers(d),
+		Sessions:          seedlessSessions(d),
+		APIKeys:           seedlessAPIKeys(d),
+		WorkspacesEnabled: true,
+		Workspaces:        workspaces.New(d),
+		GithubTokens:      githubtokens.New(d, sec),
+		GithubAPIBaseURL:  stub.URL,
+	})
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/github-tokens", map[string]any{
+		"name":  "personal",
+		"token": "ghp_bad",
+	})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 on invalid token, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("Bad credentials")) {
+		t.Fatalf("error body should surface GitHub message, got %s", rr.Body.String())
 	}
 }
 

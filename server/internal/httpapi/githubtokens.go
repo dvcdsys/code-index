@@ -6,9 +6,21 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/githubapi"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 )
+
+// githubAPI returns a per-request GitHub client. The Deps override lets
+// tests point at an httptest server; in production BaseURL stays at
+// the canonical api.github.com via githubapi.New.
+func (s *Server) githubAPI() *githubapi.Client {
+	c := githubapi.New()
+	if s.Deps.GithubAPIBaseURL != "" {
+		c.BaseURL = s.Deps.GithubAPIBaseURL
+	}
+	return c
+}
 
 // githubTokenPayload mirrors openapi.GithubToken on the wire. Plaintext is
 // never carried — only the metadata. The plaintext only ever surfaces on
@@ -71,6 +83,12 @@ func (s *Server) ListGithubTokens(w http.ResponseWriter, r *http.Request) {
 // floor — only the metadata view comes back to the caller. We deliberately
 // do NOT echo the plaintext in the response: the caller already has it,
 // and re-serialising it would be a needless place for it to leak.
+//
+// Scopes are NOT taken from the request body — GitHub is the only
+// source of truth, so we call GET /user with the PAT, parse
+// X-OAuth-Scopes from the response header, and store what GitHub
+// actually advertises. The Scopes field on the request stays for
+// backwards compatibility with older clients but is ignored.
 func (s *Server) CreateGithubToken(w http.ResponseWriter, r *http.Request) {
 	if s.githubTokensUnavailable(w) {
 		return
@@ -80,11 +98,24 @@ func (s *Server) CreateGithubToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
 		return
 	}
-	scopes := []string{}
-	if body.Scopes != nil {
-		scopes = *body.Scopes
+	if body.Token == "" {
+		writeError(w, http.StatusUnprocessableEntity, "token value is required")
+		return
 	}
-	tok, err := s.Deps.GithubTokens.Create(r.Context(), body.Name, body.Token, scopes)
+
+	info, verr := s.githubAPI().ValidateToken(r.Context(), body.Token)
+	if verr != nil {
+		if errors.Is(verr, githubapi.ErrUnauthorized) {
+			writeError(w, http.StatusUnprocessableEntity,
+				"GitHub rejected the token: "+verr.Error())
+			return
+		}
+		writeError(w, http.StatusBadGateway,
+			"could not validate token with GitHub: "+verr.Error())
+		return
+	}
+
+	tok, err := s.Deps.GithubTokens.Create(r.Context(), body.Name, body.Token, info.Scopes)
 	if err != nil {
 		switch {
 		case errors.Is(err, githubtokens.ErrNameEmpty):
