@@ -149,6 +149,33 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
     updated_at TEXT NOT NULL,
     updated_by TEXT
 );
+
+-- Workspaces feature (PR1 — skeleton). Workspaces group GitHub repositories
+-- for cross-project semantic search. Server-wide shared: every authenticated
+-- user can see and modify any workspace (per the chosen visibility model).
+-- The richer workspace_repos / call_edges / communities tables land in
+-- subsequent PRs of the workspaces feature branch.
+CREATE TABLE IF NOT EXISTS workspaces (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+-- github_tokens stores GitHub Personal Access Tokens encrypted at rest with
+-- AES-256-GCM. Only the encrypted blob ever lives in SQLite — the plaintext
+-- is returned exactly once on POST /api/v1/github-tokens and then forgotten.
+-- The encryption key comes from CIX_SECRET_KEY / CIX_SECRET_KEYFILE / a
+-- generated keyfile (see internal/secrets).
+CREATE TABLE IF NOT EXISTS github_tokens (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    encrypted    BLOB NOT NULL,
+    scopes       TEXT,
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT
+);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -163,4 +190,6 @@ var ExpectedTables = []string{
 	"sessions",
 	"api_keys",
 	"runtime_settings",
+	"workspaces",
+	"github_tokens",
 }
