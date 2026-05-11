@@ -151,7 +151,10 @@ function TokenRow({ token, onDeleted }: { token: GithubToken; onDeleted: () => v
       <div className="min-w-0">
         <div className="truncate font-medium">{token.name}</div>
         <div className="truncate text-xs text-muted-foreground">
-          scopes: {token.scopes.length ? token.scopes.join(', ') : '—'}
+          scopes:{' '}
+          {token.scopes.length
+            ? token.scopes.join(', ')
+            : '(fine-grained or none)'}
           {token.last_used_at && (
             <> · last used {new Date(token.last_used_at).toLocaleString()}</>
           )}
@@ -168,22 +171,20 @@ function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [token, setToken] = useState('');
-  const [scopes, setScopes] = useState('repo');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Scopes are intentionally not asked for — the server validates the
+  // token against GET /user and reads the real X-OAuth-Scopes header,
+  // which is the only thing GitHub will actually enforce. Asking the
+  // user just invites drift between displayed and effective scopes.
   async function submit() {
     setBusy(true);
     setErr(null);
     try {
-      const scopeList = scopes
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      await api.post('/github-tokens', { name, token, scopes: scopeList });
+      await api.post('/github-tokens', { name, token });
       setName('');
       setToken('');
-      setScopes('repo');
       setOpen(false);
       onCreated();
     } catch (e) {
@@ -207,7 +208,8 @@ function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
           <DialogDescription>
             Stored encrypted-at-rest with AES-256-GCM. The plaintext value
             never leaves this request — there is no way to retrieve it after
-            saving.
+            saving. Scopes are read from GitHub on save (no need to enter
+            them here).
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
@@ -228,17 +230,8 @@ function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
               type="password"
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder="ghp_..."
+              placeholder="ghp_... or github_pat_..."
               className="font-mono"
-            />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="tok-scopes">Scopes (comma-separated)</Label>
-            <Input
-              id="tok-scopes"
-              value={scopes}
-              onChange={(e) => setScopes(e.target.value)}
-              placeholder="repo, admin:repo_hook"
             />
           </div>
           {err && (

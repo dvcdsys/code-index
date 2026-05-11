@@ -95,6 +95,12 @@ type Deps struct {
 	// operator to prepend their tunnel origin manually. Source:
 	// CIX_PUBLIC_URL.
 	PublicBaseURL string
+	// GithubAPIBaseURL overrides the GitHub REST API base for the
+	// per-request client constructed inside token / webhook handlers.
+	// Empty in production (the client defaults to https://api.github.com).
+	// Tests set this to an httptest server so they can assert the
+	// scopes / validation flow without hitting the real API.
+	GithubAPIBaseURL string
 }
 
 // NewRouter builds the chi router with middleware and the generated
