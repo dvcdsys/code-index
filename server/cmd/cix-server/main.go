@@ -264,6 +264,7 @@ func run() error {
 			WorkspaceRepos: wrSvc,
 			GithubTokens:   ghSvc,
 			Indexer:        idx,
+			VectorStore:    vs,
 			DataDir:        cfg.WorkspacesDataDir,
 			Logger:         logger,
 		})
