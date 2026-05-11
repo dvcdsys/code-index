@@ -1218,6 +1218,175 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/workspaces/{id}/repos:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Workspace ID.
+    get:
+      operationId: listWorkspaceRepos
+      tags: [workspaces]
+      summary: List repositories attached to a workspace
+      responses:
+        "200":
+          description: Repo list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceRepoListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    post:
+      operationId: addWorkspaceRepo
+      tags: [workspaces]
+      summary: Attach a GitHub repository to a workspace
+      description: |
+        Inserts a workspace_repos row in status `pending` and enqueues a
+        `clone_repo` background job. The clone job is followed by an
+        `index_repo` job on success; the dashboard polls
+        `/api/v1/workspaces/{id}/repos` to surface status transitions.
+
+        Provide `token_id` to clone a private repository. The
+        `auto_webhook` flag is accepted in PR2 but not yet acted upon —
+        PR3 wires the auto-register path against the GitHub API.
+
+        The response includes a one-shot `webhook_url` + `webhook_secret`
+        so an operator can manually register the webhook in GitHub if
+        `auto_webhook` is false. The secret is also returned by the
+        webhook-info endpoint added in PR3.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddWorkspaceRepoRequest"
+      responses:
+        "201":
+          description: Repo attached + clone enqueued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceRepoCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}/repos/{repo_id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: repo_id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: deleteWorkspaceRepo
+      tags: [workspaces]
+      summary: Detach a repository from a workspace
+      description: |
+        Removes the workspace_repos row. The cloned directory on disk and
+        the indexed project rows remain — a follow-up cleanup job lands
+        in a later release. PR3 will also de-register the GitHub webhook
+        when auto_webhook=true.
+      responses:
+        "204":
+          description: Detached
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}/repos/{repo_id}/reindex:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: repo_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: reindexWorkspaceRepo
+      tags: [workspaces]
+      summary: Manually re-trigger the clone + index pipeline
+      description: |
+        Enqueues a fresh `clone_repo` job for the repo. Dedupe collapses
+        repeated triggers into the existing in-flight job — only one
+        clone is ever active per repo at a time.
+      responses:
+        "202":
+          description: Reindex enqueued (or already running — dedupe)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReindexEnqueuedResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/jobs:
+    get:
+      operationId: listJobs
+      tags: [workspaces]
+      summary: List background jobs (status / type filter)
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, running, completed, failed]
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: Job list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
   /api/v1/github-tokens:
     get:
       operationId: listGithubTokens
@@ -2620,3 +2789,185 @@ components:
           description: |
             Optional scope hints. Best-effort metadata for the UI; real
             scope enforcement happens at GitHub.
+
+    WorkspaceRepo:
+      type: object
+      required:
+        - id
+        - workspace_id
+        - github_url
+        - branch
+        - project_path
+        - status
+        - auto_webhook
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        workspace_id:
+          type: string
+        github_url:
+          type: string
+          description: Canonical https://github.com/owner/repo URL.
+        branch:
+          type: string
+        project_path:
+          type: string
+          description: |
+            Indexed project's host_path — "github.com/owner/repo@branch".
+            Use this with the existing /api/v1/projects/{path}/* endpoints
+            (path = first 16 hex chars of SHA1).
+        token_id:
+          type: string
+          nullable: true
+          description: |
+            GitHub token used for clone+webhook calls. Null when the
+            repo is public.
+        auto_webhook:
+          type: boolean
+          description: Whether the server should auto-register the webhook.
+        status:
+          type: string
+          enum: [pending, cloning, indexing, indexed, failed]
+        last_sha:
+          type: string
+          nullable: true
+          description: HEAD SHA at last successful clone.
+        last_error:
+          type: string
+          nullable: true
+        last_indexed_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    WorkspaceRepoListResponse:
+      type: object
+      required: [repos, total]
+      properties:
+        repos:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceRepo"
+        total:
+          type: integer
+
+    AddWorkspaceRepoRequest:
+      type: object
+      required: [github_url, branch]
+      properties:
+        github_url:
+          type: string
+          description: https://github.com/owner/repo URL.
+        branch:
+          type: string
+          minLength: 1
+        token_id:
+          type: string
+          description: |
+            Optional id of a stored GitHub PAT. Required for private repos.
+        auto_webhook:
+          type: boolean
+          default: false
+          description: |
+            When true, the server will try to register the webhook in
+            GitHub on the operator's behalf (PR3+). Requires the PAT to
+            carry admin:repo_hook scope.
+
+    WorkspaceRepoCreated:
+      type: object
+      required: [repo, webhook_url, webhook_secret]
+      properties:
+        repo:
+          $ref: "#/components/schemas/WorkspaceRepo"
+        webhook_url:
+          type: string
+          description: |
+            Publicly-reachable POST endpoint to register in GitHub when
+            doing the webhook setup manually. Includes the workspace_repo
+            id segment.
+        webhook_secret:
+          type: string
+          description: |
+            HMAC secret. **Returned once on create + once via
+            webhook-info.** Use as the "Secret" field in GitHub's webhook
+            UI; deliveries are validated by HMAC-SHA256 over the body.
+
+    ReindexEnqueuedResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [enqueued, already_running]
+        repo:
+          $ref: "#/components/schemas/WorkspaceRepo"
+
+    Job:
+      type: object
+      required:
+        - id
+        - type
+        - status
+        - attempts
+        - max_attempts
+        - scheduled_at
+        - created_at
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        dedupe_key:
+          type: string
+          nullable: true
+        payload:
+          type: object
+          additionalProperties: true
+          description: |
+            Raw JSON payload — shape depends on `type`. Render as-is in
+            the dashboard; don't assume structure.
+        attempts:
+          type: integer
+          minimum: 0
+        max_attempts:
+          type: integer
+          minimum: 0
+        last_error:
+          type: string
+          nullable: true
+        scheduled_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    JobListResponse:
+      type: object
+      required: [jobs, total]
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        total:
+          type: integer

@@ -120,6 +120,25 @@ type Config struct {
 	// lives alongside the encrypted data — losing one almost certainly
 	// means losing both.
 	SecretsDataDir string
+
+	// WorkspacesDataDir is the parent directory the worker pool clones
+	// GitHub repositories under (workspace_repos.{id}/). Defaults to
+	// <SQLite parent>/repos. Source: CIX_WORKSPACES_DATA_DIR.
+	WorkspacesDataDir string
+
+	// WorkerConcurrency controls how many jobs goroutines drain the
+	// queue at once. Clone+index is mostly IO; 2 is a sensible default
+	// for a self-hosted single-node deployment. Source:
+	// CIX_WORKER_CONCURRENCY (default 2).
+	WorkerConcurrency int
+
+	// PublicBaseURL is the externally-reachable URL of this server
+	// (e.g. "https://cix.example.com"). Used to construct webhook
+	// delivery URLs surfaced to operators on POST /workspaces/{id}/repos.
+	// Optional — when empty, handlers return path-only URLs and trust
+	// the operator to prepend their tunnel/proxy origin. Source:
+	// CIX_PUBLIC_URL.
+	PublicBaseURL string
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -301,6 +320,15 @@ func Load() (*Config, error) {
 	c.SecretKey = getenv("CIX_SECRET_KEY", "")
 	c.SecretKeyFile = getenv("CIX_SECRET_KEYFILE", "")
 	c.SecretsDataDir = getenv("CIX_SECRETS_DATA_DIR", filepath.Dir(c.SQLitePath))
+	c.WorkspacesDataDir = getenv("CIX_WORKSPACES_DATA_DIR", filepath.Join(filepath.Dir(c.SQLitePath), "repos"))
+
+	workerConc, err := getenvInt("CIX_WORKER_CONCURRENCY", 2)
+	if err != nil {
+		return nil, err
+	}
+	c.WorkerConcurrency = workerConc
+
+	c.PublicBaseURL = strings.TrimSpace(getenv("CIX_PUBLIC_URL", ""))
 
 	return c, nil
 }
