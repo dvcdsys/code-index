@@ -116,6 +116,82 @@ func TestDeleteWebhookTreats404AsSuccess(t *testing.T) {
 	}
 }
 
+func TestValidateTokenReturnsScopesFromHeader(t *testing.T) {
+	c, recs := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-OAuth-Scopes", "repo, admin:repo_hook, read:org")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"login": "alice"}`))
+	}))
+	info, err := c.ValidateToken(context.Background(), "ghp_xxx")
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if info.Login != "alice" {
+		t.Fatalf("login: %q", info.Login)
+	}
+	want := []string{"repo", "admin:repo_hook", "read:org"}
+	if len(info.Scopes) != len(want) {
+		t.Fatalf("scopes: got %v, want %v", info.Scopes, want)
+	}
+	for i, s := range want {
+		if info.Scopes[i] != s {
+			t.Fatalf("scope[%d]=%q want %q", i, info.Scopes[i], s)
+		}
+	}
+	if info.FineGrained {
+		t.Fatalf("ghp_ prefix should not be fine-grained")
+	}
+	if len(*recs) != 1 || (*recs)[0].Path != "/user" {
+		t.Fatalf("expected GET /user, got %+v", *recs)
+	}
+}
+
+func TestValidateTokenFineGrainedHasEmptyScopes(t *testing.T) {
+	c, _ := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Fine-grained PATs: GitHub omits X-OAuth-Scopes entirely.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"login": "alice"}`))
+	}))
+	info, err := c.ValidateToken(context.Background(), "github_pat_yyy")
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if !info.FineGrained {
+		t.Fatalf("github_pat_ prefix should be fine-grained")
+	}
+	if len(info.Scopes) != 0 {
+		t.Fatalf("expected empty scopes for fine-grained, got %v", info.Scopes)
+	}
+}
+
+func TestValidateTokenUnauthorized(t *testing.T) {
+	c, _ := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message": "Bad credentials"}`))
+	}))
+	_, err := c.ValidateToken(context.Background(), "bad")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "Bad credentials") {
+		t.Fatalf("error should surface github message, got %v", err)
+	}
+}
+
+func TestValidateTokenEmptyHeaderYieldsNilScopes(t *testing.T) {
+	c, _ := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-OAuth-Scopes", "")
+		_, _ = w.Write([]byte(`{"login": "alice"}`))
+	}))
+	info, err := c.ValidateToken(context.Background(), "ghp_x")
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if len(info.Scopes) != 0 {
+		t.Fatalf("empty header should yield empty scopes, got %v", info.Scopes)
+	}
+}
+
 func TestParseOwnerRepo(t *testing.T) {
 	cases := map[string][2]string{
 		"https://github.com/spf13/cobra":      {"spf13", "cobra"},

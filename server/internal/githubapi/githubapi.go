@@ -32,6 +32,18 @@ import (
 // manual or rotate the PAT".
 var ErrUnauthorized = errors.New("github API rejected the token")
 
+// TokenInfo carries the metadata we learn about a PAT by calling
+// GET /user. The truth about scopes lives on GitHub, not in user input,
+// so we always read X-OAuth-Scopes from the response.
+//
+// Fine-grained PATs (github_pat_*) do not advertise scopes via this
+// header — for them Scopes is empty and FineGrained is true.
+type TokenInfo struct {
+	Login       string
+	Scopes      []string
+	FineGrained bool
+}
+
 // ErrNotFound is the 404 sentinel (e.g. repo missing or token can't see
 // it).
 var ErrNotFound = errors.New("github API: not found")
@@ -128,6 +140,75 @@ func (c *Client) CreateWebhook(ctx context.Context, opts CreateWebhookOptions) (
 	default:
 		return HookResponse{}, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(respBody))
 	}
+}
+
+// ValidateToken probes GET /user with the given PAT, returning the
+// authenticated login plus the scopes GitHub advertises in the
+// X-OAuth-Scopes response header. A 401/403 yields ErrUnauthorized so
+// the caller can reject token creation with a precise message.
+//
+// We treat X-OAuth-Scopes as the only authoritative source of scope
+// information: it is what GitHub will actually enforce, so storing
+// anything else (e.g. user-typed strings) just invites drift.
+func (c *Client) ValidateToken(ctx context.Context, pat string) (TokenInfo, error) {
+	if pat == "" {
+		return TokenInfo{}, fmt.Errorf("PAT required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/user", nil)
+	if err != nil {
+		return TokenInfo{}, err
+	}
+	c.signRequest(req, pat)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return TokenInfo{}, fmt.Errorf("github API: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var u struct {
+			Login string `json:"login"`
+		}
+		if err := json.Unmarshal(respBody, &u); err != nil {
+			return TokenInfo{}, fmt.Errorf("parse /user response: %w", err)
+		}
+		info := TokenInfo{
+			Login:       u.Login,
+			Scopes:      parseScopeHeader(resp.Header.Get("X-OAuth-Scopes")),
+			FineGrained: strings.HasPrefix(pat, "github_pat_"),
+		}
+		return info, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return TokenInfo{}, fmt.Errorf("%w: %s", ErrUnauthorized, githubMessage(respBody))
+	default:
+		return TokenInfo{}, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(respBody))
+	}
+}
+
+// parseScopeHeader splits the comma-separated X-OAuth-Scopes value
+// GitHub returns on classic PATs. An empty header (typical for
+// fine-grained PATs or a token with no scopes) yields a nil slice
+// rather than [""]; callers that need a stable JSON shape replace nil
+// with []string{} at the boundary.
+func parseScopeHeader(h string) []string {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return nil
+	}
+	parts := strings.Split(h, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		s := strings.TrimSpace(p)
+		if s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // DeleteWebhook calls DELETE /repos/{owner}/{repo}/hooks/{id}. Treats
