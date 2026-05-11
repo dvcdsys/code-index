@@ -133,17 +133,66 @@ func (s *Server) CreateGithubToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, githubTokenToPayload(tok))
 }
 
+// ListTokenAccounts — GET /api/v1/github-tokens/{id}/accounts.
+//
+// Returns the PAT owner plus every org the PAT can see (/user/orgs).
+// The dashboard uses this as the first step of the add-repo flow so
+// the operator can drill into a specific account before picking a
+// repository — useful when /user/repos misses SAML-protected org
+// repos that only surface under /orgs/{login}/repos.
+func (s *Server) ListTokenAccounts(w http.ResponseWriter, r *http.Request, id string) {
+	if s.githubTokensUnavailable(w) {
+		return
+	}
+
+	pat, err := s.Deps.GithubTokens.Reveal(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, githubtokens.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "github token not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load github token")
+		return
+	}
+
+	accounts, lerr := s.githubAPI().ListAccounts(r.Context(), pat)
+	if lerr != nil {
+		if errors.Is(lerr, githubapi.ErrUnauthorized) {
+			writeError(w, http.StatusUnprocessableEntity,
+				"GitHub rejected the token: "+lerr.Error())
+			return
+		}
+		writeError(w, http.StatusBadGateway,
+			"could not list accounts via GitHub: "+lerr.Error())
+		return
+	}
+	_ = s.Deps.GithubTokens.Touch(r.Context(), id)
+
+	out := make([]openapi.GithubAccount, 0, len(accounts))
+	for _, a := range accounts {
+		out = append(out, openapi.GithubAccount{
+			Login:     a.Login,
+			Type:      openapi.GithubAccountType(a.Type),
+			AvatarUrl: ptrStr(a.AvatarURL),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accounts": out,
+		"total":    len(out),
+	})
+}
+
 // ListTokenRepos — GET /api/v1/github-tokens/{id}/repos.
 //
-// Reveals the PAT server-side, calls GitHub's /user/repos paginated
-// endpoint, and returns the resulting list to the dashboard so it can
-// render a repo picker. The PAT never leaves the server.
+// Reveals the PAT server-side and returns the repos visible to it.
+// When `account` is set, the server scopes the listing to that
+// account's /users/{login}/repos or /orgs/{login}/repos endpoint;
+// when not, it falls back to /user/repos (affiliations-aggregated).
 //
-// Up to 500 repos (5 pages × 100) so a worst-case org-member with lots
-// of affiliations doesn't have to deal with infinite scroll. If the
-// caller passes ?q=, results are filtered to repos whose full_name
-// contains q (case-insensitive). We keep filtering on the server so
-// the dashboard fetch stays a single round-trip.
+// Up to 500 repos (5 pages × 100) so a worst-case org-member with
+// lots of affiliations doesn't have to deal with infinite scroll. The
+// optional ?q= substring filter is applied server-side so the
+// dashboard fetch stays a single round-trip.
 func (s *Server) ListTokenRepos(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -165,11 +214,33 @@ func (s *Server) ListTokenRepos(
 	}
 
 	const maxPages = 5
-	repos, lerr := s.githubAPI().ListUserRepos(r.Context(), pat, maxPages)
+
+	var (
+		repos []githubapi.Repo
+		lerr  error
+	)
+	if params.Account != nil && *params.Account != "" {
+		if params.AccountType == nil {
+			writeError(w, http.StatusUnprocessableEntity,
+				"account_type is required when account is set")
+			return
+		}
+		accountType := githubapi.AccountType(*params.AccountType)
+		repos, lerr = s.githubAPI().ListReposForAccount(
+			r.Context(), pat, accountType, *params.Account, maxPages,
+		)
+	} else {
+		repos, lerr = s.githubAPI().ListUserRepos(r.Context(), pat, maxPages)
+	}
 	if lerr != nil {
 		if errors.Is(lerr, githubapi.ErrUnauthorized) {
 			writeError(w, http.StatusUnprocessableEntity,
 				"GitHub rejected the token: "+lerr.Error())
+			return
+		}
+		if errors.Is(lerr, githubapi.ErrNotFound) {
+			writeError(w, http.StatusNotFound,
+				"account not found on GitHub: "+lerr.Error())
 			return
 		}
 		writeError(w, http.StatusBadGateway,

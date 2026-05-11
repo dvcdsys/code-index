@@ -73,6 +73,19 @@ export type GithubRepoListResponse = {
   total: number;
 };
 
+export type GithubAccountType = 'user' | 'org';
+
+export type GithubAccount = {
+  login: string;
+  type: GithubAccountType;
+  avatar_url?: string;
+};
+
+export type GithubAccountListResponse = {
+  accounts: GithubAccount[];
+  total: number;
+};
+
 export type WorkspaceRepoCreated = {
   repo: WorkspaceRepo;
   webhook_url: string;
