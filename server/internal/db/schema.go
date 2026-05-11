@@ -240,6 +240,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedupe_active ON jobs(dedupe_key)
 CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status, scheduled_at)
     WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_jobs_type_status ON jobs(type, status);
+
+-- Workspaces feature PR4 — call_edges + edge_provenance.
+--
+-- call_edges holds the approximate caller→callee edges that Louvain
+-- consumes in PR5. It is a CO-OCCURRENCE graph, not an exact call graph:
+-- we resolve callees by name lookup in the symbols table constrained
+-- by the caller's enclosing scope, then weight each edge inversely with
+-- the callee-name popcount (1 / N). That keeps Louvain robust to
+-- name-collision noise (common in Python/JS) without needing per-language
+-- type resolution.
+--
+-- One row per (caller, callee). Duplicate caller→callee pairs collapse
+-- by accumulating weight at insert time (handler-side INSERT OR REPLACE
+-- against the unique constraint below). source identifies which heuristic
+-- produced the edge — useful for the eval harness and for swapping in
+-- alternative graph builders without dropping the table.
+CREATE TABLE IF NOT EXISTS call_edges (
+    project_path  TEXT NOT NULL,
+    caller_symbol TEXT NOT NULL,
+    callee_symbol TEXT NOT NULL,
+    weight        REAL NOT NULL,
+    source        TEXT NOT NULL DEFAULT 'refs_heuristic',
+    PRIMARY KEY (project_path, caller_symbol, callee_symbol),
+    FOREIGN KEY (project_path) REFERENCES projects(host_path) ON DELETE CASCADE,
+    FOREIGN KEY (caller_symbol) REFERENCES symbols(id) ON DELETE CASCADE,
+    FOREIGN KEY (callee_symbol) REFERENCES symbols(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_call_edges_project ON call_edges(project_path);
+CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_symbol);
+CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_symbol);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -258,4 +288,5 @@ var ExpectedTables = []string{
 	"github_tokens",
 	"workspace_repos",
 	"jobs",
+	"call_edges",
 }

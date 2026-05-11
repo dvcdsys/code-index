@@ -33,6 +33,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/callgraph"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
@@ -193,6 +194,23 @@ func handleIndex(ctx context.Context, d Deps, job jobs.Job) error {
 		d.recordFailure(ctx, wr.ID, fmt.Errorf("index: %w", err))
 		return err
 	}
+
+	// Post-index — build the call-graph used by Louvain in PR5. Non-fatal:
+	// if extraction fails, we still consider the repo "indexed" (semantic
+	// search continues to work without the graph). The error gets logged
+	// so operators can diagnose.
+	if stats, cgErr := callgraph.Build(ctx, d.DB, wr.ProjectPath, callgraph.DefaultOptions()); cgErr != nil {
+		d.Logger.Warn("workspacejobs: callgraph build failed",
+			"repo_id", wr.ID, "err", cgErr)
+	} else {
+		d.Logger.Info("workspacejobs: callgraph built",
+			"repo_id", wr.ID,
+			"project_path", wr.ProjectPath,
+			"refs_considered", stats.RefsConsidered,
+			"refs_with_caller", stats.RefsWithCaller,
+			"edges", stats.EdgesAccumulated)
+	}
+
 	now := time.Now().UTC()
 	if err := d.WorkspaceRepos.SetStatus(ctx, wr.ID, workspacerepos.StatusIndexed, "", "", &now); err != nil {
 		return fmt.Errorf("mark indexed: %w", err)
