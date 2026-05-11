@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Boxes, Plus, Search, Trash2 } from 'lucide-react';
+import { AlertCircle, Boxes, ChevronDown, ChevronRight, Plus, Search, Trash2 } from 'lucide-react';
 import { ApiError, api } from '@/api/client';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
@@ -26,6 +26,23 @@ type Workspace = {
 
 type WorkspaceListResponse = {
   workspaces: Workspace[];
+  total: number;
+};
+
+type WorkspaceRepo = {
+  id: string;
+  workspace_id: string;
+  github_url: string;
+  branch: string;
+  project_path: string;
+  status: 'pending' | 'cloning' | 'indexing' | 'indexed' | 'failed';
+  last_sha: string | null;
+  last_error: string | null;
+  last_indexed_at: string | null;
+};
+
+type WorkspaceRepoListResponse = {
+  repos: WorkspaceRepo[];
   total: number;
 };
 
@@ -133,6 +150,27 @@ function EmptyState() {
 
 function WorkspaceRow({ ws, onDeleted }: { ws: Workspace; onDeleted: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [repos, setRepos] = useState<WorkspaceRepo[] | null>(null);
+  const [reposErr, setReposErr] = useState<string | null>(null);
+
+  async function loadRepos() {
+    try {
+      const resp = await api.get<WorkspaceRepoListResponse>(`/workspaces/${ws.id}/repos`);
+      setRepos(resp.repos);
+      setReposErr(null);
+    } catch (e) {
+      setReposErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function toggleExpanded() {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && repos === null) {
+      void loadRepos();
+    }
+  }
 
   async function handleDelete() {
     if (!confirm(`Delete workspace "${ws.name}"?`)) return;
@@ -148,19 +186,89 @@ function WorkspaceRow({ ws, onDeleted }: { ws: Workspace; onDeleted: () => void 
   }
 
   return (
-    <li className="flex items-center justify-between gap-3 px-4 py-3">
-      <div className="min-w-0">
-        <div className="truncate font-medium">{ws.name}</div>
-        {ws.description && (
-          <div className="truncate text-xs text-muted-foreground">{ws.description}</div>
+    <li className="border-b last:border-b-0">
+      <div className="flex items-center gap-2 px-4 py-3">
+        <button
+          type="button"
+          onClick={toggleExpanded}
+          className="text-muted-foreground hover:text-foreground"
+          aria-label={expanded ? 'Collapse' : 'Expand'}
+        >
+          {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-medium">{ws.name}</div>
+          {ws.description && (
+            <div className="truncate text-xs text-muted-foreground">{ws.description}</div>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <WorkspaceSearchDialog workspace={ws} />
+          <Button variant="ghost" size="sm" disabled={busy} onClick={handleDelete}>
+            <Trash2 className="size-4" />
+          </Button>
+        </div>
+      </div>
+      {expanded && (
+        <div className="border-t bg-muted/20 px-4 py-2 pl-10">
+          {reposErr && (
+            <Alert variant="destructive" className="mb-2">
+              <AlertDescription>{reposErr}</AlertDescription>
+            </Alert>
+          )}
+          {repos === null && !reposErr && (
+            <div className="text-xs text-muted-foreground">Loading repos…</div>
+          )}
+          {repos !== null && repos.length === 0 && (
+            <div className="text-xs text-muted-foreground">
+              No repos attached yet. Use the Dashboard's add-repo flow.
+            </div>
+          )}
+          {repos !== null && repos.length > 0 && (
+            <ul className="space-y-1 text-sm">
+              {repos.map((r) => (
+                <RepoRow key={r.id} repo={r} />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function RepoRow({ repo }: { repo: WorkspaceRepo }) {
+  const statusColor = (() => {
+    switch (repo.status) {
+      case 'indexed':
+        return 'text-emerald-600 dark:text-emerald-400';
+      case 'failed':
+        return 'text-red-600 dark:text-red-400';
+      case 'pending':
+      case 'cloning':
+      case 'indexing':
+        return 'text-amber-600 dark:text-amber-400';
+      default:
+        return 'text-muted-foreground';
+    }
+  })();
+  return (
+    <li className="flex flex-col gap-0.5 rounded px-2 py-1">
+      <div className="flex items-baseline gap-2">
+        <span className={`font-mono text-xs ${statusColor}`}>{repo.status}</span>
+        <span className="truncate font-medium">{repo.github_url}@{repo.branch}</span>
+      </div>
+      <div className="truncate text-xs text-muted-foreground">
+        {repo.project_path}
+        {repo.last_indexed_at && (
+          <> · indexed {new Date(repo.last_indexed_at).toLocaleString()}</>
         )}
       </div>
-      <div className="flex items-center gap-1">
-        <WorkspaceSearchDialog workspace={ws} />
-        <Button variant="ghost" size="sm" disabled={busy} onClick={handleDelete}>
-          <Trash2 className="size-4" />
-        </Button>
-      </div>
+      {repo.last_error && (
+        <div className="truncate text-xs text-red-600 dark:text-red-400">
+          error: {repo.last_error}
+        </div>
+      )}
     </li>
   );
 }
