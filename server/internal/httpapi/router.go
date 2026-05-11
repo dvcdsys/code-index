@@ -16,11 +16,13 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
+	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
+	"github.com/dvcdsys/code-index/server/internal/workspacerepos"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -84,6 +86,15 @@ type Deps struct {
 	WorkspacesEnabled bool
 	Workspaces        *workspaces.Service
 	GithubTokens      *githubtokens.Service
+	// PR2 additions — repo attachment + the persistent job queue.
+	WorkspaceRepos *workspacerepos.Service
+	Jobs           *jobs.Service
+	// PublicBaseURL is the operator-set externally-reachable URL of the
+	// server. Used to build the webhook URL surfaced when adding a repo
+	// — when empty, handlers return the path-only form and rely on the
+	// operator to prepend their tunnel origin manually. Source:
+	// CIX_PUBLIC_URL.
+	PublicBaseURL string
 }
 
 // NewRouter builds the chi router with middleware and the generated

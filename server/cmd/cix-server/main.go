@@ -23,12 +23,15 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/httpapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
+	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
+	"github.com/dvcdsys/code-index/server/internal/workspacejobs"
+	"github.com/dvcdsys/code-index/server/internal/workspacerepos"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
@@ -194,14 +197,17 @@ func run() error {
 		}
 	}
 
-	// Workspaces feature wiring (PR1 — skeleton). The whole subsystem is
-	// gated by CIX_WORKSPACES_ENABLED so existing deployments don't surface
+	// Workspaces feature wiring. The whole subsystem is gated by
+	// CIX_WORKSPACES_ENABLED so existing deployments don't surface
 	// half-wired endpoints in /docs. When the flag is off we skip the
-	// secrets boot entirely so operators don't trip on encryption-key
-	// requirements they never opted into.
+	// secrets boot AND the job worker pool entirely so operators don't
+	// trip on encryption-key or polling-overhead concerns they never
+	// opted into.
 	var (
-		wsSvc *workspaces.Service
-		ghSvc *githubtokens.Service
+		wsSvc    *workspaces.Service
+		ghSvc    *githubtokens.Service
+		wrSvc    *workspacerepos.Service
+		jobsSvc  *jobs.Service
 	)
 	if cfg.WorkspacesEnabled {
 		secSvc, err := secrets.Open(secrets.OpenOptions{
@@ -243,6 +249,36 @@ func run() error {
 			logger.Info("workspaces: encryption key loaded", "source", secSvc.Source())
 		}
 		wsSvc = workspaces.New(database)
+		wrSvc = workspacerepos.New(database)
+
+		// Persistent job queue + worker pool. Worker concurrency comes
+		// from CIX_WORKER_CONCURRENCY (default 2). Handlers are registered
+		// before Start so racing inserts get picked up immediately.
+		jobsSvc = jobs.New(database, jobs.Options{
+			Concurrency: cfg.WorkerConcurrency,
+			Logger:      logger,
+		})
+		workspacejobs.Register(workspacejobs.Deps{
+			DB:             database,
+			Jobs:           jobsSvc,
+			WorkspaceRepos: wrSvc,
+			GithubTokens:   ghSvc,
+			Indexer:        idx,
+			DataDir:        cfg.WorkspacesDataDir,
+			Logger:         logger,
+		})
+		jobsSvc.Start(context.Background())
+		// Defer shutdown — stop new claims, drain in-flight work.
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := jobsSvc.Stop(stopCtx); err != nil {
+				logger.Warn("workspaces jobs: stop", "err", err)
+			}
+		}()
+		logger.Info("workspaces: jobs worker pool started",
+			"concurrency", cfg.WorkerConcurrency,
+			"data_dir", cfg.WorkspacesDataDir)
 	} else {
 		logger.Info("workspaces feature disabled (CIX_WORKSPACES_ENABLED=false)")
 	}
@@ -280,6 +316,9 @@ func run() error {
 		WorkspacesEnabled: cfg.WorkspacesEnabled,
 		Workspaces:        wsSvc,
 		GithubTokens:      ghSvc,
+		WorkspaceRepos:    wrSvc,
+		Jobs:              jobsSvc,
+		PublicBaseURL:     cfg.PublicBaseURL,
 	})
 
 	srv := &http.Server{

@@ -176,6 +176,70 @@ CREATE TABLE IF NOT EXISTS github_tokens (
     created_at   TEXT NOT NULL,
     last_used_at TEXT
 );
+
+-- Workspaces feature PR2 — workspace_repos + jobs.
+--
+-- One workspace_repos row per (repo, branch). project_path is the canonical
+-- "github.com/owner/repo@branch" string used as host_path in projects, so
+-- existing per-project SQL stays uniform across local + remote sources.
+-- webhook_secret is generated server-side at create time and shown exactly
+-- once to the operator (or used by the auto-register flow added in PR3).
+-- token_id stays nullable so public repos can be added without storing a PAT.
+-- last_sha / last_indexed_at survive across reindexes so an incremental
+-- fetch_repo job can short-circuit when HEAD hasn't moved.
+CREATE TABLE IF NOT EXISTS workspace_repos (
+    id              TEXT PRIMARY KEY,
+    workspace_id    TEXT NOT NULL,
+    github_url      TEXT NOT NULL,
+    branch          TEXT NOT NULL,
+    project_path    TEXT NOT NULL UNIQUE,
+    token_id        TEXT,
+    webhook_secret  TEXT NOT NULL,
+    webhook_id      INTEGER,
+    auto_webhook    INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    last_sha        TEXT,
+    last_error      TEXT,
+    last_indexed_at TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    UNIQUE(workspace_id, github_url, branch),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (token_id) REFERENCES github_tokens(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_repos_workspace ON workspace_repos(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_repos_project ON workspace_repos(project_path);
+
+-- jobs is the persistent worker queue. Survives process restarts; one
+-- worker pool drains it. dedupe_key is the partial-unique mechanism that
+-- collapses webhook bursts (e.g. 50 push deliveries for the same repo
+-- become 1 pending fetch_repo job). status transitions:
+--   pending → running → completed | failed
+-- Failed jobs may be re-enqueued by the worker up to a per-type retry
+-- budget (attempts column tracks the count).
+CREATE TABLE IF NOT EXISTS jobs (
+    id            TEXT PRIMARY KEY,
+    type          TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    dedupe_key    TEXT,
+    payload       TEXT NOT NULL DEFAULT '{}',
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    max_attempts  INTEGER NOT NULL DEFAULT 3,
+    last_error    TEXT,
+    scheduled_at  TEXT NOT NULL,
+    started_at    TEXT,
+    completed_at  TEXT,
+    created_at    TEXT NOT NULL
+);
+-- Partial unique index — at most one active job per dedupe_key. Insert
+-- a second pending row for the same key and SQLite raises a UNIQUE
+-- constraint error, which the jobs service translates to "already
+-- enqueued, no-op".
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedupe_active ON jobs(dedupe_key)
+    WHERE dedupe_key IS NOT NULL AND status IN ('pending','running');
+CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status, scheduled_at)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_jobs_type_status ON jobs(type, status);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -192,4 +256,6 @@ var ExpectedTables = []string{
 	"runtime_settings",
 	"workspaces",
 	"github_tokens",
+	"workspace_repos",
+	"jobs",
 }
