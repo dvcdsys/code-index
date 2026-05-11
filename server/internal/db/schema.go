@@ -270,6 +270,38 @@ CREATE TABLE IF NOT EXISTS call_edges (
 CREATE INDEX IF NOT EXISTS idx_call_edges_project ON call_edges(project_path);
 CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_symbol);
 CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_symbol);
+
+-- Workspaces feature PR5 — communities + community_members.
+--
+-- One community = one Louvain output cluster on the workspace's
+-- combined call_edges graph. label is derived heuristically from the
+-- top symbol names; parent_id is non-null for sub-communities produced
+-- by the >50-chunks recursive-split rule.
+--
+-- compute_workspace_communities job DELETES + reinserts all rows for
+-- a workspace_id on each rebuild, so the table reflects the latest
+-- Louvain output without orphans. The downstream centroid Chroma
+-- collection (workspace_{id}_centroids) is rebuilt in lock-step.
+CREATE TABLE IF NOT EXISTS communities (
+    id           TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    label        TEXT,
+    size         INTEGER NOT NULL DEFAULT 0,
+    parent_id    TEXT,
+    created_at   TEXT NOT NULL,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_id) REFERENCES communities(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_communities_workspace ON communities(workspace_id);
+
+CREATE TABLE IF NOT EXISTS community_members (
+    community_id TEXT NOT NULL,
+    project_path TEXT NOT NULL,
+    symbol_id    TEXT NOT NULL,
+    PRIMARY KEY (community_id, project_path, symbol_id),
+    FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_community_members_symbol ON community_members(project_path, symbol_id);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -289,4 +321,6 @@ var ExpectedTables = []string{
 	"workspace_repos",
 	"jobs",
 	"call_edges",
+	"communities",
+	"community_members",
 }
