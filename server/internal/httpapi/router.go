@@ -108,6 +108,12 @@ type Deps struct {
 // middleware. The generated chi-server mounts under a sub-router so the gate
 // stays in one place.
 func NewRouter(d Deps) http.Handler {
+	// Ensure handlers can call d.Logger.* without nil-checking everywhere.
+	// Tests routinely leave Logger zero — fall back to the global slog
+	// default which writes to stderr.
+	if d.Logger == nil {
+		d.Logger = slog.Default()
+	}
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)

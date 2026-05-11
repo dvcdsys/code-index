@@ -1316,6 +1316,111 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/workspaces/{id}/repos/{repo_id}/webhook-info:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: repo_id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getWorkspaceRepoWebhookInfo
+      tags: [workspaces]
+      summary: Get the webhook URL + secret for manual GitHub setup
+      description: |
+        Returns the publicly-reachable webhook URL and the HMAC secret.
+        Pair this with GitHub Settings → Webhooks when `auto_webhook` is
+        false. The secret rotates if the workspace_repo is deleted and
+        re-attached.
+      responses:
+        "200":
+          description: Webhook coordinates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookInfoResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/webhooks/github/{repo_id}:
+    parameters:
+      - name: repo_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: receiveGithubWebhook
+      tags: [workspaces]
+      summary: Receive a GitHub webhook delivery (public, HMAC-authenticated)
+      description: |
+        Public endpoint — `requireAuth` is bypassed. Authentication is
+        per-row via the `X-Hub-Signature-256` header which must be
+        HMAC-SHA256 of the request body keyed by the workspace_repo's
+        `webhook_secret`. Mismatched signatures return 401; unknown
+        `repo_id` returns 404. On a valid `push` for the tracked branch
+        the server enqueues a `fetch_repo` job (dedupe collapses burst
+        deliveries).
+
+        GitHub `ping` deliveries return 200 with no side effects so the
+        setup confirmation flow works.
+      security: []
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: false
+          schema:
+            type: string
+          description: HMAC-SHA256 over the body, hex-encoded with sha256= prefix.
+        - name: X-GitHub-Event
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "202":
+          description: Delivery accepted (enqueued or already in flight)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookAccepted"
+        "200":
+          description: Ping or no-op delivery
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookAccepted"
+        "401":
+          description: HMAC signature mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown workspace_repo id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
   /api/v1/workspaces/{id}/repos/{repo_id}/reindex:
     parameters:
       - name: id
@@ -2971,3 +3076,32 @@ components:
             $ref: "#/components/schemas/Job"
         total:
           type: integer
+
+    WebhookInfoResponse:
+      type: object
+      required: [webhook_url, webhook_secret, auto_registered]
+      properties:
+        webhook_url:
+          type: string
+          description: |
+            Full URL to paste into GitHub's webhook config. Empty path-only
+            value when CIX_PUBLIC_URL is unset — prepend your tunnel origin.
+        webhook_secret:
+          type: string
+          description: HMAC secret. Treat as sensitive — rotates on repo recreate.
+        auto_registered:
+          type: boolean
+          description: |
+            True when the server successfully auto-registered the webhook
+            against the GitHub API (auto_webhook=true on create + PAT had
+            admin:repo_hook). When false, the operator must register manually.
+
+    WebhookAccepted:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [enqueued, already_running, ignored, ping]
+        repo_id:
+          type: string
