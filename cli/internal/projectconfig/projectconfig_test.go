@@ -91,8 +91,8 @@ func TestSubmodulePaths_Standard(t *testing.T) {
 	writeFile(t, filepath.Join(root, ".gitmodules"), `[submodule "api/schema/acme-shared"]
 	path = api/schema/acme-shared
 	url = https://github.com/Example/acme-shared.git
-[submodule "api/generated/acme-models"]
-	path = api/generated/acme-models
+[submodule "api/models/acme-models"]
+	path = api/models/acme-models
 	url = https://github.com/Example/acme-models.git
 `)
 
@@ -102,7 +102,7 @@ func TestSubmodulePaths_Standard(t *testing.T) {
 	}
 
 	sort.Strings(paths)
-	expected := []string{"api/schema/acme-shared", "api/generated/acme-models"}
+	expected := []string{"api/models/acme-models", "api/schema/acme-shared"}
 
 	if len(paths) != len(expected) {
 		t.Fatalf("expected %v, got %v", expected, paths)

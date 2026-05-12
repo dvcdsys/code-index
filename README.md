@@ -488,7 +488,7 @@ Use `.cixignore` when you want to exclude files from the index that are **not** 
 ```gitignore
 # .cixignore
 api/generated/
-generated/
+vendor/
 *.pb.go
 testdata/fixtures/
 ```
