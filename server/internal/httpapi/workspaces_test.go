@@ -390,16 +390,17 @@ func TestGithubTokens_ListAccountsAndScopedRepos(t *testing.T) {
 		case "/user":
 			w.Header().Set("X-OAuth-Scopes", "repo")
 			_, _ = w.Write([]byte(`{"login":"alice"}`))
-		case "/user/orgs":
-			_, _ = w.Write([]byte(`[{"login":"acme"}]`))
 		case "/orgs/acme/repos":
-			_, _ = w.Write([]byte(`[{"full_name":"acme/api","default_branch":"main","private":true,"html_url":"https://github.com/acme/api"}]`))
+			_, _ = w.Write([]byte(`[{"full_name":"acme/api","default_branch":"main","private":true,"html_url":"https://github.com/acme/api","owner":{"login":"acme","type":"Organization"}}]`))
 		case "/users/alice/repos":
-			_, _ = w.Write([]byte(`[{"full_name":"alice/dotfiles","default_branch":"main","private":false,"html_url":"https://github.com/alice/dotfiles"}]`))
+			_, _ = w.Write([]byte(`[{"full_name":"alice/dotfiles","default_branch":"main","private":false,"html_url":"https://github.com/alice/dotfiles","owner":{"login":"alice","type":"User"}}]`))
 		case "/user/repos":
+			// /user/repos is the new source-of-truth for ListAccounts.
+			// owner.type tells the dashboard whether to render this as
+			// a user or org account in the dropdown.
 			_, _ = w.Write([]byte(`[
-				{"full_name":"alice/personal","default_branch":"main","private":false,"html_url":"https://github.com/alice/personal"},
-				{"full_name":"acme/shared","default_branch":"main","private":true,"html_url":"https://github.com/acme/shared"}
+				{"full_name":"alice/personal","default_branch":"main","private":false,"html_url":"https://github.com/alice/personal","owner":{"login":"alice","type":"User"}},
+				{"full_name":"acme/shared","default_branch":"main","private":true,"html_url":"https://github.com/acme/shared","owner":{"login":"acme","type":"Organization"}}
 			]`))
 		default:
 			http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)

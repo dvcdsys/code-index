@@ -38,11 +38,6 @@ import type {
 // choice as a distinct string and translate at the request boundary.
 const NO_TOKEN = '__none__';
 
-// Encodes the account-selector's "(all accessible)" choice — the
-// affiliations-aggregated view of /user/repos. Distinct from a
-// specific user/org account so the server can route the call.
-const ALL_ACCOUNTS = '__all__';
-
 // AddRepoDialog is a staged form: each step gates the next so the user
 // can't pick a repository before choosing a token, and can't submit
 // before pinning down a branch + webhook mode. The shape mirrors how
@@ -58,13 +53,15 @@ export function AddRepoDialog({
   const [tokens, setTokens] = useState<GithubToken[] | null>(null);
   const [tokenID, setTokenID] = useState<string>('');
 
-  // Account step — loaded after a token is picked. The first option
-  // is "(all accessible)" which keeps the original /user/repos
-  // behaviour; subsequent options scope the listing to a specific
-  // user or org so SAML-only repos surface.
+  // Account step — loaded after a token is picked. The list contains
+  // the PAT owner (user) plus every org from /user/orgs; the dashboard
+  // requires the operator to pick one specifically so we always know
+  // which slice of GitHub to query for the repo picker. Default is
+  // the first account returned (the user themselves).
   const [accounts, setAccounts] = useState<GithubAccount[] | null>(null);
   const [accountsErr, setAccountsErr] = useState<string | null>(null);
-  const [accountKey, setAccountKey] = useState<string>(ALL_ACCOUNTS);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountKey, setAccountKey] = useState<string>('');
 
   // The repo step. `repos` is the unfiltered fetch result; the visible
   // dropdown is filtered client-side by `repoQuery` so typing is
@@ -94,61 +91,65 @@ export function AddRepoDialog({
       .catch(() => setTokens([]));
   }, [open]);
 
-  // When a token is picked, fetch the accounts visible to it. Repo
-  // load is gated on a chosen account so the user can drill into a
-  // specific org rather than mining /user/repos for SAML-protected
-  // repos that the aggregated endpoint omits.
+  // When a token is picked, fetch the accounts visible to it. The
+  // first account in the response (always the PAT owner) is auto-
+  // selected so the repo picker can populate immediately without an
+  // extra user click.
   useEffect(() => {
     if (!tokenID || tokenID === NO_TOKEN) {
       setAccounts(null);
-      setAccountKey(ALL_ACCOUNTS);
+      setAccountKey('');
       setRepos(null);
       setSelectedRepo(null);
+      setAccountsLoading(false);
       return;
     }
     let cancelled = false;
     setAccountsErr(null);
-    setAccountKey(ALL_ACCOUNTS);
+    setAccountKey('');
     setRepos(null);
     setSelectedRepo(null);
+    setAccountsLoading(true);
     api
       .get<GithubAccountListResponse>(`/github-tokens/${tokenID}/accounts`)
       .then((r) => {
-        if (!cancelled) setAccounts(r.accounts);
+        if (cancelled) return;
+        setAccounts(r.accounts);
+        setAccountsLoading(false);
+        if (r.accounts.length > 0) {
+          setAccountKey(`${r.accounts[0].type}:${r.accounts[0].login}`);
+        }
       })
       .catch((e) => {
         if (cancelled) return;
         const msg =
           e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e);
         setAccountsErr(msg);
+        setAccountsLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [tokenID]);
 
-  // When the account selection changes, load the corresponding repo
-  // list. ALL_ACCOUNTS uses the affiliations-aggregated endpoint; a
-  // specific account uses /users/{login}/repos or /orgs/{login}/repos
-  // per the account's type.
+  // When the account selection changes, load that account's repos.
+  // /users/{login}/repos for user, /orgs/{login}/repos for org — we
+  // always scope the listing so the operator gets a predictable,
+  // bounded result instead of the aggregated view.
   useEffect(() => {
-    if (!tokenID || tokenID === NO_TOKEN) return;
+    if (!tokenID || tokenID === NO_TOKEN || !accountKey || !accounts) return;
+    const acc = accounts.find((a) => `${a.type}:${a.login}` === accountKey);
+    if (!acc) return;
+
     let cancelled = false;
     setReposLoading(true);
     setReposErr(null);
     setSelectedRepo(null);
 
-    const query: Record<string, string> = {};
-    if (accountKey !== ALL_ACCOUNTS && accounts) {
-      const acc = accounts.find((a) => `${a.type}:${a.login}` === accountKey);
-      if (acc) {
-        query.account = acc.login;
-        query.account_type = acc.type;
-      }
-    }
-
     api
-      .get<GithubRepoListResponse>(`/github-tokens/${tokenID}/repos`, { query })
+      .get<GithubRepoListResponse>(`/github-tokens/${tokenID}/repos`, {
+        query: { account: acc.login, account_type: acc.type },
+      })
       .then((r) => {
         if (!cancelled) {
           setRepos(r.repos);
@@ -215,7 +216,8 @@ export function AddRepoDialog({
     setTokenID('');
     setAccounts(null);
     setAccountsErr(null);
-    setAccountKey(ALL_ACCOUNTS);
+    setAccountsLoading(false);
+    setAccountKey('');
     setRepos(null);
     setReposErr(null);
     setSelectedRepo(null);
@@ -244,7 +246,7 @@ export function AddRepoDialog({
             <Plus className="mr-1 size-4" /> Add repo
           </Button>
         </DialogTrigger>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle>Repository attached</DialogTitle>
             <DialogDescription>
@@ -281,16 +283,24 @@ export function AddRepoDialog({
           <Plus className="mr-1 size-4" /> Add repo
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-lg">
+      {/* `min-w-0` on every direct grid child is the trick: DialogContent
+          is `display: grid`, and grid items default to `min-width: auto`
+          (= min-content). A long unbreakable repo full_name then blows
+          out the grid track and the whole dialog widens past max-w-lg.
+          Applying min-w-0 lets the track shrink and the inner truncate
+          actually take effect. */}
+      <DialogContent className="max-w-lg [&>*]:min-w-0">
         <DialogHeader>
           <DialogTitle>Add repository</DialogTitle>
           <DialogDescription>
-            Pick a token, then a repository. The branch defaults to the
-            repo's default branch — change it if you index a different one.
+            Pick a token, then an account and a repository. Branch
+            defaults to <code>main</code> — change it if the repo
+            uses a different one (the picker shows each repo's default
+            in the column on the right).
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           {/* Step 1: token */}
           <div className="space-y-1.5">
             <Label htmlFor="tok">GitHub token</Label>
@@ -322,9 +332,21 @@ export function AddRepoDialog({
             )}
           </div>
 
-          {/* Step 2: account — only shown once a token is chosen and accounts
-              loaded. Lets the user drill into a specific org instead of
-              the affiliations-aggregated view. */}
+          {/* Accounts fetch is paginated server-side (/user + up to 5
+              pages of /user/repos) and can take a few seconds against
+              a SSO-protected org. Surface a spinner so the form
+              doesn't look frozen between picking the token and the
+              account selector appearing. */}
+          {tokenID && tokenID !== NO_TOKEN && accountsLoading && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              Loading accounts visible to this token…
+            </div>
+          )}
+
+          {/* Step 2: account — the PAT owner plus every org they
+              belong to. The operator must pick one specifically so we
+              always know which slice of GitHub to ask. */}
           {tokenID && tokenID !== NO_TOKEN && accounts !== null && (
             <div className="space-y-1.5">
               <Label htmlFor="acc">Account</Label>
@@ -333,9 +355,6 @@ export function AddRepoDialog({
                   <SelectValue placeholder="Choose an account…" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value={ALL_ACCOUNTS}>
-                    (all accessible · personal + org repos)
-                  </SelectItem>
                   {accounts.map((a) => (
                     <SelectItem
                       key={`${a.type}:${a.login}`}
@@ -349,14 +368,24 @@ export function AddRepoDialog({
                   ))}
                 </SelectContent>
               </Select>
+              {accounts.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  GitHub returned no accounts for this token. Check the
+                  PAT has at least the <code>read:user</code> +{' '}
+                  <code>read:org</code> scopes.
+                </p>
+              )}
               {accountsErr && (
                 <p className="text-xs text-destructive">{accountsErr}</p>
               )}
             </div>
           )}
 
-          {/* Step 3: repository — only shown once a token is chosen */}
-          {tokenID && tokenID !== NO_TOKEN && (
+          {/* Step 3: repository — only shown once accounts are loaded
+              (and therefore an account auto-selected). Showing the
+              Repository label before that just renders an empty box
+              that adds to the "form is frozen" feeling. */}
+          {tokenID && tokenID !== NO_TOKEN && accounts !== null && (
             <div className="space-y-1.5">
               <Label htmlFor="repo-search">Repository</Label>
               {reposLoading ? (
@@ -379,7 +408,7 @@ export function AddRepoDialog({
                       setSelectedRepo(null);
                     }}
                   />
-                  <div className="max-h-56 overflow-y-auto rounded-md border">
+                  <div className="max-h-56 min-w-0 overflow-y-auto overflow-x-hidden rounded-md border">
                     {filteredRepos.length === 0 ? (
                       <div className="px-3 py-2 text-xs text-muted-foreground">
                         No matching repositories. {repos.length} total visible
@@ -396,7 +425,14 @@ export function AddRepoDialog({
                                 title={r.full_name}
                                 onClick={() => {
                                   setSelectedRepo(r);
-                                  setBranch(r.default_branch || 'main');
+                                  // Branch defaults to "main" and stays
+                                  // there when the user picks a repo —
+                                  // we deliberately do NOT auto-fill
+                                  // from the repo's default_branch so
+                                  // the form has a single, predictable
+                                  // default. The user can edit the
+                                  // branch input if the repo needs a
+                                  // different one (e.g. legacy master).
                                 }}
                                 className={`flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted ${
                                   active ? 'bg-muted' : ''

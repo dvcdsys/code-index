@@ -720,6 +720,35 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/projects/{path}/workspaces:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    get:
+      operationId: listProjectWorkspaces
+      tags: [projects]
+      summary: List workspaces that contain this project
+      description: |
+        Returns every workspace that has this project attached, owned or
+        linked. The project page uses this to show "Workspaces" chips
+        the user can click to jump to the workspace detail page.
+
+        Empty list when the project isn't part of any workspace yet —
+        either it was indexed directly via /projects rather than via a
+        workspace_repo, or all its memberships have been detached.
+      responses:
+        "200":
+          description: Memberships
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectWorkspaceList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/projects/{path}/search:
     parameters:
       - $ref: "#/components/parameters/ProjectHash"
@@ -1285,6 +1314,58 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/workspaces/{id}/repos/link:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: linkExistingProject
+      tags: [workspaces]
+      summary: Attach an already-indexed project to a workspace
+      description: |
+        Inserts a workspace_repos row marked `is_linked=true` pointing at
+        an existing indexed project. No clone happens, no index job is
+        enqueued, no GitHub webhook is registered — the row is a
+        lightweight membership pointer so workspace-level features
+        (search, communities, the repo list) include the project.
+
+        The project's `host_path` must be of the form
+        "github.com/owner/repo@branch" (i.e. created from a GitHub
+        source) and the project must be in `status='indexed'`. Per-
+        workspace uniqueness is enforced via the same composite UNIQUE
+        as the regular Add Repo flow — a project already in this
+        workspace (owned or linked) returns 409.
+
+        Use this when the user wants to bring an existing repo from
+        workspace A into workspace B without paying the clone+index
+        cost twice.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LinkExistingProjectRequest"
+      responses:
+        "201":
+          description: Linked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceRepoCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
   /api/v1/workspaces/{id}/repos/{repo_id}:
     parameters:
       - name: id
@@ -1326,19 +1407,28 @@ paths:
     get:
       operationId: workspaceSearch
       tags: [workspaces]
-      summary: Two-stage semantic search across all repos in a workspace
+      summary: Hybrid BM25+dense search across all repos in a workspace
       description: |
-        Runs the query through the workspace's centroid index (stage 1)
-        to pick the top-N functional communities, then fans out to the
-        per-project chromem collections (stage 2) restricted to chunks
-        whose symbols belong to those communities. Returns a merged
-        global ranking.
+        Embeds the query, then fans out two parallel sub-queries per
+        project: dense (chromem cosine) and sparse (SQLite FTS5 BM25
+        over chunks_fts). Per-project the two ranked lists are fused
+        via Reciprocal Rank Fusion (k=60).
 
-        Communities are populated by the background
-        `compute_workspace_communities` job — until that runs at least
-        once for a workspace, this endpoint returns an empty result with
-        `status: "communities_not_built"`. Add a repo + wait for the
-        debounced rebuild (30s after the last index_repo finishes).
+        Across projects an α-blended candidacy score (`α × bm25_norm
+        + (1-α) × dense_norm` with α=0.5, both signals min-max
+        normalized per query) plus a relative threshold
+        (`candidacy ≥ best × 0.4`) drops projects that share no
+        semantic and no lexical overlap with the query. Pure-dense
+        fan-out returned the N nearest vectors regardless of
+        absolute distance, so workspaces routinely surfaced
+        irrelevant repos at noise-level cosine similarity; the BM25
+        gate fixes that by requiring at least one of the two
+        signals to be a meaningful fraction of the best.
+
+        The chunks list is then built by round-robin interleaving:
+        rank-1 from every surviving project before any rank-2, etc.,
+        capped per-project so one dominant repo can't take every
+        slot. Always live — no background rebuild job, no debounce.
       parameters:
         - name: q
           in: query
@@ -1346,14 +1436,14 @@ paths:
           schema:
             type: string
             minLength: 1
-        - name: top_communities
+        - name: top_projects
           in: query
           required: false
           schema:
             type: integer
             minimum: 1
             maximum: 50
-            default: 5
+            default: 10
         - name: top_chunks
           in: query
           required: false
@@ -1362,6 +1452,22 @@ paths:
             minimum: 1
             maximum: 200
             default: 20
+        - name: min_score
+          in: query
+          required: false
+          description: |
+            Floor on raw cosine similarity. Chunks below this are
+            dropped before aggregation. Default 0 — relies on
+            chromem's natural ordering. Set higher (e.g. 0.3) to cut
+            noise when querying long natural-language sentences;
+            keep at 0 for short tokens / acronyms where embedding
+            magnitudes are inherently smaller.
+          schema:
+            type: number
+            format: float
+            minimum: 0
+            maximum: 1
+            default: 0
       responses:
         "200":
           description: Search results
@@ -3110,6 +3216,7 @@ components:
         - status
         - auto_webhook
         - webhook_mode
+        - is_linked
         - created_at
         - updated_at
       properties:
@@ -3163,6 +3270,14 @@ components:
           type: string
           format: date-time
           nullable: true
+        is_linked:
+          type: boolean
+          description: |
+            True when this row is a lightweight pointer to a project
+            already owned by another workspace_repo — added via the
+            "Add Existing Project" flow. Linked rows have no clone on
+            disk, no webhook, and no token; reindex is a no-op (must
+            be triggered from the canonical owning row).
         created_at:
           type: string
           format: date-time
@@ -3268,13 +3383,57 @@ components:
           description: |
             Publicly-reachable POST endpoint to register in GitHub when
             doing the webhook setup manually. Includes the workspace_repo
-            id segment.
+            id segment. Empty string for linked rows (no webhook).
         webhook_secret:
           type: string
           description: |
             HMAC secret. **Returned once on create + once via
             webhook-info.** Use as the "Secret" field in GitHub's webhook
             UI; deliveries are validated by HMAC-SHA256 over the body.
+            Empty string for linked rows (no webhook).
+
+    LinkExistingProjectRequest:
+      type: object
+      required: [project_hash]
+      properties:
+        project_hash:
+          type: string
+          minLength: 16
+          maxLength: 16
+          description: |
+            The 16-hex `path_hash` of an indexed project — the same value
+            used in /api/v1/projects/{path}. The server resolves it to
+            the canonical `host_path` and inserts a linked workspace_repo
+            row. The project must already be in status='indexed' and have
+            a host_path of the form "github.com/owner/repo@branch".
+
+    ProjectWorkspaceList:
+      type: object
+      required: [workspaces]
+      properties:
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectWorkspaceEntry"
+
+    ProjectWorkspaceEntry:
+      type: object
+      required: [workspace_id, workspace_name, repo_id, branch, status, is_linked]
+      properties:
+        workspace_id:
+          type: string
+        workspace_name:
+          type: string
+        repo_id:
+          type: string
+          description: workspace_repos.id — same value used in /repos endpoints.
+        branch:
+          type: string
+        status:
+          type: string
+          enum: [pending, cloning, indexing, indexed, failed]
+        is_linked:
+          type: boolean
 
     ReindexEnqueuedResponse:
       type: object
@@ -3379,43 +3538,114 @@ components:
 
     WorkspaceSearchResponse:
       type: object
-      required: [status, communities, chunks]
+      required: [status, projects, chunks]
       properties:
         status:
           type: string
-          enum: [ok, communities_not_built, empty]
+          enum: [ok, empty, partial_failure]
           description: |
-            `ok` — results follow. `communities_not_built` — the centroid
-            index has not been built yet (no successful
-            compute_workspace_communities run); both arrays are empty.
-            `empty` — communities exist but no chunks matched.
-        communities:
+            `ok` — results follow. `empty` — workspace queried fine but
+            nothing cleared the `min_score` floor. `partial_failure` —
+            no chunks returned but at least one repo errored out during
+            the fan-out (see `failed_repos`).
+        projects:
           type: array
+          description: |
+            Top projects ranked by `project_score`. Surfaces which repos
+            in the workspace the query is most relevant to, independent
+            of which individual chunks rank highest globally.
           items:
-            $ref: "#/components/schemas/WorkspaceSearchCommunity"
+            $ref: "#/components/schemas/WorkspaceSearchProject"
         chunks:
           type: array
           items:
             $ref: "#/components/schemas/WorkspaceSearchChunk"
+        pending_repos:
+          type: array
+          description: |
+            Repos that belong to the workspace but weren't queryable
+            yet — clone or index hasn't completed (or the last attempt
+            failed). Their matches will appear once they reach
+            `status=indexed`. Empty if every repo is ready.
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchPendingRepo"
+        failed_repos:
+          type: array
+          description: |
+            Repos whose per-project vector search returned an error
+            during this request (e.g. corrupt collection on disk). The
+            rest of the workspace is still aggregated; surface this so
+            the operator knows the result set is incomplete.
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchFailedRepo"
 
-    WorkspaceSearchCommunity:
+    WorkspaceSearchPendingRepo:
       type: object
-      required: [id, label, score, project_paths, member_count]
+      required: [project_path, status]
       properties:
-        id:
+        project_path:
+          type: string
+        status:
+          type: string
+          enum: [pending, cloning, indexing, failed]
+          description: |
+            Current row state in `workspace_repos.status`. Anything
+            other than `indexed` means the repo hasn't contributed to
+            this response.
+
+    WorkspaceSearchFailedRepo:
+      type: object
+      required: [project_path, reason]
+      properties:
+        project_path:
+          type: string
+        reason:
+          type: string
+          description: |
+            Short category for the failure — `vectorstore_error`,
+            `timeout`, etc. Intentionally not the raw error message so
+            internal details don't leak; check the server logs by
+            `workspace_id` for the full error.
+
+    WorkspaceSearchProject:
+      type: object
+      required: [project_path, label, project_score, num_hits, bm25_score, dense_score]
+      properties:
+        project_path:
           type: string
         label:
           type: string
-        score:
+          description: |
+            Short human-readable label derived from the project_path's
+            last segment (e.g. "owner/repo@main" → "repo@main").
+        project_score:
           type: number
           format: float
-          description: Cosine similarity between the query and the centroid.
-        project_paths:
-          type: array
-          items:
-            type: string
-        member_count:
+          description: |
+            Hybrid candidacy in [0,1] — the α-blend of per-query
+            min-max normalized BM25 and dense signals (α=0.5) the
+            project-relevance gate ranks by. The "Top projects"
+            panel sorts by this value.
+        num_hits:
           type: integer
+          description: |
+            Chunks from this project that survived the per-project
+            chunk cap and made it into the global chunks list.
+        bm25_score:
+          type: number
+          format: float
+          description: |
+            Mean of the top-N raw BM25 scores in this project (sign
+            flipped from SQLite's bm25() so positive = better).
+            Surfaced so the dashboard can show "this repo surfaced
+            on literal token overlap" vs. "pure semantic similarity".
+        dense_score:
+          type: number
+          format: float
+          description: |
+            Mean of the top-N raw cosine similarities in this
+            project. Together with `bm25_score`, the two raw signals
+            that feed into `project_score`.
 
     WorkspaceSearchChunk:
       type: object
@@ -3425,7 +3655,6 @@ components:
         - start_line
         - end_line
         - score
-        - community_id
         - content
       properties:
         project_path:
@@ -3443,9 +3672,11 @@ components:
         score:
           type: number
           format: float
-        community_id:
-          type: string
-        community_label:
-          type: string
+          description: |
+            Raw cosine similarity between the query and this chunk —
+            the value chunks are sorted by. No per-project boost is
+            applied (a previous revision multiplied this by
+            project_score, which let one repo dominate every result
+            for short queries like product-name acronyms).
         content:
           type: string

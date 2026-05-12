@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { AlertCircle, ChevronLeft, Trash2 } from 'lucide-react';
 import { ApiError, api } from '@/api/client';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
 import { Skeleton } from '@/ui/skeleton';
+import { AddExistingProjectDialog } from './components/AddExistingProjectDialog';
 import { AddRepoDialog } from './components/AddRepoDialog';
 import { RepoCard } from './components/RepoCard';
 import { WorkspaceSearchDialog } from './components/WorkspaceSearchDialog';
@@ -14,6 +15,11 @@ import type {
   WorkspaceRepo,
   WorkspaceRepoListResponse,
 } from './types';
+
+// Auto-dismiss the "indexing finished" toast after this many ms. Long
+// enough to read, short enough not to linger past when the user has
+// likely moved on.
+const INDEX_DONE_TOAST_MS = 5000;
 
 // Background polling cadence. Three seconds is short enough that the
 // "indexing" → "indexed" transition is visible while you watch the
@@ -29,6 +35,7 @@ export function WorkspaceDetailPage() {
   const [repos, setRepos] = useState<WorkspaceRepo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [indexDoneMsg, setIndexDoneMsg] = useState<string | null>(null);
 
   const loadRepos = useCallback(async () => {
     try {
@@ -74,6 +81,35 @@ export function WorkspaceDetailPage() {
     }, POLL_MS);
     return () => clearInterval(handle);
   }, [repos, loadRepos]);
+
+  // Detect the "last in-flight repo just finished" transition. Workspace
+  // search is live (no centroid rebuild step) so we just confirm to
+  // the user that the new repo is now searchable.
+  //
+  // wasInflightRef is the gate: we only fire the toast on a
+  // true → false transition, not on the initial page load where
+  // everything was already indexed. Reset back to false after firing
+  // so a second indexing wave (add another repo later) re-arms it.
+  const wasInflightRef = useRef(false);
+  useEffect(() => {
+    if (!repos) return;
+    const anyBusy = repos.some((r) => isInFlight(r.status));
+    if (anyBusy) {
+      wasInflightRef.current = true;
+      return;
+    }
+    if (wasInflightRef.current) {
+      wasInflightRef.current = false;
+      setIndexDoneMsg('Indexing finished — workspace search is ready.');
+    }
+  }, [repos]);
+
+  // Auto-dismiss the toast so it doesn't linger after the user moves on.
+  useEffect(() => {
+    if (!indexDoneMsg) return;
+    const handle = setTimeout(() => setIndexDoneMsg(null), INDEX_DONE_TOAST_MS);
+    return () => clearTimeout(handle);
+  }, [indexDoneMsg]);
 
   async function handleDeleteWorkspace() {
     if (!workspace) return;
@@ -133,11 +169,23 @@ export function WorkspaceDetailPage() {
         <div className="flex flex-wrap gap-2">
           <WorkspaceSearchDialog workspace={workspace} />
           <AddRepoDialog workspaceID={workspace.id} onAdded={loadRepos} />
+          <AddExistingProjectDialog
+            workspaceID={workspace.id}
+            existingProjectPaths={(repos ?? []).map((r) => r.project_path)}
+            onAdded={loadRepos}
+          />
           <Button variant="outline" onClick={handleDeleteWorkspace}>
             <Trash2 className="mr-1 size-4" /> Delete
           </Button>
         </div>
       </header>
+
+      {indexDoneMsg && (
+        <Alert>
+          <AlertTitle>Workspace search ready</AlertTitle>
+          <AlertDescription>{indexDoneMsg}</AlertDescription>
+        </Alert>
+      )}
 
       {error && (
         <Alert variant="destructive">

@@ -72,11 +72,21 @@ func New() *Client {
 // repo-picker UI actually renders — so we don't bloat the JSON payload
 // (a single user can have several hundred repos visible via a PAT).
 type Repo struct {
-	FullName      string `json:"full_name"`       // "owner/name"
-	DefaultBranch string `json:"default_branch"`  // used to auto-fill the branch input
-	Private       bool   `json:"private"`         // shown as a lock icon in the dropdown
-	HTMLURL       string `json:"html_url"`        // canonical https://github.com/... form
-	Description   string `json:"description,omitempty"`
+	FullName      string    `json:"full_name"`       // "owner/name"
+	DefaultBranch string    `json:"default_branch"`  // used to auto-fill the branch input
+	Private       bool      `json:"private"`         // shown as a lock icon in the dropdown
+	HTMLURL       string    `json:"html_url"`        // canonical https://github.com/... form
+	Description   string    `json:"description,omitempty"`
+	Owner         RepoOwner `json:"owner"`
+}
+
+// RepoOwner mirrors the `owner` slice of GitHub's repo payload. GitHub
+// uses the strings "User" / "Organization" (capitalized) so we
+// preserve them verbatim and translate at the application boundary.
+type RepoOwner struct {
+	Login     string `json:"login"`
+	Type      string `json:"type"` // "User" | "Organization"
+	AvatarURL string `json:"avatar_url"`
 }
 
 // AccountType discriminates between a personal account (the PAT
@@ -98,71 +108,85 @@ type Account struct {
 	AvatarURL string      `json:"avatar_url,omitempty"`
 }
 
-// ListAccounts returns the user that owns the PAT plus every org the
-// PAT can see via /user/orgs. The two calls are sequential — they
-// share a HTTP client but GitHub recommends one at a time to stay
-// within rate-limit-friendly behaviour. Errors from /user/orgs are
-// not fatal: an outdated PAT scope can return 200 with an empty list,
-// or 403 if SSO is required; either way we keep the personal account
-// in the response so the operator can still pick a personal repo.
+// ListAccounts returns the user that owns the PAT plus every distinct
+// org owner found in /user/repos.
+//
+// Why not /user/orgs or /user/memberships/orgs? Both require explicit
+// scopes (classic: `read:org`; fine-grained: "Members → Read"). PATs
+// that lack those still see and clone repos through /user/repos — so
+// scoping the dashboard's account picker to "everything the PAT
+// already shows me" is both more permissive and more honest. The
+// listed accounts always correspond to repos the token can actually
+// access. The trade-off is that orgs with zero visible repos won't
+// surface; that's a feature, not a bug — there'd be nothing for the
+// operator to pick anyway.
+//
+// /user is still hit first as a token-validity probe and to pick up
+// the operator's own login + avatar even when /user/repos is empty.
 func (c *Client) ListAccounts(ctx context.Context, pat string) ([]Account, error) {
 	if pat == "" {
 		return nil, fmt.Errorf("PAT required")
 	}
 
-	// Personal account — also doubles as a token-validity probe; if
-	// /user 401s the whole flow short-circuits.
 	user, err := c.fetchUser(ctx, pat)
 	if err != nil {
 		return nil, err
 	}
+
+	const maxPages = 5
+	repos, rerr := c.ListUserRepos(ctx, pat, maxPages)
+	if rerr != nil {
+		// Don't fail the whole flow on a /user/repos hiccup — return
+		// at least the personal account so the dialog renders.
+		return []Account{{
+			Login:     user.Login,
+			Type:      AccountTypeUser,
+			AvatarURL: user.AvatarURL,
+		}}, nil
+	}
+
+	// The user's own account always comes first so the dashboard can
+	// default-select it. Then every distinct owner — Users vs Orgs
+	// distinguished by the owner.type field from /user/repos. Login
+	// comparison is case-insensitive (GitHub treats `Foo` and `foo`
+	// as the same account).
 	out := []Account{{
 		Login:     user.Login,
 		Type:      AccountTypeUser,
 		AvatarURL: user.AvatarURL,
 	}}
-
-	// Orgs — paginated like /user/repos.
-	pageURL := c.BaseURL + "/user/orgs?per_page=100"
-	for pageURL != "" {
-		req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
-		if rerr != nil {
-			return nil, rerr
+	seen := map[string]struct{}{
+		strings.ToLower(user.Login): {},
+	}
+	for _, rp := range repos {
+		key := strings.ToLower(rp.Owner.Login)
+		if key == "" {
+			continue
 		}
-		c.signRequest(req, pat)
-		resp, derr := c.HTTPClient.Do(req)
-		if derr != nil {
-			return nil, fmt.Errorf("github API: %w", derr)
+		if _, dup := seen[key]; dup {
+			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		switch resp.StatusCode {
-		case http.StatusOK:
-			var batch []struct {
-				Login     string `json:"login"`
-				AvatarURL string `json:"avatar_url"`
-			}
-			if err := json.Unmarshal(body, &batch); err != nil {
-				return nil, fmt.Errorf("parse /user/orgs: %w", err)
-			}
-			for _, o := range batch {
-				out = append(out, Account{
-					Login:     o.Login,
-					Type:      AccountTypeOrg,
-					AvatarURL: o.AvatarURL,
-				})
-			}
-		case http.StatusUnauthorized, http.StatusForbidden:
-			// SSO-gated or insufficient-scope PATs can 403 here even
-			// when /user succeeded. The personal account is enough to
-			// continue, so swallow and return what we have.
-			return out, nil
-		default:
-			return nil, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(body))
-		}
-		pageURL = parseNextLink(resp.Header.Get("Link"))
+		seen[key] = struct{}{}
+		out = append(out, Account{
+			Login:     rp.Owner.Login,
+			Type:      ownerTypeToAccountType(rp.Owner.Type),
+			AvatarURL: rp.Owner.AvatarURL,
+		})
 	}
 	return out, nil
+}
+
+// ownerTypeToAccountType normalises GitHub's "User"/"Organization"
+// strings to our user/org enum. Unknown values default to user, which
+// is the conservative choice — repos will be fetched from
+// /users/{login}/repos and just return what's accessible.
+func ownerTypeToAccountType(s string) AccountType {
+	switch strings.ToLower(s) {
+	case "organization":
+		return AccountTypeOrg
+	default:
+		return AccountTypeUser
+	}
 }
 
 // fetchUser is a small private helper for the two callsites (this

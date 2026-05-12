@@ -20,8 +20,10 @@
 //	   - calls repoindexer.IndexDir with the workspace_repo.project_path
 //	   - flips status → indexed (or failed on error)
 //
-// PR3 will add fetch_repo (incremental) + the webhook receiver that
-// enqueues it; PR4+ chains build_call_graph + compute_workspace_communities.
+// Workspace-level search is served straight from the per-project
+// chromem collections via a weighted fan-out (see
+// internal/httpapi/workspacesearch.go) — there is no background
+// "build centroid index" step anymore.
 package workspacejobs
 
 import (
@@ -33,8 +35,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/dvcdsys/code-index/server/internal/callgraph"
-	"github.com/dvcdsys/code-index/server/internal/communities"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
@@ -49,16 +49,9 @@ import (
 // string — typos in job types are a notoriously easy source of "why isn't
 // this running?" bugs.
 const (
-	TypeCloneRepo    = "clone_repo"
-	TypeIndexRepo    = "index_repo"
-	TypeComputeWorkspaceCommunities = "compute_workspace_communities"
+	TypeCloneRepo = "clone_repo"
+	TypeIndexRepo = "index_repo"
 )
-
-// CommunitiesDebounce is the delay applied when chaining a community
-// recompute after an index_repo. A burst of repos finishing within the
-// window collapses to one rebuild via the dedupe_key — keeps Louvain
-// churn off the worker during catch-up after a long downtime.
-const CommunitiesDebounce = 30 * time.Second
 
 // ClonePayload is the JSON shape stored on a clone_repo job.
 type ClonePayload struct {
@@ -68,13 +61,6 @@ type ClonePayload struct {
 // IndexPayload is the JSON shape stored on an index_repo job.
 type IndexPayload struct {
 	RepoID string `json:"repo_id"`
-}
-
-// CommunitiesPayload is the JSON shape stored on a
-// compute_workspace_communities job. WorkspaceID identifies the
-// workspace whose Louvain + centroids will be rebuilt.
-type CommunitiesPayload struct {
-	WorkspaceID string `json:"workspace_id"`
 }
 
 // Deps bundles everything the handlers need. Keeping it explicit makes
@@ -103,51 +89,10 @@ func Register(d Deps) {
 	d.Jobs.Register(TypeIndexRepo, func(ctx context.Context, job jobs.Job) error {
 		return handleIndex(ctx, d, job)
 	})
-	d.Jobs.Register(TypeComputeWorkspaceCommunities, func(ctx context.Context, job jobs.Job) error {
-		return handleComputeCommunities(ctx, d, job)
-	})
 }
 
-// EnqueueComputeCommunities schedules a Louvain + centroid rebuild for a
-// workspace. Dedupe key + 30s delay collapses the common "many repos
-// finished indexing at once" scenario into one rebuild.
-func EnqueueComputeCommunities(ctx context.Context, j *jobs.Service, workspaceID string) error {
-	_, err := j.Enqueue(ctx, jobs.EnqueueRequest{
-		Type:      TypeComputeWorkspaceCommunities,
-		DedupeKey: "communities:" + workspaceID,
-		Payload:   CommunitiesPayload{WorkspaceID: workspaceID},
-		Delay:     CommunitiesDebounce,
-	})
-	if errors.Is(err, jobs.ErrDuplicate) {
-		return nil
-	}
-	return err
-}
-
-func handleComputeCommunities(ctx context.Context, d Deps, job jobs.Job) error {
-	var p CommunitiesPayload
-	if err := jobs.UnmarshalPayload(job, &p); err != nil {
-		return fmt.Errorf("decode payload: %w", err)
-	}
-	if p.WorkspaceID == "" {
-		return errors.New("empty workspace_id")
-	}
-	res, err := communities.Build(ctx, d.DB, d.VectorStore, p.WorkspaceID, d.Logger)
-	if err != nil {
-		return fmt.Errorf("communities build: %w", err)
-	}
-	d.Logger.Info("workspacejobs: communities rebuilt",
-		"workspace_id", p.WorkspaceID,
-		"nodes", res.Nodes,
-		"edges", res.Edges,
-		"communities", res.CommunityCount,
-		"centroids_stored", res.CentroidsStored,
-		"modularity", res.Modularity)
-	return nil
-}
-
-// EnqueueCloneAndIndex inserts a clone_repo job. The index_repo job is
-// chained on successful clone — callers don't enqueue it directly.
+// EnqueueClone inserts a clone_repo job. The index_repo job is chained
+// on successful clone — callers don't enqueue it directly.
 func EnqueueClone(ctx context.Context, j *jobs.Service, repoID string) error {
 	_, err := j.Enqueue(ctx, jobs.EnqueueRequest{
 		Type:      TypeCloneRepo,
@@ -253,33 +198,9 @@ func handleIndex(ctx context.Context, d Deps, job jobs.Job) error {
 		return err
 	}
 
-	// Post-index — build the call-graph used by Louvain in PR5. Non-fatal:
-	// if extraction fails, we still consider the repo "indexed" (semantic
-	// search continues to work without the graph). The error gets logged
-	// so operators can diagnose.
-	if stats, cgErr := callgraph.Build(ctx, d.DB, wr.ProjectPath, callgraph.DefaultOptions()); cgErr != nil {
-		d.Logger.Warn("workspacejobs: callgraph build failed",
-			"repo_id", wr.ID, "err", cgErr)
-	} else {
-		d.Logger.Info("workspacejobs: callgraph built",
-			"repo_id", wr.ID,
-			"project_path", wr.ProjectPath,
-			"refs_considered", stats.RefsConsidered,
-			"refs_with_caller", stats.RefsWithCaller,
-			"edges", stats.EdgesAccumulated)
-	}
-
 	now := time.Now().UTC()
 	if err := d.WorkspaceRepos.SetStatus(ctx, wr.ID, workspacerepos.StatusIndexed, "", "", &now); err != nil {
 		return fmt.Errorf("mark indexed: %w", err)
-	}
-
-	// Chain a debounced community recompute. We pass the workspace_id
-	// from the workspace_repos row, not the job payload, so a future
-	// hand-triggered index doesn't need to remember to enqueue it.
-	if err := EnqueueComputeCommunities(ctx, d.Jobs, wr.WorkspaceID); err != nil {
-		d.Logger.Warn("workspacejobs: could not enqueue communities recompute",
-			"workspace_id", wr.WorkspaceID, "err", err)
 	}
 	return nil
 }

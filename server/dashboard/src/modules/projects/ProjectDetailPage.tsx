@@ -12,7 +12,7 @@ import { formatDateTime, formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
 import { DeleteProjectDialog } from './components/DeleteProjectDialog';
 import { ProjectInfoCard } from './components/ProjectInfoCard';
-import { useProject, useProjectSummary } from './hooks';
+import { useProject, useProjectSummary, useProjectWorkspaces } from './hooks';
 
 const STATUS_VARIANT: Record<Project['status'], 'default' | 'secondary' | 'destructive' | 'outline'> = {
   created: 'outline',
@@ -27,6 +27,7 @@ export function ProjectDetailPage() {
   const isAdmin = user?.role === 'admin';
   const project = useProject(id);
   const summary = useProjectSummary(id);
+  const workspaces = useProjectWorkspaces(id);
   const currentModel = useRuntimeModel();
 
   if (project.isLoading) return <DetailSkeleton />;
@@ -129,6 +130,46 @@ export function ProjectDetailPage() {
       </section>
 
       <ProjectInfoCard project={p} />
+
+      <section>
+        <h2 className="mb-3 text-sm font-medium text-muted-foreground">Workspaces</h2>
+        {workspaces.isLoading ? (
+          <Skeleton className="h-10 w-full max-w-md" />
+        ) : !workspaces.data || workspaces.data.workspaces.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Not part of any workspace yet.
+          </p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {workspaces.data.workspaces.map((w) => (
+              <Button
+                key={w.repo_id}
+                asChild
+                variant="outline"
+                size="sm"
+                className="h-auto py-1.5"
+                title={
+                  w.is_linked
+                    ? `Linked into ${w.workspace_name} from another workspace's clone`
+                    : `Owned by ${w.workspace_name} (this is the cloning workspace)`
+                }
+              >
+                <Link to={`/workspaces/${w.workspace_id}`}>
+                  <span className="font-medium">{w.workspace_name}</span>
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    @{w.branch}
+                  </span>
+                  {w.is_linked ? (
+                    <Badge variant="secondary" className="ml-2 text-[10px]">
+                      linked
+                    </Badge>
+                  ) : null}
+                </Link>
+              </Button>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="grid gap-6 lg:grid-cols-2">
         <div>

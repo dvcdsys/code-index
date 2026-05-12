@@ -38,6 +38,7 @@ export type WorkspaceRepo = {
   last_sha: string | null;
   last_error: string | null;
   last_indexed_at: string | null;
+  is_linked: boolean;
   created_at: string;
   updated_at: string;
 };

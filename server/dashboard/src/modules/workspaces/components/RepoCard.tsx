@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  Link2,
   Loader2,
   RefreshCw,
   Trash2,
@@ -33,11 +34,10 @@ export function RepoCard({
   const inFlight = isInFlight(repo.status);
 
   async function handleDelete() {
-    if (
-      !confirm(
-        `Detach "${repo.github_url}@${repo.branch}" from this workspace?\n\nThe indexed project will also be removed.`,
-      )
-    ) {
+    const detachMsg = repo.is_linked
+      ? `Detach the linked project "${repo.github_url}@${repo.branch}" from this workspace?\n\nThe project itself stays — only this workspace's link to it is removed.`
+      : `Detach "${repo.github_url}@${repo.branch}" from this workspace?\n\nThe indexed project will also be removed.`;
+    if (!confirm(detachMsg)) {
       return;
     }
     setBusy('delete');
@@ -91,20 +91,25 @@ export function RepoCard({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={busy !== null || inFlight}
-              title="Reindex"
-              onClick={handleReindex}
-            >
-              <RefreshCw className={`size-4 ${busy === 'reindex' ? 'animate-spin' : ''}`} />
-            </Button>
+            {/* Reindex is a no-op for linked rows — they don't own the
+                clone, so the canonical workspace must trigger it. Hide
+                the button to make that contract obvious. */}
+            {!repo.is_linked && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy !== null || inFlight}
+                title="Reindex"
+                onClick={handleReindex}
+              >
+                <RefreshCw className={`size-4 ${busy === 'reindex' ? 'animate-spin' : ''}`} />
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"
               disabled={busy !== null}
-              title="Detach repo"
+              title={repo.is_linked ? 'Detach linked project' : 'Detach repo'}
               onClick={handleDelete}
             >
               <Trash2 className="size-4" />
@@ -114,7 +119,13 @@ export function RepoCard({
 
         <div className="flex flex-wrap items-center gap-1.5 text-xs">
           <StatusBadge repo={repo} />
-          <WebhookBadge repo={repo} />
+          {repo.is_linked ? (
+            <Badge variant="outline" className="gap-1 font-normal">
+              <Link2 className="size-3" /> linked
+            </Badge>
+          ) : (
+            <WebhookBadge repo={repo} />
+          )}
           {repo.last_indexed_at && (
             <span className="text-muted-foreground">
               · indexed {formatRelative(repo.last_indexed_at)}

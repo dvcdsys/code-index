@@ -148,3 +148,97 @@ func TestDeleteCascade(t *testing.T) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
+
+func TestCreateLink_HappyPath(t *testing.T) {
+	svc, wsID := withWorkspace(t)
+	ctx := context.Background()
+	wr, err := svc.CreateLink(ctx, wsID, "github.com/spf13/cobra@main")
+	if err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	if !wr.IsLinked {
+		t.Fatalf("expected IsLinked=true, got %v", wr.IsLinked)
+	}
+	if wr.Status != StatusIndexed {
+		t.Fatalf("expected status=indexed, got %q", wr.Status)
+	}
+	if wr.WebhookMode != WebhookModeDisabled {
+		t.Fatalf("expected webhook_mode=disabled, got %q", wr.WebhookMode)
+	}
+	if wr.TokenID != "" {
+		t.Fatalf("linked rows must have empty token_id, got %q", wr.TokenID)
+	}
+	if wr.GitHubURL != "https://github.com/spf13/cobra" {
+		t.Fatalf("github_url derived wrong: %q", wr.GitHubURL)
+	}
+	if wr.Branch != "main" {
+		t.Fatalf("branch derived wrong: %q", wr.Branch)
+	}
+	if wr.ProjectPath != "github.com/spf13/cobra@main" {
+		t.Fatalf("project_path mismatch: %q", wr.ProjectPath)
+	}
+}
+
+func TestCreateLink_DuplicateInSameWorkspace(t *testing.T) {
+	svc, wsID := withWorkspace(t)
+	ctx := context.Background()
+	if _, err := svc.CreateLink(ctx, wsID, "github.com/foo/bar@main"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	// Second link with the same (workspace, repo, branch) → ErrDuplicate.
+	if _, err := svc.CreateLink(ctx, wsID, "github.com/foo/bar@main"); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("expected ErrDuplicate, got %v", err)
+	}
+	// An owned row in the same workspace conflicts with the linked one too —
+	// both share the same UNIQUE(workspace_id, github_url, branch) key.
+	if _, err := svc.Create(ctx, CreateRequest{
+		WorkspaceID: wsID, GitHubURL: "https://github.com/foo/bar", Branch: "main",
+	}); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("owned-after-linked: expected ErrDuplicate, got %v", err)
+	}
+}
+
+func TestCreateLink_AllowedAcrossWorkspaces(t *testing.T) {
+	svcA, wsA := withWorkspace(t)
+	// Reuse the same underlying DB — withWorkspace gives us a Service
+	// bound to a fresh DB; for a cross-workspace test we need two
+	// workspaces on one DB. Seed a second workspace explicitly.
+	wsB, err := workspaces.New(svcA.DB).Create(context.Background(), "ws-b", "")
+	if err != nil {
+		t.Fatalf("seed second workspace: %v", err)
+	}
+	ctx := context.Background()
+	// Same canonical project_path attaches as owned in A, then linked
+	// in B without tripping the legacy global UNIQUE.
+	if _, err := svcA.Create(ctx, CreateRequest{
+		WorkspaceID: wsA, GitHubURL: "https://github.com/x/y", Branch: "main",
+	}); err != nil {
+		t.Fatalf("owned in A: %v", err)
+	}
+	if _, err := svcA.CreateLink(ctx, wsB.ID, "github.com/x/y@main"); err != nil {
+		t.Fatalf("linked in B (same project): %v", err)
+	}
+}
+
+func TestCreateLink_InvalidProjectPath(t *testing.T) {
+	svc, wsID := withWorkspace(t)
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		path string
+		want error
+	}{
+		{"empty", "", ErrInvalidURL},
+		{"no at", "github.com/foo/bar", ErrInvalidURL},
+		{"empty branch", "github.com/foo/bar@", ErrBranchEmpty},
+		{"non-github", "gitlab.com/foo/bar@main", ErrInvalidURL},
+		{"missing repo", "github.com/foo@main", ErrInvalidURL},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := svc.CreateLink(ctx, wsID, c.path); !errors.Is(err, c.want) {
+				t.Fatalf("path=%q: expected %v, got %v", c.path, c.want, err)
+			}
+		})
+	}
+}

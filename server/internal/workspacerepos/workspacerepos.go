@@ -91,6 +91,7 @@ type WorkspaceRepo struct {
 	LastSHA        string
 	LastError      string
 	LastIndexedAt  *time.Time
+	IsLinked       bool // true for lightweight references to projects owned by another workspace_repo
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
@@ -167,6 +168,57 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (WorkspaceRepo,
 			return WorkspaceRepo{}, ErrDuplicate
 		}
 		return WorkspaceRepo{}, fmt.Errorf("insert workspace_repo: %w", err)
+	}
+	return s.GetByID(ctx, id)
+}
+
+// CreateLink inserts a workspace_repo with is_linked=1: a lightweight
+// pointer to an already-indexed project. Unlike Create, there is no
+// clone job, no webhook, no PAT — the row exists only so the project
+// participates in workspace-level features (search, communities,
+// the repo list UI). The canonical project must already exist in the
+// projects table; the caller (HTTP handler) is responsible for that
+// check + the status='indexed' precondition before calling here.
+//
+// projectPath must be the same canonical form Create produces, i.e.
+// "github.com/owner/repo@branch" — we round-trip through parseProjectPath
+// so the resulting (workspace_id, github_url, branch) triple matches
+// what an owned row would produce. This is what makes the
+// UNIQUE(workspace_id, github_url, branch) constraint catch an attempt
+// to link the same project that's already attached as owned.
+//
+// webhook_secret is generated but never used — the column is NOT NULL.
+// webhook_mode is set to 'disabled' so the dashboard hides the webhook
+// UI for linked rows.
+func (s *Service) CreateLink(ctx context.Context, workspaceID, projectPath string) (WorkspaceRepo, error) {
+	githubURL, branch, err := parseProjectPath(projectPath)
+	if err != nil {
+		return WorkspaceRepo{}, err
+	}
+
+	secret, err := generateWebhookSecret()
+	if err != nil {
+		return WorkspaceRepo{}, fmt.Errorf("generate webhook secret: %w", err)
+	}
+
+	id := uuid.NewString()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	_, err = s.DB.ExecContext(ctx,
+		`INSERT INTO workspace_repos (
+		   id, workspace_id, github_url, branch, project_path,
+		   token_id, webhook_secret, auto_webhook, webhook_mode, status,
+		   is_linked, created_at, updated_at
+		 ) VALUES (?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, 1, ?, ?)`,
+		id, workspaceID, githubURL, branch, projectPath,
+		secret, WebhookModeDisabled, StatusIndexed,
+		now, now,
+	)
+	if err != nil {
+		if isUniqueConstraintViolation(err) {
+			return WorkspaceRepo{}, ErrDuplicate
+		}
+		return WorkspaceRepo{}, fmt.Errorf("insert linked workspace_repo: %w", err)
 	}
 	return s.GetByID(ctx, id)
 }
@@ -261,7 +313,7 @@ const selectColumns = `
 	SELECT id, workspace_id, github_url, branch, project_path,
 	       token_id, webhook_secret, webhook_id, auto_webhook,
 	       webhook_mode, status, last_sha, last_error, last_indexed_at,
-	       created_at, updated_at
+	       is_linked, created_at, updated_at
 	  FROM workspace_repos`
 
 func scanRow(r interface{ Scan(dest ...any) error }) (WorkspaceRepo, error) {
@@ -274,13 +326,14 @@ func scanRow(r interface{ Scan(dest ...any) error }) (WorkspaceRepo, error) {
 		lastSHA       sql.NullString
 		lastError     sql.NullString
 		lastIndexed   sql.NullString
+		isLinked      int
 		createdAt     string
 		updatedAt     string
 	)
 	err := r.Scan(&wr.ID, &wr.WorkspaceID, &wr.GitHubURL, &wr.Branch, &wr.ProjectPath,
 		&tokenID, &wr.WebhookSecret, &webhookID, &autoWebhook,
 		&webhookMode, &wr.Status, &lastSHA, &lastError, &lastIndexed,
-		&createdAt, &updatedAt)
+		&isLinked, &createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return WorkspaceRepo{}, ErrNotFound
@@ -303,6 +356,7 @@ func scanRow(r interface{ Scan(dest ...any) error }) (WorkspaceRepo, error) {
 		t, _ := time.Parse(time.RFC3339Nano, lastIndexed.String)
 		wr.LastIndexedAt = &t
 	}
+	wr.IsLinked = isLinked == 1
 	wr.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	wr.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	return wr, nil
@@ -343,6 +397,39 @@ func parseGitHubURL(s string) (owner, repo string, err error) {
 		return "", "", ErrInvalidURL
 	}
 	return parts[0], parts[1], nil
+}
+
+// parseProjectPath splits a canonical project_path of the form
+// "github.com/owner/repo@branch" back into (github_url, branch) so we
+// can reuse the per-workspace uniqueness key when creating a linked
+// row from a project hash. Inverse of the Sprintf at Create().
+//
+// Errors:
+//   - empty input or missing "@" → ErrInvalidURL
+//   - prefix not "github.com/" → ErrInvalidURL (linked rows only make
+//     sense for GitHub-derived projects; local paths can't map to a
+//     workspace_repo since the schema requires github_url + branch)
+//   - branch portion empty → ErrBranchEmpty
+func parseProjectPath(projectPath string) (githubURL, branch string, err error) {
+	s := strings.TrimSpace(projectPath)
+	at := strings.LastIndex(s, "@")
+	if at <= 0 {
+		return "", "", ErrInvalidURL
+	}
+	left, right := s[:at], s[at+1:]
+	if right == "" {
+		return "", "", ErrBranchEmpty
+	}
+	const prefix = "github.com/"
+	if !strings.HasPrefix(left, prefix) {
+		return "", "", ErrInvalidURL
+	}
+	ownerRepo := strings.Trim(left[len(prefix):], "/")
+	parts := strings.Split(ownerRepo, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", ErrInvalidURL
+	}
+	return "https://github.com/" + parts[0] + "/" + parts[1], right, nil
 }
 
 // canonicaliseURL strips trailing slash + ".git" so two forms of the same
