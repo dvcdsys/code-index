@@ -1,6 +1,6 @@
 ---
 name: cix-workspace
-description: Cross-project research via cix workspace search. Use when a task touches more than the project you're cd'd into — microservices that talk to each other, a feature whose implementation lives in N repos (backend + contracts + smart-contracts + webhooks + infra + …), or any time the user mentions a product name / service / event that isn't fully defined in the primary repo. The skill structures the research around three questions and a sub-agent fan-out so the answer doesn't drown in chunks.
+description: Cross-project research via cix workspace search. Use when a task touches more than the project you're cd'd into — microservices that talk to each other, a feature whose implementation lives in N repos (backend + api + shared-models + workers + infra + …), or any time the user mentions a product name / service / event that isn't fully defined in the primary repo. The skill structures the research around three questions and a sub-agent fan-out so the answer doesn't drown in chunks.
 user-invocable: true
 ---
 
@@ -261,7 +261,7 @@ event format is canonical) back to the user.
 ## Worked example — the XYZ retro
 
 This is how this skill was developed. The user asked: *"Add sell flow
-to XYZ"* (XYZ is the internal name of a product in their workspace).
+to XYZ"* (XYZ is a placeholder for an internal product code).
 
 **What went wrong with naïve approach:**
 
@@ -315,7 +315,7 @@ acme-shared (119 mentions in 8 files), acme-platform (98
 mentions in 6 files), acme-notifier (18 mentions in 1 file),
 acme-models (1 mention + 2 sell-related files). Drops the
 three zero-mention repos. The 5 survivors are the actual scope —
-each plays a real role (backend / API contracts / k8s configs /
+each plays a real role (backend / shared API types / platform config /
 event notifications / shared data models).
 
 **The lesson encoded in this skill:**
