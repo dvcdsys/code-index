@@ -187,12 +187,17 @@ CREATE TABLE IF NOT EXISTS github_tokens (
 -- token_id stays nullable so public repos can be added without storing a PAT.
 -- last_sha / last_indexed_at survive across reindexes so an incremental
 -- fetch_repo job can short-circuit when HEAD hasn't moved.
+-- is_linked discriminates owned rows (the canonical Add Repo flow that
+-- clones + indexes + owns a webhook) from linked rows (a lightweight
+-- membership pointer to an already-indexed project — no clone, no
+-- webhook). Uniqueness is per-workspace; the same project_path may live
+-- in many workspaces as long as it appears at most once in each.
 CREATE TABLE IF NOT EXISTS workspace_repos (
     id              TEXT PRIMARY KEY,
     workspace_id    TEXT NOT NULL,
     github_url      TEXT NOT NULL,
     branch          TEXT NOT NULL,
-    project_path    TEXT NOT NULL UNIQUE,
+    project_path    TEXT NOT NULL,
     token_id        TEXT,
     webhook_secret  TEXT NOT NULL,
     webhook_id      INTEGER,
@@ -208,6 +213,7 @@ CREATE TABLE IF NOT EXISTS workspace_repos (
     last_sha        TEXT,
     last_error      TEXT,
     last_indexed_at TEXT,
+    is_linked       INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     UNIQUE(workspace_id, github_url, branch),
@@ -278,37 +284,47 @@ CREATE INDEX IF NOT EXISTS idx_call_edges_project ON call_edges(project_path);
 CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_symbol);
 CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_symbol);
 
--- Workspaces feature PR5 — communities + community_members.
---
--- One community = one Louvain output cluster on the workspace's
--- combined call_edges graph. label is derived heuristically from the
--- top symbol names; parent_id is non-null for sub-communities produced
--- by the >50-chunks recursive-split rule.
---
--- compute_workspace_communities job DELETES + reinserts all rows for
--- a workspace_id on each rebuild, so the table reflects the latest
--- Louvain output without orphans. The downstream centroid Chroma
--- collection (workspace_{id}_centroids) is rebuilt in lock-step.
-CREATE TABLE IF NOT EXISTS communities (
-    id           TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    label        TEXT,
-    size         INTEGER NOT NULL DEFAULT 0,
-    parent_id    TEXT,
-    created_at   TEXT NOT NULL,
-    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-    FOREIGN KEY (parent_id) REFERENCES communities(id) ON DELETE SET NULL
-);
-CREATE INDEX IF NOT EXISTS idx_communities_workspace ON communities(workspace_id);
+-- PR14 dropped the workspaces communities/community_members tables.
+-- Workspace search is now a weighted fan-out across per-project chromem
+-- collections (no Louvain, no centroid index). migrateDropCommunities
+-- DROPs the tables on upgrade for installs that ran any of PR5..PR12.
 
-CREATE TABLE IF NOT EXISTS community_members (
-    community_id TEXT NOT NULL,
-    project_path TEXT NOT NULL,
-    symbol_id    TEXT NOT NULL,
-    PRIMARY KEY (community_id, project_path, symbol_id),
-    FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
+-- chunks_meta is the row-level shadow for chunks_fts: it stores the
+-- non-content metadata we need to retrieve when a BM25 query matches.
+-- chunks_fts (FTS5 virtual table) can only filter efficiently by rowid,
+-- so we keep a regular indexed table here for (project_path, file_path)
+-- lookups and join by rowid on retrieval/deletion.
+CREATE TABLE IF NOT EXISTS chunks_meta (
+    rowid        INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_path TEXT    NOT NULL,
+    file_path    TEXT    NOT NULL,
+    start_line   INTEGER NOT NULL,
+    end_line     INTEGER NOT NULL,
+    chunk_type   TEXT,
+    symbol_name  TEXT,
+    language     TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_community_members_symbol ON community_members(project_path, symbol_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_meta_project_file
+    ON chunks_meta(project_path, file_path);
+CREATE INDEX IF NOT EXISTS idx_chunks_meta_project
+    ON chunks_meta(project_path);
+
+-- chunks_fts is the BM25-searchable side, parallel to chromem-go's dense
+-- vector store. Workspace search runs both in parallel per project then
+-- fuses by RRF; project-relevance gating uses BM25 signal to drop repos
+-- that share no token with the query (the dense-only fan-out leaks
+-- semantically-distant repos as false positives).
+--
+-- tokenize='trigram': substring matching on identifiers (CamelCase /
+-- snake_case / dotted paths are not tokenized to word boundaries
+-- predictably enough for code). Short acronyms like "XYZ" become a
+-- single trigram; lookups are exact-substring within a word.
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    content,
+    symbol_name,
+    file_path,
+    tokenize = 'trigram'
+);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -328,6 +344,6 @@ var ExpectedTables = []string{
 	"workspace_repos",
 	"jobs",
 	"call_edges",
-	"communities",
-	"community_members",
+	"chunks_meta",
+	"chunks_fts",
 }
