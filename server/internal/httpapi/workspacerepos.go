@@ -12,6 +12,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
+	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/workspacejobs"
 	"github.com/dvcdsys/code-index/server/internal/workspacerepos"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
@@ -30,6 +31,7 @@ type workspaceRepoPayload struct {
 	LastSHA       *string    `json:"last_sha"`
 	LastError     *string    `json:"last_error"`
 	LastIndexedAt *time.Time `json:"last_indexed_at"`
+	IsLinked      bool       `json:"is_linked"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
@@ -67,6 +69,7 @@ func workspaceRepoToPayload(wr workspacerepos.WorkspaceRepo) workspaceRepoPayloa
 		LastSHA:       lastSHA,
 		LastError:     lastErr,
 		LastIndexedAt: wr.LastIndexedAt,
+		IsLinked:      wr.IsLinked,
 		CreatedAt:     wr.CreatedAt,
 		UpdatedAt:     wr.UpdatedAt,
 	}
@@ -348,4 +351,75 @@ func (s *Server) buildWebhookURL(repoID string) string {
 		return path
 	}
 	return base + path
+}
+
+// LinkExistingProject — POST /api/v1/workspaces/{id}/repos/link.
+//
+// Attaches an already-indexed project to the workspace as a lightweight
+// linked row. No clone, no index job, no webhook. The response mirrors
+// AddWorkspaceRepo's shape so the dashboard can reuse the same refresh
+// pattern; webhook_url + webhook_secret are empty because linked rows
+// have no webhook to register.
+func (s *Server) LinkExistingProject(w http.ResponseWriter, r *http.Request, id string) {
+	if s.workspaceReposUnavailable(w) {
+		return
+	}
+	if !s.requireWorkspace(w, r, id) {
+		return
+	}
+	var body openapi.LinkExistingProjectRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
+		return
+	}
+	hash := strings.TrimSpace(body.ProjectHash)
+	if hash == "" {
+		writeError(w, http.StatusUnprocessableEntity, "project_hash is required")
+		return
+	}
+
+	// Resolve the project by hash so we can validate status + extract
+	// host_path. The same lookup is used by /projects/{path} so the
+	// behaviour is consistent — 404 for unknown hashes, 422 for known
+	// but not-yet-indexed projects.
+	proj, perr := projects.GetByHash(r.Context(), s.Deps.DB, hash)
+	if perr != nil {
+		if errors.Is(perr, projects.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load project")
+		return
+	}
+	if proj.Status != "indexed" {
+		writeError(w, http.StatusUnprocessableEntity,
+			"project is not yet indexed (status="+proj.Status+") — wait for indexing to complete before linking")
+		return
+	}
+
+	wr, err := s.Deps.WorkspaceRepos.CreateLink(r.Context(), id, proj.HostPath)
+	if err != nil {
+		switch {
+		case errors.Is(err, workspacerepos.ErrInvalidURL):
+			writeError(w, http.StatusUnprocessableEntity,
+				"project host_path is not a github.com/owner/repo@branch — local-path projects cannot be linked")
+		case errors.Is(err, workspacerepos.ErrBranchEmpty):
+			writeError(w, http.StatusUnprocessableEntity, "project host_path has no branch suffix")
+		case errors.Is(err, workspacerepos.ErrDuplicate):
+			writeError(w, http.StatusConflict, "this repo+branch is already attached to the workspace")
+		default:
+			writeError(w, http.StatusInternalServerError, "could not link project")
+		}
+		return
+	}
+
+	// Mirror AddWorkspaceRepo's envelope so the dashboard can decode one
+	// shape regardless of which create path it called. Linked rows have
+	// no webhook, so URL/secret are empty.
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"repo":            workspaceRepoToPayload(wr),
+		"webhook_url":     "",
+		"webhook_secret":  "",
+		"auto_registered": false,
+	})
 }

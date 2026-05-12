@@ -278,15 +278,20 @@ func TestParseNextLink(t *testing.T) {
 	}
 }
 
-func TestListAccountsReturnsUserPlusOrgs(t *testing.T) {
+func TestListAccountsDerivedFromUserRepos(t *testing.T) {
+	// /user/repos returns repos under three owners: the PAT owner
+	// (alice/User), one Org (acme), and one User collaborator (bob).
+	// ListAccounts must dedupe, preserve case, and tag types correctly.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/user":
-			_, _ = w.Write([]byte(`{"login":"alice","avatar_url":"https://x/avatars/alice"}`))
-		case "/user/orgs":
+			_, _ = w.Write([]byte(`{"login":"alice","avatar_url":"https://x/alice"}`))
+		case "/user/repos":
 			_, _ = w.Write([]byte(`[
-				{"login":"acme","avatar_url":"https://x/avatars/acme"},
-				{"login":"hooli","avatar_url":"https://x/avatars/hooli"}
+				{"full_name":"alice/dotfiles","default_branch":"main","private":false,"html_url":"x","owner":{"login":"alice","type":"User","avatar_url":"https://x/alice"}},
+				{"full_name":"acme/api","default_branch":"main","private":true,"html_url":"x","owner":{"login":"acme","type":"Organization","avatar_url":"https://x/acme"}},
+				{"full_name":"acme/web","default_branch":"main","private":true,"html_url":"x","owner":{"login":"acme","type":"Organization","avatar_url":"https://x/acme"}},
+				{"full_name":"bob/shared","default_branch":"main","private":false,"html_url":"x","owner":{"login":"bob","type":"User","avatar_url":"https://x/bob"}}
 			]`))
 		default:
 			http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
@@ -301,25 +306,64 @@ func TestListAccountsReturnsUserPlusOrgs(t *testing.T) {
 		t.Fatalf("ListAccounts: %v", err)
 	}
 	if len(got) != 3 {
-		t.Fatalf("expected user + 2 orgs, got %d: %+v", len(got), got)
+		t.Fatalf("expected user + acme + bob (deduped), got %d: %+v", len(got), got)
 	}
 	if got[0].Login != "alice" || got[0].Type != AccountTypeUser {
-		t.Fatalf("first must be the PAT owner (user), got %+v", got[0])
+		t.Fatalf("first must be the PAT owner, got %+v", got[0])
 	}
-	if got[1].Login != "acme" || got[1].Type != AccountTypeOrg {
-		t.Fatalf("second must be org acme, got %+v", got[1])
+	// acme should be tagged as org (GitHub's "Organization" → our "org").
+	var acmeFound bool
+	for _, a := range got {
+		if a.Login == "acme" {
+			acmeFound = true
+			if a.Type != AccountTypeOrg {
+				t.Fatalf("acme must be org-type, got %+v", a)
+			}
+		}
+	}
+	if !acmeFound {
+		t.Fatalf("acme org should be present in %+v", got)
 	}
 }
 
-func TestListAccountsSwallowsOrgsForbidden(t *testing.T) {
-	// SAML-protected PATs can 403 on /user/orgs even when /user works.
-	// We must still return the personal account so the dashboard can
-	// at least let the user pick a personal repo.
+func TestListAccountsTokenOwnerNotDuplicated(t *testing.T) {
+	// /user/repos includes the user's own repos. The /user step also
+	// reports the same login. Without dedupe the owner would appear
+	// twice — once from /user, once from /user/repos.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login":"Alice"}`))
+		case "/user/repos":
+			// owner.login casing differs from /user response — GitHub
+			// is case-insensitive but capitalisation can drift; we must
+			// dedupe regardless.
+			_, _ = w.Write([]byte(`[
+				{"full_name":"alice/repo","default_branch":"main","private":false,"html_url":"x","owner":{"login":"alice","type":"User","avatar_url":""}}
+			]`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := New()
+	c.BaseURL = srv.URL
+
+	got, err := c.ListAccounts(context.Background(), "ghp_x")
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("PAT owner must not be duplicated, got %+v", got)
+	}
+}
+
+func TestListAccountsSurvivesUserReposError(t *testing.T) {
+	// If /user/repos fails we must still return at least the personal
+	// account — the dialog needs something to render.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/user":
 			_, _ = w.Write([]byte(`{"login":"alice"}`))
-		case "/user/orgs":
+		case "/user/repos":
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"message":"saml enforced"}`))
 		}
@@ -330,9 +374,9 @@ func TestListAccountsSwallowsOrgsForbidden(t *testing.T) {
 
 	got, err := c.ListAccounts(context.Background(), "ghp_x")
 	if err != nil {
-		t.Fatalf("ListAccounts should swallow orgs-forbidden, got %v", err)
+		t.Fatalf("ListAccounts should swallow /user/repos errors, got %v", err)
 	}
-	if len(got) != 1 || got[0].Type != AccountTypeUser {
+	if len(got) != 1 || got[0].Login != "alice" {
 		t.Fatalf("expected just the user, got %+v", got)
 	}
 }

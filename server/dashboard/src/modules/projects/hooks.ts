@@ -10,6 +10,24 @@ export const projectKeys = {
   all: ['projects'] as const,
   detail: (hash: string) => ['projects', hash] as const,
   summary: (hash: string) => ['projects', hash, 'summary'] as const,
+  workspaces: (hash: string) => ['projects', hash, 'workspaces'] as const,
+};
+
+// ProjectWorkspaceEntry mirrors the Go response shape from
+// /api/v1/projects/{hash}/workspaces — one row per workspace_repo
+// pointing at this project. Defined locally so the hook doesn't
+// depend on a regen of generated.ts every time the page renders.
+export type ProjectWorkspaceEntry = {
+  workspace_id: string;
+  workspace_name: string;
+  repo_id: string;
+  branch: string;
+  status: 'pending' | 'cloning' | 'indexing' | 'indexed' | 'failed';
+  is_linked: boolean;
+};
+
+export type ProjectWorkspaceList = {
+  workspaces: ProjectWorkspaceEntry[];
 };
 
 export function useProjects() {
@@ -31,6 +49,19 @@ export function useProjectSummary(hash: string | undefined) {
   return useQuery({
     queryKey: hash ? projectKeys.summary(hash) : ['projects', 'unknown', 'summary'],
     queryFn: ({ signal }) => api.get<ProjectSummary>(`/projects/${hash}/summary`, { signal }),
+    enabled: Boolean(hash),
+  });
+}
+
+// useProjectWorkspaces returns every workspace this project participates
+// in. Used by the project detail page to render "Workspaces" chips. The
+// endpoint is cheap and the membership is rarely stale, so we don't
+// poll — refetch happens on window focus via react-query defaults.
+export function useProjectWorkspaces(hash: string | undefined) {
+  return useQuery({
+    queryKey: hash ? projectKeys.workspaces(hash) : ['projects', 'unknown', 'workspaces'],
+    queryFn: ({ signal }) =>
+      api.get<ProjectWorkspaceList>(`/projects/${hash}/workspaces`, { signal }),
     enabled: Boolean(hash),
   });
 }

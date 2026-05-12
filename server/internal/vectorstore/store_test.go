@@ -340,3 +340,4 @@ func TestSearchLatencyGate(t *testing.T) {
 		t.Errorf("P95 latency %.1fms ≥ 200ms gate", p95)
 	}
 }
+

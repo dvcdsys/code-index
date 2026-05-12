@@ -6,10 +6,12 @@ package db
 import (
 	"crypto/sha1"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -85,7 +87,206 @@ func Open(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrate webhook_mode: %w", err)
 	}
 
+	// PR13 — workspace_repos.is_linked + drop the legacy global UNIQUE
+	// on project_path. The rebuild path is taken only when the old
+	// constraint is still present; freshly-created DBs hit the new
+	// CREATE TABLE shape via Schema and the rebuild becomes a no-op.
+	if err := migrateWorkspaceReposLinked(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate workspace_repos is_linked: %w", err)
+	}
+
+	// PR14 — workspace search switched from the Louvain-centroid two-
+	// stage pipeline to a weighted fan-out. The communities +
+	// community_members tables stop being written; drop them on
+	// upgrade so the schema reflects what's actually used.
+	if err := migrateDropCommunities(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate drop communities: %w", err)
+	}
+
 	return db, nil
+}
+
+// migrateDropCommunities removes the PR5–PR12 communities +
+// community_members tables. The PR14 fan-out search doesn't need
+// them; leaving them around would just confuse anyone reading the
+// schema. Idempotent via IF EXISTS, child rows in community_members
+// go first to avoid FK-on-DELETE noise.
+func migrateDropCommunities(db *sql.DB) error {
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS community_members`,
+		`DROP TABLE IF EXISTS communities`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("exec %q: %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+// migrateWorkspaceReposLinked brings pre-PR13 workspace_repos tables up to
+// the current shape: adds the is_linked column and removes the legacy
+// global UNIQUE on project_path so the same indexed project can live in
+// multiple workspaces. Two cases:
+//
+//  1. Table doesn't exist yet (fresh DB) — nothing to migrate; Schema's
+//     CREATE TABLE IF NOT EXISTS already laid the new shape down.
+//  2. Table has the old shape (project_path declared UNIQUE inline). We
+//     read the stored DDL from sqlite_master, and if it still contains
+//     "project_path TEXT NOT NULL UNIQUE", do the standard SQLite
+//     table-rebuild dance inside a transaction. is_linked is folded into
+//     the new table so we avoid a second ALTER pass.
+//  3. Table has the new shape but is_linked is still missing (operator
+//     applied a partial migration manually) — ALTER TABLE ADD COLUMN.
+//
+// The check is conservative: any DDL string that doesn't contain the
+// legacy UNIQUE marker is treated as already-migrated.
+func migrateWorkspaceReposLinked(db *sql.DB) error {
+	tableExists, haveIsLinked, err := workspaceReposColumns(db)
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		return nil
+	}
+
+	needRebuild, err := workspaceReposNeedsUniqueDrop(db)
+	if err != nil {
+		return err
+	}
+	if needRebuild {
+		return rebuildWorkspaceReposWithoutGlobalUnique(db)
+	}
+	if !haveIsLinked {
+		if _, err := db.Exec(
+			`ALTER TABLE workspace_repos ADD COLUMN is_linked INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("add is_linked column: %w", err)
+		}
+	}
+	return nil
+}
+
+// workspaceReposColumns reports whether workspace_repos exists and
+// whether the is_linked column is already present.
+func workspaceReposColumns(db *sql.DB) (tableExists, haveIsLinked bool, err error) {
+	rows, qerr := db.Query(`PRAGMA table_info(workspace_repos)`)
+	if qerr != nil {
+		return false, false, fmt.Errorf("table_info workspace_repos: %w", qerr)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if scanErr := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); scanErr != nil {
+			return false, false, scanErr
+		}
+		tableExists = true
+		if name == "is_linked" {
+			haveIsLinked = true
+		}
+	}
+	return tableExists, haveIsLinked, rows.Err()
+}
+
+// workspaceReposNeedsUniqueDrop returns true when the stored DDL for
+// workspace_repos still has project_path declared as inline-UNIQUE.
+// String inspection is the only reasonable signal — PRAGMA index_list
+// also lists the auto-index from the composite UNIQUE so column-level
+// detection is unreliable.
+func workspaceReposNeedsUniqueDrop(db *sql.DB) (bool, error) {
+	var ddl sql.NullString
+	row := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workspace_repos'`,
+	)
+	if err := row.Scan(&ddl); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read workspace_repos ddl: %w", err)
+	}
+	if !ddl.Valid {
+		return false, nil
+	}
+	// Whitespace varies (formatting, indentation) — collapse and
+	// uppercase to make the substring match robust.
+	normalised := strings.ToUpper(strings.Join(strings.Fields(ddl.String), " "))
+	return strings.Contains(normalised, "PROJECT_PATH TEXT NOT NULL UNIQUE"), nil
+}
+
+// rebuildWorkspaceReposWithoutGlobalUnique creates a new
+// workspace_repos table with the current shape (no global UNIQUE on
+// project_path, is_linked present), copies all rows from the old
+// table, drops the old one, renames the new one, and recreates the
+// indices. Wrapped in a transaction so a mid-rebuild failure leaves
+// the original table intact.
+func rebuildWorkspaceReposWithoutGlobalUnique(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin rebuild tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`CREATE TABLE workspace_repos_new (
+        id              TEXT PRIMARY KEY,
+        workspace_id    TEXT NOT NULL,
+        github_url      TEXT NOT NULL,
+        branch          TEXT NOT NULL,
+        project_path    TEXT NOT NULL,
+        token_id        TEXT,
+        webhook_secret  TEXT NOT NULL,
+        webhook_id      INTEGER,
+        auto_webhook    INTEGER NOT NULL DEFAULT 0,
+        webhook_mode    TEXT NOT NULL DEFAULT 'manual',
+        status          TEXT NOT NULL DEFAULT 'pending',
+        last_sha        TEXT,
+        last_error      TEXT,
+        last_indexed_at TEXT,
+        is_linked       INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        UNIQUE(workspace_id, github_url, branch),
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+        FOREIGN KEY (token_id) REFERENCES github_tokens(id) ON DELETE SET NULL
+    )`); err != nil {
+		return fmt.Errorf("create workspace_repos_new: %w", err)
+	}
+
+	if _, err := tx.Exec(`INSERT INTO workspace_repos_new
+        (id, workspace_id, github_url, branch, project_path,
+         token_id, webhook_secret, webhook_id, auto_webhook, webhook_mode,
+         status, last_sha, last_error, last_indexed_at,
+         created_at, updated_at)
+        SELECT id, workspace_id, github_url, branch, project_path,
+               token_id, webhook_secret, webhook_id, auto_webhook, webhook_mode,
+               status, last_sha, last_error, last_indexed_at,
+               created_at, updated_at
+          FROM workspace_repos`); err != nil {
+		return fmt.Errorf("copy workspace_repos rows: %w", err)
+	}
+
+	if _, err := tx.Exec(`DROP TABLE workspace_repos`); err != nil {
+		return fmt.Errorf("drop old workspace_repos: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE workspace_repos_new RENAME TO workspace_repos`); err != nil {
+		return fmt.Errorf("rename workspace_repos_new: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_workspace_repos_workspace ON workspace_repos(workspace_id)`); err != nil {
+		return fmt.Errorf("recreate workspace index: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_workspace_repos_project ON workspace_repos(project_path)`); err != nil {
+		return fmt.Errorf("recreate project index: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rebuild tx: %w", err)
+	}
+	return nil
 }
 
 // migratePathHash brings older databases up to the current schema by adding

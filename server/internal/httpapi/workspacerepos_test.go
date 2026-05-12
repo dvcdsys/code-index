@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
+	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/workspacerepos"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
@@ -328,5 +330,229 @@ func TestJobs_ListEndpointFiltersByStatus(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &lr)
 	if lr.Total != 1 {
 		t.Fatalf("expected 1 typed job, got %d", lr.Total)
+	}
+}
+
+// reposRouterWithDB is the same router setup as reposRouter but also
+// returns the underlying *sql.DB so link-existing tests can seed
+// projects directly. We keep reposRouter signature unchanged so the
+// existing call sites in webhooks_test.go and elsewhere stay green.
+func reposRouterWithDB(t *testing.T) (http.Handler, *jobs.Service, *sql.DB) {
+	t.Helper()
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Setenv("CIX_SECRET_KEY", "")
+	t.Setenv("CIX_SECRET_KEYFILE", "")
+	sec, err := secrets.Open(secrets.OpenOptions{DataDir: t.TempDir(), AllowGenerate: true})
+	if err != nil {
+		t.Fatalf("open secrets: %v", err)
+	}
+	wsSvc := workspaces.New(d)
+	ghSvc := githubtokens.New(d, sec)
+	wrSvc := workspacerepos.New(d)
+	jobsSvc := jobs.New(d, jobs.Options{Concurrency: 1, PollEvery: time.Hour})
+
+	router := NewRouter(Deps{
+		DB:                d,
+		ServerVersion:     "test",
+		APIVersion:        "v1",
+		Backend:           "go",
+		AuthDisabled:      true,
+		Users:             seedlessUsers(d),
+		Sessions:          seedlessSessions(d),
+		APIKeys:           seedlessAPIKeys(d),
+		WorkspacesEnabled: true,
+		Workspaces:        wsSvc,
+		GithubTokens:      ghSvc,
+		WorkspaceRepos:    wrSvc,
+		Jobs:              jobsSvc,
+		PublicBaseURL:     "https://cix.example.test",
+	})
+	return router, jobsSvc, d
+}
+
+// seedIndexedProject creates an indexed project row with the given
+// host_path and returns its path_hash. Used by the link-existing tests
+// so they don't need to invoke the real cloner+indexer.
+func seedIndexedProject(t *testing.T, db *sql.DB, hostPath string) string {
+	t.Helper()
+	if _, err := projects.Create(context.Background(), db, projects.CreateRequest{HostPath: hostPath}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := db.Exec(
+		`UPDATE projects SET status = 'indexed', last_indexed_at = ?, updated_at = ? WHERE host_path = ?`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		time.Now().UTC().Format(time.RFC3339Nano),
+		hostPath,
+	); err != nil {
+		t.Fatalf("mark indexed: %v", err)
+	}
+	return projects.HashPath(hostPath)
+}
+
+func TestLinkExistingProject_SkipsCloneJob(t *testing.T) {
+	router, jobsSvc, d := reposRouterWithDB(t)
+	wsID := createWS(t, router, "platform")
+	hash := seedIndexedProject(t, d, "github.com/spf13/cobra@main")
+
+	rr := doJSON(t, router, http.MethodPost,
+		"/api/v1/workspaces/"+wsID+"/repos/link",
+		map[string]any{"project_hash": hash})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("link: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Repo           workspaceRepoPayload `json:"repo"`
+		WebhookURL     string               `json:"webhook_url"`
+		WebhookSecret  string               `json:"webhook_secret"`
+		AutoRegistered bool                 `json:"auto_registered"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Repo.IsLinked {
+		t.Fatalf("expected IsLinked=true, got %+v", resp.Repo)
+	}
+	if resp.Repo.Status != workspacerepos.StatusIndexed {
+		t.Fatalf("expected status=indexed, got %q", resp.Repo.Status)
+	}
+	if resp.Repo.WebhookMode != workspacerepos.WebhookModeDisabled {
+		t.Fatalf("expected webhook_mode=disabled, got %q", resp.Repo.WebhookMode)
+	}
+	if resp.WebhookURL != "" || resp.WebhookSecret != "" {
+		t.Fatalf("linked rows must not surface webhook info, got url=%q secret-len=%d",
+			resp.WebhookURL, len(resp.WebhookSecret))
+	}
+
+	// Critical: no clone_repo job should have been enqueued.
+	jobList, err := jobsSvc.List(context.Background(), jobs.StatusPending, "clone_repo", 10)
+	if err != nil {
+		t.Fatalf("jobs list: %v", err)
+	}
+	if len(jobList) != 0 {
+		t.Fatalf("expected 0 clone_repo jobs, got %d (linked rows must not clone)", len(jobList))
+	}
+}
+
+func TestLinkExistingProject_409OnDuplicate(t *testing.T) {
+	router, _, d := reposRouterWithDB(t)
+	wsID := createWS(t, router, "platform")
+	hash := seedIndexedProject(t, d, "github.com/foo/bar@main")
+
+	rr := doJSON(t, router, http.MethodPost,
+		"/api/v1/workspaces/"+wsID+"/repos/link",
+		map[string]any{"project_hash": hash})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("first link: %d (%s)", rr.Code, rr.Body.String())
+	}
+	rr = doJSON(t, router, http.MethodPost,
+		"/api/v1/workspaces/"+wsID+"/repos/link",
+		map[string]any{"project_hash": hash})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409 on duplicate link, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLinkExistingProject_422IfProjectNotIndexed(t *testing.T) {
+	router, _, d := reposRouterWithDB(t)
+	wsID := createWS(t, router, "platform")
+	// Create the project but leave status=created (the default).
+	hostPath := "github.com/foo/bar@main"
+	if _, err := projects.Create(context.Background(), d,
+		projects.CreateRequest{HostPath: hostPath}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	rr := doJSON(t, router, http.MethodPost,
+		"/api/v1/workspaces/"+wsID+"/repos/link",
+		map[string]any{"project_hash": projects.HashPath(hostPath)})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLinkExistingProject_404OnUnknownHash(t *testing.T) {
+	router, _ := reposRouter(t)
+	wsID := createWS(t, router, "platform")
+	rr := doJSON(t, router, http.MethodPost,
+		"/api/v1/workspaces/"+wsID+"/repos/link",
+		map[string]any{"project_hash": "0000000000000000"})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown project_hash, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestListProjectWorkspaces_ReturnsAllMemberships(t *testing.T) {
+	router, _, d := reposRouterWithDB(t)
+	hash := seedIndexedProject(t, d, "github.com/foo/bar@main")
+	wsA := createWS(t, router, "alpha")
+	wsB := createWS(t, router, "beta")
+
+	for _, ws := range []string{wsA, wsB} {
+		rr := doJSON(t, router, http.MethodPost,
+			"/api/v1/workspaces/"+ws+"/repos/link",
+			map[string]any{"project_hash": hash})
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("link to %s: %d (%s)", ws, rr.Code, rr.Body.String())
+		}
+	}
+
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/projects/"+hash+"/workspaces", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list workspaces: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Workspaces []struct {
+			WorkspaceID   string `json:"workspace_id"`
+			WorkspaceName string `json:"workspace_name"`
+			RepoID        string `json:"repo_id"`
+			IsLinked      bool   `json:"is_linked"`
+			Status        string `json:"status"`
+		} `json:"workspaces"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Workspaces) != 2 {
+		t.Fatalf("expected 2 memberships, got %d (%+v)", len(resp.Workspaces), resp.Workspaces)
+	}
+	for _, m := range resp.Workspaces {
+		if !m.IsLinked {
+			t.Fatalf("workspace %s membership should be linked", m.WorkspaceName)
+		}
+		if m.Status != workspacerepos.StatusIndexed {
+			t.Fatalf("status should be indexed, got %q", m.Status)
+		}
+	}
+}
+
+func TestListProjectWorkspaces_EmptyWhenUnused(t *testing.T) {
+	router, _, d := reposRouterWithDB(t)
+	hash := seedIndexedProject(t, d, "github.com/lonely/project@main")
+
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/projects/"+hash+"/workspaces", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list workspaces: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Workspaces []any `json:"workspaces"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Workspaces) != 0 {
+		t.Fatalf("expected empty list, got %d", len(resp.Workspaces))
+	}
+}
+
+func TestListProjectWorkspaces_404OnUnknownHash(t *testing.T) {
+	router, _ := reposRouter(t)
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/projects/0000000000000000/workspaces", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (%s)", rr.Code, rr.Body.String())
 	}
 }
