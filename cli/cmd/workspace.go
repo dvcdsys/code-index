@@ -47,7 +47,7 @@ Examples:
   cix ws platform
   cix ws platform list
   cix ws platform search "JWT validation"
-  cix ws platform search "rate limiting" --top-communities 8 --top-chunks 30 --json
+  cix ws platform search "rate limiting" --top-projects 8 --top-chunks 30 --json
 
 Workspace identifiers accept the opaque id OR the (case-insensitive)
 name. Repository attachment, GitHub token management, and the
@@ -59,7 +59,7 @@ detailed dashboard view all live at /dashboard on the cix-server.`,
 var (
 	wsJSON                bool
 	wsVerbose             bool
-	wsSearchTopCommunities int
+	wsSearchTopProjects int
 	wsSearchTopChunks      int
 )
 
@@ -70,7 +70,7 @@ func init() {
 	// "..." --json` works regardless of where the user puts the flag.
 	workspaceCmd.Flags().BoolVar(&wsJSON, "json", false, "Emit raw JSON instead of formatted output")
 	workspaceCmd.Flags().BoolVarP(&wsVerbose, "verbose", "v", false, "Show extra columns on list / describe")
-	workspaceCmd.Flags().IntVar(&wsSearchTopCommunities, "top-communities", 5, "Search: top-N centroids to fan out (1-50)")
+	workspaceCmd.Flags().IntVar(&wsSearchTopProjects, "top-projects", 10, "Search: top-N projects in the projects panel (1-50)")
 	workspaceCmd.Flags().IntVar(&wsSearchTopChunks, "top-chunks", 20, "Search: top-K chunks returned overall (1-200)")
 }
 
@@ -282,7 +282,7 @@ func cmdWorkspaceSearch(cli *client.Client, identifier, query string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := cli.WorkspaceSearch(id, query, wsSearchTopCommunities, wsSearchTopChunks)
+	resp, err := cli.WorkspaceSearch(id, query, wsSearchTopProjects, wsSearchTopChunks)
 	if err != nil {
 		return err
 	}
@@ -311,23 +311,34 @@ func resolveWorkspaceID(cli *client.Client, identifier string) (string, error) {
 
 func renderSearch(resp *client.WorkspaceSearchResponse) error {
 	switch resp.Status {
-	case "communities_not_built":
-		fmt.Fprintln(os.Stderr, "workspace has no centroid index yet — add a repo or wait for the debounced rebuild")
-		return nil
 	case "empty":
 		fmt.Fprintln(os.Stderr, "no chunks matched the query")
 		return nil
+	case "partial_failure":
+		fmt.Fprintln(os.Stderr, "at least one repo errored — results below are incomplete; check server logs")
 	}
 
-	if len(resp.Communities) > 0 {
-		fmt.Println("Top communities:")
-		for _, c := range resp.Communities {
-			label := c.Label
+	if len(resp.StaleFTSRepos) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"warning: %d repo(s) were indexed before BM25 was enabled; hybrid degrades to dense-only for them.\n"+
+				"         reindex to fix: ", len(resp.StaleFTSRepos))
+		paths := make([]string, len(resp.StaleFTSRepos))
+		for i, s := range resp.StaleFTSRepos {
+			paths[i] = s.ProjectPath
+		}
+		fmt.Fprintln(os.Stderr, strings.Join(paths, ", "))
+		fmt.Fprintln(os.Stderr)
+	}
+
+	if len(resp.Projects) > 0 {
+		fmt.Println("Top projects:")
+		for _, p := range resp.Projects {
+			label := p.Label
 			if label == "" {
-				label = "(unlabelled)"
+				label = p.ProjectPath
 			}
-			fmt.Printf("  [%.3f] %s  — %d members across %s\n",
-				c.Score, label, c.MemberCount, strings.Join(c.ProjectPaths, ", "))
+			fmt.Printf("  [%.3f] %s  — %d hits · bm25 %.3f · dense %.3f · %s\n",
+				p.ProjectScore, label, p.NumHits, p.BM25Score, p.DenseScore, p.ProjectPath)
 		}
 		fmt.Println()
 	}
@@ -338,9 +349,6 @@ func renderSearch(resp *client.WorkspaceSearchResponse) error {
 		fmt.Printf("         project: %s\n", c.ProjectPath)
 		if c.SymbolName != "" {
 			fmt.Printf("         symbol:  %s\n", c.SymbolName)
-		}
-		if c.CommunityLabel != "" {
-			fmt.Printf("         community: %s\n", c.CommunityLabel)
 		}
 		fmt.Println()
 	}
