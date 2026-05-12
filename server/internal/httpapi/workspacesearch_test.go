@@ -183,11 +183,16 @@ type searchFailedResp struct {
 }
 
 type searchResp struct {
-	Status       string              `json:"status"`
-	Projects     []searchProjectResp `json:"projects"`
-	Chunks       []searchChunkResp   `json:"chunks"`
-	PendingRepos []searchPendingResp `json:"pending_repos,omitempty"`
-	FailedRepos  []searchFailedResp  `json:"failed_repos,omitempty"`
+	Status        string                `json:"status"`
+	Projects      []searchProjectResp   `json:"projects"`
+	Chunks        []searchChunkResp     `json:"chunks"`
+	PendingRepos  []searchPendingResp   `json:"pending_repos,omitempty"`
+	FailedRepos   []searchFailedResp    `json:"failed_repos,omitempty"`
+	StaleFTSRepos []searchStaleFTSRepoR `json:"stale_fts_repos,omitempty"`
+}
+
+type searchStaleFTSRepoR struct {
+	ProjectPath string `json:"project_path"`
 }
 
 // TestWorkspaceSearch_EmptyWorkspace covers the no-repos case — the
@@ -468,6 +473,79 @@ func TestWorkspaceSearch_ProjectGateDropsDeadWeightRepos(t *testing.T) {
 	for _, c := range resp.Chunks {
 		if c.ProjectPath == "github.com/o/dead@main" {
 			t.Errorf("dead project chunk leaked into output: %+v", c)
+		}
+	}
+}
+
+// TestWorkspaceSearch_FlagsStaleFTSRepos exercises the pre-FTS5-mirror
+// detection. We seed a project the way the old indexer used to —
+// chromem + file_hashes populated, chunks_meta left empty — and
+// verify the response calls it out in stale_fts_repos.
+func TestWorkspaceSearch_FlagsStaleFTSRepos(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	query := l2([]float32{1, 0, 0, 0})
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: query})
+	wsID := createWS(t, router, "stale")
+
+	// Seed a normal repo (chunks_fts populated via the helper).
+	seedRepoWithChunks(t, d, vs, wsID, "github.com/o/fresh@main",
+		[]vectorstore.Chunk{
+			{Content: "needle here", FilePath: "f.go", StartLine: 1, EndLine: 9, ChunkType: "function", Language: "go"},
+		},
+		[][]float32{l2([]float32{1.0, 0.0, 0.0, 0.0})},
+	)
+
+	// Simulate a pre-FTS5-mirror repo: insert project + workspace_repo
+	// + chromem chunk + file_hashes row, but skip chunks_fts/meta.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	stalePath := "github.com/o/stale@main"
+	if _, err := d.Exec(
+		`INSERT INTO projects (host_path, container_path, languages, settings, stats, status, created_at, updated_at, path_hash)
+		 VALUES (?, ?, '[]', '{}', '{}', 'created', ?, ?, 'h')`,
+		stalePath, stalePath, now, now,
+	); err != nil {
+		t.Fatalf("insert stale project: %v", err)
+	}
+	if _, err := d.Exec(
+		`INSERT INTO workspace_repos
+		 (id, workspace_id, github_url, branch, project_path, webhook_secret, status, created_at, updated_at, last_indexed_at)
+		 VALUES (?, ?, ?, 'main', ?, 'sec', 'indexed', ?, ?, ?)`,
+		uuid.NewString(), wsID, "https://"+stalePath, stalePath, now, now, now,
+	); err != nil {
+		t.Fatalf("insert stale workspace_repo: %v", err)
+	}
+	if err := vs.UpsertChunks(context.Background(), stalePath,
+		[]vectorstore.Chunk{{Content: "stale chunk", FilePath: "s.go", StartLine: 1, EndLine: 9, Language: "go"}},
+		[][]float32{l2([]float32{0.9, 0.1, 0.0, 0.0})},
+	); err != nil {
+		t.Fatalf("upsert stale chromem chunks: %v", err)
+	}
+	if _, err := d.Exec(
+		`INSERT INTO file_hashes (project_path, file_path, content_hash, indexed_at)
+		 VALUES (?, 's.go', 'hash', ?)`,
+		stalePath, now,
+	); err != nil {
+		t.Fatalf("insert stale file_hashes: %v", err)
+	}
+
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=needle", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var resp searchResp
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if len(resp.StaleFTSRepos) != 1 || resp.StaleFTSRepos[0].ProjectPath != stalePath {
+		t.Fatalf("expected stale_fts_repos to flag %q, got %+v", stalePath, resp.StaleFTSRepos)
+	}
+	// Sanity: the fresh repo must NOT appear in the stale list.
+	for _, s := range resp.StaleFTSRepos {
+		if s.ProjectPath == "github.com/o/fresh@main" {
+			t.Errorf("fresh repo wrongly flagged as stale: %+v", s)
 		}
 	}
 }

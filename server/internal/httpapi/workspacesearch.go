@@ -88,6 +88,14 @@ type workspaceSearchFailedRepoPayload struct {
 	Reason      string `json:"reason"`
 }
 
+// workspaceSearchStaleFTSRepoPayload reports a repo that was indexed
+// before the chunks_fts mirror existed: dense search works, BM25
+// returns nothing for it, hybrid degrades to pure-dense for that one
+// entry. Dashboard renders a banner telling the operator to reindex.
+type workspaceSearchStaleFTSRepoPayload struct {
+	ProjectPath string `json:"project_path"`
+}
+
 // projectHits is the per-project intermediate state accumulated across
 // the parallel fan-out. Dense and BM25 sides arrive separately and are
 // fused inside the goroutine before being collected.
@@ -177,6 +185,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 			[]workspaceSearchChunkPayload{},
 			nil,
 			nil,
+			nil,
 		))
 		return
 	}
@@ -206,9 +215,20 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 			[]workspaceSearchChunkPayload{},
 			pendingRepos,
 			nil,
+			nil,
 		))
 		return
 	}
+
+	// Detect repos that were indexed before chunks_fts existed:
+	// file_hashes has rows for them (so they're "indexed") but
+	// chunks_meta is empty, meaning the BM25 side is permanently 0
+	// until a reindex backfills it. We still run the search (dense
+	// works) but surface the list so the dashboard can prompt for a
+	// reindex — otherwise the operator sees no observable difference
+	// from the pre-hybrid algorithm and assumes the change didn't
+	// take effect.
+	staleRepos := s.detectStaleFTSRepos(r.Context(), projectPaths)
 
 	hits, failedRepos, err := s.fanOutHybrid(r.Context(), id, projectPaths, params.Q, queryEmbedding, minScore)
 	if err != nil {
@@ -274,6 +294,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 			[]workspaceSearchChunkPayload{},
 			pendingRepos,
 			failedRepos,
+			staleRepos,
 		))
 		return
 	}
@@ -330,6 +351,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		merged,
 		pendingRepos,
 		failedRepos,
+		staleRepos,
 	))
 }
 
@@ -398,6 +420,7 @@ func workspaceSearchResponse(
 	chunks []workspaceSearchChunkPayload,
 	pending []workspaceSearchPendingRepoPayload,
 	failed []workspaceSearchFailedRepoPayload,
+	stale []workspaceSearchStaleFTSRepoPayload,
 ) map[string]any {
 	out := map[string]any{
 		"status":   status,
@@ -409,6 +432,41 @@ func workspaceSearchResponse(
 	}
 	if len(failed) > 0 {
 		out["failed_repos"] = failed
+	}
+	if len(stale) > 0 {
+		out["stale_fts_repos"] = stale
+	}
+	return out
+}
+
+// detectStaleFTSRepos returns the subset of projectPaths whose
+// chunks_meta is empty but file_hashes has at least one row — meaning
+// the project was indexed before the FTS5 mirror existed and needs a
+// reindex before BM25 can contribute. A best-effort detector: if any
+// SQL probe errors out we log + return nil rather than fail the
+// request, since the warning is informational, not load-bearing.
+func (s *Server) detectStaleFTSRepos(ctx context.Context, projectPaths []string) []workspaceSearchStaleFTSRepoPayload {
+	out := make([]workspaceSearchStaleFTSRepoPayload, 0)
+	for _, pp := range projectPaths {
+		var nMeta, nFiles int
+		if err := s.Deps.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM chunks_meta WHERE project_path = ? LIMIT 1`, pp).Scan(&nMeta); err != nil {
+			s.Deps.Logger.Warn("workspaces search: stale-fts probe (chunks_meta)",
+				"project_path", pp, "err", err)
+			return nil
+		}
+		if nMeta > 0 {
+			continue
+		}
+		if err := s.Deps.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM file_hashes WHERE project_path = ? LIMIT 1`, pp).Scan(&nFiles); err != nil {
+			s.Deps.Logger.Warn("workspaces search: stale-fts probe (file_hashes)",
+				"project_path", pp, "err", err)
+			return nil
+		}
+		if nFiles > 0 {
+			out = append(out, workspaceSearchStaleFTSRepoPayload{ProjectPath: pp})
+		}
 	}
 	return out
 }

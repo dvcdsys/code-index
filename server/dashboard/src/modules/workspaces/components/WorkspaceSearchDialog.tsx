@@ -138,6 +138,23 @@ export function WorkspaceSearchDialog({ workspace }: { workspace: Workspace }) {
               </AlertDescription>
             </Alert>
           )}
+          {resp?.stale_fts_repos && resp.stale_fts_repos.length > 0 && (
+            <Alert>
+              <AlertDescription>
+                {resp.stale_fts_repos.length} repo
+                {resp.stale_fts_repos.length === 1 ? '' : 's'} indexed
+                before BM25 was enabled — keyword matching is empty
+                for {resp.stale_fts_repos.length === 1 ? 'it' : 'them'},
+                so results below fall back to dense-only ranking.
+                Re-index each to enable hybrid search:{' '}
+                <span className="font-mono text-xs">
+                  {resp.stale_fts_repos
+                    .map((r) => r.project_path.split('/').pop() ?? r.project_path)
+                    .join(', ')}
+                </span>
+              </AlertDescription>
+            </Alert>
+          )}
           {resp && resp.status === 'empty' && (
             <Alert>
               <AlertDescription>
