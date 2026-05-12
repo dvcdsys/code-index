@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/dvcdsys/code-index/server/internal/chunksfts"
 )
 
 // ErrNotFound is returned when a project does not exist.
@@ -263,12 +265,27 @@ func Patch(ctx context.Context, db *sql.DB, hostPath string, req UpdateRequest) 
 }
 
 // Delete removes a project and its cascading records. Returns ErrNotFound if absent.
+//
+// chunks_meta and chunks_fts are not bound to projects via FK because
+// chunks_fts is a virtual table and cannot participate in foreign keys.
+// We wipe them in the same tx that drops the projects row so a failure
+// rolls back the partial state.
 func Delete(ctx context.Context, db *sql.DB, hostPath string) error {
 	if _, err := Get(ctx, db, hostPath); err != nil {
 		return err
 	}
-	_, err := db.ExecContext(ctx, `DELETE FROM projects WHERE host_path = ?`, hostPath)
-	return err
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after commit
+	if err := chunksfts.DeleteByProjectTx(ctx, tx, hostPath); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE host_path = ?`, hostPath); err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	return tx.Commit()
 }
 
 // ---------------------------------------------------------------------------

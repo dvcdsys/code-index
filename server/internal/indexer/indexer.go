@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/dvcdsys/code-index/server/internal/chunker"
+	"github.com/dvcdsys/code-index/server/internal/chunksfts"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/langdetect"
 	"github.com/dvcdsys/code-index/server/internal/symbolindex"
@@ -239,6 +240,9 @@ func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bo
 				return "", nil, fmt.Errorf("full wipe: %w", err)
 			}
 		}
+		if err := chunksfts.DeleteByProjectTx(ctx, tx2, projectPath); err != nil {
+			return "", nil, fmt.Errorf("full wipe chunks_fts: %w", err)
+		}
 		if err := tx2.Commit(); err != nil {
 			return "", nil, fmt.Errorf("commit (full): %w", err)
 		}
@@ -336,8 +340,6 @@ func (s *Service) ProcessFilesStreaming(
 	now := nowUTC()
 	filesAccepted := 0
 	batchChunks := 0
-	var batchSymbols []symbolindex.Symbol
-	var batchRefs []symbolindex.Reference
 
 	// maxContentBytes guards against files that grew past the CLI's MaxFileSize
 	// filter between discovery and indexing (e.g. a log file written in-flight).
@@ -345,19 +347,17 @@ func (s *Service) ProcessFilesStreaming(
 	// the queue slot for tens of seconds per file.
 	const maxContentBytes = 512 * 1024
 
-	// Open the per-batch transaction. Every per-file DB change lives inside a
-	// SAVEPOINT of this tx so a single bad file only rolls back that file's
-	// rows, not the whole batch.
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("begin batch tx: %w", err)
-	}
-	txCommitted := false
-	defer func() {
-		if !txCommitted {
-			_ = tx.Rollback()
-		}
-	}()
+	// Per-file transactions (not per-batch). Earlier revisions wrapped the
+	// whole loop in a single BeginTx and used SAVEPOINTs per file, which held
+	// SQLite's WAL writer lock across every embed call (a network RTT to
+	// llama-server per file). On a multi-minute batch any concurrent write —
+	// most visibly POST /projects from the dashboard add-repo flow — timed
+	// out against busy_timeout=5s with `database is locked (5) (SQLITE_BUSY)`.
+	// Per-file tx caps lock-holding to the actual DB writes (sub-ms) and
+	// releases the writer between files so other connections can interleave.
+	// Side benefit: a fatal mid-batch error (embed ErrBusy, etc.) no longer
+	// rolls back all of this batch's work — successfully-indexed files stay
+	// committed and the next batch resumes from where this one stopped.
 
 	for fi, fp := range files {
 		// file_started — emit even for files we'll skip below, so the client
@@ -500,43 +500,11 @@ func (s *Service) ProcessFilesStreaming(
 			EmbedMS: time.Since(embedStart).Milliseconds(),
 		})
 
-		// Per-file SAVEPOINT so a partial failure rolls back only this file.
-		// savepointName is derived from filesAccepted (monotonically increasing
-		// within the tx) so nested savepoints cannot collide.
-		savepointName := fmt.Sprintf("f%d", filesAccepted)
-		if _, err := tx.ExecContext(ctx, "SAVEPOINT "+savepointName); err != nil {
-			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("savepoint: %w", err)
-		}
-		// Rollback helper for the failure path below.
-		rollback := func() {
-			_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+savepointName)
-			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepointName)
-		}
-
-		// Delete old symbols/refs before insert (matches Python).
-		if err := symbolindex.DeleteByFileTx(ctx, tx, projectPath, fp.Path); err != nil {
-			s.logger.Error("indexer: symbols delete by file", "path", fp.Path, "err", err)
-			rollback()
-			continue
-		}
-		if err := symbolindex.DeleteRefsByFileTx(ctx, tx, projectPath, fp.Path); err != nil {
-			s.logger.Error("indexer: refs delete by file", "path", fp.Path, "err", err)
-			rollback()
-			continue
-		}
-
-		// Vector store has no transactions — delete is best-effort. If the
-		// savepoint rolls back below we leave any vectors in place; they get
-		// overwritten on the next successful indexing of this file.
-		if s.vs != nil {
-			if err := s.vs.DeleteByFile(ctx, projectPath, fp.Path); err != nil {
-				s.logger.Error("indexer: vectorstore delete by file", "path", fp.Path, "err", err)
-				rollback()
-				continue
-			}
-		}
-
-		// Upsert chunks.
+		// Vector store has no transactions — do its writes BEFORE opening
+		// the DB tx so the writer lock is acquired strictly for the DB part.
+		// If the DB tx fails we leave the new vectors in place; next reindex
+		// will see file_hashes was not updated and re-process the file,
+		// overwriting them. Acceptable for an infrequent failure mode.
 		vsChunks := make([]vectorstore.Chunk, len(chunks))
 		for i, c := range chunks {
 			sym := ""
@@ -554,36 +522,95 @@ func (s *Service) ProcessFilesStreaming(
 			}
 		}
 		if s.vs != nil {
+			if err := s.vs.DeleteByFile(ctx, projectPath, fp.Path); err != nil {
+				s.logger.Error("indexer: vectorstore delete by file", "path", fp.Path, "err", err)
+				progressSend(progress, ProgressEvent{
+					Event:   EventFileError,
+					Path:    fp.Path,
+					Message: "vectorstore delete: " + err.Error(),
+					Fatal:   false,
+				})
+				continue
+			}
 			if err := s.vs.UpsertChunks(ctx, projectPath, vsChunks, embs); err != nil {
 				s.logger.Error("indexer: vectorstore upsert", "path", fp.Path, "err", err)
-				rollback()
+				progressSend(progress, ProgressEvent{
+					Event:   EventFileError,
+					Path:    fp.Path,
+					Message: "vectorstore upsert: " + err.Error(),
+					Fatal:   false,
+				})
 				continue
 			}
 		}
 
-		if _, err := tx.ExecContext(ctx,
-			`INSERT OR REPLACE INTO file_hashes
-			 (project_path, file_path, content_hash, indexed_at)
-			 VALUES (?, ?, ?, ?)`,
-			projectPath, fp.Path, fp.ContentHash, now,
-		); err != nil {
-			s.logger.Error("indexer: file_hashes upsert", "path", fp.Path, "err", err)
-			rollback()
+		// Build chunksfts payload from the same chunks we just pushed to
+		// chromem. The FTS side reuses content + metadata; embeddings stay
+		// on the vector side only.
+		ftsChunks := make([]chunksfts.Chunk, len(vsChunks))
+		for i, c := range vsChunks {
+			ftsChunks[i] = chunksfts.Chunk{
+				Content:    c.Content,
+				FilePath:   c.FilePath,
+				StartLine:  c.StartLine,
+				EndLine:    c.EndLine,
+				ChunkType:  c.ChunkType,
+				SymbolName: c.SymbolName,
+				Language:   c.Language,
+			}
+		}
+
+		// Per-file DB tx: delete-old + insert-new symbols/refs + chunks_fts
+		// + file_hashes commit atomically. Anonymous func so the deferred
+		// rollback fires per file rather than at function return.
+		fileErr := func() error {
+			ftx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("begin file tx: %w", err)
+			}
+			defer ftx.Rollback() //nolint:errcheck // no-op after commit
+
+			if err := symbolindex.DeleteByFileTx(ctx, ftx, projectPath, fp.Path); err != nil {
+				return fmt.Errorf("symbols delete: %w", err)
+			}
+			if err := symbolindex.DeleteRefsByFileTx(ctx, ftx, projectPath, fp.Path); err != nil {
+				return fmt.Errorf("refs delete: %w", err)
+			}
+			if len(fileSymbols) > 0 {
+				if err := symbolindex.UpsertSymbolsTx(ctx, ftx, projectPath, fileSymbols); err != nil {
+					return fmt.Errorf("upsert symbols: %w", err)
+				}
+			}
+			if len(fileRefs) > 0 {
+				if err := symbolindex.UpsertReferencesTx(ctx, ftx, projectPath, fileRefs); err != nil {
+					return fmt.Errorf("upsert refs: %w", err)
+				}
+			}
+			if err := chunksfts.UpsertByFileTx(ctx, ftx, projectPath, fp.Path, ftsChunks); err != nil {
+				return fmt.Errorf("upsert chunks_fts: %w", err)
+			}
+			if _, err := ftx.ExecContext(ctx,
+				`INSERT OR REPLACE INTO file_hashes
+				 (project_path, file_path, content_hash, indexed_at)
+				 VALUES (?, ?, ?, ?)`,
+				projectPath, fp.Path, fp.ContentHash, now,
+			); err != nil {
+				return fmt.Errorf("file_hashes upsert: %w", err)
+			}
+			return ftx.Commit()
+		}()
+		if fileErr != nil {
+			s.logger.Error("indexer: file tx failed", "path", fp.Path, "err", fileErr)
+			progressSend(progress, ProgressEvent{
+				Event:   EventFileError,
+				Path:    fp.Path,
+				Message: fileErr.Error(),
+				Fatal:   false,
+			})
 			continue
 		}
 
-		if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepointName); err != nil {
-			emitTerminal(progress, ProgressEvent{
-				Event:   EventError,
-				Message: "release savepoint: " + err.Error(),
-				Fatal:   true,
-			})
-			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("release savepoint: %w", err)
-		}
-
 		batchChunks += len(chunks)
-		batchSymbols = append(batchSymbols, fileSymbols...)
-		batchRefs = append(batchRefs, fileRefs...)
 
 		s.mu.Lock()
 		sess.languagesSeen[language] = struct{}{}
@@ -596,40 +623,6 @@ func (s *Service) ProcessFilesStreaming(
 			Chunks: len(chunks),
 		})
 	}
-
-	// M2 — these upserts are part of the outer tx. Any failure returns the
-	// whole batch's work via deferred tx.Rollback, so the session counters
-	// below only advance on a successful commit.
-	if len(batchSymbols) > 0 {
-		if err := symbolindex.UpsertSymbolsTx(ctx, tx, projectPath, batchSymbols); err != nil {
-			emitTerminal(progress, ProgressEvent{
-				Event:   EventError,
-				Message: "upsert symbols: " + err.Error(),
-				Fatal:   true,
-			})
-			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("upsert symbols: %w", err)
-		}
-	}
-	if len(batchRefs) > 0 {
-		if err := symbolindex.UpsertReferencesTx(ctx, tx, projectPath, batchRefs); err != nil {
-			emitTerminal(progress, ProgressEvent{
-				Event:   EventError,
-				Message: "upsert refs: " + err.Error(),
-				Fatal:   true,
-			})
-			return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("upsert refs: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		emitTerminal(progress, ProgressEvent{
-			Event:   EventError,
-			Message: "commit batch: " + err.Error(),
-			Fatal:   true,
-		})
-		return filesAccepted, batchChunks, sess.filesProcessed, fmt.Errorf("commit batch: %w", err)
-	}
-	txCommitted = true
 
 	s.mu.Lock()
 	sess.filesProcessed += filesAccepted
@@ -690,6 +683,9 @@ func (s *Service) FinishIndexing(
 		}
 		if err := symbolindex.DeleteRefsByFile(ctx, s.db, projectPath, dp); err != nil {
 			s.logger.Warn("indexer: refs delete by file (finish)", "path", dp, "err", err)
+		}
+		if err := deleteChunksFTSByFile(ctx, s.db, projectPath, dp); err != nil {
+			s.logger.Warn("indexer: chunks_fts delete by file (finish)", "path", dp, "err", err)
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`DELETE FROM file_hashes WHERE project_path = ? AND file_path = ?`,
@@ -976,5 +972,21 @@ func marshalJSONStringArray(langs []string) string {
 	}
 	b.WriteByte(']')
 	return b.String()
+}
+
+// deleteChunksFTSByFile is the standalone-db wrapper used by the
+// FinishIndexing deletedPaths loop, which operates outside the per-file
+// tx. Internally it opens a short tx so chunks_fts and chunks_meta
+// stay consistent if one of the two DELETEs fails.
+func deleteChunksFTSByFile(ctx context.Context, db *sql.DB, projectPath, filePath string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after commit
+	if err := chunksfts.DeleteByFileTx(ctx, tx, projectPath, filePath); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 

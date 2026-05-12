@@ -17,8 +17,15 @@ func TestOpenInMemoryAppliesSchema(t *testing.T) {
 	}
 	defer database.Close()
 
+	// FTS5 virtual tables create implementation-detail shadow tables
+	// (chunks_fts_config, chunks_fts_content, chunks_fts_data,
+	// chunks_fts_docsize, chunks_fts_idx). Exclude them — we only audit
+	// the tables we explicitly declare.
 	rows, err := database.Query(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`,
+		`SELECT name FROM sqlite_master
+		 WHERE type='table'
+		   AND name NOT LIKE 'sqlite_%'
+		   AND name NOT LIKE 'chunks_fts_%'`,
 	)
 	if err != nil {
 		t.Fatalf("query sqlite_master: %v", err)
@@ -217,5 +224,123 @@ func TestSymbolsIndexExists(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("idx_symbols_project_name count = %d, want 1", n)
+	}
+}
+
+// TestMigrate_DropsGlobalUniqueOnProjectPath verifies that opening a
+// pre-PR13 database (workspace_repos with `project_path TEXT NOT NULL UNIQUE`)
+// migrates it to the current shape, dropping the global UNIQUE so the
+// same indexed project can live in multiple workspaces.
+//
+// Strategy: create a fresh file-backed DB, manually lay down the
+// legacy table shape + seed one row, close, reopen via Open() so the
+// migration runs, then try inserting a second row with the same
+// project_path in a different workspace_id — pre-migration this would
+// fail with UNIQUE constraint failed; post-migration it must succeed.
+func TestMigrate_DropsGlobalUniqueOnProjectPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+
+	// Open with the regular driver (bypass Schema by hand-rolling DDL).
+	raw, err := sql.Open(DriverName, "file:"+path+"?_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+
+	// Lay down only the minimum tables the legacy workspace_repos needs:
+	// workspaces (FK target) + the OLD workspace_repos shape with the
+	// inline UNIQUE on project_path. github_tokens is FK-referenced but
+	// nullable, so we can skip it for this test.
+	legacy := `
+		CREATE TABLE workspaces (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			description TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE TABLE workspace_repos (
+			id              TEXT PRIMARY KEY,
+			workspace_id    TEXT NOT NULL,
+			github_url      TEXT NOT NULL,
+			branch          TEXT NOT NULL,
+			project_path    TEXT NOT NULL UNIQUE,
+			token_id        TEXT,
+			webhook_secret  TEXT NOT NULL,
+			webhook_id      INTEGER,
+			auto_webhook    INTEGER NOT NULL DEFAULT 0,
+			webhook_mode    TEXT NOT NULL DEFAULT 'manual',
+			status          TEXT NOT NULL DEFAULT 'pending',
+			last_sha        TEXT,
+			last_error      TEXT,
+			last_indexed_at TEXT,
+			created_at      TEXT NOT NULL,
+			updated_at      TEXT NOT NULL,
+			UNIQUE(workspace_id, github_url, branch),
+			FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+		);
+		INSERT INTO workspaces (id, name, created_at, updated_at)
+			VALUES ('ws-a', 'alpha', '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z');
+		INSERT INTO workspaces (id, name, created_at, updated_at)
+			VALUES ('ws-b', 'beta',  '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z');
+		INSERT INTO workspace_repos (id, workspace_id, github_url, branch, project_path,
+			webhook_secret, created_at, updated_at)
+			VALUES ('repo-1', 'ws-a', 'https://github.com/x/y', 'main',
+			        'github.com/x/y@main', 's', '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z');
+	`
+	if _, err := raw.Exec(legacy); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+
+	// Confirm pre-migration: the second insert with same project_path
+	// would fail. We catch the error so the test is honest about the
+	// invariant we're removing.
+	_, err = raw.Exec(`INSERT INTO workspace_repos (id, workspace_id, github_url, branch, project_path,
+		webhook_secret, created_at, updated_at) VALUES ('repo-bad', 'ws-b', 'https://github.com/x/y', 'main',
+		'github.com/x/y@main', 's', '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z')`)
+	if err == nil {
+		_ = raw.Close()
+		t.Fatalf("pre-migration insert should fail UNIQUE — test setup is wrong")
+	}
+	_ = raw.Close()
+
+	// Now reopen via the real Open() so the migration runs.
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer migrated.Close()
+
+	// is_linked column should be present and default to 0 on the
+	// migrated row.
+	var isLinked int
+	if err := migrated.QueryRow(
+		`SELECT is_linked FROM workspace_repos WHERE id = 'repo-1'`,
+	).Scan(&isLinked); err != nil {
+		t.Fatalf("read is_linked: %v", err)
+	}
+	if isLinked != 0 {
+		t.Fatalf("pre-existing rows must keep is_linked=0, got %d", isLinked)
+	}
+
+	// And the post-migration invariant we care about: same project_path
+	// in a different workspace now succeeds.
+	if _, err := migrated.Exec(`INSERT INTO workspace_repos (id, workspace_id, github_url, branch, project_path,
+		webhook_secret, status, is_linked, created_at, updated_at)
+		VALUES ('repo-2', 'ws-b', 'https://github.com/x/y', 'main',
+		'github.com/x/y@main', 's', 'indexed', 1,
+		'2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z')`); err != nil {
+		t.Fatalf("post-migration cross-workspace insert should succeed: %v", err)
+	}
+
+	// Per-workspace UNIQUE must still bite — adding the same repo+branch
+	// to ws-b a second time should fail.
+	_, err = migrated.Exec(`INSERT INTO workspace_repos (id, workspace_id, github_url, branch, project_path,
+		webhook_secret, status, is_linked, created_at, updated_at)
+		VALUES ('repo-3', 'ws-b', 'https://github.com/x/y', 'main',
+		'github.com/x/y@main', 's', 'indexed', 1,
+		'2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z')`)
+	if err == nil {
+		t.Fatalf("per-workspace UNIQUE should still reject duplicate (workspace_id, github_url, branch)")
 	}
 }
