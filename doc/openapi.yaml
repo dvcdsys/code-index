@@ -3578,6 +3578,18 @@ components:
             the operator knows the result set is incomplete.
           items:
             $ref: "#/components/schemas/WorkspaceSearchFailedRepo"
+        stale_fts_repos:
+          type: array
+          description: |
+            Repos that were indexed before the BM25 mirror
+            (`chunks_fts`) was added: they're queryable via dense
+            search but the sparse half of the hybrid is empty, which
+            collapses the algorithm to pure-dense fan-out for these
+            entries. Trigger a reindex on each to backfill the FTS
+            side. Empty once every workspace repo has been reindexed
+            under the new schema.
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchStaleFTSRepo"
 
     WorkspaceSearchPendingRepo:
       type: object
@@ -3606,6 +3618,13 @@ components:
             `timeout`, etc. Intentionally not the raw error message so
             internal details don't leak; check the server logs by
             `workspace_id` for the full error.
+
+    WorkspaceSearchStaleFTSRepo:
+      type: object
+      required: [project_path]
+      properties:
+        project_path:
+          type: string
 
     WorkspaceSearchProject:
       type: object
