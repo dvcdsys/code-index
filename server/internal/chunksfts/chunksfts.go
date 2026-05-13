@@ -6,9 +6,9 @@
 // combine dense vector retrieval with sparse keyword retrieval. The
 // sparse signal serves two roles:
 //
-//  1. Acronym / short-token precision. Short product codes like "XYZ"
-//     get diffuse cosine scores from the embedding model — BM25 over
-//     literal tokens recovers the precision.
+//  1. Acronym / short-token precision. Short product codes and
+//     unique identifiers get diffuse cosine scores from the embedding
+//     model — BM25 over literal tokens recovers the precision.
 //
 //  2. Project-relevance gating. Pure dense fan-out returns N nearest
 //     vectors from every project's chromem collection regardless of

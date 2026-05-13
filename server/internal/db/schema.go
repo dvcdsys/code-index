@@ -317,7 +317,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_meta_project
 --
 -- tokenize='trigram': substring matching on identifiers (CamelCase /
 -- snake_case / dotted paths are not tokenized to word boundaries
--- predictably enough for code). Short acronyms like "XYZ" become a
+-- predictably enough for code). Short acronyms like "ABC" become a
 -- single trigram; lookups are exact-substring within a word.
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     content,

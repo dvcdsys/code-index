@@ -39,33 +39,33 @@ func TestUpsertAndSearchProject_FindsLiteralToken(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	upsert(t, d, "proj-a", "src/XYZOrder.go", []Chunk{
-		{Content: "func ProcessXYZOrder(o *Order) error { ... }", FilePath: "src/XYZOrder.go", StartLine: 1, EndLine: 5, SymbolName: "ProcessXYZOrder", Language: "go"},
-		{Content: "// XYZ is the internal product code", FilePath: "src/XYZOrder.go", StartLine: 10, EndLine: 10, Language: "go"},
+	upsert(t, d, "proj-a", "src/widget_processor.go", []Chunk{
+		{Content: "func ProcessWidget(w *Widget) error { ... }", FilePath: "src/widget_processor.go", StartLine: 1, EndLine: 5, SymbolName: "ProcessWidget", Language: "go"},
+		{Content: "// WIDGET is the internal product code", FilePath: "src/widget_processor.go", StartLine: 10, EndLine: 10, Language: "go"},
 	})
-	upsert(t, d, "proj-b", "src/widget.go", []Chunk{
-		{Content: "func helloWorld() {}", FilePath: "src/widget.go", StartLine: 1, EndLine: 3, SymbolName: "helloWorld", Language: "go"},
+	upsert(t, d, "proj-b", "src/util.go", []Chunk{
+		{Content: "func helloWorld() {}", FilePath: "src/util.go", StartLine: 1, EndLine: 3, SymbolName: "helloWorld", Language: "go"},
 	})
 
-	hits, err := SearchProject(ctx, d, "proj-a", "XYZ", 10)
+	hits, err := SearchProject(ctx, d, "proj-a", "WIDGET", 10)
 	if err != nil {
 		t.Fatalf("SearchProject: %v", err)
 	}
 	if len(hits) == 0 {
-		t.Fatal("expected at least one XYZ hit in proj-a")
+		t.Fatal("expected at least one WIDGET hit in proj-a")
 	}
 	for _, h := range hits {
-		if !strings.Contains(strings.ToLower(h.Content+h.SymbolName), "xyz") {
-			t.Errorf("hit doesn't actually mention xyz: %+v", h)
+		if !strings.Contains(strings.ToLower(h.Content+h.SymbolName), "widget") {
+			t.Errorf("hit doesn't actually mention widget: %+v", h)
 		}
 	}
 
-	hitsB, err := SearchProject(ctx, d, "proj-b", "XYZ", 10)
+	hitsB, err := SearchProject(ctx, d, "proj-b", "WIDGET", 10)
 	if err != nil {
 		t.Fatalf("SearchProject b: %v", err)
 	}
 	if len(hitsB) != 0 {
-		t.Errorf("expected zero XYZ hits in proj-b, got %d", len(hitsB))
+		t.Errorf("expected zero WIDGET hits in proj-b, got %d", len(hitsB))
 	}
 }
 
@@ -73,14 +73,14 @@ func TestSearchProject_RanksMoreMentionsHigher(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	// Two chunks in the same project; chunk-1 mentions "sell" once,
+	// Two chunks in the same project; chunk-1 mentions "ping" once,
 	// chunk-2 mentions it many times. BM25 should rank chunk-2 higher.
 	upsert(t, d, "p", "f.go", []Chunk{
-		{Content: "this code does a sell once", FilePath: "f.go", StartLine: 1, EndLine: 1, Language: "go"},
-		{Content: "sell sell sell sell sell offer accept sell flow", FilePath: "f.go", StartLine: 2, EndLine: 2, Language: "go"},
+		{Content: "this code does a ping once", FilePath: "f.go", StartLine: 1, EndLine: 1, Language: "go"},
+		{Content: "ping ping ping ping ping handle request ping loop", FilePath: "f.go", StartLine: 2, EndLine: 2, Language: "go"},
 	})
 
-	hits, err := SearchProject(ctx, d, "p", "sell", 10)
+	hits, err := SearchProject(ctx, d, "p", "ping", 10)
 	if err != nil {
 		t.Fatalf("SearchProject: %v", err)
 	}
@@ -101,12 +101,12 @@ func TestSearchProject_OrJoinsTokens(t *testing.T) {
 
 	upsert(t, d, "p", "f.go", []Chunk{
 		{Content: "totally unrelated content", FilePath: "f.go", StartLine: 1, EndLine: 1, Language: "go"},
-		{Content: "this mentions sell only", FilePath: "f.go", StartLine: 2, EndLine: 2, Language: "go"},
-		{Content: "this mentions XYZ only", FilePath: "f.go", StartLine: 3, EndLine: 3, Language: "go"},
-		{Content: "this mentions both sell and XYZ", FilePath: "f.go", StartLine: 4, EndLine: 4, Language: "go"},
+		{Content: "this mentions ping only", FilePath: "f.go", StartLine: 2, EndLine: 2, Language: "go"},
+		{Content: "this mentions WIDGET only", FilePath: "f.go", StartLine: 3, EndLine: 3, Language: "go"},
+		{Content: "this mentions both ping and WIDGET", FilePath: "f.go", StartLine: 4, EndLine: 4, Language: "go"},
 	})
 
-	hits, err := SearchProject(ctx, d, "p", "sell XYZ", 10)
+	hits, err := SearchProject(ctx, d, "p", "ping WIDGET", 10)
 	if err != nil {
 		t.Fatalf("SearchProject: %v", err)
 	}
@@ -122,10 +122,10 @@ func TestSearchProject_TrigramMatchesInsideCamelCase(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 	upsert(t, d, "p", "f.go", []Chunk{
-		{Content: "func processXYZOrderEvent() {}", FilePath: "f.go", StartLine: 1, EndLine: 1, SymbolName: "processXYZOrderEvent", Language: "go"},
+		{Content: "func processWidgetItemEvent() {}", FilePath: "f.go", StartLine: 1, EndLine: 1, SymbolName: "processWidgetItemEvent", Language: "go"},
 		{Content: "func helloWorld() {}", FilePath: "f.go", StartLine: 2, EndLine: 2, SymbolName: "helloWorld", Language: "go"},
 	})
-	hits, err := SearchProject(ctx, d, "p", "XYZ", 10)
+	hits, err := SearchProject(ctx, d, "p", "Widget", 10)
 	if err != nil {
 		t.Fatalf("SearchProject: %v", err)
 	}
@@ -153,12 +153,12 @@ func TestUpsertByFile_ReplacesExisting(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 	upsert(t, d, "p", "f.go", []Chunk{
-		{Content: "old XYZ content", FilePath: "f.go", StartLine: 1, EndLine: 1, Language: "go"},
+		{Content: "old WIDGET content", FilePath: "f.go", StartLine: 1, EndLine: 1, Language: "go"},
 	})
 	upsert(t, d, "p", "f.go", []Chunk{
 		{Content: "new replacement content", FilePath: "f.go", StartLine: 1, EndLine: 1, Language: "go"},
 	})
-	hits, err := SearchProject(ctx, d, "p", "XYZ", 10)
+	hits, err := SearchProject(ctx, d, "p", "WIDGET", 10)
 	if err != nil {
 		t.Fatalf("SearchProject: %v", err)
 	}
@@ -177,8 +177,8 @@ func TestUpsertByFile_ReplacesExisting(t *testing.T) {
 func TestDeleteByFile_RemovesFromFTS(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	upsert(t, d, "p", "f.go", []Chunk{{Content: "XYZ is here", FilePath: "f.go", StartLine: 1, EndLine: 1}})
-	upsert(t, d, "p", "g.go", []Chunk{{Content: "also XYZ here", FilePath: "g.go", StartLine: 1, EndLine: 1}})
+	upsert(t, d, "p", "f.go", []Chunk{{Content: "WIDGET is here", FilePath: "f.go", StartLine: 1, EndLine: 1}})
+	upsert(t, d, "p", "g.go", []Chunk{{Content: "also WIDGET here", FilePath: "g.go", StartLine: 1, EndLine: 1}})
 
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
@@ -191,7 +191,7 @@ func TestDeleteByFile_RemovesFromFTS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hits, _ := SearchProject(ctx, d, "p", "XYZ", 10)
+	hits, _ := SearchProject(ctx, d, "p", "WIDGET", 10)
 	if len(hits) != 1 || hits[0].FilePath != "g.go" {
 		t.Errorf("expected only g.go to remain, got %+v", hits)
 	}
@@ -211,19 +211,19 @@ func TestDeleteByFile_RemovesFromFTS(t *testing.T) {
 func TestDeleteByProject_RemovesEverything(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	upsert(t, d, "p1", "a.go", []Chunk{{Content: "XYZ here", FilePath: "a.go", StartLine: 1, EndLine: 1}})
-	upsert(t, d, "p1", "b.go", []Chunk{{Content: "more XYZ", FilePath: "b.go", StartLine: 1, EndLine: 1}})
-	upsert(t, d, "p2", "c.go", []Chunk{{Content: "p2 XYZ", FilePath: "c.go", StartLine: 1, EndLine: 1}})
+	upsert(t, d, "p1", "a.go", []Chunk{{Content: "WIDGET here", FilePath: "a.go", StartLine: 1, EndLine: 1}})
+	upsert(t, d, "p1", "b.go", []Chunk{{Content: "more WIDGET", FilePath: "b.go", StartLine: 1, EndLine: 1}})
+	upsert(t, d, "p2", "c.go", []Chunk{{Content: "p2 WIDGET", FilePath: "c.go", StartLine: 1, EndLine: 1}})
 
 	if err := DeleteByProject(ctx, d, "p1"); err != nil {
 		t.Fatal(err)
 	}
 
-	hits1, _ := SearchProject(ctx, d, "p1", "XYZ", 10)
+	hits1, _ := SearchProject(ctx, d, "p1", "WIDGET", 10)
 	if len(hits1) != 0 {
 		t.Errorf("expected p1 wiped, got %d hits", len(hits1))
 	}
-	hits2, _ := SearchProject(ctx, d, "p2", "XYZ", 10)
+	hits2, _ := SearchProject(ctx, d, "p2", "WIDGET", 10)
 	if len(hits2) != 1 {
 		t.Errorf("expected p2 untouched, got %d hits", len(hits2))
 	}
@@ -240,10 +240,10 @@ func TestDeleteByProject_RemovesEverything(t *testing.T) {
 func TestSearchProject_ScopedToProject(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
-	upsert(t, d, "p1", "a.go", []Chunk{{Content: "XYZ order", FilePath: "a.go", StartLine: 1, EndLine: 1}})
-	upsert(t, d, "p2", "b.go", []Chunk{{Content: "XYZ payment", FilePath: "b.go", StartLine: 1, EndLine: 1}})
+	upsert(t, d, "p1", "a.go", []Chunk{{Content: "WIDGET order", FilePath: "a.go", StartLine: 1, EndLine: 1}})
+	upsert(t, d, "p2", "b.go", []Chunk{{Content: "WIDGET payment", FilePath: "b.go", StartLine: 1, EndLine: 1}})
 
-	hits, err := SearchProject(ctx, d, "p1", "XYZ", 10)
+	hits, err := SearchProject(ctx, d, "p1", "WIDGET", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,8 +259,8 @@ func TestBuildFTS5Query(t *testing.T) {
 		{"", ""},
 		{"   ", ""},
 		{"a b", ""},
-		{"XYZ", `"XYZ"`},
-		{"add sell XYZ", `"add" OR "sell" OR "XYZ"`},
+		{"WIDGET", `"WIDGET"`},
+		{"add ping WIDGET", `"add" OR "ping" OR "WIDGET"`},
 		{`oh "yes"`, `"oh" OR """yes"""`},
 	}
 	for _, c := range cases {

@@ -764,9 +764,12 @@ paths:
         then merged into per-file groups and ranked by best match score.
 
         `min_score` semantics:
-          - omitted → server default `0.4` (calibrated for CodeRankEmbed-Q8)
+          - omitted → server default `0.2` (light relevance floor that
+            doesn't silently drop abstract natural-language queries
+            whose best chunks score in [0.25, 0.35])
           - explicit `0` → return everything above HNSW floor
-          - explicit positive → that floor
+          - explicit positive → that floor (use `0.4+` for strict
+            code-symbol searches calibrated for CodeRankEmbed-Q8)
 
         `query_time_ms` is rounded to 1 decimal place.
       requestBody:
@@ -1457,17 +1460,19 @@ paths:
           required: false
           description: |
             Floor on raw cosine similarity. Chunks below this are
-            dropped before aggregation. Default 0 — relies on
-            chromem's natural ordering. Set higher (e.g. 0.3) to cut
-            noise when querying long natural-language sentences;
-            keep at 0 for short tokens / acronyms where embedding
-            magnitudes are inherently smaller.
+            dropped before aggregation. Default 0.4 — symmetric with
+            per-project search default so an unfiltered workspace
+            query doesn't return cross-repo noise that a single-repo
+            query would have rejected. Pass 0 explicitly for
+            intentional cross-project sweeps that need long-tail
+            recall (e.g. "authentication and authorization" across a
+            mixed-domain workspace).
           schema:
             type: number
             format: float
             minimum: 0
             maximum: 1
-            default: 0
+            default: 0.4
       responses:
         "200":
           description: Search results
@@ -2836,8 +2841,10 @@ components:
           type: number
           format: float
           description: |
-            Minimum cosine similarity. Omit for server default (0.4 for
-            CodeRankEmbed-Q8). Send `0` explicitly to disable the floor.
+            Minimum cosine similarity. Omit for server default (0.2 —
+            light floor that keeps abstract NL queries non-empty). Send
+            `0` to disable; pass `0.4+` for strict code-symbol searches
+            calibrated for CodeRankEmbed-Q8.
 
     NestedHit:
       type: object

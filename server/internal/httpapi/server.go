@@ -605,7 +605,12 @@ func (s *Server) SemanticSearch(w http.ResponseWriter, r *http.Request, path ope
 	paths := derefStringSlice(body.Paths)
 	excludes := derefStringSlice(body.Excludes)
 
-	minScore := float32(0.4)
+	// Default 0.2 — light relevance floor. Was 0.4, but that silently
+	// returned an empty result for abstract natural-language queries
+	// (e.g. "end-to-end workflow lifecycle") whose best chunks score
+	// in [0.25, 0.35]. 0.2 still rejects clean noise. Callers that
+	// want strict code-symbol matching can pass 0.4+ explicitly.
+	minScore := float32(0.2)
 	if body.MinScore != nil {
 		minScore = *body.MinScore
 	}
