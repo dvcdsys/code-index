@@ -47,6 +47,7 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 - **Web dashboard** at `/dashboard` — projects, semantic search, user + API-key management, runtime sidecar control, drift indicator. Embedded directly into the server binary.
 - **`cix` CLI** — drop-in `cix search`/`cix symbols`/`cix files` commands for terminal + agent use.
 - **File watcher** — `cix watch` keeps the index fresh as you edit, no manual reindex.
+- **Workspaces** *(experimental)* — group multiple repositories into a single named workspace; clone GitHub repos server-side via stored PAT, then run hybrid BM25 + dense search across all of them. See [`workspaces.md`](workspaces.md).
 - **OpenAPI as source of truth** — Go server interface + TypeScript dashboard types are generated from `doc/openapi.yaml`. Swagger UI at `/docs`.
 
 ---
@@ -248,8 +249,10 @@ The dashboard ships embedded in the server binary at `/dashboard`. No extra serv
 |------|----------|--------------|
 | **Home** | everyone | Live status strip (server version, current embedding model, sidecar Ready/Loading) + module shortcuts |
 | **Projects** | everyone | List indexed projects, view stats (file count, languages, symbols, vector count, sqlite/chroma sizes), copy reindex commands. Cards turn **red with "Stale model"** badge when the runtime embedding model differs from the model the project was indexed with — see [Drift indicator](#drift-indicator). |
+| **Workspaces** *(experimental)* | everyone | Group multiple repositories into a named workspace and search them as one corpus. Add GitHub repos by URL + branch — the server clones them under its data dir, indexes them with the same pipeline as local projects, and tracks status (`cloning` / `indexing` / `indexed` / `failed`). Run hybrid BM25 + dense search across the whole group from a two-stage search dialog. See [`workspaces.md`](workspaces.md). |
 | **Search** | everyone | Five modes: semantic, symbols, references, definitions, files. Same engine the CLI uses. |
 | **API Keys** | everyone | Mint long-lived `cix_*` keys (256-bit entropy, GitHub-class), copy them once, revoke at any time. |
+| **GitHub Tokens** *(experimental)* | everyone | Store personal access tokens used by workspaces to clone private repositories and (optionally) auto-register push webhooks for incremental reindexing. Tokens are AES-256-GCM encrypted at rest; the plaintext is returned exactly once on creation and never again. Pair this with the **Workspaces** page to onboard private repos without pasting the PAT every time. |
 | **Users** | admin | Invite teammates, set role (admin/viewer), reset password (forces change on next login), disable account. |
 | **Settings** | everyone | Theme, default editor, change own password. |
 | **Server** | admin | Runtime config — embedding model, `n_ctx`, `n_gpu_layers`, `n_threads`, batch size, queue concurrency. **Save & Restart** drains in-flight embeddings, restarts the sidecar, polls until ready. Source pill on each field shows whether the live value comes from the DB override, env bootstrap, or the recommended fallback. |
@@ -273,6 +276,36 @@ After running the reindex, the drift signal clears automatically.
 ### Disabled-embeddings mode
 
 Set `CIX_EMBEDDINGS_ENABLED=false` to bring the server up without the llama-server sidecar — auth, dashboard, project metadata, and symbol/file searches all keep working; only semantic search and indexing are disabled. The Server page renders a warning banner and disables the relevant inputs.
+
+### Workspaces and external repositories *(experimental)*
+
+The **Workspaces** page lets you group several repositories into one
+named workspace and search them as a single corpus — useful for tasks
+that span microservices, infra-as-code, API specs, and the like. Unlike
+`cix init` (which indexes the project you're `cd`'d into), workspaces
+track **external repositories that the server itself clones**.
+
+You add a repo by GitHub URL + branch; the server clones it under its
+data directory (default `<data-dir>/repos/<repo_id>/`), indexes it with
+the standard pipeline (tree-sitter chunking → CodeRankEmbed embeddings
+→ chromem + FTS5), and tracks the lifecycle via a per-repo `status`
+field (`pending` → `cloning` → `indexing` → `indexed` / `failed`).
+Existing local projects can also be **linked** into a workspace without
+re-cloning.
+
+Private repos and webhook auto-registration go through the **GitHub
+Tokens** page. Tokens are AES-256-GCM encrypted at rest, scoped per
+entry, and never exposed back to clients after creation. With
+`webhook_mode=auto` the server registers a push webhook on the
+upstream repo and re-indexes automatically on every push to the
+tracked branch.
+
+Workspaces are gated by `CIX_WORKSPACES_ENABLED=true` and are still
+experimental — defaults, search-algorithm tuning, and the UI shape are
+all evolving. See [`workspaces.md`](workspaces.md) for: enabling the
+feature, end-to-end setup, the search algorithm and its tunables,
+webhook modes, REST API reference, and a candid strengths/weaknesses
+section based on the calibration eval.
 
 ---
 
@@ -355,6 +388,19 @@ Install the bundled skill so Claude knows to use `cix` automatically:
 ```bash
 cp -r skills/cix ~/.claude/skills/cix
 ```
+
+For multi-repo work via the experimental **workspaces** feature, the
+`cix-workspace` skill teaches the agent the cross-project workflow and
+ships a dedicated `cix-workspace-investigator` sub-agent for parallel
+per-repo fan-out:
+
+```bash
+cp -r skills/cix-workspace ~/.claude/skills/cix-workspace
+mkdir -p ~/.claude/agents
+cp skills/cix-workspace/agents/cix-workspace-investigator.md ~/.claude/agents/
+```
+
+Invoke with `/cix-workspace <task>`. See [`workspaces.md`](workspaces.md#agent-integration) for the agent contract and behavior rules.
 
 Then in any Claude Code session, invoke the skill **paired with the actual engineering task** — not a search query. The pattern is `/cix <fix / implement / investigate / refactor …>`:
 
