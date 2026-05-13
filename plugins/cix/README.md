@@ -137,7 +137,7 @@ in two tiers:
 | `.claude-plugin/plugin.json` | Plugin manifest |
 | `skills/cix/SKILL.md` | Lazy-loaded usage skill (~7 KB) |
 | `commands/*.md` | Six slash commands |
-| `hooks/hooks.json` | SessionStart + PreToolUse(Grep\|Glob) registration |
+| `hooks/hooks.json` | SessionStart + PreToolUse(Grep\|Glob\|Bash) registration |
 | `scripts/cix-wrapper.sh` | "Use system or auto-install" CLI wrapper |
 | `scripts/session-start.sh` | One-time session reminder |
 | `scripts/grep-nudge.sh` | Exponential-backoff Grep nudge |
@@ -158,6 +158,13 @@ in two tiers:
   "fade away".
 - **"This project has a cix semantic code index" never appears** —
   the project must contain a `.cix/` directory. Run `/cix:init` first.
+- **Nudge does not fire on `grep` invoked via Bash** — the `PreToolUse`
+  matcher works on `tool_name`, not on the command string. The plugin
+  matches `Bash` explicitly and filters grep/rg from
+  `tool_input.command` inside `grep-nudge.sh`. Confirm
+  `hooks/hooks.json` contains both `"matcher": "Grep|Glob"` and
+  `"matcher": "Bash"` entries; the regression in
+  `tests/manifest.bats` enforces this.
 
 ## License
 
