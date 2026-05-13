@@ -827,9 +827,29 @@ re-create every token entry.
 The `cix-workspace` skill teaches AI agents how to use workspace search
 responsibly — when to fan out, how to read the `projects[]` panel, how
 to interpret `score=0` hits, how to spawn parallel per-repo investigators.
-See [`skills/cix-workspace/SKILL.md`](skills/cix-workspace/SKILL.md).
+A bundled `cix-workspace-investigator` sub-agent handles the per-repo
+deep dive in isolated context.
 
-Install for Claude Code:
+**This skill is manual-only by design.** It does **not** auto-trigger
+on cross-cutting prompts — you invoke it deliberately when the request
+genuinely spans multiple repos. The workspace flow is heavier than
+single-repo `cix search` (multi-repo fan-out, sub-agent spawns) and
+only pays off when you've made the call that cross-project research
+is what you actually need. This policy may relax once the
+"is-this-really-cross-project" heuristics are more reliable.
+
+### Install — Claude Code plugin (recommended)
+
+The skill and sub-agent ship with the `cix` Claude Code plugin (v0.2.0+).
+Marketplace install:
+
+```
+/plugin marketplace add dvcdsys/code-index
+/plugin install cix@code-index
+/reload-plugins   # or restart Claude Code
+```
+
+### Install — manual cp-r (legacy)
 
 ```bash
 cp -r skills/cix-workspace ~/.claude/skills/cix-workspace
@@ -837,7 +857,10 @@ mkdir -p ~/.claude/agents
 cp skills/cix-workspace/agents/cix-workspace-investigator.md ~/.claude/agents/
 ```
 
-Then in a Claude Code session:
+### Invoke
+
+In any Claude Code session — type `/cix-workspace` followed by the
+task verbatim:
 
 ```
 /cix-workspace add a new rate-limit middleware and wire it through

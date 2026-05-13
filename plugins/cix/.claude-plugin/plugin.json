@@ -1,8 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "cix",
-  "version": "0.1.0",
-  "description": "Semantic code search and navigation for Claude Code via the cix index. Bundles the cix CLI (auto-installs if missing) and nudges Claude to prefer cix over Grep for semantic queries.",
+  "version": "0.2.0",
+  "description": "Semantic code search and navigation for Claude Code via the cix index. Single-repo cix skill + commands, plus the experimental cix-workspace skill and cix-workspace-investigator sub-agent for cross-project research across cix workspaces.",
   "author": {
     "name": "dvcdsys",
     "email": "dvcdsys@gmail.com"
@@ -10,5 +10,17 @@
   "homepage": "https://github.com/dvcdsys/code-index",
   "repository": "https://github.com/dvcdsys/code-index",
   "license": "MIT",
-  "keywords": ["search", "code-search", "semantic", "navigation", "indexing", "embeddings", "ai"]
+  "keywords": [
+    "search",
+    "code-search",
+    "semantic",
+    "navigation",
+    "indexing",
+    "embeddings",
+    "ai",
+    "workspace",
+    "cross-project",
+    "monorepo",
+    "sub-agent"
+  ]
 }
