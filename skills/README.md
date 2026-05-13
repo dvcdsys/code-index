@@ -33,9 +33,9 @@ section in the main README).
 Structures the agent's workflow for tasks that touch more than one
 repo: how to identify which repos are in scope, how to investigate
 them (single-project search or parallel sub-agent fan-out), and how
-to synthesize a per-repo change plan. Includes a worked retro on the
-"add sell flow to XYZ" failure mode that motivated the hybrid
-BM25+dense algorithm.
+to synthesize a per-repo change plan. Includes a worked example
+showing the failure mode that motivated the hybrid BM25+dense
+algorithm.
 
 The skill answers three questions per request:
 
@@ -47,10 +47,27 @@ It also handles the *primary project* nuance — the agent is usually
 `cd`'d into a specific repo, and the user's task is rooted there; the
 workspace is for the surrounding context.
 
+### Bundled sub-agent
+
+This skill ships with a dedicated `cix-workspace-investigator`
+sub-agent — a thin, read-only shell around `cix search` / `cix def` /
+`cix refs` with scope-isolation invariants baked in (one repo per
+spawn, no edits, no recursion). When the main session fans out across
+3+ repos, each spawn runs in its own context, keeping the main session
+free of per-repo code chunks. The methodology (what to look for, in
+what format) is the main agent's call per spawn; the sub-agent just
+follows instructions and reports.
+
 ### Install
 
 ```bash
+# Skill body
 cp -r skills/cix-workspace ~/.claude/skills/cix-workspace
+
+# Bundled sub-agent — must live in ~/.claude/agents/ for Claude Code
+# to discover it
+mkdir -p ~/.claude/agents
+cp skills/cix-workspace/agents/cix-workspace-investigator.md ~/.claude/agents/
 ```
 
 ### Usage

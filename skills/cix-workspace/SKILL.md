@@ -11,11 +11,12 @@ directory the user opened you in. Most tasks are fully contained there
 and `cix search` / `cix definitions` / `cix references` are the right
 tools.
 
-But some tasks are not contained. A "sell flow" feature in a payments
-product touches the API backend, the smart contracts, the webhook
-notifier, the deployment manifests, the marketplace contract. Reading
-the primary repo alone gives you 1/N of the picture. Worse, you don't
-know which N repos are actually involved until you look.
+But some tasks are not contained. A request like "wire feature X
+through the platform" can touch a half-dozen repos in different
+languages, layers, and shapes — a service, a shared library, the
+infra manifests, an API spec. Reading the primary repo alone gives
+you 1/N of the picture. Worse, you don't know which N repos are
+actually involved until you look.
 
 `cix workspace` is the tool for that. It searches every repo in a
 named workspace at once and tells you:
@@ -38,6 +39,7 @@ to implementation before you can answer all three with evidence.
 | "Across services", "between repos", "end-to-end" | Workspace search the feature |
 | Talks about an event / topic / contract / API endpoint | Workspace search the event name |
 | References infra / deployment alongside code | Workspace search — infra repo is probably in the workspace too |
+| "How do I change X in production / staging" | Workspace search BUT look past top-1 — the answer is usually a manifests/config/contract repo even when a code repo ranks higher (rule 7 below) |
 | Plain bugfix entirely inside one file | **Don't** workspace search. `cix search` is enough |
 | User points at a specific symbol / file path | **Don't.** `cix definitions <name>` or just Read the path |
 
@@ -67,11 +69,11 @@ Run workspace search with a **short, term-rich query**, not the full
 user sentence:
 
 ```bash
-# GOOD — the product name + the action verb
-cix ws platform search "XYZ sell"
+# GOOD — short, term-rich (a product acronym + an action verb)
+cix ws platform search "rate-limit middleware"
 
 # BAD — full sentence dilutes BM25 with stopwords ("add", "to", "a")
-cix ws platform search "Add a sell flow to XYZ"
+cix ws platform search "Add a rate limit to every API endpoint"
 ```
 
 Why short: the hybrid algorithm fuses BM25 (literal token match) with
@@ -109,24 +111,21 @@ search directly.
 ```bash
 # Search inside one specific project
 curl -G -H "Authorization: Bearer $CIX_KEY" \
-  --data-urlencode "q=sell offer accept handler" \
+  --data-urlencode "q=rate limit middleware handler" \
   --data-urlencode "min_score=0" \
   "$CIX_URL/api/v1/projects/$(project_hash)/search"
 ```
 
+The per-project default `min_score` is `0.2` — light floor that
+keeps abstract NL queries non-empty. For drill-down on a natural-
+language question ("how does X work end-to-end"), pass `min_score=0`
+explicitly to be safe. For strict code-symbol matching, pass `0.4+`.
+
 **B. Fan-out to sub-agents (≥ 3 repos, or you need a thorough read):**
-spawn one Explore sub-agent per relevant repo, in parallel.
-
-Each sub-agent gets:
-
-- The user's task description (the full sentence — sub-agents have
-  fresh context).
-- The project_path it's investigating.
-- The top chunks from workspace search for that project, as seed
-  pointers (so the sub-agent doesn't restart from zero).
-- An explicit instruction: "Locate the entry points relevant to
-  *<task>*, summarize the data flow, and identify what would need to
-  change. Don't propose code yet. Report file:line for everything."
+spawn one `cix-workspace-investigator` sub-agent per relevant repo, in
+parallel. See the dedicated [Sub-agent fan-out pattern](#sub-agent-fan-out-pattern)
+section below for the four-part prompt template, including how to pass
+seed chunks with your interpretive commentary.
 
 Run them concurrently (one message, multiple Agent tool calls). When
 they report back, you have N independent reads to synthesize, not N
@@ -172,9 +171,9 @@ real time."
 ## Reading the projects panel — what the numbers mean
 
 ```
-acme-backend@main         0.500   5 hits   bm25 0.421   dense 0.556
-acme-shared@main        0.412   5 hits   bm25 0.318   dense 0.498
-acme-models@main 0.288   3 hits   bm25 0.155   dense 0.362
+project-a@main   0.500   5 hits   bm25 0.421   dense 0.556
+project-b@main   0.412   5 hits   bm25 0.318   dense 0.498
+project-c@main   0.288   3 hits   bm25 0.155   dense 0.362
 ```
 
 - `project_score` (first column): the α-blended candidacy in [0, 1].
@@ -191,6 +190,114 @@ acme-models@main 0.288   3 hits   bm25 0.155   dense 0.362
   product nickname not used in code.
 - If both are near zero: you're seeing the project because nothing
   else cleared the gate either. Treat with skepticism.
+
+---
+
+## Trust rules — making sense of the response
+
+These ten rules were derived from a calibration eval (113 synthetic
+queries + 5 real engineering tasks against a mixed-domain workspace).
+Apply them before acting on workspace-search output. Numbers below
+are empirical, not vibes.
+
+### Rule 1 — `chunk.score >= 0.4` is the trust threshold
+
+Chunks with `score < 0.4` are noise about 75% of the time
+(rank-inversion and weak-signal FPs from the relative project gate).
+Skim them only when the higher-scored chunks don't answer the
+question. With the default `min_score=0.4` you usually won't see them
+at all; if you passed `min_score=0` (intentional broad sweep), apply
+this rule yourself.
+
+### Rule 2 — `chunk.score == 0` is a BM25-only hit, not low confidence
+
+The chunk's project matched the literal query tokens via FTS5 but the
+embedding side didn't surface it. These are valuable when the query
+carries project-specific identifiers (CamelCase symbols, file names,
+acronyms). Discount them when the query is a generic English word
+(`error`, `data`, `config`) — common-word BM25 hits are noise.
+
+### Rule 3 — Top-1 of `projects[]` is correct ~70% of the time in real tasks
+
+The synthetic eval measured 91% on single-target queries; real
+engineering tasks hit ~70% because real queries often span layers
+(see rule 7). When the top-1 project doesn't match your task's
+intent, **scan ranks 2–5 before reformulating** — the right repo is
+usually there. The `projects[]` panel is the answer to "where do
+the words live", not "where should the change happen".
+
+### Rule 4 — Drop down to single-project search for depth
+
+When `projects[]` shows the target at rank 1 with a clear lead
+(`project_score` ≥ 1.5× the next), switch to per-project search.
+You get file-grouped, deeper results without the cross-project
+round-robin cap of 5 chunks per repo.
+
+### Rule 5 — `min_score=0` for intentional cross-project sweeps
+
+Default workspace `min_score` is `0.4`. For queries that should
+legitimately span many repos ("authentication", "configuration
+loading", "Kafka consumers"), pass `min_score=0` explicitly.
+Expect `projects[]` to list 5–8 entries — that's the feature, not a
+bug. Ignore rule 1 in this mode: many real positives sit below 0.4
+in genuine cross-cutting queries.
+
+### Rule 6 — Add a 3rd disambiguating token, carefully
+
+If two query words are each domain-overloaded (e.g. "client SDK"
+could be the generated API client, the shared library, or a model
+type), add a third word. **Prefer meta-tokens** (`endpoint`,
+`route`, `handler`, `manifest`, `migration`, `config file`) over
+tech-stack guesses (`grpc`, `kafka`, `terraform`) — wrong stack
+guesses actively rotate the ranking away from the right answer. If
+unsure of the stack, run the query without a disambiguator first,
+read the top-1 project's language/path patterns, then refine.
+
+### Rule 7 — "Change X in production" → manifests repo, not code repo
+
+For tasks framed as deploying / configuring / overriding a feature,
+the answer usually lives in a manifests / config / contract repo
+(K8s overlays, Helm charts, OpenAPI specs, environment-specific
+yaml). Workspace search ranks by token frequency, so the code repo
+typically wins. Look at `projects[]` for repos with **manifests,
+config, platform, deploy, contract, openapi, infra** in their
+names — those are often the right targets even at rank 3–5.
+
+### Rule 8 — When top-1 doesn't fit, scan first, reformulate second
+
+If you think top-1 is wrong:
+
+1. First, scan ranks 2–5. The right project is there ~80% of the
+   time when the layer mismatch caused rule 3 to fail.
+2. Only after scanning, reformulate. Reformulating before scanning
+   wastes a round-trip and risks the new query introducing fresh
+   layer confusion.
+
+### Rule 9 — For per-project NL drill-down, pass `min_score=0` explicitly
+
+When dropping from workspace to per-project search with a natural-
+language query (e.g. "how does X work"), pass `min_score=0` to be
+safe. The per-project default `min_score=0.2` is lighter than it
+used to be (`0.4`) and usually fine, but abstract semantic queries
+can score in the 0.2–0.3 range that the default still rejects.
+
+### Rule 10 — Words ≠ change location (the intent-vs-tokens watchword)
+
+Workspace search ranks projects by *where the words live*. Your
+task is usually about *where the change should happen*. These
+coincide ~70% of the time, not 91%. When in doubt: read the
+chunks in ranks 2–5 before committing to a target repo.
+
+### Quick example — when rules 7 and 10 save you
+
+> User: "Change the database timeout for the staging environment of
+> the order service."
+
+Workspace search ranks the **order-service code repo** at #1 (it's
+where the word "database" appears most). But the change needs to
+land in the **environment-platform manifests repo** at rank #4. If
+you stopped at top-1 you'd edit the wrong file. Rules 7 and 10
+remind you to scan further.
 
 ---
 
@@ -220,108 +327,153 @@ Workspace search tells you which pattern you're in. Don't assume.
 
 ## Sub-agent fan-out pattern
 
-When you have 3+ relevant repos, parallel sub-agents beat sequential
-self-investigation. Template:
+When you have 3+ relevant repos, fan out. Sub-agents run with isolated
+context — the main session stays clean (no per-repo code chunks bloating
+it) and the investigations run in parallel.
+
+Use the dedicated **`cix-workspace-investigator`** sub-agent, which ships
+with this skill. It's a thin, read-only shell around `cix search` / `cix
+def` / `cix refs` / `Read` / `Grep` with three hard rules baked in:
+stay inside the assigned project, no edits, no recursion. The
+methodology — what to look for, what to report, in what format — is
+**your** call, per spawn. The sub-agent follows your instructions; it
+doesn't second-guess them.
+
+### The four parts of a good per-spawn prompt
+
+You'll write one prompt per repo. A good one has four parts:
+
+#### 1. The user's task, verbatim
+
+Sub-agents have zero prior context. Paste the original user request even
+if it feels redundant — your interpretation might be wrong, and the
+user's wording is the ground truth the sub-agent should reason from.
+
+#### 2. The `project_path` you're assigning
+
+Plus the workspace ID or `cix` command-prefix if your setup needs it.
+One repo per spawn.
+
+#### 3. Seed chunks **with your commentary**
+
+This is the part most often done badly. Don't just paste raw chunk
+pointers and hope the sub-agent figures out what matters. You saw the
+workspace search response; you have hunches about which chunks are real
+entry points and which are noise; pass that down.
+
+For each chunk you cite, add one short line of interpretation. For
+the response as a whole, flag suspicious signals:
+
+- Which chunk looks like the most likely entry point and why
+- Which chunks look like test fixtures / dead code / wrong-layer the
+  sub-agent should de-prioritize
+- Numeric signals that need a second opinion: `score=0` (BM25-only
+  literal — verify the token isn't a false friend), `score < 0.4` (low
+  confidence, possible rank-inversion), `bm25_score` high + `dense_score`
+  near zero (literal-only match — concept may not actually live here)
+- Whether you suspect this repo is wrong-layer (rule 7) — tell the
+  sub-agent to confirm relevance before diving into the chunks
+
+**Example "good chunk block":**
 
 ```
-For each project P in surviving_projects (except primary):
-    spawn Agent(
-        subagent_type="Explore",
-        description="<P short label>: locate <task> entry points",
-        prompt=f"""
-        You're investigating one repo in a workspace fan-out for the
-        task: "<user task, verbatim>".
+Seed chunks from workspace search:
+- `internal/gateway/server.go:412-418` (score 0.55) — looks like the
+  HTTP handler entry point for the rate-limit feature; confirm it
+  invokes the limiter middleware rather than just returning 429.
+- `internal/gateway/middleware.go:89-93` (score 0.49) — middleware
+  registration site. Verify whether rate-limit is wired here or
+  elsewhere.
+- `tests/integration/rate_limit_test.go` (score 0.41) — integration
+  test. Useful for understanding the expected shape, but not where
+  the change lands. Skim only.
+- `pkg/shared/util.go:1-30` (score 0) — BM25-only hit, "limit"
+  appears in a comment. Almost certainly noise; skip unless you need
+  shared utilities.
 
-        Repo to investigate: {P.project_path}
-        Seed chunks (from workspace search):
-        {top_chunks_for_P}
-
-        Your job:
-        1. Confirm the seed chunks are actually the right entry point.
-           If they're not, find the real one and report it.
-        2. Trace the data flow inside this repo that's relevant to
-           the task. Brief — names and file:line, not whole files.
-        3. List what would need to change here to implement the task.
-           Don't write code. Report what changes and why.
-
-        Report under 300 words. No filler.
-        """
-    )
+Panel-level notes:
+- Workspace ranked this project #1 with a clear lead (project_score
+  1.000 vs next 0.860). High confidence this is the right repo.
+- bm25_score=8.5, dense_score=0.54 — strong on both signals, not a
+  wrong-layer concern.
 ```
 
-Run them all in **one message with multiple Agent calls** so they
-execute in parallel. Collect responses, then synthesize.
+#### 4. Explicit deliverable
 
-Synthesis = your job. The sub-agents don't see each other's findings;
-you do. Surface inconsistencies (e.g. two repos disagree on which
-event format is canonical) back to the user.
+Tell the sub-agent **exactly** what to return and in what shape. Each
+task has different needs:
+
+- "Confirm whether this repo is in scope. Yes / no / partial + one
+  sentence why."
+- "Find the entry point for the rate-limit middleware. Report
+  file:line of the entry and a five-step trace through the call
+  graph."
+- "List every file that would need to change to add a new audit-log
+  event type. No code, just file path + one-line per-file reason."
+
+Vague deliverables (`"investigate this repo"`) → vague answers.
+
+### Anti-patterns to avoid
+
+- **"Investigate this repo for rate-limit"** — no deliverable. The
+  sub-agent guesses scope and you can't verify the result.
+- **Three paragraphs of context with nested questions** — sub-agent
+  answers the wrong question. Pick one deliverable per spawn.
+- **"Read all the auth code"** — unbounded. Either fails or returns a
+  wall of text.
+- **Pasting raw chunks without interpretation** — you saw the
+  response, you have hunches about what matters. Sub-agent doesn't.
+  Skipping commentary throws away the most valuable thing you can pass
+  down.
+
+### Mechanics
+
+Run all sub-agents in **one message with multiple Agent calls** so they
+execute in parallel. Wait for completion. Synthesize their reports
+yourself — sub-agents don't see each other's work; you do. Surface
+inconsistencies (e.g. two repos disagree on which event format is
+canonical) back to the user.
 
 ---
 
-## Worked example — the XYZ retro
+## Worked example — why this skill exists
 
-This is how this skill was developed. The user asked: *"Add sell flow
-to XYZ"* (XYZ is a placeholder for an internal product code).
+A representative failure mode that motivated the hybrid algorithm:
 
-**What went wrong with naïve approach:**
-
-I ran the pre-hybrid workspace search with the full sentence: `"Add
-sell flow to XYZ"`. It returned 8 projects ranked by mean dense
-similarity:
-
-```
-acme-backend          0.393
-acme-platform 0.279
-acme-shared         0.270
-acme-models  0.258
-acme-worker     0.247
-acme-notifier 0.189
-acme-directory        0.170
-acme-inventory        0.164
-```
-
-All 8 repos surfaced. I confidently reported all 8 as relevant. **The
-user flagged that acme-worker, acme-directory, acme-inventory had
-zero XYZ mentions whatsoever.** A literal grep confirmed: 0 lines
-mentioning XYZ in those 3 repos. The dense embedding had been
-returning the N nearest vectors regardless of how far away "nearest"
-actually was — those repos surfaced on noise-level cosine similarity
-(0.16-0.25).
+**The naïve approach:** running workspace search with a full natural-
+language sentence ("Add feature X to product Y"). The pre-hybrid
+implementation was pure-dense — it returned the N nearest vectors
+regardless of how far away "nearest" actually was. Every repo in the
+workspace surfaced, including repos that contained **zero literal
+mentions** of either the feature name or the product code. Confidently
+reporting all of them as "relevant" wasted time on completely
+unrelated repos.
 
 **The structural failure:**
 
 1. Pure-dense fan-out cannot tell "no signal" apart from "weak
    signal" — chromem always returns the K nearest vectors.
-2. Long natural-language queries dilute the few tokens (`XYZ`,
-   `sell`) that carry the actual gating signal.
-3. Without a sparse-retrieval channel, an acronym query has nothing
-   to lock onto.
+2. Long natural-language queries dilute the few tokens that carry
+   the actual gating signal.
+3. Without a sparse-retrieval channel, an acronym or unique
+   identifier query has nothing to lock onto.
 
-**What I should have done from the start:**
+**What this skill teaches instead:**
 
-1. Query with **just `XYZ`** first to identify the surface area. The
-   product code is the high-precision term; everything else is
-   noise.
-2. Verify projects with `bm25_score = 0` aren't masquerading as
-   relevant. (After the hybrid landed, those 3 dead-weight repos
-   drop out automatically via the project-gate.)
+1. Query with **just the high-precision term** first — the product
+   acronym, the feature name, the unique symbol. Everything else
+   is noise.
+2. Verify that projects with `bm25_score = 0` aren't masquerading
+   as relevant. After the hybrid landed, repos with no literal
+   matches AND only marginal dense similarity drop out automatically
+   via the project gate.
 3. Confirm with the user before treating "this repo surfaced in
    search" as "this repo is in scope for the change".
-
-**Result after fixing the algorithm:**
-
-Workspace search with `XYZ` now keeps acme-backend (780 mentions),
-acme-shared (119 mentions in 8 files), acme-platform (98
-mentions in 6 files), acme-notifier (18 mentions in 1 file),
-acme-models (1 mention + 2 sell-related files). Drops the
-three zero-mention repos. The 5 survivors are the actual scope —
-each plays a real role (backend / shared API types / platform config /
-event notifications / shared data models).
 
 **The lesson encoded in this skill:**
 
 - Step 1: query the term, not the sentence.
-- Step 1: trust the project-gate; if a repo dropped out, it dropped
+- Step 1: trust the project gate; if a repo dropped out, it dropped
   out for a reason.
 - Step 2: read the surface area from `projects[]` first, then read
   the chunks as starting points.
@@ -335,8 +487,8 @@ event notifications / shared data models).
 
 The workspace was indexed before the FTS5 mirror existed and the
 sparse half of the hybrid is empty. Hybrid degrades to pure-dense
-fan-out — the same algorithm that produced the XYZ false-positive
-above.
+fan-out — the same algorithm that produces the false-positive
+failure mode described in the worked example above.
 
 The response includes `stale_fts_repos` listing the affected
 project_paths. Fix: reindex each repo (dashboard → repo card →
@@ -386,6 +538,35 @@ single repo accidentally matching the user's stopwords across many
 files. Spot-check: is the project's `bm25_score` driven by the
 high-IDF term (the product name) or by common words?
 
+### Top-1 is wrong-layer (rule 7 / rule 10 in action)
+
+The top-1 project contains the words but isn't where the change
+should land. Classic example: "deploy X to staging" → workspace
+ranks the code repo for X at #1, but the staging overlay lives in
+a manifests repo at rank #4. Or: "add API endpoint Y" → ranks the
+backend implementation at #1, but the OpenAPI contract repo at #3
+must be updated first.
+
+**Fix:** scan ranks 2–5 explicitly. Look for projects whose names
+hint at a different layer (`*-platform`, `*-manifests`,
+`*-contracts`, `*-config`, `*-infra`, `openapi*`). If you see one,
+that's probably your real target.
+
+### Disambiguator backfired — the query lost its grip
+
+You added a 3rd word to discriminate between two overloaded terms,
+and the response is *worse* — top projects all have mediocre scores
+and the right repo isn't among them anymore. This usually happens
+when the added token belongs to a different stack than your target
+(e.g. you guessed a transport / framework / library that the canonical
+repo doesn't use), so the extra token rotates the ranking toward
+unrelated repos.
+
+**Fix:** strip the guessed-stack token. Try a meta-token instead
+(`endpoint`, `route`, `handler`, `manifest`, `migration`). Or: run
+the 2-word query as-is, scan the top-1 project's path patterns and
+language to see what stack it actually uses, then refine.
+
 ---
 
 ## Quick command reference
@@ -404,9 +585,9 @@ cix ws platform list
 cix ws platform repos --verbose
 
 # Search a workspace
-cix ws platform search "XYZ sell"
+cix ws platform search "rate-limit middleware"
 cix ws platform search "JWT validation" --top-projects 8 --top-chunks 30
-cix ws platform search "rate limiting" --json
+cix ws platform search "audit logging" --json
 ```
 
 Flags:
@@ -416,9 +597,11 @@ Flags:
 - `--top-chunks K` — return up to K chunks total (default 20, max
   200). Round-robin interleaved across surviving projects.
 - `--min-score F` — drop dense hits below cosine F before scoring.
-  Default 0. Useful when natural-language queries hit too much
-  noise; leave at 0 for short acronyms (cosine for short tokens
-  is naturally small).
+  **Default 0.4** (symmetric with per-project search default).
+  Pass `0` explicitly for intentional cross-project sweeps that
+  need long-tail recall — broad concepts like "authentication" or
+  "Kafka consumers" that legitimately live in many repos. Higher
+  values (0.5+) for queries you want laser-focused.
 - `--json` — raw machine-readable response.
 
 ---
@@ -430,8 +613,9 @@ When the user's task plausibly spans more than one repo:
 1. `cix ws` → find the workspace, then `cix ws <name>` describe it.
 2. Workspace search with a **short, term-rich** query.
 3. Read `projects[]` → that's your scope (Q1 answered).
-4. For each repo in scope, either single-project search or spawn an
-   Explore sub-agent — in parallel.
+4. For each repo in scope, either single-project search or spawn a
+   `cix-workspace-investigator` sub-agent — in parallel, with seed
+   chunks AND your interpretive commentary on what to trust.
 5. Synthesize the sub-agent reports → plan changes per repo, with
    order constraints (Q2 + Q3 answered).
 6. Ask the user to confirm the scope and plan before implementing.
