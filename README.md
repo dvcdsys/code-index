@@ -392,7 +392,17 @@ cp -r skills/cix ~/.claude/skills/cix
 For multi-repo work via the experimental **workspaces** feature, the
 `cix-workspace` skill teaches the agent the cross-project workflow and
 ships a dedicated `cix-workspace-investigator` sub-agent for parallel
-per-repo fan-out:
+per-repo fan-out. Both are bundled with the **`cix` Claude Code plugin**
+(v0.2.0+) — install it from the marketplace and the workspace pieces
+come with it automatically:
+
+```
+/plugin marketplace add dvcdsys/code-index
+/plugin install cix@code-index
+/reload-plugins
+```
+
+Or the legacy manual route:
 
 ```bash
 cp -r skills/cix-workspace ~/.claude/skills/cix-workspace
@@ -400,7 +410,10 @@ mkdir -p ~/.claude/agents
 cp skills/cix-workspace/agents/cix-workspace-investigator.md ~/.claude/agents/
 ```
 
-Invoke with `/cix-workspace <task>`. See [`workspaces.md`](workspaces.md#agent-integration) for the agent contract and behavior rules.
+The skill is **manual-only by design** — it doesn't auto-trigger on
+cross-cutting prompts. Invoke it explicitly with `/cix-workspace <task>`
+when you genuinely need the multi-repo workflow. See [`workspaces.md`](workspaces.md#agent-integration)
+for the agent contract and behavior rules.
 
 Then in any Claude Code session, invoke the skill **paired with the actual engineering task** — not a search query. The pattern is `/cix <fix / implement / investigate / refactor …>`:
 

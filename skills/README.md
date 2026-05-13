@@ -60,6 +60,17 @@ follows instructions and reports.
 
 ### Install
 
+Easiest path is the **`cix` Claude Code plugin** (v0.2.0+) — both the
+skill and the sub-agent are bundled and installed together:
+
+```
+/plugin marketplace add dvcdsys/code-index
+/plugin install cix@code-index
+/reload-plugins
+```
+
+Or manually:
+
 ```bash
 # Skill body
 cp -r skills/cix-workspace ~/.claude/skills/cix-workspace
@@ -72,15 +83,17 @@ cp skills/cix-workspace/agents/cix-workspace-investigator.md ~/.claude/agents/
 
 ### Usage
 
-In a Claude Code session:
+In a Claude Code session — **invoke explicitly with `/cix-workspace`**
+followed by the task verbatim:
 
 ```
-/cix-workspace
+/cix-workspace add a rate-limit middleware across the gateway and
+backend services
 ```
 
-Loads the cross-project research workflow into context. Pair with
-`/cix` for the single-repo navigation guidance.
-
-To activate automatically when the user's request looks cross-cutting,
-mention `cix-workspace` in your `~/.claude/CLAUDE.md` alongside the
-`cix` instructions.
+The skill is **manual-only by design** — it doesn't auto-trigger on
+cross-cutting prompts. The workspace flow is heavier than single-repo
+`cix search` (multi-repo fan-out, sub-agent spawns) and only pays off
+when you've made the call that cross-project research is what you
+actually need. Pair it with `/cix` for the single-repo navigation
+guidance.

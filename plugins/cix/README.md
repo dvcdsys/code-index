@@ -18,6 +18,21 @@ Semantic code search and navigation for Claude Code, powered by the
   invoke it (`/cix:search`, `/cix-skill`, or auto-trigger on a relevant
   prompt). Stays in context for the rest of the session — never
   duplicated.
+- **`cix-workspace` skill (SKILL.md)** *(experimental, **manual-only**)* —
+  companion workflow for tasks that span more than one repo. **Does
+  not auto-trigger** — invoke it explicitly with `/cix-workspace <task>`
+  when you want the full cross-project workflow guidance: which repos
+  are in scope, what code is relevant, what changes need to land.
+  Includes ten trust rules for interpreting `projects[]` vs `chunks[]`,
+  a four-part fan-out prompt template, and an anti-patterns list.
+- **`cix-workspace-investigator` sub-agent** *(experimental)* — thin
+  read-only shell around `cix search`/`cix def`/`cix refs` for parallel
+  per-repo fan-out from the workspace skill. Hard rules baked in: one
+  repo per spawn, no edits, no recursion. Methodology and output
+  format are the main agent's call per spawn; the sub-agent follows
+  instructions. Lives at `agents/cix-workspace-investigator.md` —
+  available as `subagent_type="cix-workspace-investigator"` in `Agent`
+  tool calls.
 - **Behavioral nudges (5 hooks):**
   - **SessionStart** — calls `cix status` (2 s timeout). Caches the
     yes/no verdict in `$CLAUDE_PLUGIN_DATA/cix-aware-$SESSION_ID-$DIR_HASH`,
@@ -135,13 +150,62 @@ in two tiers:
 | Path | Purpose |
 |---|---|
 | `.claude-plugin/plugin.json` | Plugin manifest |
-| `skills/cix/SKILL.md` | Lazy-loaded usage skill (~7 KB) |
+| `skills/cix/SKILL.md` | Lazy-loaded single-repo usage skill (~7 KB) |
+| `skills/cix-workspace/SKILL.md` | Cross-project workflow skill *(experimental)* |
+| `agents/cix-workspace-investigator.md` | Read-only per-repo investigator sub-agent *(experimental)* |
 | `commands/*.md` | Six slash commands |
 | `hooks/hooks.json` | SessionStart + PreToolUse(Grep\|Glob\|Bash) registration |
 | `scripts/cix-wrapper.sh` | "Use system or auto-install" CLI wrapper |
 | `scripts/session-start.sh` | One-time session reminder |
 | `scripts/grep-nudge.sh` | Exponential-backoff Grep nudge |
 | `bin/cix` | Symlink to wrapper, exposed on `$PATH` while plugin enabled |
+
+## Cross-project workflow (experimental, manual-only)
+
+For tasks that touch more than the repo you're cd'd into, the plugin
+ships a second skill — **`cix-workspace`** — plus a dedicated
+**`cix-workspace-investigator`** sub-agent for parallel per-repo
+fan-out. **Neither auto-triggers.** You invoke them explicitly when
+you actually need them — typically with `/cix-workspace <task>`.
+
+> *Why manual-only?* The workspace flow is heavier than single-repo
+> `cix search` (multi-repo fan-out, server-side clones, sub-agent
+> spawns) and only pays off when the task genuinely spans repos. We
+> don't want it firing on every request that vaguely mentions
+> "services". Load it deliberately, when you've decided cross-project
+> research is the right shape of work. This policy may change once
+> the heuristics around "is this really cross-project?" are more
+> reliable.
+
+The flow once you've invoked it:
+
+1. `cix-workspace` skill loads, structures the request around three
+   questions (which repos? what code? what changes?).
+2. Main agent runs a short, term-rich workspace search and reads the
+   `projects[]` panel.
+3. For each relevant repo, main agent spawns a `cix-workspace-investigator`
+   sub-agent with the task verbatim, the project_path, seed chunks
+   plus its own interpretive commentary on them, and an explicit
+   deliverable.
+4. Sub-agents run in parallel with isolated context. Main agent
+   synthesizes their reports.
+
+Requirements:
+
+- Configured cix server with **workspaces enabled**
+  (`CIX_WORKSPACES_ENABLED=true`).
+- At least one workspace containing the repos you're working across.
+
+See [`workspaces.md`](https://github.com/dvcdsys/code-index/blob/main/workspaces.md)
+in the parent project for setup details and the full search-algorithm
+reference.
+
+The skill body documents ten "trust rules" derived from internal
+calibration testing — how to read `chunk.score=0` (BM25-only literal
+match), when to drop down to per-project search, when adding a
+disambiguating token helps vs hurts, and so on. Load it via
+`/cix-workspace` when you need the full reference; it stays in
+context for the rest of the session.
 
 ## Troubleshooting
 

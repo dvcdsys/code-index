@@ -2,6 +2,7 @@
 name: cix-workspace
 description: Cross-project research workflow for cix workspaces. Manual-invocation skill — load explicitly via `/cix-workspace <task>` when a request spans multiple repos and you want the full workflow guidance (which repos? what code? what changes?) plus the trust rules for interpreting workspace search responses. Bundles the cix-workspace-investigator sub-agent for parallel per-repo fan-out. Do not auto-trigger.
 user-invocable: true
+allowed-tools: Bash(cix *), Agent
 ---
 
 # `cix workspace` — Cross-Project Research Workflow
