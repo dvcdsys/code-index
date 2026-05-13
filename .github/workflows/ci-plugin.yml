@@ -1,0 +1,75 @@
+name: Plugin Tests
+
+# Trigger only when plugin files change — server/CLI/dashboard work
+# is unaffected and shouldn't run plugin tests.
+on:
+  push:
+    branches: [main, 'feat/*', 'fix/*']
+    paths:
+      - 'plugins/cix/**'
+      - '.claude-plugin/**'
+      - '.github/workflows/ci-plugin.yml'
+  pull_request:
+    paths:
+      - 'plugins/cix/**'
+      - '.claude-plugin/**'
+      - '.github/workflows/ci-plugin.yml'
+
+# Minimum permissions required by the workflow (CodeQL workflow-permissions advisory).
+# Read-only on repo contents is enough — we don't push code, comments, or releases.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: bats + shellcheck on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats, jq, shellcheck (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats jq shellcheck
+
+      - name: Install bats, jq, shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bats-core jq shellcheck
+
+      - name: Verify bats version
+        run: bats --version
+
+      - name: Run bats test suites
+        run: bats --tap plugins/cix/tests/*.bats
+
+      - name: ShellCheck on hook scripts
+        run: |
+          # `--severity=warning` filters out style nags; `-x` follows
+          # sourced files (we don't source any in v0.1, but defensive).
+          shellcheck --severity=warning plugins/cix/scripts/*.sh
+
+      - name: Validate JSON manifests with jq
+        run: |
+          jq . .claude-plugin/marketplace.json
+          jq . plugins/cix/.claude-plugin/plugin.json
+          jq . plugins/cix/hooks/hooks.json
+
+      - name: Verify symlink integrity
+        run: |
+          # The bin/cix symlink MUST point at scripts/cix-wrapper.sh.
+          if [[ ! -L plugins/cix/bin/cix ]]; then
+            echo "::error::plugins/cix/bin/cix is not a symlink"
+            exit 1
+          fi
+          target=$(readlink plugins/cix/bin/cix)
+          if [[ "$target" != "../scripts/cix-wrapper.sh" ]]; then
+            echo "::error::bin/cix points to '$target' (expected '../scripts/cix-wrapper.sh')"
+            exit 1
+          fi

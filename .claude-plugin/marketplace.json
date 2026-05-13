@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "code-index",
+  "owner": {
+    "name": "dvcdsys",
+    "email": "dvcdsys@gmail.com"
+  },
+  "description": "Marketplace for cix — semantic code search and navigation tooling for Claude Code",
+  "plugins": [
+    {
+      "name": "cix",
+      "source": "./plugins/cix",
+      "description": "Semantic code search and navigation. Bundles the cix CLI and nudges Claude to prefer cix over Grep for semantic queries.",
+      "author": {
+        "name": "dvcdsys"
+      },
+      "homepage": "https://github.com/dvcdsys/code-index",
+      "repository": "https://github.com/dvcdsys/code-index",
+      "license": "MIT",
+      "keywords": ["search", "code-search", "semantic", "navigation", "indexing", "embeddings"],
+      "category": "developer-tools",
+      "tags": ["search", "indexing", "ai", "embeddings"]
+    }
+  ]
+}
