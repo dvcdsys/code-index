@@ -55,11 +55,31 @@ teardown_test_env() {
 
 # Run a hook script with controlled env. Usage:
 #   run_hook session-start.sh "$session_id" "$project_dir"
+#   run_hook grep-nudge.sh   "$session_id" "$project_dir" "Bash" "grep -rn foo ."
+#
+# Tool_name defaults to "Grep" so existing grep-nudge tests (which don't
+# pass tool_name) keep exercising the Grep-tool path. When tool_cmd is
+# non-empty, it goes into tool_input.command — required for the Bash branch
+# of grep-nudge.sh, ignored elsewhere.
+#
 # Reads stdout/stderr into bats's $output and $status as usual.
 run_hook() {
     local script="$1"
     local session_id="${2:-test-session}"
     local project_dir="${3:-$TEST_PROJECT_DIR}"
+    local tool_name="${4:-Grep}"
+    local tool_cmd="${5:-}"
+
+    local payload
+    if [ -n "$tool_cmd" ]; then
+        payload=$(jq -n \
+            --arg sid "$session_id" --arg tn "$tool_name" --arg cmd "$tool_cmd" \
+            '{session_id:$sid, tool_name:$tn, tool_input:{command:$cmd}}')
+    else
+        payload=$(jq -n \
+            --arg sid "$session_id" --arg tn "$tool_name" \
+            '{session_id:$sid, tool_name:$tn}')
+    fi
 
     # PATH includes our mock so any unqualified `cix` call hits the mock.
     # We deliberately do NOT pre-empt CLAUDE_PLUGIN_ROOT/bin/cix here —
@@ -69,7 +89,7 @@ run_hook() {
         PATH="$TEST_MOCK_BIN:$PATH" \
         CLAUDE_PLUGIN_DATA="$TEST_CACHE_DIR" \
         CLAUDE_PROJECT_DIR="$project_dir" \
-        bash "$TEST_PLUGIN_ROOT/scripts/$script" <<<"{\"session_id\":\"$session_id\"}"
+        bash "$TEST_PLUGIN_ROOT/scripts/$script" <<<"$payload"
 }
 
 # Compute the same DIR_HASH the scripts compute.
