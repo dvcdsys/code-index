@@ -6,8 +6,24 @@
 |---|---|---|---|---|
 | `latest` | linux/amd64 + linux/arm64 | Go CPU (distroless/static) | ~100 MB | Use with `CIX_EMBEDDINGS_ENABLED=false` |
 | `cu128` | linux/amd64 | distroless/cc-debian13 + CUDA libs | ~1.0 GB | RTX 3090 prod; embeddings via llama-server |
+| `develop-cu128` | linux/amd64 | same as cu128 | ~1.0 GB | Floating pre-release; force-updated on every merge to `develop` that touches `server/`. Not for production. |
 | `go-cu128` | linux/amd64 | same as cu128 | ~1.0 GB | Dev alias — retire after v0.3.0 ships |
 | `0.2-python-legacy` | linux/amd64 | Python FastAPI | ~5 GB | Frozen; rollback only |
+
+## Develop channels
+
+`develop` has a matched pair of floating pre-release artifacts:
+
+- **Server:** Docker tag `dvcdsys/code-index:develop-cu128` (CUDA only;
+  CPU image is published only on `server/v*` releases). Workflow:
+  `.github/workflows/prerelease-server.yml`.
+- **CLI:** GitHub release `cli/develop` (no `v` prefix, so the stable
+  installer's `^cli/v` filter ignores it). Installed via
+  `install-develop.sh`. Workflow:
+  `.github/workflows/prerelease-cli.yml`.
+
+Both are intended for staging the next release together against the
+RTX 3090 box without cutting a real tag.
 
 ## Retired Tags (kept for historical reference)
 

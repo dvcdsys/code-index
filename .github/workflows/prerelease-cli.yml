@@ -1,0 +1,136 @@
+name: "Pre-release: CLI (develop)"
+
+# Triggered on push to `develop` (i.e. PR merges; direct pushes are blocked
+# by branch protection) with CLI-touching changes. Force-updates the floating
+# `cli/develop` GitHub release with fresh artifacts for all four platforms so
+# `install-develop.sh` always pulls the latest develop build.
+#
+# Stable releases live under `cli/v*` and are handled by release-cli.yml —
+# this workflow never touches those tags. The floating tag has no leading
+# `v`, so install.sh's `^cli/v` filter naturally ignores it.
+on:
+  push:
+    branches: [develop]
+    paths:
+      - "cli/**"
+      - ".github/workflows/prerelease-cli.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: "0"
+          - target: linux-arm64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: "0"
+          - target: darwin-amd64
+            runner: macos-latest
+            goos: darwin
+            goarch: amd64
+            cgo: "1"
+          - target: darwin-arm64
+            runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            cgo: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Build
+        working-directory: cli
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          # Stamp short SHA so `cix --version` distinguishes one dev build
+          # from another even though the tag is floating.
+          VERSION="develop-${GITHUB_SHA::7}"
+          go build \
+            -ldflags="-s -w -X 'github.com/anthropics/code-index/cli/cmd.Version=${VERSION}'" \
+            -o "dist/cix" .
+
+      - name: Package
+        working-directory: cli/dist
+        run: |
+          tar -czf "cix-${{ matrix.target }}.tar.gz" cix
+          rm cix
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cix-${{ matrix.target }}
+          path: cli/dist/cix-${{ matrix.target }}.tar.gz
+
+  release:
+    name: Publish develop release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compute checksums
+        working-directory: artifacts
+        run: sha256sum * > checksums.txt
+
+      - name: Delete previous develop release + tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # `|| true` because the release/tag may not exist on the first run.
+          gh release delete cli/develop \
+            --cleanup-tag --yes \
+            --repo "${{ github.repository }}" || true
+
+      - name: Create develop release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cli/develop
+          target_commitish: develop
+          name: "CLI develop (${{ github.sha }})"
+          prerelease: true
+          make_latest: "false"
+          files: |
+            artifacts/*.tar.gz
+            artifacts/checksums.txt
+          body: |
+            **Floating develop release** — force-updated on every merge to
+            `develop` that touches `cli/**`. Not a stable release.
+
+            Built from commit ${{ github.sha }}.
+
+            ## Install
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-develop.sh | bash
+            ```
+
+            Re-run the same command later to pick up the next develop build.
+            For stable, use [`install.sh`](https://github.com/dvcdsys/code-index/blob/main/install.sh) instead.

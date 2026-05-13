@@ -210,6 +210,19 @@ cd cli && make build && make install   # → /usr/local/bin/cix
 cd cli && go build -o cix . && sudo mv cix /usr/local/bin/
 ```
 
+#### Develop channel (bleeding edge)
+
+For testing unreleased CLI changes from the `develop` branch — refreshed
+on every merge that touches `cli/`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-develop.sh | bash
+```
+
+Re-run any time to pick up the latest develop build. Pairs with the
+`:develop-cu128` server image (see `doc/DOCKER_TAGS.md`). Not for
+production.
+
 ### 4. Configure the CLI
 
 ```bash
