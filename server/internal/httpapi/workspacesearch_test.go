@@ -223,12 +223,12 @@ func TestWorkspaceSearch_EmptyWorkspace(t *testing.T) {
 }
 
 // TestWorkspaceSearch_ProjectsRankByMeanNotCount verifies the change
-// motivated by the prod "XYZ" search where acme-backend (63 hits, mean
-// ≈ 0.5) drowned out acme-platform (2 hits, mean ≈ 0.41) with
-// the previous mean×log(1+N_hits) formula. The new pure-mean
-// project_score keeps these projects close together so both surface
-// in the panel, and the per-project chunk cap stops the higher-count
-// project from monopolising the chunks list.
+// motivated by a workspace where one large repo (many hits, mean
+// ≈ 0.5) drowned out a smaller-but-equally-relevant repo (few hits,
+// mean ≈ 0.41) with the previous mean×log(1+N_hits) formula. The new
+// pure-mean project_score keeps these projects close together so
+// both surface in the panel, and the per-project chunk cap stops the
+// higher-count project from monopolising the chunks list.
 func TestWorkspaceSearch_ProjectsRankByMeanNotCount(t *testing.T) {
 	d, err := dbOpenMemory(t)
 	if err != nil {
@@ -303,10 +303,11 @@ func TestWorkspaceSearch_ProjectsRankByMeanNotCount(t *testing.T) {
 }
 
 // TestWorkspaceSearch_PerProjectChunkCap is the regression for the
-// "one repo eats every slot" failure mode that originally surfaced as
-// "workspace search misses 6 of 8 repos for XYZ". Seeds one project
-// with 12 strong hits and another with 1; the global chunks list must
-// not exceed the per-project cap for the dominant repo.
+// "one repo eats every slot" failure mode where a dominant repo's
+// hits crowded out every other surviving project from the chunks
+// list. Seeds one project with 12 strong hits and another with 1;
+// the global chunks list must not exceed the per-project cap for
+// the dominant repo.
 func TestWorkspaceSearch_PerProjectChunkCap(t *testing.T) {
 	d, err := dbOpenMemory(t)
 	if err != nil {
@@ -415,12 +416,12 @@ func TestWorkspaceSearch_MinScoreDropsLowScoringChunks(t *testing.T) {
 }
 
 // TestWorkspaceSearch_ProjectGateDropsDeadWeightRepos is the regression
-// for the workspace-XYZ probe that motivated this redesign: three of
-// eight ACME repos had zero literal "XYZ" mentions yet surfaced 50
-// chunks each at noise-level cosine similarity. The hybrid gate must
-// drop projects whose normalised candidacy falls below 40% of the
-// best project's candidacy, regardless of how many chunks chromem
-// happily returned.
+// for the pre-hybrid failure mode that motivated this redesign: in a
+// multi-repo workspace, repos with zero literal mentions of the query
+// term still surfaced 50 chunks each at noise-level cosine similarity.
+// The hybrid gate must drop projects whose normalised candidacy falls
+// below 40% of the best project's candidacy, regardless of how many
+// chunks chromem happily returned.
 func TestWorkspaceSearch_ProjectGateDropsDeadWeightRepos(t *testing.T) {
 	d, err := dbOpenMemory(t)
 	if err != nil {
@@ -961,5 +962,132 @@ func TestWorkspaceSearch_ClampsParams(t *testing.T) {
 	if resp.Status != "empty" {
 		t.Fatalf("min_score=5 should clamp to 1 and return empty, got status=%q (%d chunks)",
 			resp.Status, len(resp.Chunks))
+	}
+}
+
+// TestWorkspaceSearch_ChunksOnlyFromPanelProjects guards against the
+// `interleaveByRank` vs `projects[]` panel inconsistency: when more
+// projects survive the gate than `top_projects` allows in the panel,
+// chunks must only come from projects that are actually visible in
+// the panel. Otherwise agents see a chunk with a project_path they
+// can't look up for bm25_score/dense_score.
+func TestWorkspaceSearch_ChunksOnlyFromPanelProjects(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: l2([]float32{1, 0, 0, 0})})
+	wsID := createWS(t, router, "panel-vs-chunks")
+
+	// Seed 12 projects with monotonically decreasing strength. All
+	// stay above the 0.4*best gate (relative threshold). With
+	// top_projects=10 the bottom 2 projects must be dropped from the
+	// panel AND from chunks[].
+	for i := 0; i < 12; i++ {
+		name := "p" + strconv.Itoa(i)
+		// First component decays slowly so cosine spread is gentle
+		// (0.99 down to ~0.85) — every project survives 0.4 × best.
+		x := float32(0.99) - 0.012*float32(i)
+		seedRepoWithChunks(t, d, vs, wsID, "github.com/o/"+name+"@main",
+			[]vectorstore.Chunk{
+				{Content: "rate limit middleware " + name, FilePath: name + ".go",
+					StartLine: 1, EndLine: 9, ChunkType: "function",
+					SymbolName: "S", Language: "go"},
+			},
+			[][]float32{l2([]float32{x, 0.1, 0.0, 0.0})},
+		)
+	}
+
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=rate+limit&top_projects=10&min_score=0", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var resp searchResp
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if len(resp.Projects) != 10 {
+		t.Fatalf("expected 10 projects in panel (top_projects=10), got %d", len(resp.Projects))
+	}
+	panel := make(map[string]struct{}, len(resp.Projects))
+	for _, p := range resp.Projects {
+		panel[p.ProjectPath] = struct{}{}
+	}
+	for i, c := range resp.Chunks {
+		if _, ok := panel[c.ProjectPath]; !ok {
+			t.Fatalf("chunk[%d] is from project %q which is NOT in projects[] panel "+
+				"(panel has %d entries: %+v)", i, c.ProjectPath, len(resp.Projects), panel)
+		}
+	}
+}
+
+// TestWorkspaceSearch_DefaultMinScoreIs04 verifies the documented
+// default has effect: a request without ?min_score=... drops chunks
+// whose cosine sits below 0.4, matching the per-project SemanticSearch
+// default. A request that explicitly passes ?min_score=0 keeps them.
+//
+// Geometry: strong cosine 0.5 (lead), weak cosine 0.3 (in the gap
+// (0,0.4) the change targets). Both projects must survive the
+// relative project gate (0.4 × best = 0.2); the only thing
+// differentiating them is the min_score filter.
+func TestWorkspaceSearch_DefaultMinScoreIs04(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	query := l2([]float32{1, 0, 0, 0})
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: query})
+	wsID := createWS(t, router, "default-floor")
+
+	// Strong project: cosine = 0.5 with query (l2-normalized vec
+	// projects onto x by exactly 0.5).
+	seedRepoWithChunks(t, d, vs, wsID, "github.com/o/strong@main",
+		[]vectorstore.Chunk{
+			{Content: "s", FilePath: "s.go", StartLine: 1, EndLine: 9,
+				ChunkType: "function", SymbolName: "S", Language: "go"},
+		},
+		[][]float32{l2([]float32{0.5, 0.866, 0, 0})}, // |v|=1, cos(v,q)=0.5
+	)
+	// Weak project: cosine = 0.3 — survives min_score=0 (and would
+	// survive old default 0) but is filtered by new default 0.4.
+	// Relative gate: 0.4 × strong_candidacy. Candidacy is
+	// 0.5*dense_norm; dense_norm(weak)=0.3/0.5=0.6 → candidacy(weak)=0.3.
+	// Threshold = 0.4 × 0.5 = 0.2 → weak survives the gate at
+	// min_score=0.
+	seedRepoWithChunks(t, d, vs, wsID, "github.com/o/weak@main",
+		[]vectorstore.Chunk{
+			{Content: "w", FilePath: "w.go", StartLine: 1, EndLine: 9,
+				ChunkType: "function", SymbolName: "W", Language: "go"},
+		},
+		[][]float32{l2([]float32{0.3, 0.9539, 0, 0})}, // cos = 0.3
+	)
+
+	// Default: no min_score param → new 0.4 floor → weak's only chunk
+	// (cosine 0.3) is filtered before candidacy aggregation, weak's
+	// dense_signal drops to 0, gate drops the project.
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=x", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("default min_score: expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var defaultResp searchResp
+	_ = json.Unmarshal(rr.Body.Bytes(), &defaultResp)
+	if len(defaultResp.Projects) != 1 || defaultResp.Projects[0].ProjectPath != "github.com/o/strong@main" {
+		t.Fatalf("default min_score=0.4: expected only strong project, got %+v",
+			defaultResp.Projects)
+	}
+
+	// Explicit override: min_score=0 → weak project survives gate.
+	rr = doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=x&min_score=0", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("min_score=0 override: expected 200, got %d", rr.Code)
+	}
+	var openResp searchResp
+	_ = json.Unmarshal(rr.Body.Bytes(), &openResp)
+	if len(openResp.Projects) != 2 {
+		t.Fatalf("min_score=0: expected both projects to survive, got %d (%+v)",
+			len(openResp.Projects), openResp.Projects)
 	}
 }

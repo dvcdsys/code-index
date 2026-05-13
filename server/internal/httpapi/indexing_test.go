@@ -357,3 +357,67 @@ func TestSemanticSearch_HTTP_NoEmbeddings(t *testing.T) {
 		t.Errorf("status=%d", w.Code)
 	}
 }
+
+// TestSemanticSearch_DefaultMinScoreIs02 guards the lowered default
+// for per-project search (was 0.4, now 0.2). A natural-language query
+// whose best chunk scores in [0.2, 0.4] would silently return empty
+// under the old default; the new default surfaces it.
+//
+// fakeEmbedder maps each byte of the input to one vector dimension
+// (byte/255). Query "Z" → vec[0]=0.357, all other dims 0. Content of
+// 16 'A's → vec[0..15]=0.255 each. Cosine ≈ 0.25 — squarely inside
+// the (0.2, 0.4) gap the default change targets.
+func TestSemanticSearch_DefaultMinScoreIs02(t *testing.T) {
+	d, hash := newIndexerTestDeps(t, "/proj-floor")
+	router := NewRouter(d)
+
+	beginW := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/begin", map[string]any{})
+	var begin indexBeginResponse
+	_ = json.Unmarshal(beginW.Body.Bytes(), &begin)
+
+	// One file whose chunk will score ~0.25 against query "Z" with
+	// the byte-positional fakeEmbedder. The chunker splits at unique
+	// content; a single short body fits in one chunk.
+	body := "AAAAAAAAAAAAAAAAA"
+	doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/files", map[string]any{
+		"run_id": begin.RunID,
+		"files": []map[string]any{
+			{"path": "/proj-floor/a.txt", "content": body, "content_hash": shaHex(body), "language": "text"},
+		},
+	})
+	doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/index/finish", map[string]any{
+		"run_id": begin.RunID,
+	})
+
+	// Default request: no min_score. Under the new default 0.2 the
+	// ~0.25-cosine chunk survives; under the old default 0.4 it
+	// would have been filtered.
+	w := doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/search", map[string]any{
+		"query": "Z",
+		"limit": 10,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("default min_score: status=%d body=%s", w.Code, w.Body.String())
+	}
+	var defaultResp searchResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &defaultResp)
+	if defaultResp.Total == 0 {
+		t.Fatalf("default min_score=0.2 should surface a chunk with cos≈0.25, got 0 results")
+	}
+
+	// Same query at explicit min_score=0.4: chunk drops out.
+	w = doRequest(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/search", map[string]any{
+		"query":     "Z",
+		"limit":     10,
+		"min_score": 0.4,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("min_score=0.4: status=%d", w.Code)
+	}
+	var strictResp searchResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &strictResp)
+	if strictResp.Total != 0 {
+		t.Fatalf("min_score=0.4 should reject the cos≈0.25 chunk, got %d results: %+v",
+			strictResp.Total, strictResp.Results)
+	}
+}

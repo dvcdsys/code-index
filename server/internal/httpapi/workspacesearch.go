@@ -61,7 +61,7 @@ type workspaceSearchProjectPayload struct {
 	NumHits      int     `json:"num_hits"`
 	// BM25Score and DenseScore are the per-signal aggregates that
 	// feed into ProjectScore. Surfaced so the dashboard can show
-	// "this repo ranked high because BM25 matched literal XYZ" vs.
+	// "this repo ranked high because BM25 matched literal tokens" vs.
 	// "ranked on dense semantic similarity only".
 	BM25Score  float32 `json:"bm25_score"`
 	DenseScore float32 `json:"dense_score"`
@@ -131,12 +131,11 @@ type projectHits struct {
 // noise-level cosine similarity, since chromem returns the N nearest
 // vectors regardless of how far away "nearest" actually is.
 //
-// Live data from the XYZ probe (8 ACME repos): pre-hybrid, three repos
-// that contained zero literal "XYZ" mentions (acme-inventory,
-// acme-worker, acme-directory) still surfaced 50 chunks each at
-// scores 0.17-0.27. With hybrid + threshold those three repos drop
-// out, restoring the cross-project signal the user needs to scope an
-// agent's follow-up search.
+// Observed pre-hybrid: in a workspace of N repos, the repos that
+// contained zero literal mentions of the query term still surfaced
+// 50 chunks each at noise-level cosine (0.17-0.27). With hybrid +
+// project threshold those repos drop out, restoring the cross-project
+// signal the user needs to scope an agent's follow-up search.
 func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id string, params openapi.WorkspaceSearchParams) {
 	if s.workspaceReposUnavailable(w) {
 		return
@@ -161,7 +160,12 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 	}
 	topProjects := clampInt(params.TopProjects, workspaceSearchTopProjects, 1, 50)
 	topChunks := clampInt(params.TopChunks, 20, 1, 200)
-	minScore := clampFloat32(params.MinScore, 0, 0, 1)
+	// Default 0.4 matches per-project SemanticSearch default so a query
+	// that returns nothing from a single project doesn't surface a wall
+	// of weak-cosine noise when broadcast across the workspace. Cross-
+	// project sweeps that want long-tail recall must pass min_score=0
+	// explicitly.
+	minScore := clampFloat32(params.MinScore, 0.4, 0, 1)
 
 	queryEmbedding, err := s.Deps.EmbeddingSvc.EmbedQuery(r.Context(), params.Q)
 	if err != nil {
@@ -330,13 +334,30 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		projectPayloads = projectPayloads[:topProjects]
 	}
 
+	// Restrict the interleave to projects that survived the panel
+	// truncation. Otherwise a workspace with > top_projects surviving
+	// repos can surface chunks whose project_path is absent from
+	// projects[] — agents lose access to bm25_score/dense_score and
+	// the response looks inconsistent. Filter to the panel before
+	// round-robin.
+	panelSet := make(map[string]struct{}, len(projectPayloads))
+	for _, p := range projectPayloads {
+		panelSet[p.ProjectPath] = struct{}{}
+	}
+	panelSurviving := make([]projectHits, 0, len(projectPayloads))
+	for _, ph := range surviving {
+		if _, ok := panelSet[ph.ProjectPath]; ok {
+			panelSurviving = append(panelSurviving, ph)
+		}
+	}
+
 	// Round-robin across surviving projects so rank-1 from each
 	// project lands in the first N slots, then rank-2, etc. This
 	// gives every surviving repo a chance to surface its top chunk
 	// before any repo's tail entries appear — matches the project-
 	// picker use case where the user wants to see each project's
 	// most-relevant hit before diving into the dominant repo's tail.
-	merged := interleaveByRank(surviving, topChunks)
+	merged := interleaveByRank(panelSurviving, topChunks)
 
 	status := "ok"
 	if len(merged) == 0 {
