@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"net/url"
+	"time"
 )
 
 // WorkspaceSearchProject mirrors the OpenAPI WorkspaceSearchProject
@@ -57,28 +58,18 @@ type WorkspaceListResponse struct {
 	Total      int         `json:"total"`
 }
 
-// WorkspaceRepo mirrors the server's WorkspaceRepo payload — every
-// field the dashboard or `cix ws <name> list` would display.
-type WorkspaceRepo struct {
-	ID            string  `json:"id"`
-	WorkspaceID   string  `json:"workspace_id"`
-	GitHubURL     string  `json:"github_url"`
-	Branch        string  `json:"branch"`
-	ProjectPath   string  `json:"project_path"`
-	TokenID       *string `json:"token_id,omitempty"`
-	AutoWebhook   bool    `json:"auto_webhook"`
-	Status        string  `json:"status"`
-	LastSHA       *string `json:"last_sha,omitempty"`
-	LastError     *string `json:"last_error,omitempty"`
-	LastIndexedAt *string `json:"last_indexed_at,omitempty"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
+// WorkspaceProject mirrors the server's WorkspaceProject — the embedded
+// project (full Project shape, defined in projects.go) plus the
+// membership-added timestamp.
+type WorkspaceProject struct {
+	AddedAt time.Time `json:"added_at"`
+	Project Project   `json:"project"`
 }
 
-// WorkspaceRepoListResponse is the GET /workspaces/{id}/repos shape.
-type WorkspaceRepoListResponse struct {
-	Repos []WorkspaceRepo `json:"repos"`
-	Total int             `json:"total"`
+// WorkspaceProjectListResponse is the GET /workspaces/{id}/projects shape.
+type WorkspaceProjectListResponse struct {
+	Projects []WorkspaceProject `json:"projects"`
+	Total    int                `json:"total"`
 }
 
 // ListWorkspaces — GET /api/v1/workspaces. Returns
@@ -96,16 +87,17 @@ func (c *Client) ListWorkspaces() (*WorkspaceListResponse, error) {
 	return &out, nil
 }
 
-// ListWorkspaceRepos — GET /api/v1/workspaces/{id}/repos. Returns
-// every attached repo with its current status (pending / cloning /
-// indexing / indexed / failed) so the CLI can render a readable
-// per-repo summary.
-func (c *Client) ListWorkspaceRepos(workspaceID string) (*WorkspaceRepoListResponse, error) {
-	resp, err := c.do("GET", "/api/v1/workspaces/"+url.PathEscape(workspaceID)+"/repos", nil)
+// ListWorkspaceProjects — GET /api/v1/workspaces/{id}/projects. Returns
+// every linked project with its current status (created / indexing /
+// indexed / error), host path, path hash, and membership timestamp so
+// the CLI can render a readable per-project summary without a second
+// round-trip.
+func (c *Client) ListWorkspaceProjects(workspaceID string) (*WorkspaceProjectListResponse, error) {
+	resp, err := c.do("GET", "/api/v1/workspaces/"+url.PathEscape(workspaceID)+"/projects", nil)
 	if err != nil {
 		return nil, err
 	}
-	var out WorkspaceRepoListResponse
+	var out WorkspaceProjectListResponse
 	if err := parseResponse(resp, &out); err != nil {
 		return nil, err
 	}

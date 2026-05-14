@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/anthropics/code-index/cli/internal/client"
 	"github.com/spf13/cobra"
@@ -140,17 +141,17 @@ func cmdListWorkspaces(cli *client.Client) error {
 		}
 		fmt.Println(line)
 		if wsVerbose {
-			// In verbose mode we follow each workspace with its repo
+			// In verbose mode we follow each workspace with its project
 			// count + indexed status. Two extra HTTP calls per
 			// workspace; acceptable at typical scale (<10 workspaces).
-			if reposResp, rerr := cli.ListWorkspaceRepos(w.ID); rerr == nil {
+			if pr, perr := cli.ListWorkspaceProjects(w.ID); perr == nil {
 				indexed := 0
-				for _, r := range reposResp.Repos {
-					if r.Status == "indexed" {
+				for _, wp := range pr.Projects {
+					if wp.Project.Status == "indexed" {
 						indexed++
 					}
 				}
-				fmt.Printf("       %d repos (%d indexed)\n", reposResp.Total, indexed)
+				fmt.Printf("       %d projects (%d indexed)\n", pr.Total, indexed)
 			}
 		}
 	}
@@ -166,7 +167,7 @@ func cmdListRepos(cli *client.Client, identifier string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := cli.ListWorkspaceRepos(id)
+	resp, err := cli.ListWorkspaceProjects(id)
 	if err != nil {
 		return err
 	}
@@ -174,28 +175,21 @@ func cmdListRepos(cli *client.Client, identifier string) error {
 		return emitJSON(resp)
 	}
 	if resp.Total == 0 {
-		fmt.Fprintln(os.Stderr, "no repos attached — add one at /dashboard/workspaces")
+		fmt.Fprintln(os.Stderr, "no projects linked — add one at /dashboard/workspaces")
 		return nil
 	}
-	for _, r := range resp.Repos {
-		statusBadge := r.Status
-		switch r.Status {
-		case "indexed":
-			statusBadge = "✓ indexed"
-		case "failed":
-			statusBadge = "✗ failed"
-		case "cloning", "indexing", "pending":
-			statusBadge = "… " + r.Status
-		}
-		fmt.Printf("%s  %s@%s\n", statusBadge, r.GitHubURL, r.Branch)
+	for _, wp := range resp.Projects {
+		p := wp.Project
+		fmt.Printf("%s  %s\n", projectStatusBadge(p.Status), p.HostPath)
 		if wsVerbose {
-			fmt.Printf("       project: %s\n", r.ProjectPath)
-			if r.LastIndexedAt != nil {
-				fmt.Printf("       last indexed: %s\n", *r.LastIndexedAt)
+			fmt.Printf("       path_hash: %s\n", p.PathHash)
+			if p.LastIndexedAt != nil {
+				fmt.Printf("       last indexed: %s\n", p.LastIndexedAt.Format(time.RFC3339))
 			}
-			if r.LastError != nil && *r.LastError != "" {
-				fmt.Printf("       last error: %s\n", *r.LastError)
+			if len(p.Languages) > 0 {
+				fmt.Printf("       languages: %s\n", strings.Join(p.Languages, ", "))
 			}
+			fmt.Printf("       linked: %s\n", wp.AddedAt.Format(time.RFC3339))
 		}
 	}
 	return nil
@@ -221,7 +215,7 @@ func cmdDescribeWorkspace(cli *client.Client, identifier string) error {
 	if ws == nil {
 		return fmt.Errorf("workspace %q not found (run `cix ws list`)", identifier)
 	}
-	reposResp, err := cli.ListWorkspaceRepos(ws.ID)
+	projResp, err := cli.ListWorkspaceProjects(ws.ID)
 	if err != nil {
 		return err
 	}
@@ -229,8 +223,8 @@ func cmdDescribeWorkspace(cli *client.Client, identifier string) error {
 	if wsJSON {
 		return emitJSON(map[string]any{
 			"workspace": ws,
-			"repos":     reposResp.Repos,
-			"total":     reposResp.Total,
+			"projects":  projResp.Projects,
+			"total":     projResp.Total,
 		})
 	}
 
@@ -240,37 +234,60 @@ func cmdDescribeWorkspace(cli *client.Client, identifier string) error {
 		fmt.Printf("  description: %s\n", ws.Description)
 	}
 	indexed := 0
-	for _, r := range reposResp.Repos {
-		if r.Status == "indexed" {
+	for _, wp := range projResp.Projects {
+		if wp.Project.Status == "indexed" {
 			indexed++
 		}
 	}
-	fmt.Printf("  repos: %d (%d indexed)\n", reposResp.Total, indexed)
-	if reposResp.Total == 0 {
-		fmt.Fprintln(os.Stderr, "\n  (no repos attached — add at /dashboard/workspaces)")
+	fmt.Printf("  projects: %d (%d indexed)\n", projResp.Total, indexed)
+	if projResp.Total == 0 {
+		fmt.Fprintln(os.Stderr, "\n  (no projects linked — add at /dashboard/workspaces)")
 		return nil
 	}
 	fmt.Println()
-	for _, r := range reposResp.Repos {
-		statusBadge := r.Status
-		switch r.Status {
-		case "indexed":
-			statusBadge = "✓"
-		case "failed":
-			statusBadge = "✗"
-		default:
-			statusBadge = "…"
+	for _, wp := range projResp.Projects {
+		p := wp.Project
+		fmt.Printf("  %s  %s\n", projectStatusBadgeShort(p.Status), p.HostPath)
+		fmt.Printf("     path_hash: %s\n", p.PathHash)
+		if p.LastIndexedAt != nil {
+			fmt.Printf("     last indexed: %s\n", p.LastIndexedAt.Format(time.RFC3339))
 		}
-		fmt.Printf("  %s  %s@%s\n", statusBadge, r.GitHubURL, r.Branch)
-		fmt.Printf("     project: %s\n", r.ProjectPath)
-		if r.LastIndexedAt != nil {
-			fmt.Printf("     last indexed: %s\n", *r.LastIndexedAt)
-		}
-		if r.LastError != nil && *r.LastError != "" {
-			fmt.Printf("     last error: %s\n", *r.LastError)
-		}
+		fmt.Printf("     linked: %s\n", wp.AddedAt.Format(time.RFC3339))
 	}
 	return nil
+}
+
+// projectStatusBadge renders the long status form used by
+// `cix ws <name> list`. The new wire enum (post-split) is:
+//
+//	created | indexing | indexed | error
+//
+// Unknown values fall through to the literal string so future enum
+// additions render readably without crashing the CLI.
+func projectStatusBadge(status string) string {
+	switch status {
+	case "indexed":
+		return "✓ indexed"
+	case "error":
+		return "✗ error"
+	case "indexing", "created":
+		return "… " + status
+	default:
+		return status
+	}
+}
+
+// projectStatusBadgeShort renders the single-glyph badge used by the
+// describe view's per-project bullet list.
+func projectStatusBadgeShort(status string) string {
+	switch status {
+	case "indexed":
+		return "✓"
+	case "error":
+		return "✗"
+	default:
+		return "…"
+	}
 }
 
 // ---------------------------------------------------------------------------
