@@ -10,7 +10,7 @@
         ]
       }
     ],
-    "PreToolUse": [
+    "PostToolUse": [
       {
         "matcher": "Grep|Glob",
         "hooks": [

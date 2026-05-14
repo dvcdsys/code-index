@@ -26,9 +26,13 @@ You have access to `cix`, a semantic code index that understands the
 codebase via embeddings + AST parsing. The right reflex is **"cix when
 you don't have a pointer; grep when you do."**
 
-This plugin also exposes shortcuts: `/cix:search`, `/cix:def`, `/cix:refs`,
-`/cix:init`, `/cix:status`, `/cix:summary`. The `cix` CLI is bundled —
-the plugin auto-installs it on first use if your system doesn't have it.
+**Always invoke `cix` through the Bash tool — do not call the
+`/cix:search`, `/cix:def`, … slash commands from inside a turn.** Those
+shortcuts exist for humans typing in the UI; an agent driving its own
+work should run `cix search …` / `cix def …` / `cix refs …` as Bash so
+the output flows through the normal tool-result pipeline and stays
+machine-parseable. The `cix` CLI is bundled — the plugin auto-installs
+it on first use if your system doesn't have it.
 
 ## When to use which
 

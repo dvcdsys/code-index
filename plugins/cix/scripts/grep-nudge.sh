@@ -1,17 +1,28 @@
 #!/usr/bin/env bash
-# PreToolUse(Grep|Glob|Bash) hook for the cix plugin.
+# PostToolUse(Grep|Glob|Bash) hook for the cix plugin.
 #
 # Behavior: if SessionStart (or CwdChanged) concluded the current
 # project is cix-indexed (cache file for this (session, project_dir)
 # pair contains "1"), occasionally inject a system reminder pointing
 # toward `cix search` instead of grep. Otherwise stay silent.
 #
+# Wired on PostToolUse (not PreToolUse) because current Claude Code
+# only surfaces hookSpecificOutput.additionalContext for PostToolUse,
+# UserPromptSubmit, and SessionStart — PreToolUse output without an
+# explicit permissionDecision goes nowhere visible to the model.
+# Firing after the grep means the model gets the nudge in time for
+# the NEXT decision; behaviorally equivalent for an advisory hook.
+#
 # Bash is matched in addition to Grep/Glob because real-session usage
-# of `grep`/`rg` happens through the Bash tool (pipelines, `| head`,
+# of `grep`/`rg`/`find` happens through the Bash tool (pipelines, `| head`,
 # `cd && grep …`). The Bash branch inspects tool_input.command and
-# only proceeds when it looks like a grep-family call; non-grep Bash
-# (ls, git status, make, go test) is fully silent and does not even
-# increment the backoff counter.
+# only proceeds when it looks like a grep- or find-family call; other
+# Bash (ls, git status, make, go test) is fully silent and does not
+# even increment the backoff counter.
+#
+# `find` is included because the agent often uses it to locate files
+# by name pattern when a cix symbol/semantic query would be faster —
+# `find . -name '*Auth*'` vs `cix search "auth"` / `cix def Auth`.
 #
 # This hook does NOT call `cix status` itself — it relies entirely on
 # the cache written by SessionStart and refreshed by CwdChanged.
@@ -45,9 +56,9 @@ fi
 # ── Gate by tool_name + command shape ─────────────────────────────────────────
 # For Grep/Glob the intent is unambiguous — always proceed (still subject to
 # the cache check and exponential backoff below). For Bash we additionally
-# inspect tool_input.command and only proceed when it looks like a grep-family
-# command; non-grep Bash exits silently here WITHOUT bumping the backoff
-# counter, so ls/git status/make/etc. stay invisible.
+# inspect tool_input.command and only proceed when it looks like a grep- or
+# find-family command; other Bash exits silently here WITHOUT bumping the
+# backoff counter, so ls/git status/make/etc. stay invisible.
 #
 # Without jq the Bash branch falls through to "silent": parsing shell commands
 # out of a JSON blob with sed invites false positives, and silent is safer than
@@ -66,11 +77,12 @@ case "$TOOL_NAME" in
         if command -v jq >/dev/null 2>&1; then
             TOOL_CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
         fi
-        # Match grep/egrep/fgrep/rg/ripgrep as a standalone token. Anchors:
-        # start-of-string, whitespace, `|`, `;`, `&`, backtick, `(`. The regex
-        # rejects `git grep` (subcommand after `git`, not a standalone shell
-        # `grep`) and substring hits like `grepl`, `egrep_helper`.
-        if ! [[ "$TOOL_CMD" =~ (^|[[:space:]\|\&\;\`\(])(grep|egrep|fgrep|rg|ripgrep)([[:space:]]|$) ]]; then
+        # Match grep/egrep/fgrep/rg/ripgrep/find as a standalone token.
+        # Anchors: start-of-string, whitespace, `|`, `;`, `&`, backtick, `(`.
+        # The regex rejects `git grep` (subcommand after `git`, not a
+        # standalone shell `grep`) and substring hits like `grepl`,
+        # `egrep_helper`, `findme`.
+        if ! [[ "$TOOL_CMD" =~ (^|[[:space:]\|\&\;\`\(])(grep|egrep|fgrep|rg|ripgrep|find)([[:space:]]|$) ]]; then
             exit 0
         fi
         ;;
@@ -115,14 +127,14 @@ if [ "$((COUNT & (COUNT - 1)))" -ne 0 ]; then
 fi
 
 # ── Emit nudge ────────────────────────────────────────────────────────────────
-MESSAGE="💡 You're about to grep this project (call #$COUNT this session). This project has a cix semantic index — for queries by meaning (find by concept, cross-file lookups, symbol navigation), \`cix search\` / \`cix def\` / \`cix refs\` outperform grep. Grep is best for exact strings (error messages, config keys, import paths). The \`/cix:search\` slash command is also available."
+MESSAGE="💡 You just ran a file/text search in this project (call #$COUNT this session). This project has a cix semantic index — next time, for queries by meaning (find by concept, cross-file lookups, symbol navigation, locating files by symbol name), the CLI commands \`cix search\` / \`cix def\` / \`cix refs\` outperform grep/find. grep and find are best for exact strings or filename patterns (error messages, config keys, import paths, glob extensions). Recommended to activate /cix SKILL to use cix effectively"
 
 if command -v jq >/dev/null 2>&1; then
     jq -n --arg msg "$MESSAGE" \
-        '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $msg}}'
+        '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $msg}}'
 else
     ESC=$(printf '%s' "$MESSAGE" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$ESC"
+    printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$ESC"
 fi
 
 exit 0

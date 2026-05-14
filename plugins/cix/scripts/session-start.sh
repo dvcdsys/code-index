@@ -135,7 +135,7 @@ fi
 # ── Project IS indexed — cache + inject reminder ──────────────────────────────
 printf '1' > "$CACHE_FILE"
 
-MESSAGE='💡 This project has a cix semantic code index. For semantic queries — finding code by meaning, cross-file lookups, symbol navigation, "where is X used", "how does Y work" — prefer `cix search`, `cix def`, `cix refs`, or the slash commands `/cix:search`, `/cix:def`, `/cix:refs`. Use Grep only for exact strings (error messages, config keys, import paths). Run `cix status` if results seem stale.'
+MESSAGE='💡 This project has a cix semantic code index. For semantic queries — finding code by meaning, cross-file lookups, symbol navigation, "where is X used", "how does Y work" — use the CLI: `cix search`, `cix def`, `cix refs` (via Bash). Activate the /cix SKILL for guidance. Use Grep only for exact strings (error messages, config keys, import paths). Run `cix status` if results seem stale.'
 
 if command -v jq >/dev/null 2>&1; then
     jq -n --arg msg "$MESSAGE" \

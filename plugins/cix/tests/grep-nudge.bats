@@ -12,7 +12,7 @@ teardown() { teardown_test_env; }
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"hookSpecificOutput"* ]]
-    [[ "$output" == *"PreToolUse"* ]]
+    [[ "$output" == *"PostToolUse"* ]]
     [[ "$output" == *"cix search"* ]]
 }
 
@@ -200,6 +200,35 @@ teardown() { teardown_test_env; }
     run_hook grep-nudge.sh "sess-sub" "$TEST_PROJECT_DIR" "Bash" "grepl --help"
     [ -z "$output" ]
     [ "$(read_counter 'sess-sub' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
+@test "Bash + find -name: nudge fires" {
+    make_cache "sess-fn" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-fn" "$TEST_PROJECT_DIR" "Bash" "find . -name '*.go'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hookSpecificOutput"* ]]
+    [[ "$output" == *"cix search"* ]]
+}
+
+@test "Bash + find -type: nudge fires" {
+    make_cache "sess-ft" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-ft" "$TEST_PROJECT_DIR" "Bash" "find src -type f"
+    [[ "$output" == *"hookSpecificOutput"* ]]
+}
+
+@test "Bash + piped find (find | head): nudge fires" {
+    make_cache "sess-fp" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-fp" "$TEST_PROJECT_DIR" "Bash" "find . -name '*.tsx' | head -20"
+    [[ "$output" == *"hookSpecificOutput"* ]]
+}
+
+@test "Bash + findme (substring, not standalone token): silent" {
+    # `findme`, `findutils`, `mlfind`, etc. share a substring with `find`
+    # but are different binaries. Regex must not match them.
+    make_cache "sess-fsub" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-fsub" "$TEST_PROJECT_DIR" "Bash" "findme --help"
+    [ -z "$output" ]
+    [ "$(read_counter 'sess-fsub' "$TEST_PROJECT_DIR")" = "0" ]
 }
 
 @test "Bash + git grep: nudge fires (git grep is still grep)" {

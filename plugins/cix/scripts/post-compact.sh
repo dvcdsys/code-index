@@ -49,7 +49,7 @@ if [ "$(cat "$CACHE_FILE" 2>/dev/null)" != "1" ]; then
 fi
 
 # ── Re-inject the SessionStart reminder ───────────────────────────────────────
-MESSAGE='💡 (Post-compact reminder) This project has a cix semantic code index. For semantic queries — finding code by meaning, cross-file lookups, symbol navigation, "where is X used", "how does Y work" — prefer `cix search`, `cix def`, `cix refs`, or the slash commands `/cix:search`, `/cix:def`, `/cix:refs`. Use Grep only for exact strings (error messages, config keys, import paths).'
+MESSAGE='💡 (Post-compact reminder) This project has a cix semantic code index. For semantic queries — finding code by meaning, cross-file lookups, symbol navigation, "where is X used", "how does Y work" — use the CLI: `cix search`, `cix def`, `cix refs` (via Bash). Activate the /cix SKILL for guidance. Use Grep only for exact strings (error messages, config keys, import paths).'
 
 if command -v jq >/dev/null 2>&1; then
     jq -n --arg msg "$MESSAGE" \
