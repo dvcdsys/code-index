@@ -143,27 +143,18 @@ export function ProjectDetailPage() {
           <div className="flex flex-wrap gap-2">
             {workspaces.data.workspaces.map((w) => (
               <Button
-                key={w.repo_id}
+                key={w.workspace_id}
                 asChild
                 variant="outline"
                 size="sm"
                 className="h-auto py-1.5"
-                title={
-                  w.is_linked
-                    ? `Linked into ${w.workspace_name} from another workspace's clone`
-                    : `Owned by ${w.workspace_name} (this is the cloning workspace)`
-                }
+                title={`Linked into ${w.workspace_name} on ${formatDateTime(w.added_at)}`}
               >
                 <Link to={`/workspaces/${w.workspace_id}`}>
                   <span className="font-medium">{w.workspace_name}</span>
-                  <span className="ml-2 font-mono text-xs text-muted-foreground">
-                    @{w.branch}
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    {formatRelative(w.added_at)}
                   </span>
-                  {w.is_linked ? (
-                    <Badge variant="secondary" className="ml-2 text-[10px]">
-                      linked
-                    </Badge>
-                  ) : null}
                 </Link>
               </Button>
             ))}
