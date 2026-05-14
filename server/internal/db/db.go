@@ -12,9 +12,54 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// migrationFn applies a single schema migration. The opts parameter carries
+// OpenOptions through to migrations that touch on-disk artefacts (the split
+// migration renames clone dirs under opts.DataDir); migrations that only
+// touch SQL ignore it.
+type migrationFn func(*sql.DB, OpenOptions) error
+
+// migration is one row in the registeredMigrations slice. version is the
+// permanent identifier recorded in schema_migrations; name is a human-readable
+// label surfaced in error messages and ops logs.
+type migration struct {
+	version int
+	name    string
+	fn      migrationFn
+}
+
+// registeredMigrations is the canonical migration ledger, in apply order.
+// schema_migrations records (version, name) after each successful run; on
+// subsequent boots applyMigrations skips every entry whose version is
+// <= MAX(schema_migrations.version), so each migration runs at most once
+// per database.
+//
+// Rules for editing this list:
+//
+//  1. Append new migrations with the next sequential version number. Never
+//     renumber, never remove — production schema_migrations rows reference
+//     these version/name tuples and a collision would silently skip work
+//     that was supposed to run.
+//  2. Keep each migration idempotent. Bootstrap (DB exists but
+//     schema_migrations is empty) runs all of them from scratch, so each
+//     must detect already-applied state via PRAGMA / sqlite_master /
+//     IF NOT EXISTS and short-circuit.
+//  3. Migrations run outside any wrapping transaction; some take their own
+//     internal tx (the split migration does). If a migration fails part-way,
+//     its schema_migrations row is NOT inserted, so the next boot retries
+//     end-to-end — which is why idempotency is non-negotiable.
+var registeredMigrations = []migration{
+	{1, "path_hash", func(db *sql.DB, _ OpenOptions) error { return migratePathHash(db) }},
+	{2, "indexed_with_model", func(db *sql.DB, _ OpenOptions) error { return migrateIndexedWithModel(db) }},
+	{3, "webhook_mode", func(db *sql.DB, _ OpenOptions) error { return migrateWebhookMode(db) }},
+	{4, "workspace_repos_linked", func(db *sql.DB, _ OpenOptions) error { return migrateWorkspaceReposLinked(db) }},
+	{5, "split_workspace_repos", func(db *sql.DB, opts OpenOptions) error { return migrateSplitWorkspaceRepos(db, opts.DataDir) }},
+	{6, "drop_communities", func(db *sql.DB, _ OpenOptions) error { return migrateDropCommunities(db) }},
+}
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
 const DriverName = "sqlite"
@@ -80,53 +125,63 @@ func OpenWith(opts OpenOptions) (*sql.DB, error) {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 
-	// m7 — migrate existing databases that pre-date the path_hash column.
-	// We add the column + index if absent, then backfill in a single pass.
-	if err := migratePathHash(db); err != nil {
+	if err := applyMigrations(db, opts); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("migrate path_hash: %w", err)
-	}
-
-	// PR-E — add indexed_with_model to projects on pre-PR-E databases. Same
-	// PRAGMA-table_info pattern as migratePathHash; no backfill (NULL means
-	// "indexed before drift tracking landed" — UI renders this as Unknown,
-	// not as a stale-model warning).
-	if err := migrateIndexedWithModel(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate indexed_with_model: %w", err)
-	}
-
-	// Up-level pre-PR10 / pre-PR13 workspace_repos shapes to the richest
-	// pre-split form (webhook_mode column present, is_linked column
-	// present, no inline-UNIQUE on project_path). On already-current or
-	// already-split DBs these are no-ops.
-	if err := migrateWebhookMode(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate webhook_mode: %w", err)
-	}
-	if err := migrateWorkspaceReposLinked(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate workspace_repos is_linked: %w", err)
-	}
-
-	// Split the legacy workspace_repos table into git_repos +
-	// workspace_projects. Idempotent — when the table is already gone
-	// (post-split DBs) the migration returns immediately.
-	if err := migrateSplitWorkspaceRepos(db, opts.DataDir); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate workspace_repos → git_repos: %w", err)
-	}
-
-	// PR14 — workspace search switched from the Louvain-centroid two-
-	// stage pipeline to a weighted fan-out. The communities +
-	// community_members tables stop being written; drop them on
-	// upgrade so the schema reflects what's actually used.
-	if err := migrateDropCommunities(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate drop communities: %w", err)
+		return nil, err
 	}
 
 	return db, nil
+}
+
+// applyMigrations runs every entry in registeredMigrations whose version is
+// greater than the current high-water mark in schema_migrations. Each
+// successful migration records a (version, name, applied_at) row so the
+// same migration never runs twice on the same database.
+//
+// Bootstrap behaviour: when schema_migrations is empty (fresh DB or any
+// production DB that pre-dates this ledger), MAX(version) reads as 0 and
+// every registered migration runs. The migrations are individually
+// idempotent — they short-circuit on already-current state — so this
+// is the same cost as the pre-ledger code path. The benefit kicks in
+// from the SECOND boot onwards: applyMigrations sees MAX = N and skips
+// every entry <= N, turning warm boots into a single SELECT.
+//
+// schema_migrations itself is created here, not in Schema, so the bootstrap
+// path on a legacy DB (which never ran Schema with the row) still gets a
+// ledger. Schema.Exec runs first in OpenWith and uses IF NOT EXISTS, so the
+// table is harmlessly recreated by this function on the same boot.
+func applyMigrations(db *sql.DB, opts OpenOptions) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+        version    INTEGER PRIMARY KEY,
+        name       TEXT    NOT NULL,
+        applied_at TEXT    NOT NULL
+    )`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	var currentMax sql.NullInt64
+	if err := db.QueryRow(
+		`SELECT MAX(version) FROM schema_migrations`,
+	).Scan(&currentMax); err != nil {
+		return fmt.Errorf("read schema_migrations max version: %w", err)
+	}
+	threshold := currentMax.Int64
+
+	for _, m := range registeredMigrations {
+		if int64(m.version) <= threshold {
+			continue
+		}
+		if err := m.fn(db, opts); err != nil {
+			return fmt.Errorf("migration %d (%s): %w", m.version, m.name, err)
+		}
+		if _, err := db.Exec(
+			`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
+			m.version, m.name, time.Now().UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return fmt.Errorf("record migration %d (%s): %w", m.version, m.name, err)
+		}
+	}
+	return nil
 }
 
 // migrateDropCommunities removes the PR5–PR12 communities +
@@ -467,8 +522,17 @@ func migrateWebhookMode(db *sql.DB) error {
 // External (owned, non-linked) workspace_repos rows used to keep their
 // clone in {dataDir}/repos/{workspace_repos.id}; we rename those dirs
 // to {dataDir}/repos/{path_hash} so the new gitrepos service finds
-// them. Failures are logged-and-ignored — the next clone job will
-// regenerate the directory from scratch.
+// them.
+//
+// Crash-safety contract — FS renames run BEFORE the DB transaction:
+// a kill -9 between commit and rename used to leave the DB split but
+// the clone dirs stranded under their old UUID names (causing silent
+// re-clones on next start). By running renames first and refusing to
+// drop workspace_repos when any rename hard-fails, a retry on next
+// start is fully idempotent (INSERT OR IGNORE on workspace_projects /
+// git_repos, skip-target-exists on the rename loop). Missing source
+// dirs (legacy clone job died before mkdir) and pre-existing targets
+// (partial rename from a previous run) are non-fatal skips.
 //
 // Pre-conditions on the legacy table: the earlier migrateWebhookMode +
 // migrateWorkspaceReposLinked passes brought it up to the richest
@@ -529,6 +593,69 @@ func migrateSplitWorkspaceRepos(db *sql.DB, dataDir string) error {
 		return fmt.Errorf("iterate workspace_repos: %w", err)
 	}
 
+	// Build the rename plan from the legacy snapshot. Only owned
+	// external rows (not linked, project_path is github.com/owner/repo@branch)
+	// have a clone directory on disk; linked rows reuse the owner's
+	// clone, and local projects have no on-disk artifact at all.
+	type renamePair struct{ oldID, newHash string }
+	var renames []renamePair
+	for _, s := range legacy {
+		if s.isLinked != 0 || !looksLikeGitHubProjectPath(s.projectPath) {
+			continue
+		}
+		renames = append(renames, renamePair{
+			oldID:   s.id,
+			newHash: HashHostPath(s.projectPath),
+		})
+	}
+
+	// Filesystem renames run BEFORE the SQL transaction. If a hard
+	// failure happens (permissions, EROFS, …) we return an error and
+	// leave workspace_repos intact, so the next process start retries
+	// the migration end-to-end. The DB-side inserts are idempotent
+	// via INSERT OR IGNORE, and the rename loop's skip-target-exists
+	// branch keeps the FS retry idempotent too.
+	if dataDir != "" && len(renames) > 0 {
+		base := filepath.Join(dataDir, "repos")
+		var renamed, skippedMissing, skippedExisting, failed int
+		for _, rp := range renames {
+			oldPath := filepath.Join(base, rp.oldID)
+			newPath := filepath.Join(base, rp.newHash)
+			if _, statErr := os.Stat(oldPath); statErr != nil {
+				// Source missing — legacy clone job died before mkdir,
+				// or a prior run already renamed away. Either way no
+				// FS work needed and the next clone job will recreate.
+				skippedMissing++
+				continue
+			}
+			if _, statErr := os.Stat(newPath); statErr == nil {
+				// Target already there — prior partial run completed
+				// this rename. Safe to skip.
+				skippedExisting++
+				continue
+			}
+			if err := os.Rename(oldPath, newPath); err != nil {
+				failed++
+				fmt.Fprintf(os.Stderr,
+					"db: migrateSplitWorkspaceRepos: rename %s → %s failed: %v\n",
+					oldPath, newPath, err)
+				continue
+			}
+			renamed++
+		}
+		fmt.Fprintf(os.Stderr,
+			"db: migrateSplitWorkspaceRepos: clone-dir renames "+
+				"renamed=%d skipped_missing_source=%d skipped_target_exists=%d failed=%d\n",
+			renamed, skippedMissing, skippedExisting, failed)
+		if failed > 0 {
+			return fmt.Errorf(
+				"migrateSplitWorkspaceRepos: %d clone-dir rename(s) failed; "+
+					"refusing to drop workspace_repos so migration retries on next start",
+				failed,
+			)
+		}
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin split tx: %w", err)
@@ -553,11 +680,6 @@ func migrateSplitWorkspaceRepos(db *sql.DB, dataDir string) error {
 			return fmt.Errorf("pre-seed projects row for %s: %w", s.projectPath, err)
 		}
 	}
-
-	// Track rename targets so the filesystem step can run after the tx
-	// commits — we don't want to half-rename then roll back the SQL.
-	type renamePair struct{ oldID, newHash string }
-	var renames []renamePair
 
 	for _, s := range legacy {
 		// Every legacy row becomes a workspace_projects membership.
@@ -597,10 +719,6 @@ func migrateSplitWorkspaceRepos(db *sql.DB, dataDir string) error {
 		); err != nil {
 			return fmt.Errorf("insert git_repos for %s: %w", s.projectPath, err)
 		}
-		renames = append(renames, renamePair{
-			oldID:   s.id,
-			newHash: HashHostPath(s.projectPath),
-		})
 	}
 
 	if _, err := tx.Exec(`DROP TABLE workspace_repos`); err != nil {
@@ -608,30 +726,6 @@ func migrateSplitWorkspaceRepos(db *sql.DB, dataDir string) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit split tx: %w", err)
-	}
-
-	// Filesystem rename — best effort. Failure is non-fatal; the next
-	// clone job will recreate the directory.
-	if dataDir != "" {
-		base := filepath.Join(dataDir, "repos")
-		for _, rp := range renames {
-			oldPath := filepath.Join(base, rp.oldID)
-			newPath := filepath.Join(base, rp.newHash)
-			if _, statErr := os.Stat(oldPath); statErr != nil {
-				continue
-			}
-			if _, statErr := os.Stat(newPath); statErr == nil {
-				continue
-			}
-			if err := os.Rename(oldPath, newPath); err != nil {
-				// Log via stderr — the db package has no logger
-				// dependency, and a single warning per stuck dir is
-				// enough for an operator to find and clean up.
-				fmt.Fprintf(os.Stderr,
-					"db: warning: could not rename clone dir %s → %s: %v\n",
-					oldPath, newPath, err)
-			}
-		}
 	}
 	return nil
 }
