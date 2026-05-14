@@ -108,6 +108,12 @@ func run() error {
 		}
 	}()
 
+	// Webhook clean-break notice (Fix #4a): the migration that split
+	// workspace_repos into git_repos + workspace_projects also changed
+	// the webhook URL format. Surface a one-line WARN with row counts
+	// so the operator knows to re-register in GitHub on upgrade.
+	auditWebhookCleanBreak(context.Background(), database, logger)
+
 	// PR-E — overlay dashboard-saved runtime overrides onto the env-loaded
 	// config before any code path reads its fields. The DB row may not
 	// exist yet (fresh install); resolution falls through to env / recommended
