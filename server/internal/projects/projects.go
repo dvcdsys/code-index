@@ -264,6 +264,19 @@ func Patch(ctx context.Context, db *sql.DB, hostPath string, req UpdateRequest) 
 	return Get(ctx, db, hostPath)
 }
 
+// SetStatus updates only the status (and updated_at) of a project. No-op if
+// the host_path doesn't match a row — callers that need 404 semantics should
+// check via Get first. Used by handlers and workers that need to flip a
+// project into "indexing"/"indexed"/"error" without round-tripping a full
+// Patch payload.
+func SetStatus(ctx context.Context, db *sql.DB, hostPath, status string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := db.ExecContext(ctx,
+		`UPDATE projects SET status = ?, updated_at = ? WHERE host_path = ?`,
+		status, now, hostPath)
+	return err
+}
+
 // Delete removes a project and its cascading records. Returns ErrNotFound if absent.
 //
 // chunks_meta and chunks_fts are not bound to projects via FK because

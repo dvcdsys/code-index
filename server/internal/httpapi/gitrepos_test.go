@@ -90,6 +90,70 @@ func TestAddGitRepo_Duplicate(t *testing.T) {
 	}
 }
 
+// TestReindexProject_FlipsStatusToIndexing pins the dashboard-facing
+// behaviour: clicking Reindex must leave the project in status='indexing'
+// before the response returns, so the post-mutation refetch shows the
+// "Indexing in progress" alert without waiting for the worker to pick up
+// the clone_repo job. Asserts both the response body and the DB row.
+func TestReindexProject_FlipsStatusToIndexing(t *testing.T) {
+	router, _, d := reposRouterDB(t)
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url": "https://github.com/a/b",
+		"branch":     "main",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed git_repo: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created struct {
+		Project struct {
+			Status string `json:"status"`
+		} `json:"project"`
+		GitRepo struct {
+			PathHash string `json:"path_hash"`
+		} `json:"git_repo"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+	if created.Project.Status != "created" {
+		t.Fatalf("baseline project.status = %q, want created", created.Project.Status)
+	}
+	hash := created.GitRepo.PathHash
+
+	rr = doJSON(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/reindex", nil)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("reindex: %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Status  string `json:"status"`
+		Project struct {
+			Status string `json:"status"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode reindex response: %v", err)
+	}
+	// Auto-enqueue from AddGitRepo already holds the clone:<hash> dedup key,
+	// so the reindex POST sees a duplicate and reports "already_running".
+	// Either outcome is acceptable; the status flip is what we're verifying.
+	if resp.Status != "enqueued" && resp.Status != "already_running" {
+		t.Fatalf("reindex response.status = %q, want enqueued or already_running", resp.Status)
+	}
+	if resp.Project.Status != "indexing" {
+		t.Errorf("response project.status = %q, want indexing", resp.Project.Status)
+	}
+
+	var dbStatus string
+	if err := d.QueryRow(
+		`SELECT status FROM projects WHERE host_path = ?`, "github.com/a/b@main",
+	).Scan(&dbStatus); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if dbStatus != "indexing" {
+		t.Errorf("db project.status = %q, want indexing", dbStatus)
+	}
+}
+
 func TestReindexProject_RequiresGitRepo(t *testing.T) {
 	router, _ := reposRouter(t)
 

@@ -263,6 +263,14 @@ func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash ope
 	if !enqueued {
 		status = "already_running"
 	}
+	// Flip the project status to "indexing" synchronously so the response
+	// (and the dashboard's post-mutation refetch) reflects the reindex
+	// without waiting for the worker to pick up the clone_repo job. The
+	// worker's own status flip in handleClone is now idempotent for this
+	// path but still needed for non-API triggers (e.g. webhook).
+	if err := projects.SetStatus(r.Context(), s.Deps.DB, g.ProjectPath, "indexing"); err != nil {
+		s.Deps.Logger.Warn("reindex: set status indexing failed", "project", g.ProjectPath, "err", err)
+	}
 	proj, _ := projects.Get(r.Context(), s.Deps.DB, g.ProjectPath)
 	resp := map[string]any{"status": status}
 	if proj != nil {
