@@ -305,7 +305,7 @@ func loadCallees(ctx context.Context, db *sql.DB, projectPath string) (map[strin
 }
 
 // CountEdges returns the number of rows in call_edges for a project.
-// Used by /api/v1/workspaces/{id}/repos to surface graph completion
+// Used by /api/v1/workspaces/{id}/projects to surface graph completion
 // state in the dashboard ("graph: 1234 edges").
 func CountEdges(ctx context.Context, db *sql.DB, projectPath string) (int, error) {
 	var n int

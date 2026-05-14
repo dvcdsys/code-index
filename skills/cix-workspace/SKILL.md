@@ -2,6 +2,7 @@
 name: cix-workspace
 description: Cross-project research workflow for cix workspaces. Manual-invocation skill — load explicitly via `/cix-workspace <task>` when a request spans multiple repos and you want the full workflow guidance (which repos? what code? what changes?) plus the trust rules for interpreting workspace search responses. Bundles the cix-workspace-investigator sub-agent for parallel per-repo fan-out. Do not auto-trigger.
 user-invocable: true
+allowed-tools: Bash(cix *), Agent
 ---
 
 # `cix workspace` — Cross-Project Research Workflow
@@ -491,8 +492,8 @@ fan-out — the same algorithm that produces the false-positive
 failure mode described in the worked example above.
 
 The response includes `stale_fts_repos` listing the affected
-project_paths. Fix: reindex each repo (dashboard → repo card →
-reindex button, or `POST /api/v1/workspaces/{id}/repos/{repo_id}/reindex`).
+project_paths. Fix: reindex each project (dashboard → project card →
+reindex button, or `POST /api/v1/projects/{hash}/reindex`).
 After reindex, BM25 populates incrementally per-file as chunks are
 written.
 

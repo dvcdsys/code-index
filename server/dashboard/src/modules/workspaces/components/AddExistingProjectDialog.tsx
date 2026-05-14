@@ -40,7 +40,7 @@ function disabledLabel(r: LinkDisabledReason): string {
 // rows are rendered as disabled with a short reason so the operator
 // understands why they can't be picked.
 //
-// Submit fans out N POSTs to /workspaces/{id}/repos/link sequentially.
+// Submit fans out N POSTs to /workspaces/{id}/projects sequentially.
 // We chose sequential over parallel because: (a) it makes per-project
 // error reporting trivial, (b) the per-call cost is tiny (no clone, no
 // index), (c) a backend hiccup mid-batch leaves the workspace in a

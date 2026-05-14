@@ -104,18 +104,27 @@ A user creates a workspace, then attaches repositories to it. A workspace
 has no built-in access control beyond what the server's auth layer already
 provides — anyone authenticated can list and search workspaces today.
 
-### Workspace repo
+### Workspace project (membership)
 
-A row in `workspace_repos` that ties one GitHub repo+branch to a
-workspace. Two kinds:
+A row in `workspace_projects` that ties one indexed project to a
+workspace. Both the `projects` row and the workspace must already exist
+— linking is the act of declaring "this project participates in this
+workspace's cross-project search". Two underlying project kinds make it
+into a workspace:
 
-- **Owned** (`is_linked=0`): the server clones the repo to disk and runs
-  indexing. Status transitions: `pending → cloning → indexing → indexed`
-  (or `failed`). These are the "true" workspace repos.
-- **Linked** (`is_linked=1`): a lightweight pointer to an *already-indexed*
-  local project (one that's tracked in the `projects` table because you
-  `cix init`'d it). No clone, no separate index. Useful for including
-  your primary repo in a workspace without duplicating data.
+- **GitHub-cloned project** — backed by a row in the `git_repos` table.
+  The server cloned the repo to disk and indexed it. `host_path` looks
+  like `github.com/owner/repo@branch`. Its lifecycle (clone, index,
+  reindex, webhook) lives in the `projects` row's `status` column.
+- **Local-path project** — backed only by the `projects` row, no
+  `git_repos` peer. Created with `cix init` against an absolute filesystem
+  path, indexed by the local CLI / file watcher rather than the server's
+  clone pipeline. Useful for including your primary repo in a workspace
+  without duplicating data.
+
+Both kinds are linked into a workspace identically — there is no
+`is_linked` column anymore. The distinction is "does a `git_repos` row
+exist for this project?".
 
 ### GitHub token
 
@@ -178,13 +187,15 @@ must rotate.
 
 ### 4. Attach a repo
 
-Dashboard: open the workspace → **Add repository** → walk through the
-staged dialog (token → account/org → repo → branch → webhook mode).
+Dashboard: open the workspace → **Add GitHub repository** → walk through
+the staged dialog (token → account/org → repo → branch → webhook mode).
 
-Or:
+Or via the API — register the project + clone metadata, then link it
+into the workspace:
 
 ```bash
-curl -X POST http://localhost:21847/api/v1/workspaces/<workspace-id>/repos \
+# Step 1 — register the project + git_repos row (kicks off clone + index).
+curl -X POST http://localhost:21847/api/v1/git-repos \
   -H "Authorization: Bearer $CIX_API_KEY" \
   -d '{
     "github_url":"https://github.com/acme/api-server",
@@ -192,18 +203,23 @@ curl -X POST http://localhost:21847/api/v1/workspaces/<workspace-id>/repos \
     "token_id":"abc-123",
     "webhook_mode":"manual"
   }'
-# → {"id":"...","status":"pending","project_path":"github.com/acme/api-server@main",...}
+# → {"path_hash":"abc1234567890def","project_path":"github.com/acme/api-server@main","status":"created",...}
+
+# Step 2 — link the new path_hash into the workspace.
+curl -X POST http://localhost:21847/api/v1/workspaces/<workspace-id>/projects \
+  -H "Authorization: Bearer $CIX_API_KEY" \
+  -d '{"path_hash":"abc1234567890def"}'
 ```
 
-Status will transition through `cloning → indexing → indexed` over the
+Status will transition through `created → indexing → indexed` over the
 next minutes (depends on repo size + embedding throughput).
 
 ### 5. Watch the indexing progress
 
 ```bash
 curl -H "Authorization: Bearer $CIX_API_KEY" \
-  http://localhost:21847/api/v1/workspaces/<workspace-id>/repos
-# Look for `status: "indexed"` per repo.
+  http://localhost:21847/api/v1/workspaces/<workspace-id>/projects
+# Look for `project.status: "indexed"` per project.
 ```
 
 ### 6. Search
@@ -226,20 +242,25 @@ curl -G -H "Authorization: Bearer $CIX_API_KEY" \
 
 ## Adding repositories
 
-### Owned vs linked
+### GitHub-cloned vs local-path projects
 
-| | Owned repo (`is_linked=0`) | Linked project (`is_linked=1`) |
+| | GitHub-cloned project | Local-path project |
 |---|---|---|
 | Source | GitHub clone | Existing `cix init`'d local project |
-| Clone path | `<data-dir>/repos/<repo_id>/` | n/a (uses original) |
+| Clone path | `<data-dir>` → `repos` → `<path_hash>` | n/a (uses original) |
+| Backing tables | `projects` + `git_repos` | `projects` only |
 | Index lifecycle | Server-managed | Whatever the user runs locally |
 | Indexed by | Server's index pipeline | `cix init` / `cix watch` |
 | Webhooks | Supported | Not applicable |
-| API | `POST /workspaces/{id}/repos` | `POST /workspaces/{id}/repos/link` |
-| Dashboard | **Add repository** button | **Link existing project** button |
+| Created via | `POST /api/v1/git-repos` | `POST /api/v1/projects` (or `cix init` locally) |
+| Linked into workspace via | `POST /api/v1/workspaces/{id}/projects` | `POST /api/v1/workspaces/{id}/projects` |
+| Dashboard | **Add GitHub repository** button | **Link existing project** button |
 
-Use **linked** when the primary project you're working in should appear
-in the workspace search but you don't want a second clone.
+Both kinds are linked into a workspace through the same membership
+endpoint; the only difference is which table owns the project's
+clone-and-webhook metadata. Use a local-path project when the primary
+project you're working in should appear in the workspace search but you
+don't want a second clone.
 
 ### From the dashboard
 
@@ -255,13 +276,21 @@ The **Add repository** dialog is staged:
 5. **Pick a webhook mode** — `manual` / `auto` / `disabled`. See
    [Webhooks](#webhooks-auto-reindex-on-push).
 
-The dialog calls `POST /workspaces/{id}/repos` at the end. The clone +
-index job runs in the background.
+The dialog calls `POST /api/v1/git-repos` to register the project +
+clone metadata, then `POST /api/v1/workspaces/{id}/projects` to link
+the resulting `path_hash` into the workspace. The clone + index job
+runs in the background.
 
 ### From the API
 
+Registering a GitHub-cloned project is a two-step flow: create the
+project (with its `git_repos` peer) via `POST /git-repos`, then link
+the resulting `path_hash` into the workspace via
+`POST /workspaces/{id}/projects`.
+
 ```bash
-curl -X POST http://localhost:21847/api/v1/workspaces/<id>/repos \
+# 1. Register the project + git_repos row (kicks off clone + index).
+curl -X POST http://localhost:21847/api/v1/git-repos \
   -H "Authorization: Bearer $CIX_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -270,56 +299,83 @@ curl -X POST http://localhost:21847/api/v1/workspaces/<id>/repos \
     "token_id": "<token-uuid-or-null>",
     "webhook_mode": "manual"
   }'
+# → {"path_hash":"abc1234567890def","project_path":"github.com/owner/repo@main",...}
+
+# 2. Link the path_hash into the workspace.
+curl -X POST http://localhost:21847/api/v1/workspaces/<id>/projects \
+  -H "Authorization: Bearer $CIX_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"path_hash": "abc1234567890def"}'
 ```
 
-Response fields worth knowing:
+Response fields worth knowing on the `POST /git-repos` response:
 
-- `id` — workspace_repo UUID (use this for delete / reindex / webhook
-  endpoints)
-- `project_path` — `github.com/owner/repo@branch`, the search identifier
-- `status` — starts at `pending`, becomes `indexed` when the pipeline
-  finishes
+- `path_hash` — the 16-hex-char project identifier used by every
+  per-project endpoint (`/projects/{hash}/reindex`,
+  `/webhooks/github/{hash}`, etc.).
+- `project_path` — `github.com/owner/repo@branch`, the search
+  identifier the dashboard surfaces.
+- `status` — lives on the `projects` row; starts at `created`,
+  transitions through `indexing` to `indexed` once the pipeline
+  finishes.
 - `webhook_secret` — server-generated HMAC secret. Returned exactly
   once if you set `webhook_mode=manual`. Use it when you configure the
   webhook on GitHub manually.
 
 ### Cloning, indexing, and status transitions
 
-What happens when you add a repo:
+`projects.status` tracks the per-project lifecycle. What happens after
+`POST /git-repos`:
 
-1. **`pending`** — row inserted in `workspace_repos`. Clone job queued.
-2. **`cloning`** — server fetches via `git clone` (or `git fetch +
-   checkout` if the repo is already on disk). Private repos use the
-   attached token. Result lands at `<CIX_WORKSPACES_DATA_DIR>/<repo_id>/`.
-3. **`indexing`** — indexer scans the clone with the standard pipeline
-   (tree-sitter chunking → embeddings → vector store + FTS5 mirror).
-4. **`indexed`** — `last_indexed_at` updated, repo is searchable.
-5. **`failed`** — clone or index errored out. `last_error` populated.
-   Common causes: invalid token, repo not found, branch doesn't exist,
-   embedder unavailable.
+1. **`created`** — rows inserted in `projects` and `git_repos`. Clone
+   job queued.
+2. **`indexing`** — server fetches via `git clone` (or `git fetch +
+   checkout` if the repo is already on disk) into
+   `<CIX_WORKSPACES_DATA_DIR>/<path_hash>/`, then runs the indexer
+   pipeline (tree-sitter chunking → embeddings → vector store + FTS5
+   mirror). Private repos use the attached token.
+3. **`indexed`** — `last_indexed_at` updated, project is searchable.
+4. **`error`** — clone or index errored out. The dashboard surfaces
+   the underlying error from the job. Common causes: invalid token,
+   repo not found, branch doesn't exist, embedder unavailable.
 
 Clone + index parallelism: `CIX_WORKER_CONCURRENCY` (default `2`).
 Increase for fleet onboarding; lower if you saturate disk or GPU.
 
-### Reindexing a single repo
+### Reindexing a single project
+
+Per-project endpoint — the same call reindexes a GitHub-cloned project
+or a local-path project, no workspace context needed.
 
 ```bash
-curl -X POST http://localhost:21847/api/v1/workspaces/<wid>/repos/<rid>/reindex \
+curl -X POST http://localhost:21847/api/v1/projects/<path_hash>/reindex \
   -H "Authorization: Bearer $CIX_API_KEY"
 ```
 
 Use this after a manual content update, after the embedding model
 changes, or after the stale-FTS warning (see [Search algorithm](#search-algorithm)).
 
-### Removing a repo
+### Unlinking a project from a workspace
+
+Removes the membership row but leaves the underlying project (and any
+clone on disk) intact, so the same project can be re-linked or remain
+linked to other workspaces.
 
 ```bash
-curl -X DELETE http://localhost:21847/api/v1/workspaces/<wid>/repos/<rid> \
+curl -X DELETE http://localhost:21847/api/v1/workspaces/<wid>/projects/<path_hash> \
   -H "Authorization: Bearer $CIX_API_KEY"
 ```
 
-The clone is deleted from disk; the `projects` row is cleaned up if no
-other workspace_repo references it; vectors are removed from chromem.
+### Deleting a project entirely
+
+Removes the `projects` row along with its `git_repos` peer (if any),
+the on-disk clone, the vectors, and — via `ON DELETE CASCADE` — every
+workspace membership referencing it.
+
+```bash
+curl -X DELETE http://localhost:21847/api/v1/projects/<host_path-or-hash> \
+  -H "Authorization: Bearer $CIX_API_KEY"
+```
 
 ---
 
@@ -463,8 +519,8 @@ Response shape (abbreviated):
     },
     ...
   ],
-  "pending_repos":   [...],         // repos still cloning / indexing
-  "failed_repos":    [...],         // repos that errored out
+  "pending_repos":   [...],         // projects still in created / indexing
+  "failed_repos":    [...],         // projects in error status
   "stale_fts_repos": [...]          // pre-FTS-mirror repos — reindex
 }
 ```
@@ -565,7 +621,7 @@ BM25 will be permanently 0 for it. The response surfaces this via
 `stale_fts_repos: [{project_path: "..."}]`. Run a reindex on each:
 
 ```bash
-curl -X POST http://localhost:21847/api/v1/workspaces/<wid>/repos/<rid>/reindex \
+curl -X POST http://localhost:21847/api/v1/projects/<path_hash>/reindex \
   -H "Authorization: Bearer $CIX_API_KEY"
 ```
 
@@ -588,11 +644,13 @@ Each workspace repo has a `webhook_mode`:
 ### Delivery endpoint
 
 ```
-POST /api/v1/webhooks/github/{repo_id}
+POST /api/v1/webhooks/github/{path_hash}
 ```
 
-GitHub's payload is HMAC-SHA256-signed with `webhook_secret`; the
-server verifies via the `X-Hub-Signature-256` header.
+The `{path_hash}` segment is the same 16-hex-char value returned by
+`POST /git-repos` and surfaced on every per-project endpoint. GitHub's
+payload is HMAC-SHA256-signed with the matching `git_repos.webhook_secret`;
+the server verifies via the `X-Hub-Signature-256` header.
 
 Event handling:
 
@@ -609,7 +667,7 @@ When `webhook_mode=manual`, the add-repo response includes a
 `webhook_secret` (returned once) and a `webhook_url` (always
 returnable). Configure on GitHub:
 
-- **Payload URL:** `<CIX_PUBLIC_URL>/api/v1/webhooks/github/<repo_id>`
+- **Payload URL:** `<CIX_PUBLIC_URL>/api/v1/webhooks/github/<path_hash>`
 - **Content type:** `application/json`
 - **Secret:** the returned `webhook_secret`
 - **Events:** Just `push` (the server ignores everything else)
@@ -735,15 +793,22 @@ PATCH  /api/v1/workspaces/{id}                  rename / update description
 DELETE /api/v1/workspaces/{id}                  remove (cascades to repos + clones)
 ```
 
-### Workspace repos
+### Workspace project membership
 
 ```
-GET    /api/v1/workspaces/{id}/repos                            list
-POST   /api/v1/workspaces/{id}/repos                            add (clones + indexes)
-POST   /api/v1/workspaces/{id}/repos/link                       link existing local project
-DELETE /api/v1/workspaces/{id}/repos/{repo_id}                  remove
-POST   /api/v1/workspaces/{id}/repos/{repo_id}/reindex          trigger fresh index
-GET    /api/v1/workspaces/{id}/repos/{repo_id}/webhook-info     dashboard helper
+GET    /api/v1/workspaces/{id}/projects                         list projects linked to this workspace
+POST   /api/v1/workspaces/{id}/projects                         link an existing indexed project (body: {path_hash})
+DELETE /api/v1/workspaces/{id}/projects/{hash}                  unlink (project + clone preserved)
+```
+
+### Projects (per-project, workspace-independent)
+
+```
+POST   /api/v1/git-repos                                        register a new GitHub-cloned project (clones + indexes)
+GET    /api/v1/projects/{hash}/git-repo                         git_repos peer of a project (404 for local-path projects)
+POST   /api/v1/projects/{hash}/reindex                          trigger a fresh index
+GET    /api/v1/projects/{hash}/webhook-info                     dashboard helper — current webhook URL + secret
+DELETE /api/v1/projects/{path}                                  delete project + clone + memberships (CASCADE)
 ```
 
 ### Workspace search
@@ -767,7 +832,7 @@ DELETE /api/v1/github-tokens/{id}                               revoke (server-s
 ### Webhooks
 
 ```
-POST   /api/v1/webhooks/github/{repo_id}                        GitHub delivery endpoint
+POST   /api/v1/webhooks/github/{hash}                           GitHub delivery endpoint (HMAC-verified)
 ```
 
 Full OpenAPI: `doc/openapi.yaml` and `http://<host>:21847/docs`.
@@ -780,27 +845,27 @@ Full OpenAPI: `doc/openapi.yaml` and `http://<host>:21847/docs`.
 → `CIX_WORKSPACES_ENABLED=true` is missing or the server hasn't been
 restarted.
 
-**`status: "failed"` on a repo, `last_error: "authentication required"`**
+**`status: "error"` on a project, dashboard surfaces "authentication required"**
 → Private repo with no token, or token's scopes are insufficient.
 Re-create the token with `repo` scope (and `admin:repo_hook` if you
-want auto webhooks), then retry by deleting and re-adding the repo.
+want auto webhooks), then retry by deleting and re-adding the project.
 
-**`status: "failed"`, `last_error: "branch not found"`**
-→ Typo or the branch was deleted upstream. Delete the repo entry and
-re-add with the correct branch.
+**`status: "error"`, dashboard surfaces "branch not found"**
+→ Typo or the branch was deleted upstream. Delete the project and
+re-add it via `POST /git-repos` with the correct branch.
 
 **Search returns `empty` for a query that should match**
 → Three likely causes:
 1. Default `min_score=0.4` filtered everything. Retry with `min_score=0`.
-2. Repo is still indexing (`status: pending|cloning|indexing`). Check
-   `GET /workspaces/{id}/repos`.
+2. Project is still indexing (`status: created|indexing`). Check
+   `GET /workspaces/{id}/projects`.
 3. The literal terms genuinely don't appear in any repo AND dense
    similarity is below threshold. Re-phrase with the term the code
    actually uses.
 
 **`stale_fts_repos` populated on every search**
 → These repos were indexed pre-FTS5 mirror. Run
-`POST /workspaces/{id}/repos/{repo_id}/reindex` on each.
+`POST /api/v1/projects/{hash}/reindex` on each.
 
 **`status: "partial_failure"`**
 → At least one repo's dense search errored (corrupt chromem collection,
@@ -810,7 +875,7 @@ fastest fix is usually a reindex of the failed repo.
 **Webhook isn't triggering reindex**
 → Verify:
 1. GitHub's webhook deliveries page shows 200 OK.
-2. Push was to the *tracked* branch (the one in `workspace_repos.branch`).
+2. Push was to the *tracked* branch (the one in `git_repos.branch`).
 3. Server logs show signature verification succeeding.
 4. `CIX_PUBLIC_URL` is set and reachable from GitHub (for `auto` mode).
 

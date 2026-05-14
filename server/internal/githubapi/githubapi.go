@@ -554,7 +554,7 @@ func githubMessage(body []byte) string {
 }
 
 // ParseOwnerRepo extracts {owner, repo} from an https://github.com/owner/repo URL.
-// Mirrors the same logic as workspacerepos.parseGitHubURL but kept private
+// Mirrors the same logic as gitrepos.parseGitHubURL but kept private
 // to that package — we re-implement here to avoid an import cycle.
 func ParseOwnerRepo(githubURL string) (owner, repo string, err error) {
 	u, perr := url.Parse(strings.TrimSpace(githubURL))

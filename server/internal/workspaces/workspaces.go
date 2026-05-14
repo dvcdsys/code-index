@@ -1,12 +1,15 @@
 // Package workspaces is the service layer for the workspaces table — the
 // top-level entity of the workspaces feature. A workspace groups one or
-// more GitHub repos for cross-project semantic search powered by
-// community-detection on the call graph (PRs 2–7 of the feature branch).
+// more projects (each backed by an indexed `projects` row, optionally
+// with a `git_repos` peer for GitHub-cloned projects) for cross-project
+// semantic search powered by hybrid BM25 + dense fan-out across the
+// memberships in `workspace_projects`.
 //
-// PR1 scope: bare CRUD. workspace_repos / call_edges / communities land in
-// later PRs. Visibility model is server-wide shared: every authenticated
-// user can list/create/modify any workspace. The decision is captured in
-// the workspaces.md plan; revisit if a per-user ACL becomes necessary.
+// Scope of this package: bare workspace CRUD. Membership lives in
+// `workspaceprojects`; clone + webhook metadata lives in `gitrepos`.
+// Visibility model is server-wide shared: every authenticated user can
+// list/create/modify any workspace. The decision is captured in the
+// workspaces.md plan; revisit if a per-user ACL becomes necessary.
 package workspaces
 
 import (

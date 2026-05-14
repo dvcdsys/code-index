@@ -122,7 +122,8 @@ type Config struct {
 	SecretsDataDir string
 
 	// WorkspacesDataDir is the parent directory the worker pool clones
-	// GitHub repositories under (workspace_repos.{id}/). Defaults to
+	// GitHub repositories under (each clone lives at
+	// <WorkspacesDataDir>/<path_hash>/). Defaults to
 	// <SQLite parent>/repos. Source: CIX_WORKSPACES_DATA_DIR.
 	WorkspacesDataDir string
 

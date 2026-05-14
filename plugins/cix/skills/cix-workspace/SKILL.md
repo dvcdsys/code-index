@@ -492,8 +492,8 @@ fan-out — the same algorithm that produces the false-positive
 failure mode described in the worked example above.
 
 The response includes `stale_fts_repos` listing the affected
-project_paths. Fix: reindex each repo (dashboard → repo card →
-reindex button, or `POST /api/v1/workspaces/{id}/repos/{repo_id}/reindex`).
+project_paths. Fix: reindex each project (dashboard → project card →
+reindex button, or `POST /api/v1/projects/{hash}/reindex`).
 After reindex, BM25 populates incrementally per-file as chunks are
 written.
 
