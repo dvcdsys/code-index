@@ -1250,7 +1250,46 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
-  /api/v1/workspaces/{id}/repos:
+  /api/v1/git-repos:
+    post:
+      operationId: addGitRepo
+      tags: [projects]
+      summary: Clone + index a GitHub repository as a standalone project
+      description: |
+        Inserts a projects row (status=pending), a matching git_repos
+        row, and enqueues a `clone_repo` background job that is chained
+        to an `index_repo` job on success. The resulting project lives
+        in `/api/v1/projects` and is initially attached to no
+        workspaces — link it into specific workspaces via
+        `/api/v1/workspaces/{id}/projects` if desired.
+
+        `token_id` is required for private repos; `webhook_mode`
+        defaults to `manual`. The response carries a one-shot
+        `webhook_url` + `webhook_secret` so the operator can register
+        the webhook in GitHub by hand (`auto` mode does it for them).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddGitRepoRequest"
+      responses:
+        "201":
+          description: Project created + clone enqueued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitRepoCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}/projects:
     parameters:
       - name: id
         in: path
@@ -1259,16 +1298,16 @@ paths:
           type: string
         description: Workspace ID.
     get:
-      operationId: listWorkspaceRepos
+      operationId: listWorkspaceProjects
       tags: [workspaces]
-      summary: List repositories attached to a workspace
+      summary: List projects currently linked to a workspace
       responses:
         "200":
-          description: Repo list
+          description: Workspace project list
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkspaceRepoListResponse"
+                $ref: "#/components/schemas/WorkspaceProjectListResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1276,88 +1315,27 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
     post:
-      operationId: addWorkspaceRepo
+      operationId: linkProjectToWorkspace
       tags: [workspaces]
-      summary: Attach a GitHub repository to a workspace
+      summary: Link an existing project into this workspace
       description: |
-        Inserts a workspace_repos row in status `pending` and enqueues a
-        `clone_repo` background job. The clone job is followed by an
-        `index_repo` job on success; the dashboard polls
-        `/api/v1/workspaces/{id}/repos` to surface status transitions.
-
-        Provide `token_id` to clone a private repository. The
-        `auto_webhook` flag is accepted in PR2 but not yet acted upon —
-        PR3 wires the auto-register path against the GitHub API.
-
-        The response includes a one-shot `webhook_url` + `webhook_secret`
-        so an operator can manually register the webhook in GitHub if
-        `auto_webhook` is false. The secret is also returned by the
-        webhook-info endpoint added in PR3.
+        Inserts a (workspace_id, project_path) row into
+        `workspace_projects`. The project must already exist and be in
+        `status='indexed'`. Duplicates return 409. The project itself
+        is untouched — workspaces are pure membership collections.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/AddWorkspaceRepoRequest"
-      responses:
-        "201":
-          description: Repo attached + clone enqueued
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/WorkspaceRepoCreated"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "422":
-          $ref: "#/components/responses/Unprocessable"
-        "503":
-          $ref: "#/components/responses/WorkspacesDisabled"
-
-  /api/v1/workspaces/{id}/repos/link:
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      operationId: linkExistingProject
-      tags: [workspaces]
-      summary: Attach an already-indexed project to a workspace
-      description: |
-        Inserts a workspace_repos row marked `is_linked=true` pointing at
-        an existing indexed project. No clone happens, no index job is
-        enqueued, no GitHub webhook is registered — the row is a
-        lightweight membership pointer so workspace-level features
-        (search, communities, the repo list) include the project.
-
-        The project's `host_path` must be of the form
-        "github.com/owner/repo@branch" (i.e. created from a GitHub
-        source) and the project must be in `status='indexed'`. Per-
-        workspace uniqueness is enforced via the same composite UNIQUE
-        as the regular Add Repo flow — a project already in this
-        workspace (owned or linked) returns 409.
-
-        Use this when the user wants to bring an existing repo from
-        workspace A into workspace B without paying the clone+index
-        cost twice.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/LinkExistingProjectRequest"
+              $ref: "#/components/schemas/LinkProjectRequest"
       responses:
         "201":
           description: Linked
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkspaceRepoCreated"
+                $ref: "#/components/schemas/WorkspaceProjectMembership"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1369,30 +1347,30 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
-  /api/v1/workspaces/{id}/repos/{repo_id}:
+  /api/v1/workspaces/{id}/projects/{hash}:
     parameters:
       - name: id
         in: path
         required: true
         schema:
           type: string
-      - name: repo_id
+      - name: hash
         in: path
         required: true
         schema:
           type: string
+        description: Project's path_hash.
     delete:
-      operationId: deleteWorkspaceRepo
+      operationId: unlinkProjectFromWorkspace
       tags: [workspaces]
-      summary: Detach a repository from a workspace
+      summary: Remove a project from this workspace (does not delete the project)
       description: |
-        Removes the workspace_repos row. The cloned directory on disk and
-        the indexed project rows remain — a follow-up cleanup job lands
-        in a later release. PR3 will also de-register the GitHub webhook
-        when auto_webhook=true.
+        Drops the (workspace_id, project_path) row. The project itself,
+        its clone on disk, its indexed content, and its memberships in
+        other workspaces are all untouched.
       responses:
         "204":
-          description: Detached
+          description: Unlinked
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1487,27 +1465,50 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
-  /api/v1/workspaces/{id}/repos/{repo_id}/webhook-info:
+  /api/v1/projects/{hash}/git-repo:
     parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-      - name: repo_id
+      - name: hash
         in: path
         required: true
         schema:
           type: string
     get:
-      operationId: getWorkspaceRepoWebhookInfo
-      tags: [workspaces]
-      summary: Get the webhook URL + secret for manual GitHub setup
+      operationId: getProjectGitRepo
+      tags: [projects]
+      summary: Read the git_repos metadata for an external project
       description: |
-        Returns the publicly-reachable webhook URL and the HMAC secret.
-        Pair this with GitHub Settings → Webhooks when `auto_webhook` is
-        false. The secret rotates if the workspace_repo is deleted and
-        re-attached.
+        Returns clone + webhook metadata. 404 when the project is local
+        (has no git_repos row). The webhook_secret is included so the
+        operator can paste it into GitHub Settings → Webhooks.
+      responses:
+        "200":
+          description: git_repos row
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitRepo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/projects/{hash}/webhook-info:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getProjectWebhookInfo
+      tags: [projects]
+      summary: Webhook URL + secret for manual GitHub setup
+      description: |
+        Returns the publicly-reachable webhook URL and the HMAC secret
+        for an external project. 404 when the project is local (no
+        webhook lifecycle).
       responses:
         "200":
           description: Webhook coordinates
@@ -1522,28 +1523,60 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
-  /api/v1/webhooks/github/{repo_id}:
+  /api/v1/projects/{hash}/reindex:
     parameters:
-      - name: repo_id
+      - name: hash
         in: path
         required: true
         schema:
           type: string
     post:
+      operationId: reindexProject
+      tags: [projects]
+      summary: Manually re-trigger the clone + index pipeline
+      description: |
+        Enqueues a fresh `clone_repo` job for the matching git_repos
+        row. 422 when the project is local (no clone pipeline — local
+        projects reindex via the CLI). Dedupe collapses repeated
+        triggers into the existing in-flight job.
+      responses:
+        "202":
+          description: Reindex enqueued (or already running — dedupe)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReindexEnqueuedResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/webhooks/github/{hash}:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Project's path_hash (16 hex chars).
+    post:
       operationId: receiveGithubWebhook
-      tags: [workspaces]
+      tags: [projects]
       summary: Receive a GitHub webhook delivery (public, HMAC-authenticated)
       description: |
-        Public endpoint — `requireAuth` is bypassed. Authentication is
-        per-row via the `X-Hub-Signature-256` header which must be
-        HMAC-SHA256 of the request body keyed by the workspace_repo's
-        `webhook_secret`. Mismatched signatures return 401; unknown
-        `repo_id` returns 404. On a valid `push` for the tracked branch
-        the server enqueues a `fetch_repo` job (dedupe collapses burst
-        deliveries).
+        Public endpoint — auth is bypassed. The `X-Hub-Signature-256`
+        header must be HMAC-SHA256 of the request body keyed by the
+        project's `git_repos.webhook_secret`. Mismatched signatures
+        return 401; an unknown `hash` returns 404. On a valid `push`
+        for the tracked branch the server enqueues a `clone_repo` job
+        (dedupe collapses burst deliveries).
 
-        GitHub `ping` deliveries return 200 with no side effects so the
-        setup confirmation flow works.
+        GitHub `ping` deliveries return 200 with no side effects so
+        the setup confirmation flow works.
       security: []
       parameters:
         - name: X-Hub-Signature-256
@@ -1584,45 +1617,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "404":
-          description: Unknown workspace_repo id
+          description: Unknown project hash
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "503":
-          $ref: "#/components/responses/WorkspacesDisabled"
-
-  /api/v1/workspaces/{id}/repos/{repo_id}/reindex:
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-      - name: repo_id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      operationId: reindexWorkspaceRepo
-      tags: [workspaces]
-      summary: Manually re-trigger the clone + index pipeline
-      description: |
-        Enqueues a fresh `clone_repo` job for the repo. Dedupe collapses
-        repeated triggers into the existing in-flight job — only one
-        clone is ever active per repo at a time.
-      responses:
-        "202":
-          description: Reindex enqueued (or already running — dedupe)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ReindexEnqueuedResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
@@ -3212,79 +3211,49 @@ components:
             consulted. Kept for backwards compatibility with older
             clients that still send it.
 
-    WorkspaceRepo:
+    GitRepo:
       type: object
       required:
-        - id
-        - workspace_id
+        - project_path
+        - path_hash
         - github_url
         - branch
-        - project_path
-        - status
         - auto_webhook
         - webhook_mode
-        - is_linked
         - created_at
         - updated_at
+      description: |
+        Clone + webhook metadata for an external (git-cloned) project.
+        Exactly 1:1 with the matching projects row; local projects have
+        no GitRepo row.
       properties:
-        id:
-          type: string
-        workspace_id:
-          type: string
-        github_url:
-          type: string
-          description: Canonical https://github.com/owner/repo URL.
-        branch:
-          type: string
         project_path:
           type: string
           description: |
-            Indexed project's host_path — "github.com/owner/repo@branch".
-            Use this with the existing /api/v1/projects/{path}/* endpoints
-            (path = first 16 hex chars of SHA1).
+            Matches projects.host_path — canonical
+            "github.com/owner/repo@branch" string.
+        path_hash:
+          type: string
+          description: 16-hex SHA1 prefix of project_path, used in URLs.
+        github_url:
+          type: string
+        branch:
+          type: string
         token_id:
           type: string
           nullable: true
-          description: |
-            GitHub token used for clone+webhook calls. Null when the
-            repo is public.
         auto_webhook:
           type: boolean
-          description: |
-            Legacy alias for `webhook_mode == "auto"`. Always present so
-            old clients keep working; new clients should consult
-            `webhook_mode` instead.
+          description: Legacy alias for `webhook_mode == "auto"`.
         webhook_mode:
           type: string
           enum: [manual, auto, disabled]
-          description: |
-            Operator's intent for how this repo gets kept fresh. `auto`
-            asks the server to register the GitHub webhook; `manual`
-            means the operator pastes the URL+secret into GitHub
-            themselves; `disabled` skips auto-sync entirely — reindex
-            via the dashboard button only.
-        status:
-          type: string
-          enum: [pending, cloning, indexing, indexed, failed]
         last_sha:
           type: string
           nullable: true
-          description: HEAD SHA at last successful clone.
         last_error:
           type: string
           nullable: true
-        last_indexed_at:
-          type: string
-          format: date-time
-          nullable: true
-        is_linked:
-          type: boolean
-          description: |
-            True when this row is a lightweight pointer to a project
-            already owned by another workspace_repo — added via the
-            "Add Existing Project" flow. Linked rows have no clone on
-            disk, no webhook, and no token; reindex is a no-op (must
-            be triggered from the canonical owning row).
         created_at:
           type: string
           format: date-time
@@ -3292,18 +3261,7 @@ components:
           type: string
           format: date-time
 
-    WorkspaceRepoListResponse:
-      type: object
-      required: [repos, total]
-      properties:
-        repos:
-          type: array
-          items:
-            $ref: "#/components/schemas/WorkspaceRepo"
-        total:
-          type: integer
-
-    AddWorkspaceRepoRequest:
+    AddGitRepoRequest:
       type: object
       required: [github_url, branch]
       properties:
@@ -3315,28 +3273,11 @@ components:
           minLength: 1
         token_id:
           type: string
-          description: |
-            Optional id of a stored GitHub PAT. Required for private repos.
-        auto_webhook:
-          type: boolean
-          default: false
-          deprecated: true
-          description: |
-            Legacy field. New clients should send `webhook_mode` instead.
-            When both are provided, `webhook_mode` wins; when only the
-            bool is set, `true` is mapped to `webhook_mode = "auto"`.
+          description: Optional id of a stored GitHub PAT (required for private repos).
         webhook_mode:
           type: string
           enum: [manual, auto, disabled]
           default: manual
-          description: |
-            How the server should keep this repo fresh:
-            - `auto` — server registers the webhook in GitHub on your
-              behalf (requires admin:repo_hook on the PAT).
-            - `manual` — server stores a webhook_secret and returns it
-              once; you paste the URL + secret into GitHub yourself.
-            - `disabled` — no auto-sync at all; reindex via the
-              dashboard button only.
 
     GithubRepo:
       type: object
@@ -3379,27 +3320,72 @@ components:
         avatar_url:
           type: string
 
-    WorkspaceRepoCreated:
+    GitRepoCreated:
       type: object
-      required: [repo, webhook_url, webhook_secret]
+      required: [project, git_repo, webhook_url, webhook_secret]
       properties:
-        repo:
-          $ref: "#/components/schemas/WorkspaceRepo"
+        project:
+          $ref: "#/components/schemas/Project"
+        git_repo:
+          $ref: "#/components/schemas/GitRepo"
         webhook_url:
           type: string
           description: |
             Publicly-reachable POST endpoint to register in GitHub when
-            doing the webhook setup manually. Includes the workspace_repo
-            id segment. Empty string for linked rows (no webhook).
+            doing webhook setup manually.
         webhook_secret:
           type: string
           description: |
             HMAC secret. **Returned once on create + once via
-            webhook-info.** Use as the "Secret" field in GitHub's webhook
-            UI; deliveries are validated by HMAC-SHA256 over the body.
-            Empty string for linked rows (no webhook).
+            /projects/{hash}/webhook-info.**
+        auto_registered:
+          type: boolean
+          description: |
+            True when webhook_mode was 'auto' AND the server
+            successfully registered the hook with GitHub.
+        auto_register_note:
+          type: string
+          description: Human-readable reason when auto_registered is false.
 
-    LinkExistingProjectRequest:
+    WorkspaceProjectMembership:
+      type: object
+      required: [workspace_id, project_path, added_at]
+      properties:
+        workspace_id:
+          type: string
+        project_path:
+          type: string
+        added_at:
+          type: string
+          format: date-time
+
+    WorkspaceProject:
+      type: object
+      required: [project, added_at]
+      description: |
+        A project listed under a workspace, decorated with the membership
+        timestamp. The embedded Project carries the full project info
+        (status, languages, last_indexed_at) so the dashboard doesn't
+        need a second roundtrip.
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+        added_at:
+          type: string
+          format: date-time
+
+    WorkspaceProjectListResponse:
+      type: object
+      required: [projects, total]
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceProject"
+        total:
+          type: integer
+
+    LinkProjectRequest:
       type: object
       required: [project_hash]
       properties:
@@ -3408,11 +3394,9 @@ components:
           minLength: 16
           maxLength: 16
           description: |
-            The 16-hex `path_hash` of an indexed project — the same value
-            used in /api/v1/projects/{path}. The server resolves it to
-            the canonical `host_path` and inserts a linked workspace_repo
-            row. The project must already be in status='indexed' and have
-            a host_path of the form "github.com/owner/repo@branch".
+            The 16-hex `path_hash` of an indexed project. The server
+            resolves it to host_path and inserts the (workspace_id,
+            project_path) row. The project must be in status='indexed'.
 
     ProjectWorkspaceList:
       type: object
@@ -3425,22 +3409,15 @@ components:
 
     ProjectWorkspaceEntry:
       type: object
-      required: [workspace_id, workspace_name, repo_id, branch, status, is_linked]
+      required: [workspace_id, workspace_name, added_at]
       properties:
         workspace_id:
           type: string
         workspace_name:
           type: string
-        repo_id:
+        added_at:
           type: string
-          description: workspace_repos.id — same value used in /repos endpoints.
-        branch:
-          type: string
-        status:
-          type: string
-          enum: [pending, cloning, indexing, indexed, failed]
-        is_linked:
-          type: boolean
+          format: date-time
 
     ReindexEnqueuedResponse:
       type: object
@@ -3449,8 +3426,8 @@ components:
         status:
           type: string
           enum: [enqueued, already_running]
-        repo:
-          $ref: "#/components/schemas/WorkspaceRepo"
+        project:
+          $ref: "#/components/schemas/Project"
 
     Job:
       type: object

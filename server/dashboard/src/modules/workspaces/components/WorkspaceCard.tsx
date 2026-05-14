@@ -4,33 +4,35 @@ import { Boxes, ChevronRight, Loader2 } from 'lucide-react';
 import { api } from '@/api/client';
 import { Badge } from '@/ui/badge';
 import { Card, CardContent } from '@/ui/card';
-import type { Workspace, WorkspaceRepo, WorkspaceRepoListResponse } from '../types';
+import type {
+  Workspace,
+  WorkspaceProject,
+  WorkspaceProjectListResponse,
+} from '../types';
 import { isInFlight } from '../types';
 import { formatRelative } from '@/lib/formatDate';
 
 // WorkspaceCard mirrors the projects ProjectCard so the dashboard reads
-// with one visual language: counts at-a-glance, status badge, "click
-// anywhere" surface. Repos are loaded lazily so the list page renders
-// instantly and each card fills in as soon as its summary arrives.
+// with one visual language. Project memberships load lazily.
 export function WorkspaceCard({ workspace }: { workspace: Workspace }) {
-  const [repos, setRepos] = useState<WorkspaceRepo[] | null>(null);
+  const [projects, setProjects] = useState<WorkspaceProject[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     api
-      .get<WorkspaceRepoListResponse>(`/workspaces/${workspace.id}/repos`)
+      .get<WorkspaceProjectListResponse>(`/workspaces/${workspace.id}/projects`)
       .then((r) => {
-        if (!cancelled) setRepos(r.repos);
+        if (!cancelled) setProjects(r.projects);
       })
       .catch(() => {
-        if (!cancelled) setRepos([]);
+        if (!cancelled) setProjects([]);
       });
     return () => {
       cancelled = true;
     };
   }, [workspace.id]);
 
-  const summary = computeSummary(repos);
+  const summary = computeSummary(projects);
 
   return (
     <Link to={`/workspaces/${workspace.id}`} className="group">
@@ -60,30 +62,30 @@ export function WorkspaceCard({ workspace }: { workspace: Workspace }) {
                 <Loader2 className="size-3 animate-spin" />
                 {summary.busy === 1 ? '1 in progress' : `${summary.busy} in progress`}
               </Badge>
-            ) : repos === null ? (
+            ) : projects === null ? (
               <Badge variant="outline" className="font-normal">
                 Loading…
               </Badge>
-            ) : repos.length === 0 ? (
+            ) : projects.length === 0 ? (
               <Badge variant="outline" className="font-normal">
-                No repos yet
+                No projects yet
               </Badge>
             ) : summary.failed > 0 ? (
               <Badge variant="destructive">{summary.failed} failed</Badge>
             ) : (
               <Badge>Ready</Badge>
             )}
-            {repos !== null && repos.length > 0 && (
+            {projects !== null && projects.length > 0 && (
               <Badge variant="outline" className="font-normal text-xs">
-                {summary.indexed}/{repos.length} indexed
+                {summary.indexed}/{projects.length} indexed
               </Badge>
             )}
           </div>
 
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
             <span className="ml-auto">
-              {repos !== null && repos.length > 0
-                ? `Updated ${formatRelative(latestUpdate(repos))}`
+              {projects !== null && projects.length > 0
+                ? `Updated ${formatRelative(latestUpdate(projects))}`
                 : `Created ${formatRelative(workspace.created_at)}`}
             </span>
           </div>
@@ -93,33 +95,28 @@ export function WorkspaceCard({ workspace }: { workspace: Workspace }) {
   );
 }
 
-// computeSummary turns the repo list into the three numbers the card
-// surface needs. Lives in this file because no other view computes the
-// same shape.
-function computeSummary(repos: WorkspaceRepo[] | null): {
+function computeSummary(projects: WorkspaceProject[] | null): {
   indexed: number;
   busy: number;
   failed: number;
 } {
-  if (!repos) return { indexed: 0, busy: 0, failed: 0 };
+  if (!projects) return { indexed: 0, busy: 0, failed: 0 };
   let indexed = 0;
   let busy = 0;
   let failed = 0;
-  for (const r of repos) {
-    if (r.status === 'indexed') indexed++;
-    else if (r.status === 'failed') failed++;
-    else if (isInFlight(r.status)) busy++;
+  for (const p of projects) {
+    const s = p.project.status;
+    if (s === 'indexed') indexed++;
+    else if (s === 'failed' || s === 'error') failed++;
+    else if (isInFlight(s)) busy++;
   }
   return { indexed, busy, failed };
 }
 
-// latestUpdate returns the most recent updated_at across a repo list.
-// Used so the card's "Updated …" footer tracks the freshest signal
-// rather than the workspace row's stale updated_at.
-function latestUpdate(repos: WorkspaceRepo[]): string {
-  let best = repos[0]?.updated_at ?? '';
-  for (const r of repos) {
-    if (r.updated_at > best) best = r.updated_at;
+function latestUpdate(projects: WorkspaceProject[]): string {
+  let best = projects[0]?.added_at ?? '';
+  for (const p of projects) {
+    if (p.added_at > best) best = p.added_at;
   }
   return best;
 }

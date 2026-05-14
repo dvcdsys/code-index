@@ -13,51 +13,33 @@ import (
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
+	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
+	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
-	"github.com/dvcdsys/code-index/server/internal/workspacerepos"
+	"github.com/dvcdsys/code-index/server/internal/workspaceprojects"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
-// addRepo helper — creates a workspace + repo and returns the repo
-// payload so tests can lift webhook_secret/id directly.
-func addRepo(t *testing.T, router http.Handler, wsName, githubURL, branch string) workspaceRepoPayload {
+// addGitRepo helper — POSTs /git-repos and returns (path_hash, webhook_secret)
+// so individual webhook tests can post against the new URL shape.
+func addGitRepo(t *testing.T, router http.Handler, githubURL, branch string) (string, string) {
 	t.Helper()
-	wsID := createWS(t, router, wsName)
-	rr := doJSON(t, router, http.MethodPost, "/api/v1/workspaces/"+wsID+"/repos", map[string]any{
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
 		"github_url": githubURL,
 		"branch":     branch,
 	})
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("add repo: %d (%s)", rr.Code, rr.Body.String())
+		t.Fatalf("add git_repo: %d (%s)", rr.Code, rr.Body.String())
 	}
 	var got struct {
-		Repo          workspaceRepoPayload `json:"repo"`
-		WebhookSecret string               `json:"webhook_secret"`
+		GitRepo struct {
+			PathHash string `json:"path_hash"`
+		} `json:"git_repo"`
+		WebhookSecret string `json:"webhook_secret"`
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &got)
-	// Stash the secret onto the payload via the URL — tests pluck it
-	// from the response body directly when needed; this helper just
-	// returns the repo. Test bodies that need the secret call addRepoWithSecret.
-	return got.Repo
-}
-
-func addRepoWithSecret(t *testing.T, router http.Handler, wsName, githubURL, branch string) (workspaceRepoPayload, string) {
-	t.Helper()
-	wsID := createWS(t, router, wsName)
-	rr := doJSON(t, router, http.MethodPost, "/api/v1/workspaces/"+wsID+"/repos", map[string]any{
-		"github_url": githubURL,
-		"branch":     branch,
-	})
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("add repo: %d (%s)", rr.Code, rr.Body.String())
-	}
-	var got struct {
-		Repo          workspaceRepoPayload `json:"repo"`
-		WebhookSecret string               `json:"webhook_secret"`
-	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &got)
-	return got.Repo, got.WebhookSecret
+	return got.GitRepo.PathHash, got.WebhookSecret
 }
 
 func signBody(body []byte, secret string) string {
@@ -66,9 +48,9 @@ func signBody(body []byte, secret string) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-func postWebhook(t *testing.T, router http.Handler, repoID string, body []byte, sig, event string) *httptest.ResponseRecorder {
+func postWebhook(t *testing.T, router http.Handler, hash string, body []byte, sig, event string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github/"+repoID, bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github/"+hash, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if sig != "" {
 		req.Header.Set("X-Hub-Signature-256", sig)
@@ -83,9 +65,9 @@ func postWebhook(t *testing.T, router http.Handler, repoID string, body []byte, 
 
 func TestWebhook_PingReturns200(t *testing.T) {
 	router, _ := reposRouter(t)
-	repo, secret := addRepoWithSecret(t, router, "platform", "https://github.com/x/y", "main")
+	hash, secret := addGitRepo(t, router, "https://github.com/x/y", "main")
 	body := []byte(`{"zen":"Speak like a human."}`)
-	rr := postWebhook(t, router, repo.ID, body, signBody(body, secret), "ping")
+	rr := postWebhook(t, router, hash, body, signBody(body, secret), "ping")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("ping: expected 200, got %d (%s)", rr.Code, rr.Body.String())
 	}
@@ -93,10 +75,8 @@ func TestWebhook_PingReturns200(t *testing.T) {
 
 func TestWebhook_PushEnqueuesCloneJob(t *testing.T) {
 	router, jobsSvc := reposRouter(t)
-	repo, secret := addRepoWithSecret(t, router, "platform", "https://github.com/x/y", "main")
+	hash, secret := addGitRepo(t, router, "https://github.com/x/y", "main")
 
-	// Drain the initial clone job from the add-repo call so we can see the
-	// webhook's own dedupe behaviour clearly.
 	ctx := context.Background()
 	initial, _ := jobsSvc.List(ctx, jobs.StatusPending, "clone_repo", 10)
 	if len(initial) != 1 {
@@ -104,8 +84,7 @@ func TestWebhook_PushEnqueuesCloneJob(t *testing.T) {
 	}
 
 	body := []byte(`{"ref":"refs/heads/main","after":"abc123def456"}`)
-	rr := postWebhook(t, router, repo.ID, body, signBody(body, secret), "push")
-	// Dedupe with the in-flight initial clone → 202 already_running.
+	rr := postWebhook(t, router, hash, body, signBody(body, secret), "push")
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("push: expected 202, got %d (%s)", rr.Code, rr.Body.String())
 	}
@@ -120,9 +99,9 @@ func TestWebhook_PushEnqueuesCloneJob(t *testing.T) {
 
 func TestWebhook_PushOnDifferentBranchIgnored(t *testing.T) {
 	router, _ := reposRouter(t)
-	repo, secret := addRepoWithSecret(t, router, "platform", "https://github.com/x/y", "main")
+	hash, secret := addGitRepo(t, router, "https://github.com/x/y", "main")
 	body := []byte(`{"ref":"refs/heads/develop","after":"abc123"}`)
-	rr := postWebhook(t, router, repo.ID, body, signBody(body, secret), "push")
+	rr := postWebhook(t, router, hash, body, signBody(body, secret), "push")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("ignored: expected 200, got %d", rr.Code)
 	}
@@ -137,10 +116,9 @@ func TestWebhook_PushOnDifferentBranchIgnored(t *testing.T) {
 
 func TestWebhook_BadSignatureRejected(t *testing.T) {
 	router, _ := reposRouter(t)
-	repo, _ := addRepoWithSecret(t, router, "platform", "https://github.com/x/y", "main")
+	hash, _ := addGitRepo(t, router, "https://github.com/x/y", "main")
 	body := []byte(`{"ref":"refs/heads/main","after":"abc"}`)
-	// Sign with the wrong secret.
-	rr := postWebhook(t, router, repo.ID, body, signBody(body, "wrong"), "push")
+	rr := postWebhook(t, router, hash, body, signBody(body, "wrong"), "push")
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("bad sig: expected 401, got %d (%s)", rr.Code, rr.Body.String())
 	}
@@ -148,28 +126,24 @@ func TestWebhook_BadSignatureRejected(t *testing.T) {
 
 func TestWebhook_MissingSignatureRejected(t *testing.T) {
 	router, _ := reposRouter(t)
-	repo, _ := addRepoWithSecret(t, router, "platform", "https://github.com/x/y", "main")
+	hash, _ := addGitRepo(t, router, "https://github.com/x/y", "main")
 	body := []byte(`{"ref":"refs/heads/main","after":"abc"}`)
-	rr := postWebhook(t, router, repo.ID, body, "", "push")
+	rr := postWebhook(t, router, hash, body, "", "push")
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("no sig: expected 401, got %d", rr.Code)
 	}
 }
 
-func TestWebhook_UnknownRepoReturns404(t *testing.T) {
+func TestWebhook_UnknownHashReturns404(t *testing.T) {
 	router, _ := reposRouter(t)
 	body := []byte(`{}`)
-	// Use the right HMAC math but a bogus repo id — must still 404 (we
-	// short-circuit before HMAC since there's no secret to compare against).
-	rr := postWebhook(t, router, "no-such-repo", body, signBody(body, "anything"), "push")
+	rr := postWebhook(t, router, "0000000000000000", body, signBody(body, "anything"), "push")
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("unknown repo: expected 404, got %d", rr.Code)
+		t.Fatalf("unknown hash: expected 404, got %d", rr.Code)
 	}
 }
 
 func TestWebhook_PathIsPublic(t *testing.T) {
-	// Spin up a router with auth ENABLED (not the test-default) to verify
-	// the webhook path is reachable without credentials.
 	d, err := dbOpenMemory(t)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -186,18 +160,12 @@ func TestWebhook_PathIsPublic(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github/anything", bytes.NewReader([]byte(`{}`)))
 	router.ServeHTTP(rr, req)
-	// We expect either 503 (feature off) or 404, NOT 401 — the public-path
-	// gate should let us through the auth middleware.
 	if rr.Code == http.StatusUnauthorized {
 		t.Fatalf("webhook path leaked into auth-gated set, got 401")
 	}
 }
 
-func TestAddRepo_AutoRegisterFailsCleanlyWithoutPublicURL(t *testing.T) {
-	// reposRouter sets PublicBaseURL=https://cix.example.test, but the
-	// auto-register flow tries a real github.com call which the test
-	// can't allow. So skip when wired with a real URL — this test
-	// exercises the empty-URL branch by building a separate router.
+func TestAddGitRepo_AutoRegisterFailsCleanlyWithoutPublicURL(t *testing.T) {
 	d, err := dbOpenMemory(t)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -210,7 +178,8 @@ func TestAddRepo_AutoRegisterFailsCleanlyWithoutPublicURL(t *testing.T) {
 	}
 	wsSvc := workspaces.New(d)
 	ghSvc := githubtokens.New(d, sec)
-	wrSvc := workspacerepos.New(d)
+	grSvc := gitrepos.New(d)
+	wpSvc := workspaceprojects.New(d)
 	jobsSvc := jobs.New(d, jobs.Options{Concurrency: 1, PollEvery: time.Hour})
 
 	router := NewRouter(Deps{
@@ -222,16 +191,16 @@ func TestAddRepo_AutoRegisterFailsCleanlyWithoutPublicURL(t *testing.T) {
 		WorkspacesEnabled: true,
 		Workspaces:        wsSvc,
 		GithubTokens:      ghSvc,
-		WorkspaceRepos:    wrSvc,
+		GitRepos:          grSvc,
+		WorkspaceProjects: wpSvc,
 		Jobs:              jobsSvc,
 		// PublicBaseURL deliberately unset.
 	})
 
-	wsID := createWS(t, router, "platform")
-	rr := doJSON(t, router, http.MethodPost, "/api/v1/workspaces/"+wsID+"/repos", map[string]any{
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
 		"github_url":   "https://github.com/x/y",
 		"branch":       "main",
-		"auto_webhook": true,
+		"webhook_mode": "auto",
 	})
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create: %d (%s)", rr.Code, rr.Body.String())
@@ -251,23 +220,27 @@ func TestAddRepo_AutoRegisterFailsCleanlyWithoutPublicURL(t *testing.T) {
 
 func TestWebhookInfo_ReturnsURLAndSecret(t *testing.T) {
 	router, _ := reposRouter(t)
-	wsID := createWS(t, router, "platform")
-	// Manual add — we want the wsID + repo for the URL construction.
-	rr := doJSON(t, router, http.MethodPost, "/api/v1/workspaces/"+wsID+"/repos", map[string]any{
+	// AddGitRepo includes the secret in the create response.
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
 		"github_url": "https://github.com/a/b",
 		"branch":     "main",
 	})
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("add: %d", rr.Code)
+		t.Fatalf("add: %d (%s)", rr.Code, rr.Body.String())
 	}
 	var created struct {
-		Repo          workspaceRepoPayload `json:"repo"`
-		WebhookSecret string               `json:"webhook_secret"`
+		GitRepo struct {
+			PathHash string `json:"path_hash"`
+		} `json:"git_repo"`
+		WebhookSecret string `json:"webhook_secret"`
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &created)
 
-	rr = doJSON(t, router, http.MethodGet,
-		"/api/v1/workspaces/"+wsID+"/repos/"+created.Repo.ID+"/webhook-info", nil)
+	hash := projects.HashPath("github.com/a/b@main")
+	if hash != created.GitRepo.PathHash {
+		t.Fatalf("path_hash mismatch: %q vs %q", hash, created.GitRepo.PathHash)
+	}
+	rr = doJSON(t, router, http.MethodGet, "/api/v1/projects/"+hash+"/webhook-info", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("webhook-info: %d (%s)", rr.Code, rr.Body.String())
 	}
@@ -280,7 +253,7 @@ func TestWebhookInfo_ReturnsURLAndSecret(t *testing.T) {
 	if info.WebhookSecret != created.WebhookSecret {
 		t.Fatalf("secret mismatch between create and info")
 	}
-	if info.WebhookURL != "https://cix.example.test/api/v1/webhooks/github/"+created.Repo.ID {
+	if info.WebhookURL != "https://cix.example.test/api/v1/webhooks/github/"+hash {
 		t.Fatalf("URL wrong: %q", info.WebhookURL)
 	}
 	if info.AutoRegistered {

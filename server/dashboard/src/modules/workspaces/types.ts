@@ -18,33 +18,53 @@ export type WorkspaceListResponse = {
 
 export type WebhookMode = 'manual' | 'auto' | 'disabled';
 
-export type RepoStatus =
+// Project lifecycle status — single source of truth lives on the
+// projects row. Surfaces directly on Project (from the projects module)
+// and on the WorkspaceProject decorator below.
+export type ProjectStatus =
+  | 'created'
   | 'pending'
   | 'cloning'
   | 'indexing'
   | 'indexed'
+  | 'error'
   | 'failed';
 
-export type WorkspaceRepo = {
-  id: string;
-  workspace_id: string;
+// GitRepo carries the clone + webhook metadata for an external project.
+// Local projects have no GitRepo row at all — that's how the dashboard
+// tells them apart from cloneable repos.
+export type GitRepo = {
+  project_path: string;
+  path_hash: string;
   github_url: string;
   branch: string;
-  project_path: string;
   token_id: string | null;
   auto_webhook: boolean;
   webhook_mode: WebhookMode;
-  status: RepoStatus;
   last_sha: string | null;
   last_error: string | null;
-  last_indexed_at: string | null;
-  is_linked: boolean;
   created_at: string;
   updated_at: string;
 };
 
-export type WorkspaceRepoListResponse = {
-  repos: WorkspaceRepo[];
+// WorkspaceProject is what /workspaces/{id}/projects returns: the
+// embedded Project plus the membership timestamp.
+export type WorkspaceProject = {
+  project: {
+    host_path: string;
+    container_path: string;
+    languages: string[];
+    status: ProjectStatus;
+    path_hash?: string;
+    last_indexed_at?: string | null;
+    created_at?: string;
+    updated_at?: string;
+  };
+  added_at: string;
+};
+
+export type WorkspaceProjectListResponse = {
+  projects: WorkspaceProject[];
   total: number;
 };
 
@@ -87,16 +107,23 @@ export type GithubAccountListResponse = {
   total: number;
 };
 
-export type WorkspaceRepoCreated = {
-  repo: WorkspaceRepo;
+// GitRepoCreated is the POST /git-repos response shape.
+export type GitRepoCreated = {
+  project: WorkspaceProject['project'];
+  git_repo: GitRepo;
   webhook_url: string;
   webhook_secret: string;
   auto_registered?: boolean;
   auto_register_note?: string;
 };
 
-// Whether the repo's status counts as "still doing something". Polling
-// stops as soon as every repo in the workspace is in a terminal state.
-export function isInFlight(status: RepoStatus): boolean {
-  return status === 'pending' || status === 'cloning' || status === 'indexing';
+// Whether a project's status counts as "still doing something". The
+// workspace detail page polls until every linked project is in a
+// terminal state.
+export function isInFlight(status: ProjectStatus): boolean {
+  return (
+    status === 'pending' ||
+    status === 'cloning' ||
+    status === 'indexing'
+  );
 }

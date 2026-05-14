@@ -227,30 +227,37 @@ func TestSymbolsIndexExists(t *testing.T) {
 	}
 }
 
-// TestMigrate_DropsGlobalUniqueOnProjectPath verifies that opening a
-// pre-PR13 database (workspace_repos with `project_path TEXT NOT NULL UNIQUE`)
-// migrates it to the current shape, dropping the global UNIQUE so the
-// same indexed project can live in multiple workspaces.
+// TestMigrate_SplitWorkspaceRepos verifies the conversion from the
+// legacy workspace_repos table into the new git_repos + workspace_projects
+// shape. Three legacy rows are seeded covering all three flavours that
+// existed before the split: an owned external repo, a linked external
+// repo (is_linked=1), and a local-path repo (host_path doesn't match
+// github.com/owner/repo@branch). After Open():
 //
-// Strategy: create a fresh file-backed DB, manually lay down the
-// legacy table shape + seed one row, close, reopen via Open() so the
-// migration runs, then try inserting a second row with the same
-// project_path in a different workspace_id — pre-migration this would
-// fail with UNIQUE constraint failed; post-migration it must succeed.
-func TestMigrate_DropsGlobalUniqueOnProjectPath(t *testing.T) {
+//   - workspace_repos is gone.
+//   - git_repos has exactly one row — for the owned external; linked +
+//     local rows must not seed git_repos.
+//   - workspace_projects has three rows — every legacy membership is
+//     preserved, regardless of flavour.
+//   - The on-disk clone directory for the owned row is renamed from
+//     {workspace_repos.id} to {path_hash}; the linked + local IDs have
+//     no on-disk artifacts to begin with so the migration leaves the
+//     filesystem alone for them.
+func TestMigrate_SplitWorkspaceRepos(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "test.db")
+	dbPath := filepath.Join(dir, "test.db")
+	dataDir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "repos", "owned-id"), 0o755); err != nil {
+		t.Fatalf("mkdir owned clone: %v", err)
+	}
 
-	// Open with the regular driver (bypass Schema by hand-rolling DDL).
-	raw, err := sql.Open(DriverName, "file:"+path+"?_pragma=foreign_keys(ON)")
+	raw, err := sql.Open(DriverName, "file:"+dbPath+"?_pragma=foreign_keys(ON)")
 	if err != nil {
 		t.Fatalf("raw open: %v", err)
 	}
 
-	// Lay down only the minimum tables the legacy workspace_repos needs:
-	// workspaces (FK target) + the OLD workspace_repos shape with the
-	// inline UNIQUE on project_path. github_tokens is FK-referenced but
-	// nullable, so we can skip it for this test.
+	// Lay down the post-PR13 / pre-split shape (matches what an upgraded
+	// prod DB looks like just before this migration ran for the first time).
 	legacy := `
 		CREATE TABLE workspaces (
 			id TEXT PRIMARY KEY,
@@ -264,7 +271,7 @@ func TestMigrate_DropsGlobalUniqueOnProjectPath(t *testing.T) {
 			workspace_id    TEXT NOT NULL,
 			github_url      TEXT NOT NULL,
 			branch          TEXT NOT NULL,
-			project_path    TEXT NOT NULL UNIQUE,
+			project_path    TEXT NOT NULL,
 			token_id        TEXT,
 			webhook_secret  TEXT NOT NULL,
 			webhook_id      INTEGER,
@@ -274,73 +281,94 @@ func TestMigrate_DropsGlobalUniqueOnProjectPath(t *testing.T) {
 			last_sha        TEXT,
 			last_error      TEXT,
 			last_indexed_at TEXT,
+			is_linked       INTEGER NOT NULL DEFAULT 0,
 			created_at      TEXT NOT NULL,
 			updated_at      TEXT NOT NULL,
 			UNIQUE(workspace_id, github_url, branch),
 			FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 		);
-		INSERT INTO workspaces (id, name, created_at, updated_at)
-			VALUES ('ws-a', 'alpha', '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z');
-		INSERT INTO workspaces (id, name, created_at, updated_at)
-			VALUES ('ws-b', 'beta',  '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z');
-		INSERT INTO workspace_repos (id, workspace_id, github_url, branch, project_path,
-			webhook_secret, created_at, updated_at)
-			VALUES ('repo-1', 'ws-a', 'https://github.com/x/y', 'main',
-			        'github.com/x/y@main', 's', '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z');
+		INSERT INTO workspaces (id, name, created_at, updated_at) VALUES
+			('ws-a', 'alpha', '2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z'),
+			('ws-b', 'beta',  '2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z');
+		INSERT INTO workspace_repos
+			(id, workspace_id, github_url, branch, project_path,
+			 webhook_secret, status, is_linked, webhook_mode,
+			 created_at, updated_at)
+		VALUES
+			('owned-id', 'ws-a', 'https://github.com/x/y', 'main',
+				'github.com/x/y@main', 's-owned', 'indexed', 0, 'manual',
+				'2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z'),
+			('linked-id', 'ws-b', 'https://github.com/x/y', 'main',
+				'github.com/x/y@main', 's-linked', 'indexed', 1, 'disabled',
+				'2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z'),
+			('local-id', 'ws-a', '/Users/x/local-proj', '',
+				'/Users/x/local-proj', 's-local', 'indexed', 1, 'disabled',
+				'2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z');
 	`
 	if _, err := raw.Exec(legacy); err != nil {
-		t.Fatalf("seed legacy: %v", err)
-	}
-
-	// Confirm pre-migration: the second insert with same project_path
-	// would fail. We catch the error so the test is honest about the
-	// invariant we're removing.
-	_, err = raw.Exec(`INSERT INTO workspace_repos (id, workspace_id, github_url, branch, project_path,
-		webhook_secret, created_at, updated_at) VALUES ('repo-bad', 'ws-b', 'https://github.com/x/y', 'main',
-		'github.com/x/y@main', 's', '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z')`)
-	if err == nil {
 		_ = raw.Close()
-		t.Fatalf("pre-migration insert should fail UNIQUE — test setup is wrong")
+		t.Fatalf("seed legacy: %v", err)
 	}
 	_ = raw.Close()
 
-	// Now reopen via the real Open() so the migration runs.
-	migrated, err := Open(path)
+	migrated, err := OpenWith(OpenOptions{Path: dbPath, DataDir: dataDir})
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatalf("OpenWith: %v", err)
 	}
 	defer migrated.Close()
 
-	// is_linked column should be present and default to 0 on the
-	// migrated row.
-	var isLinked int
+	// workspace_repos is gone.
+	var n int
 	if err := migrated.QueryRow(
-		`SELECT is_linked FROM workspace_repos WHERE id = 'repo-1'`,
-	).Scan(&isLinked); err != nil {
-		t.Fatalf("read is_linked: %v", err)
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workspace_repos'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count workspace_repos: %v", err)
 	}
-	if isLinked != 0 {
-		t.Fatalf("pre-existing rows must keep is_linked=0, got %d", isLinked)
-	}
-
-	// And the post-migration invariant we care about: same project_path
-	// in a different workspace now succeeds.
-	if _, err := migrated.Exec(`INSERT INTO workspace_repos (id, workspace_id, github_url, branch, project_path,
-		webhook_secret, status, is_linked, created_at, updated_at)
-		VALUES ('repo-2', 'ws-b', 'https://github.com/x/y', 'main',
-		'github.com/x/y@main', 's', 'indexed', 1,
-		'2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z')`); err != nil {
-		t.Fatalf("post-migration cross-workspace insert should succeed: %v", err)
+	if n != 0 {
+		t.Fatalf("workspace_repos should be dropped after migration, count=%d", n)
 	}
 
-	// Per-workspace UNIQUE must still bite — adding the same repo+branch
-	// to ws-b a second time should fail.
-	_, err = migrated.Exec(`INSERT INTO workspace_repos (id, workspace_id, github_url, branch, project_path,
-		webhook_secret, status, is_linked, created_at, updated_at)
-		VALUES ('repo-3', 'ws-b', 'https://github.com/x/y', 'main',
-		'github.com/x/y@main', 's', 'indexed', 1,
-		'2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z')`)
-	if err == nil {
-		t.Fatalf("per-workspace UNIQUE should still reject duplicate (workspace_id, github_url, branch)")
+	// git_repos has exactly the one owned-external row.
+	if err := migrated.QueryRow(`SELECT COUNT(*) FROM git_repos`).Scan(&n); err != nil {
+		t.Fatalf("count git_repos: %v", err)
 	}
+	if n != 1 {
+		t.Fatalf("expected 1 git_repos row, got %d", n)
+	}
+	var gh, branch, secret string
+	if err := migrated.QueryRow(
+		`SELECT github_url, branch, webhook_secret FROM git_repos WHERE project_path = ?`,
+		"github.com/x/y@main",
+	).Scan(&gh, &branch, &secret); err != nil {
+		t.Fatalf("read git_repos: %v", err)
+	}
+	if gh != "https://github.com/x/y" || branch != "main" || secret != "s-owned" {
+		t.Fatalf("git_repos row mismatch: gh=%q branch=%q secret=%q", gh, branch, secret)
+	}
+
+	// workspace_projects holds three rows — one per legacy workspace_repos.
+	if err := migrated.QueryRow(`SELECT COUNT(*) FROM workspace_projects`).Scan(&n); err != nil {
+		t.Fatalf("count workspace_projects: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("expected 3 workspace_projects rows, got %d", n)
+	}
+
+	// On-disk clone for the owned row was renamed from {old id} → {path_hash}.
+	expectedPath := filepath.Join(dataDir, "repos", HashHostPath("github.com/x/y@main"))
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("clone dir was not renamed to %s: %v", expectedPath, err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "repos", "owned-id")); err == nil {
+		t.Fatalf("legacy clone dir still exists after rename")
+	}
+
+	// Re-running Open() must be a no-op — workspace_repos is already
+	// gone so the migration short-circuits at tableExists().
+	migrated.Close()
+	again, err := OpenWith(OpenOptions{Path: dbPath, DataDir: dataDir})
+	if err != nil {
+		t.Fatalf("second OpenWith: %v", err)
+	}
+	defer again.Close()
 }

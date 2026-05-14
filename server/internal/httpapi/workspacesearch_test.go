@@ -15,10 +15,12 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/chunksfts"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
+	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
+	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
-	"github.com/dvcdsys/code-index/server/internal/workspacerepos"
+	"github.com/dvcdsys/code-index/server/internal/workspaceprojects"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
@@ -55,7 +57,8 @@ func newSearchRouter(t *testing.T, d *sql.DB, vs *vectorstore.Store, emb fixedEm
 		WorkspacesEnabled: true,
 		Workspaces:        workspaces.New(d),
 		GithubTokens:      githubtokens.New(d, sec),
-		WorkspaceRepos:    workspacerepos.New(d),
+		GitRepos:          gitrepos.New(d),
+		WorkspaceProjects: workspaceprojects.New(d),
 		Jobs:              jobs.New(d, jobs.Options{Concurrency: 1, PollEvery: time.Hour}),
 		VectorStore:       vs,
 		EmbeddingSvc:      emb,
@@ -79,19 +82,19 @@ func seedRepoWithChunks(
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := d.Exec(
 		`INSERT INTO projects (host_path, container_path, languages, settings, stats, status, created_at, updated_at, path_hash)
-		 VALUES (?, ?, '[]', '{}', '{}', 'created', ?, ?, 'h')`,
-		projectPath, projectPath, now, now,
+		 VALUES (?, ?, '[]', '{}', '{}', 'indexed', ?, ?, ?)`,
+		projectPath, projectPath, now, now, projects.HashPath(projectPath),
 	); err != nil {
 		t.Fatalf("insert project %q: %v", projectPath, err)
 	}
 	if _, err := d.Exec(
-		`INSERT INTO workspace_repos
-		 (id, workspace_id, github_url, branch, project_path, webhook_secret, status, created_at, updated_at, last_indexed_at)
-		 VALUES (?, ?, ?, 'main', ?, 'sec', 'indexed', ?, ?, ?)`,
-		uuid.NewString(), wsID, "https://"+projectPath, projectPath, now, now, now,
+		`INSERT INTO workspace_projects (workspace_id, project_path, added_at)
+		 VALUES (?, ?, ?)`,
+		wsID, projectPath, now,
 	); err != nil {
-		t.Fatalf("insert workspace_repo %q: %v", projectPath, err)
+		t.Fatalf("insert workspace_project %q: %v", projectPath, err)
 	}
+	_ = uuid.NewString() // keep import in case future tests need it
 	if err := vs.UpsertChunks(context.Background(), projectPath, chunks, embeddings); err != nil {
 		t.Fatalf("upsert chunks for %q: %v", projectPath, err)
 	}
@@ -505,20 +508,19 @@ func TestWorkspaceSearch_FlagsStaleFTSRepos(t *testing.T) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	stalePath := "github.com/o/stale@main"
 	if _, err := d.Exec(
-		`INSERT INTO projects (host_path, container_path, languages, settings, stats, status, created_at, updated_at, path_hash)
-		 VALUES (?, ?, '[]', '{}', '{}', 'created', ?, ?, 'h')`,
-		stalePath, stalePath, now, now,
+		`INSERT INTO projects (host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, path_hash)
+		 VALUES (?, ?, '[]', '{}', '{}', 'indexed', ?, ?, ?, ?)`,
+		stalePath, stalePath, now, now, now, projects.HashPath(stalePath),
 	); err != nil {
 		t.Fatalf("insert stale project: %v", err)
 	}
 	if _, err := d.Exec(
-		`INSERT INTO workspace_repos
-		 (id, workspace_id, github_url, branch, project_path, webhook_secret, status, created_at, updated_at, last_indexed_at)
-		 VALUES (?, ?, ?, 'main', ?, 'sec', 'indexed', ?, ?, ?)`,
-		uuid.NewString(), wsID, "https://"+stalePath, stalePath, now, now, now,
+		`INSERT INTO workspace_projects (workspace_id, project_path, added_at)
+		 VALUES (?, ?, ?)`, wsID, stalePath, now,
 	); err != nil {
-		t.Fatalf("insert stale workspace_repo: %v", err)
+		t.Fatalf("insert stale workspace_projects: %v", err)
 	}
+	_ = uuid.NewString()
 	if err := vs.UpsertChunks(context.Background(), stalePath,
 		[]vectorstore.Chunk{{Content: "stale chunk", FilePath: "s.go", StartLine: 1, EndLine: 9, Language: "go"}},
 		[][]float32{l2([]float32{0.9, 0.1, 0.0, 0.0})},
@@ -766,20 +768,29 @@ func TestWorkspaceSearch_Disabled(t *testing.T) {
 	}
 }
 
-// seedPendingRepo inserts a workspace_repos row with a non-`indexed`
-// status (no projects row, no chromem collection). Mirrors what the
-// DB looks like while clone/index jobs are still in flight.
+// seedPendingRepo inserts a projects row with a non-`indexed` status
+// AND a workspace_projects membership row. Mirrors what the DB looks
+// like while clone/index jobs are still in flight (project registered,
+// workspace_projects already attached, status not yet 'indexed').
 func seedPendingRepo(t *testing.T, d *sql.DB, wsID, projectPath, status string) {
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := d.Exec(
-		`INSERT INTO workspace_repos
-		 (id, workspace_id, github_url, branch, project_path, webhook_secret, status, created_at, updated_at)
-		 VALUES (?, ?, ?, 'main', ?, 'sec', ?, ?, ?)`,
-		uuid.NewString(), wsID, "https://"+projectPath, projectPath, status, now, now,
+		`INSERT INTO projects (
+			host_path, container_path, languages, settings, stats,
+			status, created_at, updated_at, path_hash
+		) VALUES (?, ?, '[]', '{}', '{}', ?, ?, ?, 'h')`,
+		projectPath, projectPath, status, now, now,
 	); err != nil {
-		t.Fatalf("insert pending workspace_repo %q: %v", projectPath, err)
+		t.Fatalf("insert pending project %q: %v", projectPath, err)
 	}
+	if _, err := d.Exec(
+		`INSERT INTO workspace_projects (workspace_id, project_path, added_at)
+		 VALUES (?, ?, ?)`, wsID, projectPath, now,
+	); err != nil {
+		t.Fatalf("insert workspace_projects %q: %v", projectPath, err)
+	}
+	_ = uuid.NewString()
 }
 
 // TestWorkspaceSearch_SurfacesPendingRepos verifies that repos whose
@@ -808,8 +819,8 @@ func TestWorkspaceSearch_SurfacesPendingRepos(t *testing.T) {
 
 	// Two repos still in flight — different statuses to make sure
 	// every non-indexed value propagates verbatim.
-	seedPendingRepo(t, d, wsID, "github.com/o/cloning@main", workspacerepos.StatusCloning)
-	seedPendingRepo(t, d, wsID, "github.com/o/indexing@main", workspacerepos.StatusIndexing)
+	seedPendingRepo(t, d, wsID, "github.com/o/cloning@main", "cloning")
+	seedPendingRepo(t, d, wsID, "github.com/o/indexing@main", "indexing")
 
 	rr := doJSON(t, router, http.MethodGet, "/api/v1/workspaces/"+wsID+"/search?q=x", nil)
 	if rr.Code != http.StatusOK {
@@ -831,10 +842,10 @@ func TestWorkspaceSearch_SurfacesPendingRepos(t *testing.T) {
 	for _, p := range resp.PendingRepos {
 		gotStatuses[p.ProjectPath] = p.Status
 	}
-	if gotStatuses["github.com/o/cloning@main"] != workspacerepos.StatusCloning {
+	if gotStatuses["github.com/o/cloning@main"] != "cloning" {
 		t.Fatalf("cloning repo lost its status: %+v", resp.PendingRepos)
 	}
-	if gotStatuses["github.com/o/indexing@main"] != workspacerepos.StatusIndexing {
+	if gotStatuses["github.com/o/indexing@main"] != "indexing" {
 		t.Fatalf("indexing repo lost its status: %+v", resp.PendingRepos)
 	}
 }
@@ -853,8 +864,8 @@ func TestWorkspaceSearch_AllPendingReturnsEmpty(t *testing.T) {
 	router := newSearchRouter(t, d, vs, fixedEmbedder{q: l2([]float32{1, 0, 0, 0})})
 	wsID := createWS(t, router, "all-pending")
 
-	seedPendingRepo(t, d, wsID, "github.com/o/p1@main", workspacerepos.StatusPending)
-	seedPendingRepo(t, d, wsID, "github.com/o/p2@main", workspacerepos.StatusCloning)
+	seedPendingRepo(t, d, wsID, "github.com/o/p1@main", "pending")
+	seedPendingRepo(t, d, wsID, "github.com/o/p2@main", "cloning")
 
 	rr := doJSON(t, router, http.MethodGet, "/api/v1/workspaces/"+wsID+"/search?q=x", nil)
 	if rr.Code != http.StatusOK {

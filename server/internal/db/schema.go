@@ -177,51 +177,52 @@ CREATE TABLE IF NOT EXISTS github_tokens (
     last_used_at TEXT
 );
 
--- Workspaces feature PR2 — workspace_repos + jobs.
+-- git_repos holds clone + webhook metadata for projects that come from a
+-- git remote (currently GitHub-only). Exactly 1:1 with the corresponding
+-- projects row — keyed by project_path = projects.host_path. Local
+-- projects (indexed via the CLI) have no git_repos row at all, which
+-- is how the server tells them apart from cloneable repos.
 --
--- One workspace_repos row per (repo, branch). project_path is the canonical
--- "github.com/owner/repo@branch" string used as host_path in projects, so
--- existing per-project SQL stays uniform across local + remote sources.
--- webhook_secret is generated server-side at create time and shown exactly
--- once to the operator (or used by the auto-register flow added in PR3).
--- token_id stays nullable so public repos can be added without storing a PAT.
--- last_sha / last_indexed_at survive across reindexes so an incremental
--- fetch_repo job can short-circuit when HEAD hasn't moved.
--- is_linked discriminates owned rows (the canonical Add Repo flow that
--- clones + indexes + owns a webhook) from linked rows (a lightweight
--- membership pointer to an already-indexed project — no clone, no
--- webhook). Uniqueness is per-workspace; the same project_path may live
--- in many workspaces as long as it appears at most once in each.
-CREATE TABLE IF NOT EXISTS workspace_repos (
-    id              TEXT PRIMARY KEY,
-    workspace_id    TEXT NOT NULL,
+-- webhook_secret is generated server-side at create time and shown
+-- exactly once to the operator (or consumed by the auto-register flow).
+-- token_id stays nullable so public repos can be cloned without a PAT.
+-- last_sha lets an incremental fetch short-circuit when HEAD hasn't
+-- moved; status lives on the projects row (single source of truth).
+CREATE TABLE IF NOT EXISTS git_repos (
+    project_path    TEXT PRIMARY KEY,
     github_url      TEXT NOT NULL,
     branch          TEXT NOT NULL,
-    project_path    TEXT NOT NULL,
     token_id        TEXT,
     webhook_secret  TEXT NOT NULL,
     webhook_id      INTEGER,
-    auto_webhook    INTEGER NOT NULL DEFAULT 0,
-    -- webhook_mode is the operator's stated intent for how this repo gets
-    -- kept fresh: 'auto' (server calls GitHub to register the hook),
-    -- 'manual' (operator pastes the URL+secret into GitHub themselves),
-    -- 'disabled' (no auto-sync, reindex via the dashboard button only).
-    -- Stored separately from auto_webhook so the dashboard can distinguish
-    -- "manual, still pending operator action" from "deliberately disabled".
+    -- webhook_mode = 'auto' | 'manual' | 'disabled'. See workspaces docs.
     webhook_mode    TEXT NOT NULL DEFAULT 'manual',
-    status          TEXT NOT NULL DEFAULT 'pending',
+    auto_webhook    INTEGER NOT NULL DEFAULT 0,
     last_sha        TEXT,
     last_error      TEXT,
-    last_indexed_at TEXT,
-    is_linked       INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
-    UNIQUE(workspace_id, github_url, branch),
-    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    UNIQUE (github_url, branch),
+    FOREIGN KEY (project_path) REFERENCES projects(host_path) ON DELETE CASCADE,
     FOREIGN KEY (token_id) REFERENCES github_tokens(id) ON DELETE SET NULL
 );
-CREATE INDEX IF NOT EXISTS idx_workspace_repos_workspace ON workspace_repos(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_workspace_repos_project ON workspace_repos(project_path);
+
+-- workspace_projects is the many-to-many junction between workspaces
+-- and projects. A workspace is just a labelled collection — adding a
+-- project = INSERT here, removing = DELETE here. The project itself
+-- is untouched. The same project can live in any number of workspaces.
+-- ON DELETE CASCADE on both FKs keeps memberships consistent: deleting
+-- a workspace or a project automatically clears the rows that name it.
+CREATE TABLE IF NOT EXISTS workspace_projects (
+    workspace_id  TEXT NOT NULL,
+    project_path  TEXT NOT NULL,
+    added_at      TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, project_path),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_path) REFERENCES projects(host_path) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_projects_project
+    ON workspace_projects(project_path);
 
 -- jobs is the persistent worker queue. Survives process restarts; one
 -- worker pool drains it. dedupe_key is the partial-unique mechanism that
@@ -341,7 +342,8 @@ var ExpectedTables = []string{
 	"runtime_settings",
 	"workspaces",
 	"github_tokens",
-	"workspace_repos",
+	"git_repos",
+	"workspace_projects",
 	"jobs",
 	"call_edges",
 	"chunks_meta",

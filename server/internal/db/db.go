@@ -19,10 +19,28 @@ import (
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
 const DriverName = "sqlite"
 
-// Open opens (and creates if necessary) the SQLite database at path, sets the
-// required PRAGMAs via the DSN, and runs the schema migration. Pass ":memory:"
-// for an in-memory DB (used by tests).
+// OpenOptions configures Open. DataDir is only consulted by migrations
+// that need to rename on-disk artefacts (e.g. the split of workspace_repos
+// into git_repos renamed clone directories from {workspace_repos.id} to
+// {path_hash}). Empty DataDir means "skip filesystem-touching migrations
+// in this call" — tests use this.
+type OpenOptions struct {
+	Path    string
+	DataDir string
+}
+
+// Open is the conventional entry point used everywhere except main.go.
+// It defers to OpenWith with an empty DataDir, so any migration that
+// wants to rename on-disk files becomes a no-op for tests + in-memory DBs.
 func Open(path string) (*sql.DB, error) {
+	return OpenWith(OpenOptions{Path: path})
+}
+
+// OpenWith opens (and creates if necessary) the SQLite database at
+// opts.Path, sets the required PRAGMAs via the DSN, and runs the
+// schema migrations.
+func OpenWith(opts OpenOptions) (*sql.DB, error) {
+	path := opts.Path
 	dsn, err := buildDSN(path)
 	if err != nil {
 		return nil, err
@@ -78,22 +96,25 @@ func Open(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrate indexed_with_model: %w", err)
 	}
 
-	// PR10 — extend workspace_repos with webhook_mode so the dashboard
-	// can distinguish manual/auto/disabled intents. Older databases get
-	// the column with a sensible default; rows where auto_webhook=1 are
-	// retro-fitted to 'auto' so they keep the same effective behaviour.
+	// Up-level pre-PR10 / pre-PR13 workspace_repos shapes to the richest
+	// pre-split form (webhook_mode column present, is_linked column
+	// present, no inline-UNIQUE on project_path). On already-current or
+	// already-split DBs these are no-ops.
 	if err := migrateWebhookMode(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate webhook_mode: %w", err)
 	}
-
-	// PR13 — workspace_repos.is_linked + drop the legacy global UNIQUE
-	// on project_path. The rebuild path is taken only when the old
-	// constraint is still present; freshly-created DBs hit the new
-	// CREATE TABLE shape via Schema and the rebuild becomes a no-op.
 	if err := migrateWorkspaceReposLinked(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate workspace_repos is_linked: %w", err)
+	}
+
+	// Split the legacy workspace_repos table into git_repos +
+	// workspace_projects. Idempotent — when the table is already gone
+	// (post-split DBs) the migration returns immediately.
+	if err := migrateSplitWorkspaceRepos(db, opts.DataDir); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate workspace_repos → git_repos: %w", err)
 	}
 
 	// PR14 — workspace search switched from the Louvain-centroid two-
@@ -434,6 +455,226 @@ func migrateWebhookMode(db *sql.DB) error {
 		return fmt.Errorf("backfill webhook_mode: %w", err)
 	}
 	return nil
+}
+
+// migrateSplitWorkspaceRepos converts a legacy workspace_repos table
+// into two new tables: git_repos (clone + webhook metadata, 1:1 with
+// projects for external repos) and workspace_projects (workspace ↔
+// project junction). After the table is consumed it is dropped, so
+// re-running the migration on already-migrated DBs is a fast no-op.
+//
+// dataDir, when non-empty, points at the on-disk workspace data root.
+// External (owned, non-linked) workspace_repos rows used to keep their
+// clone in {dataDir}/repos/{workspace_repos.id}; we rename those dirs
+// to {dataDir}/repos/{path_hash} so the new gitrepos service finds
+// them. Failures are logged-and-ignored — the next clone job will
+// regenerate the directory from scratch.
+//
+// Pre-conditions on the legacy table: the earlier migrateWebhookMode +
+// migrateWorkspaceReposLinked passes brought it up to the richest
+// shape (webhook_mode + is_linked columns present, no global UNIQUE
+// on project_path).
+func migrateSplitWorkspaceRepos(db *sql.DB, dataDir string) error {
+	exists, err := tableExists(db, "workspace_repos")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+
+	type rowSnapshot struct {
+		id            string
+		workspaceID   string
+		githubURL     string
+		branch        string
+		projectPath   string
+		tokenID       sql.NullString
+		webhookSecret string
+		webhookID     sql.NullInt64
+		autoWebhook   int
+		webhookMode   string
+		lastSHA       sql.NullString
+		lastError     sql.NullString
+		isLinked      int
+		createdAt     string
+		updatedAt     string
+	}
+
+	rows, err := db.Query(`
+		SELECT id, workspace_id, github_url, branch, project_path,
+		       token_id, webhook_secret, webhook_id, auto_webhook,
+		       webhook_mode, last_sha, last_error, is_linked,
+		       created_at, updated_at
+		  FROM workspace_repos`)
+	if err != nil {
+		return fmt.Errorf("select workspace_repos: %w", err)
+	}
+	var legacy []rowSnapshot
+	for rows.Next() {
+		var s rowSnapshot
+		if err := rows.Scan(
+			&s.id, &s.workspaceID, &s.githubURL, &s.branch, &s.projectPath,
+			&s.tokenID, &s.webhookSecret, &s.webhookID, &s.autoWebhook,
+			&s.webhookMode, &s.lastSHA, &s.lastError, &s.isLinked,
+			&s.createdAt, &s.updatedAt,
+		); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan workspace_repos row: %w", err)
+		}
+		legacy = append(legacy, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate workspace_repos: %w", err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin split tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Pre-seed projects rows for any project_path that's referenced by
+	// the legacy workspace_repos but doesn't yet exist in projects
+	// (typical state for rows still in clone/index lifecycle when the
+	// upgrade boots). Both workspace_projects and git_repos FK to
+	// projects(host_path), so the membership + clone-metadata inserts
+	// below would fail without this.
+	for _, s := range legacy {
+		if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO projects (
+				host_path, container_path, languages, settings, stats,
+				status, created_at, updated_at, path_hash
+			) VALUES (?, ?, '[]', '{}', '{}', 'pending', ?, ?, ?)`,
+			s.projectPath, s.projectPath,
+			s.createdAt, s.updatedAt, HashHostPath(s.projectPath),
+		); err != nil {
+			return fmt.Errorf("pre-seed projects row for %s: %w", s.projectPath, err)
+		}
+	}
+
+	// Track rename targets so the filesystem step can run after the tx
+	// commits — we don't want to half-rename then roll back the SQL.
+	type renamePair struct{ oldID, newHash string }
+	var renames []renamePair
+
+	for _, s := range legacy {
+		// Every legacy row becomes a workspace_projects membership.
+		if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO workspace_projects
+				(workspace_id, project_path, added_at)
+			VALUES (?, ?, ?)`,
+			s.workspaceID, s.projectPath, s.createdAt,
+		); err != nil {
+			return fmt.Errorf("insert workspace_projects: %w", err)
+		}
+
+		// Owned + external rows additionally seed a git_repos row.
+		// Linked rows reuse the canonical owner's git_repos row, so we
+		// skip them here. Local rows (project_path doesn't look like
+		// github.com/owner/repo@branch) have no git_repos representation.
+		if s.isLinked != 0 || !looksLikeGitHubProjectPath(s.projectPath) {
+			continue
+		}
+		webhookMode := s.webhookMode
+		if webhookMode == "" {
+			webhookMode = "manual"
+		}
+		if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO git_repos (
+				project_path, github_url, branch,
+				token_id, webhook_secret, webhook_id,
+				webhook_mode, auto_webhook,
+				last_sha, last_error,
+				created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			s.projectPath, s.githubURL, s.branch,
+			nullableSQL(s.tokenID), s.webhookSecret, nullableSQLInt(s.webhookID),
+			webhookMode, s.autoWebhook,
+			nullableSQL(s.lastSHA), nullableSQL(s.lastError),
+			s.createdAt, s.updatedAt,
+		); err != nil {
+			return fmt.Errorf("insert git_repos for %s: %w", s.projectPath, err)
+		}
+		renames = append(renames, renamePair{
+			oldID:   s.id,
+			newHash: HashHostPath(s.projectPath),
+		})
+	}
+
+	if _, err := tx.Exec(`DROP TABLE workspace_repos`); err != nil {
+		return fmt.Errorf("drop workspace_repos: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit split tx: %w", err)
+	}
+
+	// Filesystem rename — best effort. Failure is non-fatal; the next
+	// clone job will recreate the directory.
+	if dataDir != "" {
+		base := filepath.Join(dataDir, "repos")
+		for _, rp := range renames {
+			oldPath := filepath.Join(base, rp.oldID)
+			newPath := filepath.Join(base, rp.newHash)
+			if _, statErr := os.Stat(oldPath); statErr != nil {
+				continue
+			}
+			if _, statErr := os.Stat(newPath); statErr == nil {
+				continue
+			}
+			if err := os.Rename(oldPath, newPath); err != nil {
+				// Log via stderr — the db package has no logger
+				// dependency, and a single warning per stuck dir is
+				// enough for an operator to find and clean up.
+				fmt.Fprintf(os.Stderr,
+					"db: warning: could not rename clone dir %s → %s: %v\n",
+					oldPath, newPath, err)
+			}
+		}
+	}
+	return nil
+}
+
+// looksLikeGitHubProjectPath decides whether a workspace_repos.project_path
+// follows the canonical "github.com/owner/repo@branch" shape used for
+// external repos. Local-path projects (absolute filesystem paths) fail this
+// check and are handled as workspace-only memberships during the split.
+func looksLikeGitHubProjectPath(projectPath string) bool {
+	s := strings.TrimSpace(projectPath)
+	if !strings.HasPrefix(s, "github.com/") {
+		return false
+	}
+	return strings.LastIndex(s, "@") > 0
+}
+
+// tableExists returns whether a table with the given name is registered in
+// sqlite_master. Used by migrations to short-circuit on already-migrated DBs.
+func tableExists(db *sql.DB, name string) (bool, error) {
+	row := db.QueryRow(
+		`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, name)
+	var dummy int
+	if err := row.Scan(&dummy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("sqlite_master lookup for %q: %w", name, err)
+	}
+	return true, nil
+}
+
+func nullableSQL(s sql.NullString) any {
+	if !s.Valid {
+		return nil
+	}
+	return s.String
+}
+
+func nullableSQLInt(n sql.NullInt64) any {
+	if !n.Valid {
+		return nil
+	}
+	return n.Int64
 }
 
 // HashHostPath returns the 16-char SHA1 prefix used as the URL segment for

@@ -2,19 +2,29 @@ import { AlertCircle, FolderPlus } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Skeleton } from '@/ui/skeleton';
 import { ApiError } from '@/api/client';
+import { AddRepoDialog } from '@/modules/workspaces/components/AddRepoDialog';
 import { ProjectCard } from './components/ProjectCard';
 import { useProjects } from './hooks';
 
 export function ProjectsListPage() {
-  const { data, error, isLoading } = useProjects();
+  const { data, error, isLoading, refetch } = useProjects();
 
   return (
     <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
-        <p className="text-sm text-muted-foreground">
-          {data ? `${data.total} indexed ${data.total === 1 ? 'project' : 'projects'}` : ' '}
-        </p>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
+          <p className="text-sm text-muted-foreground">
+            {data
+              ? `${data.total} indexed ${data.total === 1 ? 'project' : 'projects'}`
+              : ' '}
+          </p>
+        </div>
+        {/* Add repo here clones + indexes a GitHub repository as a
+            standalone project. The new project lives in /projects with
+            no workspace attachment — link it into specific workspaces
+            from the workspace detail page if you want. */}
+        <AddRepoDialog onAdded={() => void refetch()} />
       </header>
 
       {isLoading ? (
@@ -51,9 +61,12 @@ function EmptyState() {
       <div className="space-y-1">
         <p className="text-base font-medium">No projects yet</p>
         <p className="max-w-sm text-sm text-muted-foreground">
-          Register a project from the CLI with{' '}
-          <code className="rounded bg-muted px-1 py-0.5 text-xs">cix init &lt;path&gt;</code>.
-          A GitHub source will land here in a future PR.
+          Use <strong>Add repo</strong> above to clone + index a GitHub
+          repository, or register a local project from the CLI with{' '}
+          <code className="rounded bg-muted px-1 py-0.5 text-xs">
+            cix init &lt;path&gt;
+          </code>
+          .
         </p>
       </div>
     </div>

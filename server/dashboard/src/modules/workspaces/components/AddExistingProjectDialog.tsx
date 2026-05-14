@@ -16,18 +16,14 @@ import {
 import { Input } from '@/ui/input';
 import { Label } from '@/ui/label';
 import type { Project, ProjectListResponse } from '@/api/types';
-import type { WorkspaceRepo, WorkspaceRepoCreated } from '../types';
 
-// Per-row disabled reason. null means the row is selectable.
-// "already-in-workspace" is NOT included here — those projects are
-// filtered out of the list entirely rather than rendered as disabled,
-// per the operator's request: a workspace's own projects shouldn't be
-// noise in the "add more" picker.
-type LinkDisabledReason = 'not-indexed' | 'not-github';
+// Per-row disabled reason. null means the row is selectable. Local
+// projects are now first-class linkable rows — only "not yet indexed"
+// disables them.
+type LinkDisabledReason = 'not-indexed';
 
 function disabledReasonFor(p: Project): LinkDisabledReason | null {
   if (p.status !== 'indexed') return 'not-indexed';
-  if (!p.host_path.startsWith('github.com/') || !p.host_path.includes('@')) return 'not-github';
   return null;
 }
 
@@ -35,8 +31,6 @@ function disabledLabel(r: LinkDisabledReason): string {
   switch (r) {
     case 'not-indexed':
       return 'not indexed yet';
-    case 'not-github':
-      return 'local path (cannot link)';
   }
 }
 
@@ -147,8 +141,8 @@ export function AddExistingProjectDialog({
     const toLink = projects.filter((p) => selected.has(p.path_hash));
     for (const p of toLink) {
       try {
-        await api.post<WorkspaceRepoCreated>(
-          `/workspaces/${workspaceID}/repos/link`,
+        await api.post(
+          `/workspaces/${workspaceID}/projects`,
           { project_hash: p.path_hash },
         );
         succeeded.add(p.path_hash);
@@ -216,7 +210,7 @@ export function AddExistingProjectDialog({
             <Label htmlFor="proj-filter">Filter</Label>
             <Input
               id="proj-filter"
-              placeholder="github.com/owner/repo"
+              placeholder="github.com/owner/repo or /local/path"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               disabled={projects === null}
@@ -332,5 +326,3 @@ export function AddExistingProjectDialog({
   );
 }
 
-// Re-export the row shape so consumers don't need to dig into types.ts.
-export type { WorkspaceRepo };
