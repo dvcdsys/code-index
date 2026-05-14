@@ -1,4 +1,4 @@
-import { AlertCircle, AlertTriangle, ArrowLeft, Search } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowLeft, Loader2, Search } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '@/api/client';
 import type { Project } from '@/api/types';
@@ -12,6 +12,7 @@ import { formatDateTime, formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
 import { DeleteProjectDialog } from './components/DeleteProjectDialog';
 import { ProjectInfoCard } from './components/ProjectInfoCard';
+import { ReindexProjectButton } from './components/ReindexProjectButton';
 import { useProject, useProjectSummary, useProjectWorkspaces } from './hooks';
 
 const STATUS_VARIANT: Record<Project['status'], 'default' | 'secondary' | 'destructive' | 'outline'> = {
@@ -54,6 +55,7 @@ export function ProjectDetailPage() {
   const p = project.data;
   const s = summary.data;
   const drift = !!p.indexed_with_model && !!currentModel && p.indexed_with_model !== currentModel;
+  const isExternal = p.host_path.startsWith('github.com/');
 
   return (
     <div className="space-y-8">
@@ -96,11 +98,25 @@ export function ProjectDetailPage() {
               Search in this project
             </Link>
           </Button>
+          {isExternal ? (
+            <ReindexProjectButton hash={p.path_hash} hostPath={p.host_path} />
+          ) : null}
           {isAdmin ? (
             <DeleteProjectDialog hash={p.path_hash} hostPath={p.host_path} redirectAfter />
           ) : null}
         </div>
       </header>
+
+      {p.status === 'indexing' ? (
+        <Alert>
+          <Loader2 className="h-4 w-4 animate-spin" />
+          <AlertTitle>Indexing in progress</AlertTitle>
+          <AlertDescription>
+            This project is being indexed. Stats and search results will be incomplete
+            until it finishes — this page auto-refreshes when the run completes.
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {drift ? (
         <Alert variant="destructive">
@@ -217,15 +233,17 @@ export function ProjectDetailPage() {
         </div>
       </section>
 
-      <Alert>
-        <AlertTitle>Reindexing</AlertTitle>
-        <AlertDescription>
-          Indexing reads files from the local filesystem and is driven by the CLI. Run{' '}
-          <code className="rounded bg-muted px-1 py-0.5 text-xs">cix reindex</code> for a one-shot
-          rescan, or keep <code className="rounded bg-muted px-1 py-0.5 text-xs">cix watch</code>{' '}
-          running for automatic updates on file change.
-        </AlertDescription>
-      </Alert>
+      {!isExternal ? (
+        <Alert>
+          <AlertTitle>Reindexing</AlertTitle>
+          <AlertDescription>
+            Indexing reads files from the local filesystem and is driven by the CLI. Run{' '}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">cix reindex</code> for a one-shot
+            rescan, or keep <code className="rounded bg-muted px-1 py-0.5 text-xs">cix watch</code>{' '}
+            running for automatic updates on file change.
+          </AlertDescription>
+        </Alert>
+      ) : null}
     </div>
   );
 }

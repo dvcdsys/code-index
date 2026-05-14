@@ -43,6 +43,9 @@ export function useProject(hash: string | undefined) {
     queryKey: hash ? projectKeys.detail(hash) : ['projects', 'unknown'],
     queryFn: ({ signal }) => api.get<Project>(`/projects/${hash}`, { signal }),
     enabled: Boolean(hash),
+    // Poll while the project is mid-index so the page reflects completion
+    // without a manual refresh. Stops as soon as status flips to indexed/error.
+    refetchInterval: (q) => (q.state.data?.status === 'indexing' ? 3000 : false),
   });
 }
 
@@ -75,8 +78,17 @@ export function useDeleteProject() {
   });
 }
 
-// NOTE: a "Reindex" button is intentionally absent. The server's three-phase
-// indexing protocol (begin → files → finish) requires a producer with filesystem
-// access to upload file contents. That is the CLI's job (`cix reindex` /
-// `cix watch`). The browser cannot drive this — it has no local filesystem.
-// The detail page surfaces this expectation in copy.
+// Reindex is only meaningful for GitHub-cloned projects — the server enqueues a
+// clone_repo job that chains into index_repo. Local projects must reindex via
+// the CLI (`cix reindex` / `cix watch`); the endpoint returns 422 for those.
+export function useReindexProject() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (hash: string) =>
+      api.post<{ status: 'enqueued' | 'already_running' }>(`/projects/${hash}/reindex`, undefined),
+    onSuccess: (_data, hash) => {
+      qc.invalidateQueries({ queryKey: projectKeys.detail(hash) });
+      qc.invalidateQueries({ queryKey: projectKeys.all });
+    },
+  });
+}
