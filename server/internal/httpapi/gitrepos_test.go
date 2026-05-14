@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
+	"sync"
 	"testing"
 
 	"github.com/dvcdsys/code-index/server/internal/jobs"
@@ -112,14 +114,168 @@ func TestReindexProject_RequiresGitRepo(t *testing.T) {
 	}
 }
 
+// TestAddGitRepo_FailedGitRepoCreate_RollsBackProject covers Fix #5 of
+// the branch review: when gitrepos.Create fails AFTER projects.Create
+// succeeded, the handler must compensate-delete the freshly created
+// projects row. Without that rollback the operator sees a 'pending'
+// orphan in /projects that can't be linked to a workspace (status !=
+// 'indexed') and can't be reindexed (no git_repos row).
+//
+// Force the gitrepos.Create failure via an invalid webhook_mode — the
+// service-side validation rejects unknown values, by which point the
+// handler has already staged the projects row. (URL + branch are
+// validated by the handler up front so they don't trigger the same
+// orphan window.)
+func TestAddGitRepo_FailedGitRepoCreate_RollsBackProject(t *testing.T) {
+	router, _, d := reposRouterDB(t)
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url":   "https://github.com/x/orphan-test",
+		"branch":       "main",
+		"webhook_mode": "totally-bogus-mode",
+	})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for invalid webhook_mode, got %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	var n int
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM projects WHERE host_path = ?`,
+		"github.com/x/orphan-test@main",
+	).Scan(&n); err != nil {
+		t.Fatalf("count projects: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected projects row to be rolled back after gitrepos.Create failure, got count=%d", n)
+	}
+
+	// Sanity: no git_repos row either (Create rejected before INSERT).
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM git_repos WHERE project_path = ?`,
+		"github.com/x/orphan-test@main",
+	).Scan(&n); err != nil {
+		t.Fatalf("count git_repos: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected no git_repos row after validation failure, got %d", n)
+	}
+}
+
+// TestAddGitRepo_FailedGitRepoCreate_PreservesPreExistingProject is the
+// negative half of Fix #5: when the project pre-existed (created by a
+// different flow earlier), a failing AddGitRepo must NOT delete it.
+// projectCreatedHere=false → no compensation, even though gitrepos.Create
+// failed. This guards the cascade-delete corruption case where rolling
+// back would wipe somebody else's git_repos row via FK CASCADE.
+func TestAddGitRepo_FailedGitRepoCreate_PreservesPreExistingProject(t *testing.T) {
+	router, _, d := reposRouterDB(t)
+
+	// Pre-seed an indexed project for the same path the request would
+	// derive. Simulates: a previous successful flow created this row,
+	// and our concurrent request shouldn't blow it away.
+	hostPath := "github.com/x/keepme@main"
+	if _, err := d.Exec(`
+		INSERT INTO projects (host_path, container_path, languages, settings, stats,
+			status, created_at, updated_at, path_hash)
+		VALUES (?, ?, '[]', '{}', '{}', 'indexed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?)`,
+		hostPath, hostPath, "0123456789abcdef",
+	); err != nil {
+		t.Fatalf("seed pre-existing project: %v", err)
+	}
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url":   "https://github.com/x/keepme",
+		"branch":       "main",
+		"webhook_mode": "totally-bogus-mode",
+	})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	var n int
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM projects WHERE host_path = ?`, hostPath,
+	).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("pre-existing project must be preserved on gitrepos.Create failure, got count=%d", n)
+	}
+}
+
+// TestAddGitRepo_ConcurrentDuplicate_NoOrphan covers the Fix #5
+// acceptance criterion literally: two concurrent POSTs with the same
+// github_url + branch should yield one 201 and one 409, with exactly
+// one projects row and one git_repos row at the end. This also covers
+// Fix #15 (concurrent race test) from the same review.
+//
+// The compensating delete guard `if no git_repos row exists` is what
+// makes this safe — without it, the loser's rollback could cascade
+// away the winner's git_repos row.
+func TestAddGitRepo_ConcurrentDuplicate_NoOrphan(t *testing.T) {
+	router, _, d := reposRouterDB(t)
+	body := map[string]any{
+		"github_url": "https://github.com/x/concurrent",
+		"branch":     "main",
+	}
+
+	var wg sync.WaitGroup
+	codes := make(chan int, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", body)
+			codes <- rr.Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+
+	got := []int{<-codes, <-codes}
+	sort.Ints(got)
+	// Exactly one 201 (winner) and one 409 (duplicate).
+	if got[0] != http.StatusCreated || got[1] != http.StatusConflict {
+		t.Fatalf("expected one 201 + one 409, got %v", got)
+	}
+
+	// Single projects row.
+	var n int
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM projects WHERE host_path = ?`,
+		"github.com/x/concurrent@main",
+	).Scan(&n); err != nil {
+		t.Fatalf("count projects: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected exactly 1 projects row after concurrent race, got %d", n)
+	}
+
+	// Single git_repos row.
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM git_repos WHERE project_path = ?`,
+		"github.com/x/concurrent@main",
+	).Scan(&n); err != nil {
+		t.Fatalf("count git_repos: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected exactly 1 git_repos row after concurrent race, got %d", n)
+	}
+}
+
 // TestDeleteProject_CascadesGitRepoAndMembership exercises the chained
 // FK ON DELETE CASCADE: removing the project deletes the git_repos row
 // AND every workspace_projects row referencing it. Used to be a
 // manual cleanup in projects.Delete; now the FKs do the work.
+//
+// Fix #16 acceptance: explicit COUNT(*) assertions on both child tables
+// after the DELETE so anyone who later strips `ON DELETE CASCADE` from
+// either FK gets a clear "git_repos should cascade" / "workspace_projects
+// should cascade" failure instead of a downstream behavioural surprise.
 func TestDeleteProject_CascadesGitRepoAndMembership(t *testing.T) {
-	router, _ := reposRouter(t)
+	router, _, d := reposRouterDB(t)
 
-	// Add an external project and attach it to a workspace.
+	// Add an external project — kicks off project + git_repos rows.
 	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
 		"github_url": "https://github.com/a/b",
 		"branch":     "main",
@@ -134,17 +290,64 @@ func TestDeleteProject_CascadesGitRepoAndMembership(t *testing.T) {
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &created)
 	hash := created.GitRepo.PathHash
+	projPath := "github.com/a/b@main"
 
-	// Delete the project directly — the cascade should clear both
-	// git_repos and any workspace memberships (there are none here,
-	// but the SQL exercises the FK trigger regardless).
+	// Force status=indexed so workspaceprojects.Link's precondition passes —
+	// the clone+index job chain isn't wired in the test harness so we
+	// satisfy the invariant by hand.
+	if _, err := d.Exec(`UPDATE projects SET status = 'indexed' WHERE host_path = ?`, projPath); err != nil {
+		t.Fatalf("mark indexed: %v", err)
+	}
+
+	// Create a workspace and link the project so the workspace_projects
+	// cascade has a real row to verify (the prior version of this test
+	// asserted nothing on workspace_projects — the FK trigger was untested).
+	rr = doJSON(t, router, http.MethodPost, "/api/v1/workspaces", map[string]any{
+		"name":        "platform",
+		"description": "cascade test",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create workspace: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var ws struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &ws)
+	rr = doJSON(t, router, http.MethodPost, "/api/v1/workspaces/"+ws.ID+"/projects", map[string]any{
+		"project_hash": hash,
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("link project: %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	// Sanity-pin the pre-delete state — without this, a "0 rows after
+	// delete" assertion can't distinguish "cascade fired" from "row
+	// never existed in the first place".
+	assertCount := func(t *testing.T, q string, want int) {
+		t.Helper()
+		var n int
+		if err := d.QueryRow(q, projPath).Scan(&n); err != nil {
+			t.Fatalf("count %q: %v", q, err)
+		}
+		if n != want {
+			t.Errorf("count %q: got %d, want %d", q, n, want)
+		}
+	}
+	assertCount(t, `SELECT COUNT(*) FROM git_repos WHERE project_path = ?`, 1)
+	assertCount(t, `SELECT COUNT(*) FROM workspace_projects WHERE project_path = ?`, 1)
+
+	// Delete the project — both child rows must cascade.
 	rr = doJSON(t, router, http.MethodDelete, "/api/v1/projects/"+hash, nil)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("delete: %d (%s)", rr.Code, rr.Body.String())
 	}
-	// Re-adding the exact same upstream must succeed — proves the
-	// git_repos row was actually removed (otherwise UNIQUE(github_url,
-	// branch) would 409 here, which is the bug a previous patch fixed).
+	assertCount(t, `SELECT COUNT(*) FROM git_repos WHERE project_path = ?`, 0)
+	assertCount(t, `SELECT COUNT(*) FROM workspace_projects WHERE project_path = ?`, 0)
+
+	// Re-adding the exact same upstream must succeed — end-to-end check
+	// that the git_repos row was actually removed (otherwise
+	// UNIQUE(github_url, branch) would 409 here, which is the bug a
+	// previous patch fixed).
 	rr = doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
 		"github_url": "https://github.com/a/b",
 		"branch":     "main",

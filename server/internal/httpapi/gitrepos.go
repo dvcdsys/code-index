@@ -117,11 +117,16 @@ func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
 	// half-failed attempt) already wrote it; the gitrepos.Create
 	// below will surface the real duplicate via UNIQUE on (github_url,
 	// branch). ErrOverlap is a hard reject.
-	if _, perr := projects.Create(r.Context(), s.Deps.DB, projects.CreateRequest{HostPath: projectPath}); perr != nil {
-		if !errors.Is(perr, projects.ErrConflict) {
-			writeError(w, http.StatusUnprocessableEntity, perr.Error())
-			return
-		}
+	//
+	// Fix #5: track whether THIS request created the projects row so
+	// we can compensate-delete it on gitrepos.Create failure. Without
+	// the rollback a failed request leaves an operator-visible
+	// 'pending' orphan with no git_repos and no workspace_projects.
+	_, createErr := projects.Create(r.Context(), s.Deps.DB, projects.CreateRequest{HostPath: projectPath})
+	projectCreatedHere := createErr == nil
+	if createErr != nil && !errors.Is(createErr, projects.ErrConflict) {
+		writeError(w, http.StatusUnprocessableEntity, createErr.Error())
+		return
 	}
 
 	g, err := s.Deps.GitRepos.Create(r.Context(), gitrepos.CreateRequest{
@@ -131,6 +136,27 @@ func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
 		WebhookMode: mode,
 	})
 	if err != nil {
+		// Compensating delete (Fix #5): drop the project we staged so
+		// the failed flow doesn't leave a 'pending' orphan visible in
+		// /projects. Guarded by two checks:
+		//   (a) projectCreatedHere — never touch a project that
+		//       pre-existed; somebody else owns it.
+		//   (b) no git_repos row currently FK-references this project
+		//       — a concurrent winner may have inserted between our
+		//       projects.Create and our gitrepos.Create. Deleting then
+		//       would cascade away the winner's git_repo row.
+		if projectCreatedHere {
+			if _, gerr := s.Deps.GitRepos.GetByPath(r.Context(), projectPath); errors.Is(gerr, gitrepos.ErrNotFound) {
+				if derr := projects.Delete(r.Context(), s.Deps.DB, projectPath); derr != nil && s.Deps.Logger != nil {
+					s.Deps.Logger.Warn(
+						"AddGitRepo: compensating projects.Delete after gitrepos.Create failure failed; an orphan 'pending' project may need manual cleanup",
+						"project_path", projectPath,
+						"original_err", err,
+						"delete_err", derr,
+					)
+				}
+			}
+		}
 		switch {
 		case errors.Is(err, gitrepos.ErrInvalidURL):
 			writeError(w, http.StatusUnprocessableEntity, "github_url must be an https://github.com/owner/repo URL")

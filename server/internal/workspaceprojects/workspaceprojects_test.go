@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,6 +186,96 @@ func TestListByProject(t *testing.T) {
 	}
 	if len(list) != 2 {
 		t.Fatalf("expected 2 memberships, got %d", len(list))
+	}
+}
+
+// TestLink_ConcurrentDistinctWorkspaces — two goroutines link the same
+// indexed project to TWO different workspaces in parallel. Both inserts
+// hit different primary-key tuples, so the expected outcome is 2 ✓ Link
+// returns / 0 spurious errors. Acceptance criterion for Fix #6
+// (one-statement atomic precondition + insert).
+func TestLink_ConcurrentDistinctWorkspaces(t *testing.T) {
+	d, svc := mustOpen(t)
+	ctx := context.Background()
+	wsA := seedWorkspace(t, d, "alpha")
+	wsB := seedWorkspace(t, d, "beta")
+	seedIndexedProject(t, d, "github.com/x/y@main")
+
+	var (
+		wg       sync.WaitGroup
+		errs     [2]error
+		members  [2]Membership
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		members[0], errs[0] = svc.Link(ctx, wsA, "github.com/x/y@main")
+	}()
+	go func() {
+		defer wg.Done()
+		members[1], errs[1] = svc.Link(ctx, wsB, "github.com/x/y@main")
+	}()
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("goroutine %d: unexpected error: %v", i, e)
+		}
+		if members[i].AddedAt.IsZero() {
+			t.Errorf("goroutine %d: AddedAt not populated", i)
+		}
+	}
+	// Sanity: both rows landed in the DB.
+	var n int
+	if err := d.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM workspace_projects WHERE project_path = ?`,
+		"github.com/x/y@main",
+	).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 rows in workspace_projects, got %d", n)
+	}
+}
+
+// TestLink_ConcurrentSameWorkspace — two goroutines race to link the
+// SAME project to the SAME workspace. Exactly one must win (returns
+// ErrDuplicate from the loser) — never 2 successes (would violate PK)
+// and never a spurious error mapped to ErrWorkspaceMissing /
+// ErrProjectMissing. Pins the diagnostic path's correctness under
+// genuine PK contention.
+func TestLink_ConcurrentSameWorkspace(t *testing.T) {
+	d, svc := mustOpen(t)
+	ctx := context.Background()
+	wsID := seedWorkspace(t, d, "platform")
+	seedIndexedProject(t, d, "github.com/x/y@main")
+
+	var (
+		wg   sync.WaitGroup
+		errs [2]error
+	)
+	wg.Add(2)
+	for i := range errs {
+		go func() {
+			defer wg.Done()
+			_, errs[i] = svc.Link(ctx, wsID, "github.com/x/y@main")
+		}()
+	}
+	wg.Wait()
+
+	successes, duplicates := 0, 0
+	for _, e := range errs {
+		switch {
+		case e == nil:
+			successes++
+		case errors.Is(e, ErrDuplicate):
+			duplicates++
+		default:
+			t.Errorf("unexpected error %v (want nil or ErrDuplicate)", e)
+		}
+	}
+	if successes != 1 || duplicates != 1 {
+		t.Errorf("expected 1 success + 1 ErrDuplicate, got %d / %d", successes, duplicates)
 	}
 }
 
