@@ -21,6 +21,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
+	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/httpapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
@@ -31,7 +32,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
 	"github.com/dvcdsys/code-index/server/internal/workspacejobs"
-	"github.com/dvcdsys/code-index/server/internal/workspacerepos"
+	"github.com/dvcdsys/code-index/server/internal/workspaceprojects"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
@@ -94,7 +95,10 @@ func run() error {
 
 	dbPath := cfg.DynamicSQLitePath()
 	logger.Info("opening database", "path", dbPath)
-	database, err := db.Open(dbPath)
+	database, err := db.OpenWith(db.OpenOptions{
+		Path:    dbPath,
+		DataDir: cfg.WorkspacesDataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
@@ -206,7 +210,8 @@ func run() error {
 	var (
 		wsSvc    *workspaces.Service
 		ghSvc    *githubtokens.Service
-		wrSvc    *workspacerepos.Service
+		grSvc    *gitrepos.Service
+		wpSvc    *workspaceprojects.Service
 		jobsSvc  *jobs.Service
 	)
 	if cfg.WorkspacesEnabled {
@@ -249,7 +254,8 @@ func run() error {
 			logger.Info("workspaces: encryption key loaded", "source", secSvc.Source())
 		}
 		wsSvc = workspaces.New(database)
-		wrSvc = workspacerepos.New(database)
+		grSvc = gitrepos.New(database)
+		wpSvc = workspaceprojects.New(database)
 
 		// Persistent job queue + worker pool. Worker concurrency comes
 		// from CIX_WORKER_CONCURRENCY (default 2). Handlers are registered
@@ -259,14 +265,14 @@ func run() error {
 			Logger:      logger,
 		})
 		workspacejobs.Register(workspacejobs.Deps{
-			DB:             database,
-			Jobs:           jobsSvc,
-			WorkspaceRepos: wrSvc,
-			GithubTokens:   ghSvc,
-			Indexer:        idx,
-			VectorStore:    vs,
-			DataDir:        cfg.WorkspacesDataDir,
-			Logger:         logger,
+			DB:           database,
+			Jobs:         jobsSvc,
+			GitRepos:     grSvc,
+			GithubTokens: ghSvc,
+			Indexer:      idx,
+			VectorStore:  vs,
+			DataDir:      cfg.WorkspacesDataDir,
+			Logger:       logger,
 		})
 		jobsSvc.Start(context.Background())
 		// Defer shutdown — stop new claims, drain in-flight work.
@@ -317,7 +323,8 @@ func run() error {
 		WorkspacesEnabled: cfg.WorkspacesEnabled,
 		Workspaces:        wsSvc,
 		GithubTokens:      ghSvc,
-		WorkspaceRepos:    wrSvc,
+		GitRepos:          grSvc,
+		WorkspaceProjects: wpSvc,
 		Jobs:              jobsSvc,
 		PublicBaseURL:     cfg.PublicBaseURL,
 	})

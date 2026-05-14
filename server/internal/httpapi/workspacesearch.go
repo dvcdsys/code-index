@@ -14,7 +14,6 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/chunksfts"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
-	"github.com/dvcdsys/code-index/server/internal/workspacerepos"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
@@ -137,7 +136,7 @@ type projectHits struct {
 // project threshold those repos drop out, restoring the cross-project
 // signal the user needs to scope an agent's follow-up search.
 func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id string, params openapi.WorkspaceSearchParams) {
-	if s.workspaceReposUnavailable(w) {
+	if s.workspaceProjectsUnavailable(w) {
 		return
 	}
 	if s.Deps.VectorStore == nil || s.Deps.EmbeddingSvc == nil {
@@ -177,12 +176,39 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	repos, err := s.Deps.WorkspaceRepos.ListByWorkspace(r.Context(), id)
+	// Pull the workspace's project memberships joined with the projects
+	// table so we can split into indexed vs pending in one pass. The
+	// junction lives in workspace_projects; status lives on projects.
+	rows, err := s.Deps.DB.QueryContext(r.Context(), `
+		SELECT p.host_path, p.status
+		  FROM workspace_projects wp
+		  JOIN projects p ON p.host_path = wp.project_path
+		 WHERE wp.workspace_id = ?
+		 ORDER BY wp.added_at DESC`, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load workspace repos: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "could not load workspace projects: "+err.Error())
 		return
 	}
-	if len(repos) == 0 {
+	type memberRow struct {
+		ProjectPath string
+		Status      string
+	}
+	var members []memberRow
+	for rows.Next() {
+		var m memberRow
+		if scanErr := rows.Scan(&m.ProjectPath, &m.Status); scanErr != nil {
+			rows.Close()
+			writeError(w, http.StatusInternalServerError, "scan workspace project row: "+scanErr.Error())
+			return
+		}
+		members = append(members, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "iterate workspace projects: "+err.Error())
+		return
+	}
+	if len(members) == 0 {
 		writeJSON(w, http.StatusOK, workspaceSearchResponse(
 			"empty",
 			[]workspaceSearchProjectPayload{},
@@ -194,22 +220,22 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	seenProjects := make(map[string]struct{}, len(repos))
-	projectPaths := make([]string, 0, len(repos))
+	seenProjects := make(map[string]struct{}, len(members))
+	projectPaths := make([]string, 0, len(members))
 	pendingRepos := make([]workspaceSearchPendingRepoPayload, 0)
-	for _, rp := range repos {
-		if rp.Status != workspacerepos.StatusIndexed {
+	for _, m := range members {
+		if m.Status != "indexed" {
 			pendingRepos = append(pendingRepos, workspaceSearchPendingRepoPayload{
-				ProjectPath: rp.ProjectPath,
-				Status:      rp.Status,
+				ProjectPath: m.ProjectPath,
+				Status:      m.Status,
 			})
 			continue
 		}
-		if _, ok := seenProjects[rp.ProjectPath]; ok {
+		if _, ok := seenProjects[m.ProjectPath]; ok {
 			continue
 		}
-		seenProjects[rp.ProjectPath] = struct{}{}
-		projectPaths = append(projectPaths, rp.ProjectPath)
+		seenProjects[m.ProjectPath] = struct{}{}
+		projectPaths = append(projectPaths, m.ProjectPath)
 	}
 
 	if len(projectPaths) == 0 {

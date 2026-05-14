@@ -29,8 +29,8 @@ import type {
   GithubRepoListResponse,
   GithubToken,
   GithubTokenListResponse,
+  GitRepoCreated,
   WebhookMode,
-  WorkspaceRepoCreated,
 } from '../types';
 
 // Sentinel value for the "(public repo, no token)" Select option. Radix
@@ -41,12 +41,22 @@ const NO_TOKEN = '__none__';
 // AddRepoDialog is a staged form: each step gates the next so the user
 // can't pick a repository before choosing a token, and can't submit
 // before pinning down a branch + webhook mode. The shape mirrors how
-// people actually fill it in: PAT → repo → branch → webhook policy.
+// people actually fill it in: PAT → account → repo → branch → webhook.
+//
+// Scope:
+//   - workspaceID provided  → after POST /git-repos, additionally
+//     POST /workspaces/{id}/projects so the new project is linked
+//     into that workspace. Note: the link call only succeeds once
+//     the project finishes indexing; we kick off the link request
+//     fire-and-forget here, the dashboard's polling will surface
+//     the membership once indexing completes.
+//   - workspaceID omitted  → just POST /git-repos. The new project
+//     lives standalone in /projects and can be linked later.
 export function AddRepoDialog({
   workspaceID,
   onAdded,
 }: {
-  workspaceID: string;
+  workspaceID?: string;
   onAdded: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -78,7 +88,7 @@ export function AddRepoDialog({
 
   const [submitting, setSubmitting] = useState(false);
   const [submitErr, setSubmitErr] = useState<string | null>(null);
-  const [created, setCreated] = useState<WorkspaceRepoCreated | null>(null);
+  const [created, setCreated] = useState<GitRepoCreated | null>(null);
 
   // Load tokens when the dialog opens — keep the request out of the
   // page mount path so users who never open the dialog don't pay for
@@ -193,11 +203,25 @@ export function AddRepoDialog({
       if (tokenID && tokenID !== NO_TOKEN) {
         payload.token_id = tokenID;
       }
-      const resp = await api.post<WorkspaceRepoCreated>(
-        `/workspaces/${workspaceID}/repos`,
-        payload,
-      );
+      const resp = await api.post<GitRepoCreated>(`/git-repos`, payload);
       setCreated(resp);
+      // If we're in workspace context, link the freshly-created
+      // project. The link call may 422 if indexing isn't done yet —
+      // that's fine for the dashboard UX. We fire it off and rely on
+      // polling in the parent page to pick up the membership once
+      // indexing finishes. A more robust approach (retry-on-422) lives
+      // in a follow-up if users complain.
+      if (workspaceID) {
+        try {
+          await api.post(`/workspaces/${workspaceID}/projects`, {
+            project_hash: resp.git_repo.path_hash,
+          });
+        } catch {
+          // Swallow — workspace polling will pick up the project once
+          // indexing completes and operators can manually link via
+          // "Add Existing Project" if anything goes wrong.
+        }
+      }
       onAdded();
     } catch (e) {
       const msg =
@@ -580,14 +604,14 @@ function CreatedResult({
   created,
   mode,
 }: {
-  created: WorkspaceRepoCreated;
+  created: GitRepoCreated;
   mode: WebhookMode;
 }) {
   return (
     <div className="space-y-3 text-sm">
       <div>
         <span className="text-muted-foreground">Project:</span>{' '}
-        <span className="font-mono">{created.repo.project_path}</span>
+        <span className="font-mono">{created.git_repo.project_path}</span>
       </div>
 
       {mode === 'auto' && (

@@ -7,47 +7,38 @@ import { Button } from '@/ui/button';
 import { Skeleton } from '@/ui/skeleton';
 import { AddExistingProjectDialog } from './components/AddExistingProjectDialog';
 import { AddRepoDialog } from './components/AddRepoDialog';
-import { RepoCard } from './components/RepoCard';
+import { WorkspaceProjectRow } from './components/WorkspaceProjectRow';
 import { WorkspaceSearchDialog } from './components/WorkspaceSearchDialog';
 import { isInFlight } from './types';
 import type {
   Workspace,
-  WorkspaceRepo,
-  WorkspaceRepoListResponse,
+  WorkspaceProject,
+  WorkspaceProjectListResponse,
 } from './types';
 
-// Auto-dismiss the "indexing finished" toast after this many ms. Long
-// enough to read, short enough not to linger past when the user has
-// likely moved on.
 const INDEX_DONE_TOAST_MS = 5000;
-
-// Background polling cadence. Three seconds is short enough that the
-// "indexing" → "indexed" transition is visible while you watch the
-// dashboard, long enough that the cost of polling for a workspace
-// with many repos stays modest. Only runs while at least one repo is
-// in flight.
 const POLL_MS = 3000;
 
 export function WorkspaceDetailPage() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [repos, setRepos] = useState<WorkspaceRepo[] | null>(null);
+  const [projects, setProjects] = useState<WorkspaceProject[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [indexDoneMsg, setIndexDoneMsg] = useState<string | null>(null);
 
-  const loadRepos = useCallback(async () => {
+  const loadProjects = useCallback(async () => {
     try {
-      const r = await api.get<WorkspaceRepoListResponse>(`/workspaces/${id}/repos`);
-      setRepos(r.repos);
+      const r = await api.get<WorkspaceProjectListResponse>(
+        `/workspaces/${id}/projects`,
+      );
+      setProjects(r.projects);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, [id]);
 
-  // Initial workspace + repo fetch.
   useEffect(() => {
     let cancelled = false;
     api
@@ -63,37 +54,27 @@ export function WorkspaceDetailPage() {
         }
         setError(e instanceof Error ? e.message : String(e));
       });
-    void loadRepos();
+    void loadProjects();
     return () => {
       cancelled = true;
     };
-  }, [id, loadRepos]);
+  }, [id, loadProjects]);
 
-  // Live progress polling. Active only while at least one repo is
-  // in pending/cloning/indexing — terminal states stop the tick so we
-  // don't burn CPU on an idle workspace.
+  // Poll while any project is still being cloned/indexed.
   useEffect(() => {
-    if (!repos || repos.length === 0) return;
-    const anyBusy = repos.some((r) => isInFlight(r.status));
+    if (!projects || projects.length === 0) return;
+    const anyBusy = projects.some((p) => isInFlight(p.project.status));
     if (!anyBusy) return;
     const handle = setInterval(() => {
-      void loadRepos();
+      void loadProjects();
     }, POLL_MS);
     return () => clearInterval(handle);
-  }, [repos, loadRepos]);
+  }, [projects, loadProjects]);
 
-  // Detect the "last in-flight repo just finished" transition. Workspace
-  // search is live (no centroid rebuild step) so we just confirm to
-  // the user that the new repo is now searchable.
-  //
-  // wasInflightRef is the gate: we only fire the toast on a
-  // true → false transition, not on the initial page load where
-  // everything was already indexed. Reset back to false after firing
-  // so a second indexing wave (add another repo later) re-arms it.
   const wasInflightRef = useRef(false);
   useEffect(() => {
-    if (!repos) return;
-    const anyBusy = repos.some((r) => isInFlight(r.status));
+    if (!projects) return;
+    const anyBusy = projects.some((p) => isInFlight(p.project.status));
     if (anyBusy) {
       wasInflightRef.current = true;
       return;
@@ -102,9 +83,8 @@ export function WorkspaceDetailPage() {
       wasInflightRef.current = false;
       setIndexDoneMsg('Indexing finished — workspace search is ready.');
     }
-  }, [repos]);
+  }, [projects]);
 
-  // Auto-dismiss the toast so it doesn't linger after the user moves on.
   useEffect(() => {
     if (!indexDoneMsg) return;
     const handle = setTimeout(() => setIndexDoneMsg(null), INDEX_DONE_TOAST_MS);
@@ -115,7 +95,7 @@ export function WorkspaceDetailPage() {
     if (!workspace) return;
     if (
       !confirm(
-        `Delete workspace "${workspace.name}"?\n\nThis removes all attached repos and the indexed projects.`,
+        `Delete workspace "${workspace.name}"?\n\nThe projects themselves stay — only this workspace is removed.`,
       )
     ) {
       return;
@@ -168,11 +148,15 @@ export function WorkspaceDetailPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           <WorkspaceSearchDialog workspace={workspace} />
-          <AddRepoDialog workspaceID={workspace.id} onAdded={loadRepos} />
+          {/* Add repo here clones + indexes a new external project AND
+              links it into this workspace in one step. The dialog
+              accepts an optional workspaceID — when supplied, it
+              chains POST /git-repos with POST /workspaces/{id}/projects. */}
+          <AddRepoDialog workspaceID={workspace.id} onAdded={loadProjects} />
           <AddExistingProjectDialog
             workspaceID={workspace.id}
-            existingProjectPaths={(repos ?? []).map((r) => r.project_path)}
-            onAdded={loadRepos}
+            existingProjectPaths={(projects ?? []).map((p) => p.project.host_path)}
+            onAdded={loadProjects}
           />
           <Button variant="outline" onClick={handleDeleteWorkspace}>
             <Trash2 className="mr-1 size-4" /> Delete
@@ -190,40 +174,40 @@ export function WorkspaceDetailPage() {
       {error && (
         <Alert variant="destructive">
           <AlertCircle className="size-4" />
-          <AlertTitle>Could not load repositories</AlertTitle>
+          <AlertTitle>Could not load projects</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
       <section className="space-y-3">
         <div className="flex items-baseline justify-between">
-          <h2 className="text-base font-medium">Repositories</h2>
-          {repos && (
+          <h2 className="text-base font-medium">Projects</h2>
+          {projects && (
             <span className="text-xs text-muted-foreground">
-              {repos.length === 0
+              {projects.length === 0
                 ? 'none'
-                : `${repos.filter((r) => r.status === 'indexed').length} of ${
-                    repos.length
+                : `${projects.filter((p) => p.project.status === 'indexed').length} of ${
+                    projects.length
                   } indexed`}
             </span>
           )}
         </div>
 
-        {repos === null ? (
+        {projects === null ? (
           <div className="space-y-2">
             <Skeleton className="h-24 w-full" />
             <Skeleton className="h-24 w-full" />
           </div>
-        ) : repos.length === 0 ? (
-          <ReposEmptyState />
+        ) : projects.length === 0 ? (
+          <ProjectsEmptyState />
         ) : (
           <div className="grid gap-3">
-            {repos.map((repo) => (
-              <RepoCard
-                key={repo.id}
-                repo={repo}
-                onDeleted={loadRepos}
-                onReindexed={loadRepos}
+            {projects.map((p) => (
+              <WorkspaceProjectRow
+                key={p.project.host_path}
+                workspaceID={workspace.id}
+                wp={p}
+                onUnlinked={loadProjects}
               />
             ))}
           </div>
@@ -244,12 +228,14 @@ function BackLink() {
   );
 }
 
-function ReposEmptyState() {
+function ProjectsEmptyState() {
   return (
     <div className="rounded-md border border-dashed bg-muted/20 p-8 text-center">
-      <p className="text-sm font-medium">No repositories yet</p>
+      <p className="text-sm font-medium">No projects in this workspace</p>
       <p className="mt-1 text-xs text-muted-foreground">
-        Click <strong>Add repo</strong> above to attach the first one.
+        Use <strong>Add repo</strong> to clone + index a new GitHub project, or{' '}
+        <strong>Add Existing Project</strong> to link a project that already
+        lives in <code>/projects</code>.
       </p>
     </div>
   );

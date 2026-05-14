@@ -13,6 +13,7 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
@@ -22,7 +23,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
-	"github.com/dvcdsys/code-index/server/internal/workspacerepos"
+	"github.com/dvcdsys/code-index/server/internal/workspaceprojects"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -86,9 +87,12 @@ type Deps struct {
 	WorkspacesEnabled bool
 	Workspaces        *workspaces.Service
 	GithubTokens      *githubtokens.Service
-	// PR2 additions — repo attachment + the persistent job queue.
-	WorkspaceRepos *workspacerepos.Service
-	Jobs           *jobs.Service
+	// GitRepos owns clone + webhook metadata for external projects;
+	// WorkspaceProjects owns the workspace ↔ project junction. Jobs is
+	// the persistent background queue.
+	GitRepos          *gitrepos.Service
+	WorkspaceProjects *workspaceprojects.Service
+	Jobs              *jobs.Service
 	// PublicBaseURL is the operator-set externally-reachable URL of the
 	// server. Used to build the webhook URL surfaced when adding a repo
 	// — when empty, handlers return the path-only form and rely on the
