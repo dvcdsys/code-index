@@ -87,6 +87,14 @@ func Open(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrate webhook_mode: %w", err)
 	}
 
+	// Standalone /git-repos feature — add workspaces.is_default + the
+	// partial UNIQUE index. The default workspace row itself is created
+	// at server startup via workspaces.Service.EnsureDefault, not here.
+	if err := migrateWorkspacesDefault(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate workspaces is_default: %w", err)
+	}
+
 	// PR13 — workspace_repos.is_linked + drop the legacy global UNIQUE
 	// on project_path. The rebuild path is taken only when the old
 	// constraint is still present; freshly-created DBs hit the new
@@ -385,6 +393,58 @@ func migrateIndexedWithModel(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`ALTER TABLE projects ADD COLUMN indexed_with_model TEXT`); err != nil {
 		return fmt.Errorf("add indexed_with_model column: %w", err)
+	}
+	return nil
+}
+
+// migrateWorkspacesDefault adds workspaces.is_default to pre-feature
+// databases plus the partial UNIQUE index that enforces "at most one
+// default workspace". Idempotent: re-runs are no-ops. The actual
+// bootstrap (inserting the singleton row) happens at server startup
+// via workspaces.Service.EnsureDefault — keeping it out of the DB
+// migration so tests can opt in/out by skipping the call.
+func migrateWorkspacesDefault(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(workspaces)`)
+	if err != nil {
+		return fmt.Errorf("table_info workspaces: %w", err)
+	}
+	have := false
+	tableExists := false
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		tableExists = true
+		if name == "is_default" {
+			have = true
+		}
+	}
+	rows.Close()
+	if !tableExists {
+		return nil
+	}
+	if !have {
+		if _, err := db.Exec(
+			`ALTER TABLE workspaces ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("add is_default column: %w", err)
+		}
+	}
+	// The partial UNIQUE index is in Schema's CREATE INDEX IF NOT
+	// EXISTS so fresh DBs already have it; create it here for older
+	// installs that just got the column added.
+	if _, err := db.Exec(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_default
+		    ON workspaces(is_default) WHERE is_default = 1`,
+	); err != nil {
+		return fmt.Errorf("create idx_workspaces_default: %w", err)
 	}
 	return nil
 }

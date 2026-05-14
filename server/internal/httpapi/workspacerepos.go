@@ -207,6 +207,34 @@ func (s *Server) AddWorkspaceRepo(w http.ResponseWriter, r *http.Request, id str
 	writeJSON(w, http.StatusCreated, resp)
 }
 
+// AddStandaloneGitRepo — POST /api/v1/git-repos.
+//
+// Convenience wrapper around AddWorkspaceRepo: resolves the singleton
+// default workspace (created at startup via workspaces.EnsureDefault)
+// and proxies to the same clone+index pipeline. Used by the dashboard's
+// /projects → Add repo button so users can add a GitHub repo without
+// having to think about workspaces first; the resulting project still
+// shows up in /projects and can later be linked into any other
+// workspace via the existing link flow.
+func (s *Server) AddStandaloneGitRepo(w http.ResponseWriter, r *http.Request) {
+	if s.workspaceReposUnavailable(w) {
+		return
+	}
+	def, err := s.Deps.Workspaces.GetDefault(r.Context())
+	if err != nil {
+		// EnsureDefault should have run at startup. If it somehow
+		// didn't, retry once here so the endpoint stays usable.
+		fresh, ensureErr := s.Deps.Workspaces.EnsureDefault(r.Context())
+		if ensureErr != nil {
+			writeError(w, http.StatusInternalServerError,
+				"could not resolve default workspace: "+ensureErr.Error())
+			return
+		}
+		def = fresh
+	}
+	s.AddWorkspaceRepo(w, r, def.ID)
+}
+
 // tryAutoRegisterWebhook calls the GitHub API to register a push hook for
 // the given repo. Best-effort — failure does NOT roll back the
 // workspace_repos row; the operator can rerun manually via the

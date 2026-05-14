@@ -17,6 +17,7 @@ type workspacePayload struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
+	IsDefault   bool      `json:"is_default"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -26,6 +27,7 @@ func workspaceToPayload(w workspaces.Workspace) workspacePayload {
 		ID:          w.ID,
 		Name:        w.Name,
 		Description: w.Description,
+		IsDefault:   w.IsDefault,
 		CreatedAt:   w.CreatedAt,
 		UpdatedAt:   w.UpdatedAt,
 	}
@@ -141,11 +143,14 @@ func (s *Server) DeleteWorkspace(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	if err := s.Deps.Workspaces.Delete(r.Context(), id); err != nil {
-		if errors.Is(err, workspaces.ErrNotFound) {
+		switch {
+		case errors.Is(err, workspaces.ErrNotFound):
 			writeError(w, http.StatusNotFound, "workspace not found")
-			return
+		case errors.Is(err, workspaces.ErrDefaultProtected):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "could not delete workspace")
 		}
-		writeError(w, http.StatusInternalServerError, "could not delete workspace")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

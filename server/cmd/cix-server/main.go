@@ -249,6 +249,15 @@ func run() error {
 			logger.Info("workspaces: encryption key loaded", "source", secSvc.Source())
 		}
 		wsSvc = workspaces.New(database)
+		// Make sure the singleton default workspace exists so the
+		// /git-repos endpoint and the dashboard's /projects "Add repo"
+		// button always have a target. Idempotent — boots after the
+		// first one are no-ops.
+		if def, err := wsSvc.EnsureDefault(context.Background()); err != nil {
+			return fmt.Errorf("ensure default workspace: %w", err)
+		} else {
+			logger.Info("workspaces: default workspace ready", "id", def.ID, "name", def.Name)
+		}
 		wrSvc = workspacerepos.New(database)
 
 		// Persistent job queue + worker pool. Worker concurrency comes

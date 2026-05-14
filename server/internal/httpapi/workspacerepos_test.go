@@ -218,6 +218,109 @@ func TestRepos_WebhookModeRejectsUnknown(t *testing.T) {
 	}
 }
 
+// TestStandaloneGitRepo_LandsInDefaultWorkspace covers the
+// /api/v1/git-repos shortcut used by the dashboard's /projects → Add
+// repo button. The endpoint must resolve (or lazily create) the
+// default workspace and run the same clone+enqueue logic as the
+// per-workspace endpoint. Critical assertions: the new row points at
+// the default workspace, a clone_repo job is enqueued, and the
+// resulting project_path matches the canonical shape.
+func TestStandaloneGitRepo_LandsInDefaultWorkspace(t *testing.T) {
+	router, jobsSvc := reposRouter(t)
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url": "https://github.com/spf13/cobra",
+		"branch":     "main",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("standalone add: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Repo workspaceRepoPayload `json:"repo"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Repo.WorkspaceID == "" {
+		t.Fatalf("workspace_id must be populated, got empty payload: %+v", resp.Repo)
+	}
+	if resp.Repo.ProjectPath != "github.com/spf13/cobra@main" {
+		t.Fatalf("unexpected project_path %q", resp.Repo.ProjectPath)
+	}
+	if resp.Repo.Status != workspacerepos.StatusPending {
+		t.Fatalf("expected status=pending, got %q", resp.Repo.Status)
+	}
+
+	// Pull the default workspace through the service-level GetDefault
+	// to verify the row actually lives there, not just "some workspace".
+	rr2 := doJSON(t, router, http.MethodGet, "/api/v1/workspaces", nil)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("list workspaces: %d", rr2.Code)
+	}
+	var list struct {
+		Workspaces []workspacePayload `json:"workspaces"`
+	}
+	_ = json.Unmarshal(rr2.Body.Bytes(), &list)
+	var defaultID string
+	for _, w := range list.Workspaces {
+		if w.IsDefault {
+			defaultID = w.ID
+		}
+	}
+	if defaultID == "" {
+		t.Fatalf("no default workspace surfaced in list response: %+v", list.Workspaces)
+	}
+	if resp.Repo.WorkspaceID != defaultID {
+		t.Fatalf("standalone repo landed in workspace=%q, want default=%q",
+			resp.Repo.WorkspaceID, defaultID)
+	}
+
+	jobList, err := jobsSvc.List(context.Background(), jobs.StatusPending, "clone_repo", 10)
+	if err != nil {
+		t.Fatalf("jobs list: %v", err)
+	}
+	if len(jobList) != 1 {
+		t.Fatalf("expected 1 clone_repo job for the standalone add, got %d", len(jobList))
+	}
+}
+
+// TestStandaloneGitRepo_DeleteDefaultWorkspaceConflict pins the
+// invariant the dashboard relies on: the default workspace cannot be
+// removed via the regular delete endpoint, so /projects → Add repo
+// always has a home to drop the row into.
+func TestStandaloneGitRepo_DeleteDefaultWorkspaceConflict(t *testing.T) {
+	router, _ := reposRouter(t)
+
+	// Force the default workspace to exist by hitting /git-repos once.
+	if rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url": "https://github.com/a/b",
+		"branch":     "main",
+	}); rr.Code != http.StatusCreated {
+		t.Fatalf("seed: %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	rr := doJSON(t, router, http.MethodGet, "/api/v1/workspaces", nil)
+	var list struct {
+		Workspaces []workspacePayload `json:"workspaces"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &list)
+	var defaultID string
+	for _, w := range list.Workspaces {
+		if w.IsDefault {
+			defaultID = w.ID
+		}
+	}
+	if defaultID == "" {
+		t.Fatalf("no default workspace found")
+	}
+
+	rr = doJSON(t, router, http.MethodDelete, "/api/v1/workspaces/"+defaultID, nil)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409 on default-workspace delete, got %d (%s)",
+			rr.Code, rr.Body.String())
+	}
+}
+
 func TestRepos_BadURLRejected(t *testing.T) {
 	router, _ := reposRouter(t)
 	wsID := createWS(t, router, "platform")

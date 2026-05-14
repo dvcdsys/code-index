@@ -42,11 +42,17 @@ const NO_TOKEN = '__none__';
 // can't pick a repository before choosing a token, and can't submit
 // before pinning down a branch + webhook mode. The shape mirrors how
 // people actually fill it in: PAT → repo → branch → webhook policy.
+//
+// Two scopes:
+//   - workspaceID provided  → POST /workspaces/{id}/repos  (standard flow).
+//   - workspaceID omitted   → POST /git-repos              (server resolves
+//     the singleton default workspace; surfaced from /projects so users
+//     can add a repo without picking a workspace first).
 export function AddRepoDialog({
   workspaceID,
   onAdded,
 }: {
-  workspaceID: string;
+  workspaceID?: string;
   onAdded: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -193,10 +199,10 @@ export function AddRepoDialog({
       if (tokenID && tokenID !== NO_TOKEN) {
         payload.token_id = tokenID;
       }
-      const resp = await api.post<WorkspaceRepoCreated>(
-        `/workspaces/${workspaceID}/repos`,
-        payload,
-      );
+      const endpoint = workspaceID
+        ? `/workspaces/${workspaceID}/repos`
+        : `/git-repos`;
+      const resp = await api.post<WorkspaceRepoCreated>(endpoint, payload);
       setCreated(resp);
       onAdded();
     } catch (e) {

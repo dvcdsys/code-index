@@ -159,6 +159,16 @@ CREATE TABLE IF NOT EXISTS workspaces (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
     description TEXT,
+    -- is_default flags the singleton "Personal" workspace that holds
+    -- repos added from /projects (the standalone Add repo flow). At
+    -- most one row carries is_default=1 — enforced by the partial
+    -- UNIQUE index created in migrateWorkspacesDefault + the
+    -- EnsureDefault bootstrap. The index is intentionally NOT here:
+    -- a pre-feature DB whose workspaces table lacks is_default would
+    -- fail the multi-statement Schema.Exec before the migration has
+    -- a chance to ALTER TABLE ADD COLUMN (same pattern as
+    -- idx_projects_path_hash).
+    is_default  INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );

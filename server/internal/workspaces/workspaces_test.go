@@ -119,3 +119,121 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("second delete should be ErrNotFound, got %v", err)
 	}
 }
+
+// TestEnsureDefault_CreatesOnFirstCall verifies the bootstrap path:
+// a fresh DB has no default workspace; EnsureDefault must create the
+// singleton row and stamp it with IsDefault=true.
+func TestEnsureDefault_CreatesOnFirstCall(t *testing.T) {
+	svc := mustOpen(t)
+	ctx := context.Background()
+
+	// Sanity: GetDefault returns ErrNotFound before EnsureDefault runs.
+	if _, err := svc.GetDefault(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound before EnsureDefault, got %v", err)
+	}
+
+	def, err := svc.EnsureDefault(ctx)
+	if err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if !def.IsDefault {
+		t.Fatalf("expected IsDefault=true, got %+v", def)
+	}
+	if def.Name != "Personal" {
+		t.Fatalf("expected name=Personal, got %q", def.Name)
+	}
+}
+
+// TestEnsureDefault_Idempotent verifies a second call returns the
+// existing row without inserting a duplicate. The partial UNIQUE index
+// on is_default would catch a regression here.
+func TestEnsureDefault_Idempotent(t *testing.T) {
+	svc := mustOpen(t)
+	ctx := context.Background()
+
+	first, err := svc.EnsureDefault(ctx)
+	if err != nil {
+		t.Fatalf("first EnsureDefault: %v", err)
+	}
+	second, err := svc.EnsureDefault(ctx)
+	if err != nil {
+		t.Fatalf("second EnsureDefault: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("EnsureDefault should be idempotent — got %q then %q", first.ID, second.ID)
+	}
+
+	// And only one row total should be flagged as default.
+	list, err := svc.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var defaults int
+	for _, w := range list {
+		if w.IsDefault {
+			defaults++
+		}
+	}
+	if defaults != 1 {
+		t.Fatalf("expected exactly one default workspace, got %d", defaults)
+	}
+}
+
+// TestEnsureDefault_AvoidsNameCollision verifies the loop that bumps
+// the name suffix when an operator-created workspace already occupies
+// the natural "Personal" name. The default workspace lands at
+// "Personal (2)" without stealing the existing row's identity.
+func TestEnsureDefault_AvoidsNameCollision(t *testing.T) {
+	svc := mustOpen(t)
+	ctx := context.Background()
+
+	existing, err := svc.Create(ctx, "Personal", "operator's own workspace")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	def, err := svc.EnsureDefault(ctx)
+	if err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if def.ID == existing.ID {
+		t.Fatalf("EnsureDefault stole the operator's workspace — got %+v", def)
+	}
+	if def.Name == existing.Name {
+		t.Fatalf("default workspace should have a distinct name, got %q", def.Name)
+	}
+	if !def.IsDefault {
+		t.Fatalf("default flag missing on the freshly-allocated row")
+	}
+	// The pre-existing row is unchanged.
+	again, err := svc.GetByID(ctx, existing.ID)
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if again.IsDefault {
+		t.Fatalf("pre-existing row must not be flagged as default, got %+v", again)
+	}
+}
+
+// TestDelete_DefaultProtected guards the bootstrap invariant: even if
+// /git-repos is unused, the default workspace must survive operator
+// deletes. The error type lets the HTTP layer map this to 409.
+func TestDelete_DefaultProtected(t *testing.T) {
+	svc := mustOpen(t)
+	ctx := context.Background()
+
+	def, err := svc.EnsureDefault(ctx)
+	if err != nil {
+		t.Fatalf("EnsureDefault: %v", err)
+	}
+	if err := svc.Delete(ctx, def.ID); !errors.Is(err, ErrDefaultProtected) {
+		t.Fatalf("expected ErrDefaultProtected, got %v", err)
+	}
+	// Sanity: regular workspaces remain deletable.
+	other, err := svc.Create(ctx, "platform", "")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := svc.Delete(ctx, other.ID); err != nil {
+		t.Fatalf("Delete on non-default workspace failed: %v", err)
+	}
+}

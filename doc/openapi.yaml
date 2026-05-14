@@ -1250,6 +1250,45 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/git-repos:
+    post:
+      operationId: addStandaloneGitRepo
+      tags: [workspaces]
+      summary: Clone + index a GitHub repository outside any specific workspace
+      description: |
+        Convenience endpoint for the dashboard's `/projects` → Add repo
+        button. Internally resolves the singleton "default" workspace
+        (see `workspaces.is_default`) and proxies to the same code path
+        as POST `/api/v1/workspaces/{id}/repos`. The resulting project
+        appears in `/api/v1/projects` and can later be linked into any
+        regular workspace via `/api/v1/workspaces/{id}/repos/link`.
+
+        Request and response shapes are identical to the per-workspace
+        Add repo endpoint, with one exception: the response's `repo`
+        field carries the default workspace's id in `workspace_id` so
+        the dashboard can show the resulting project in context.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddWorkspaceRepoRequest"
+      responses:
+        "201":
+          description: Repo attached to default workspace + clone enqueued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceRepoCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
   /api/v1/workspaces/{id}/repos:
     parameters:
       - name: id
@@ -3097,7 +3136,7 @@ components:
 
     Workspace:
       type: object
-      required: [id, name, description, created_at, updated_at]
+      required: [id, name, description, is_default, created_at, updated_at]
       properties:
         id:
           type: string
@@ -3108,6 +3147,13 @@ components:
         description:
           type: string
           description: Free-form description. Empty string when absent.
+        is_default:
+          type: boolean
+          description: |
+            True for the singleton workspace that receives repositories
+            added via the standalone `/api/v1/git-repos` endpoint (the
+            dashboard's `/projects` → Add repo flow). Exactly one
+            workspace is flagged; deleting it returns 409.
         created_at:
           type: string
           format: date-time
