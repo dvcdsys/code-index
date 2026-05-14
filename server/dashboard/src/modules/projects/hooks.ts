@@ -14,16 +14,17 @@ export const projectKeys = {
 };
 
 // ProjectWorkspaceEntry mirrors the Go response shape from
-// /api/v1/projects/{hash}/workspaces — one row per workspace_repo
-// pointing at this project. Defined locally so the hook doesn't
-// depend on a regen of generated.ts every time the page renders.
+// /api/v1/projects/{hash}/workspaces — one row per workspace_projects
+// membership pointing at this project. The server returns just three
+// fields: the workspace it's linked into and the timestamp it was
+// added. Branch / status / owner-vs-linked concepts no longer exist
+// on this endpoint — projects are uniformly first-class members.
+// Defined locally so the hook doesn't depend on a regen of
+// generated.ts every time the page renders.
 export type ProjectWorkspaceEntry = {
   workspace_id: string;
   workspace_name: string;
-  repo_id: string;
-  branch: string;
-  status: 'pending' | 'cloning' | 'indexing' | 'indexed' | 'failed';
-  is_linked: boolean;
+  added_at: string;
 };
 
 export type ProjectWorkspaceList = {
