@@ -150,11 +150,11 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
     updated_by TEXT
 );
 
--- Workspaces feature (PR1 — skeleton). Workspaces group GitHub repositories
--- for cross-project semantic search. Server-wide shared: every authenticated
+-- Workspaces group indexed projects (rows in the projects table,
+-- optionally with their git_repos peer) for cross-project semantic
+-- search. Membership lives in workspace_projects; clone + webhook
+-- metadata lives in git_repos. Server-wide shared: every authenticated
 -- user can see and modify any workspace (per the chosen visibility model).
--- The richer workspace_repos / call_edges / communities tables land in
--- subsequent PRs of the workspaces feature branch.
 CREATE TABLE IF NOT EXISTS workspaces (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
@@ -348,4 +348,5 @@ var ExpectedTables = []string{
 	"call_edges",
 	"chunks_meta",
 	"chunks_fts",
+	"schema_migrations",
 }
