@@ -38,8 +38,9 @@ func (e fixedEmbedder) EmbedQuery(_ context.Context, _ string) ([]float32, error
 func (e fixedEmbedder) Ready(_ context.Context) error { return nil }
 
 // newSearchRouter wires the minimum surface workspace search needs:
-// workspaces, workspace_repos, jobs (unused but in Deps), vectorstore
-// (real, on tmpdir), and a query embedder the caller controls.
+// workspaces, git_repos, workspace_projects, jobs (unused but in Deps),
+// vectorstore (real, on tmpdir), and a query embedder the caller
+// controls.
 func newSearchRouter(t *testing.T, d *sql.DB, vs *vectorstore.Store, emb fixedEmbedder) http.Handler {
 	t.Helper()
 	t.Setenv("CIX_SECRET_KEY", "")
@@ -65,11 +66,11 @@ func newSearchRouter(t *testing.T, d *sql.DB, vs *vectorstore.Store, emb fixedEm
 	})
 }
 
-// seedRepoWithChunks inserts a projects + workspace_repos row for the
-// given project_path inside the workspace, then upserts the supplied
-// chunks into chromem so /search has something to retrieve. Bypasses
-// the clone+index job chain — those are exercised in workspacerepos
-// tests already.
+// seedRepoWithChunks inserts a projects row + workspace_projects
+// membership for the given project_path inside the workspace, then
+// upserts the supplied chunks into chromem so /search has something to
+// retrieve. Bypasses the clone+index job chain — those are exercised
+// in gitrepos tests already.
 func seedRepoWithChunks(
 	t *testing.T,
 	d *sql.DB,
@@ -793,12 +794,11 @@ func seedPendingRepo(t *testing.T, d *sql.DB, wsID, projectPath, status string) 
 	_ = uuid.NewString()
 }
 
-// TestWorkspaceSearch_SurfacesPendingRepos verifies that repos whose
-// workspace_repos.status ≠ 'indexed' are reported back in
-// `pending_repos` instead of being silently dropped. The dashboard
-// uses this to render a "still indexing" banner — without it the
-// operator sees a partial result set with no hint that anything's
-// missing.
+// TestWorkspaceSearch_SurfacesPendingRepos verifies that projects whose
+// projects.status ≠ 'indexed' are reported back in `pending_repos`
+// instead of being silently dropped. The dashboard uses this to render
+// a "still indexing" banner — without it the operator sees a partial
+// result set with no hint that anything's missing.
 func TestWorkspaceSearch_SurfacesPendingRepos(t *testing.T) {
 	d, err := dbOpenMemory(t)
 	if err != nil {
