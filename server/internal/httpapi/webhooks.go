@@ -159,7 +159,18 @@ func (s *Server) ReceiveGithubWebhook(w http.ResponseWriter, r *http.Request, ha
 
 // validHMAC returns true when the given header matches HMAC-SHA256(body, secret).
 // Header format is "sha256=<hex>" per GitHub's spec.
+//
+// An empty secret is rejected before any computation: HMAC keyed with the
+// empty string is a fixed, well-known value over any body (an attacker
+// who never saw our secret can forge a matching header). This case
+// should be unreachable — git_repos.webhook_secret is NOT NULL and the
+// add-repo handler always populates it with a random 32-byte secret —
+// but defending here makes the invariant explicit and removes the
+// "what if a future caller passes nil" footgun.
 func validHMAC(body, secret []byte, header string) bool {
+	if len(secret) == 0 {
+		return false
+	}
 	header = strings.TrimSpace(header)
 	const prefix = "sha256="
 	if !strings.HasPrefix(header, prefix) {

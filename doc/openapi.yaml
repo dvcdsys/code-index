@@ -733,8 +733,8 @@ paths:
         the user can click to jump to the workspace detail page.
 
         Empty list when the project isn't part of any workspace yet —
-        either it was indexed directly via /projects rather than via a
-        workspace_repo, or all its memberships have been detached.
+        either it was indexed directly via /projects without ever being
+        linked, or all its memberships have been detached.
       responses:
         "200":
           description: Memberships
@@ -1237,9 +1237,11 @@ paths:
       tags: [workspaces]
       summary: Delete a workspace
       description: |
-        Removes the workspace row. PR1 has nothing else to cascade
-        (workspace_repos lands in PR2); future PRs will cascade repos,
-        communities, and the centroid Chroma collection.
+        Removes the workspace row. workspace_projects memberships
+        referencing this workspace are removed via ON DELETE CASCADE;
+        the underlying projects, git_repos peers, and on-disk clones
+        are preserved (delete those explicitly via /projects/{path}
+        when desired).
       responses:
         "204":
           description: Deleted
@@ -1507,8 +1509,16 @@ paths:
       summary: Webhook URL + secret for manual GitHub setup
       description: |
         Returns the publicly-reachable webhook URL and the HMAC secret
-        for an external project. 404 when the project is local (no
-        webhook lifecycle).
+        for an external (GitHub-cloned) project. Only projects with a
+        `git_repos` peer participate in webhook delivery — local-path
+        projects have no clone lifecycle and no webhook.
+
+        The handler returns 404 in two distinct cases, indistinguishable
+        on the wire: (a) the `path_hash` doesn't resolve to any project
+        at all, and (b) the project exists but is local. Callers that
+        need to disambiguate must query `GET /projects/{hash}` first to
+        confirm existence, then treat a subsequent webhook-info 404 as
+        "local project, no webhook to configure".
       responses:
         "200":
           description: Webhook coordinates
@@ -1519,7 +1529,14 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
-          $ref: "#/components/responses/NotFound"
+          description: |
+            Either the project does not exist, OR the project exists but
+            is local (no `git_repos` row, no webhook to surface).
+            Disambiguate by checking `GET /projects/{hash}` first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
@@ -1728,9 +1745,11 @@ paths:
       summary: Delete a stored GitHub PAT
       description: |
         Permanently removes the encrypted blob. Subsequent workspaces
-        operations that reference this token id will fail. PR1 does not
-        block deletion when the token is referenced — workspace_repos
-        landing in PR2 will introduce that FK.
+        operations that reference this token id will fail. The
+        git_repos.token_id FK uses ON DELETE SET NULL, so existing
+        rows survive token revocation but their re-clone / webhook
+        flows that need GitHub auth will fail until a token is
+        re-attached.
       responses:
         "204":
           description: Deleted
@@ -3585,9 +3604,8 @@ components:
           type: string
           enum: [pending, cloning, indexing, failed]
           description: |
-            Current row state in `workspace_repos.status`. Anything
-            other than `indexed` means the repo hasn't contributed to
-            this response.
+            Current per-project status. Anything other than `indexed`
+            means the project hasn't contributed to this response.
 
     WorkspaceSearchFailedRepo:
       type: object
