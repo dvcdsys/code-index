@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
@@ -128,6 +129,16 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 			return terr
 		}
 		pat = token
+		// Best-effort intent signal: rebind `pat` to a zero-filled string
+		// on function exit. Go strings are immutable, so this does NOT
+		// wipe the underlying bytes — the original allocation from
+		// Reveal/Decrypt may still be reachable from escape-analyzed
+		// copies (e.g. inside repocloner's HTTP basic-auth header). The
+		// gesture matters for readability + intent (PAT is sensitive,
+		// don't hold it longer than needed), not as a security control.
+		// Switching PAT to []byte with explicit wipe via crypto/subtle
+		// would be overkill for this code path.
+		defer func() { pat = strings.Repeat("\x00", len(pat)) }()
 		_ = d.GithubTokens.Touch(ctx, g.TokenID)
 	}
 

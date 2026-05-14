@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,6 +135,38 @@ func TestWebhook_MissingSignatureRejected(t *testing.T) {
 	}
 }
 
+// TestValidHMAC_RejectsEmptySecret pins the empty-secret guard added in
+// Fix #13. HMAC keyed with the empty string returns a fixed, attacker-
+// computable digest for any body; if validHMAC accepted that case, a
+// caller who forgot to load the secret (or a future bug that passed
+// nil) would silently authenticate every delivery. We pre-compute the
+// "correct" HMAC with the empty key over a known body and assert the
+// function STILL rejects it — the empty-secret short-circuit must fire
+// before the constant-time compare, never after.
+func TestValidHMAC_RejectsEmptySecret(t *testing.T) {
+	body := []byte(`{"ref":"refs/heads/main"}`)
+	// Compute what the header WOULD be if we naively HMAC'd with "".
+	mac := hmac.New(sha256.New, []byte(""))
+	mac.Write(body)
+	forged := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	if validHMAC(body, nil, forged) {
+		t.Error("validHMAC accepted a nil-secret HMAC — guard missing")
+	}
+	if validHMAC(body, []byte(""), forged) {
+		t.Error("validHMAC accepted an empty-byte-slice secret HMAC — guard missing")
+	}
+
+	// Sanity: with a real secret + matching signature it still works.
+	real := []byte("real-secret")
+	mac2 := hmac.New(sha256.New, real)
+	mac2.Write(body)
+	good := "sha256=" + hex.EncodeToString(mac2.Sum(nil))
+	if !validHMAC(body, real, good) {
+		t.Error("validHMAC rejected a correctly-signed body with a real secret — guard over-broad")
+	}
+}
+
 func TestWebhook_UnknownHashReturns404(t *testing.T) {
 	router, _ := reposRouter(t)
 	body := []byte(`{}`)
@@ -215,6 +248,43 @@ func TestAddGitRepo_AutoRegisterFailsCleanlyWithoutPublicURL(t *testing.T) {
 	}
 	if resp.Note == "" {
 		t.Fatalf("operator-facing note should explain the reason")
+	}
+}
+
+// TestGetProjectWebhookInfo_LocalProject_Returns404 verifies that the
+// webhook-info endpoint returns 404 when the project exists but has no
+// `git_repos` peer (i.e. it's a local-path project tracked only in the
+// `projects` table). Local projects don't go through the clone +
+// webhook lifecycle, so there's no URL or secret to surface. The
+// operation contract documented in doc/openapi.yaml requires callers
+// to disambiguate "project missing" vs "project local" by first
+// hitting GET /projects/{hash} — this test pins the local-project arm
+// of the 404 response so the contract doesn't drift.
+func TestGetProjectWebhookInfo_LocalProject_Returns404(t *testing.T) {
+	router, _, d := reposRouterDB(t)
+
+	// Seed a local project — absolute filesystem path, no git_repos peer.
+	hostPath := "/Users/x/local-proj"
+	hash := projects.HashPath(hostPath)
+	if _, err := d.Exec(`
+		INSERT INTO projects (host_path, container_path, languages, settings, stats,
+			status, created_at, updated_at, path_hash)
+		VALUES (?, ?, '[]', '{}', '{}', 'indexed', '2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z', ?)`,
+		hostPath, hostPath, hash,
+	); err != nil {
+		t.Fatalf("seed local project: %v", err)
+	}
+
+	rr := doJSON(t, router, http.MethodGet, "/api/v1/projects/"+hash+"/webhook-info", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for local project webhook-info, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	// Body should mention "local" or "no git_repos" so an operator
+	// reading the API response (or curl output) understands why this
+	// project doesn't have webhook coordinates.
+	body := rr.Body.String()
+	if !strings.Contains(body, "local") && !strings.Contains(body, "git_repos") {
+		t.Errorf("404 body should hint at the local-project cause, got: %s", body)
 	}
 }
 
