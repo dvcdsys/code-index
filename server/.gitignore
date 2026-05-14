@@ -1,5 +1,7 @@
 # Compiled binaries — match only the executable, not the cmd/cix-server/ source directory.
 /cmd/cix-server/cix-server
+# `go build ./cmd/cix-server` run from server/ without -o drops the binary here.
+/cix-server
 /bin/
 /dist/
 
