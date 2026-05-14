@@ -11,7 +11,7 @@
 //   - Fetch + reset to remote HEAD on subsequent runs
 //   - Report the current HEAD SHA (for last_sha bookkeeping)
 //   - Resolve a "github.com/owner/repo" + branch to a deterministic local
-//     directory under DataDir/repos/{repo_id}/
+//     directory under DataDir/repos/{path_hash}/
 //
 // Errors are deliberately coarse — the worker pool surfaces them in the
 // job row and the dashboard renders them verbatim. There's no point
@@ -62,8 +62,8 @@ type Result struct {
 // after the operation completes.
 //
 // The caller is responsible for choosing a LocalDir that won't collide
-// across repos — typically `<DataDir>/repos/<repo_id>/` keyed by the
-// workspace_repos row id (NOT the github URL, which can change with
+// across repos — typically `<DataDir>/repos/<path_hash>/` keyed by
+// projects.path_hash (NOT the github URL, which can change with
 // rename + redirect).
 func CloneOrFetch(ctx context.Context, opts CloneOptions) (Result, error) {
 	if strings.TrimSpace(opts.GitHubURL) == "" {

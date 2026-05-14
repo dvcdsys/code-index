@@ -28,9 +28,9 @@ and troubleshoot the feature in production.
    branch, optional token, and choose **Auto-register webhook** if
    your PAT carries `admin:repo_hook`. Otherwise check **I'll set it
    up myself** and copy the displayed URL + secret into GitHub.
-6. The server clones the repo into `<CIX_WORKSPACES_DATA_DIR>/<repo_id>/`
+6. The server clones the repo into `<CIX_WORKSPACES_DATA_DIR>/<path_hash>/`
    and runs the existing indexer pipeline against it. Status transitions
-   visible on the workspace detail page: `pending → cloning → indexing → indexed`.
+   visible on the workspace detail page: `created → indexing → indexed`.
 
 ## Environment variables
 
@@ -62,11 +62,11 @@ convenience for dev.
 
 ## Webhooks
 
-GitHub deliveries hit `POST /api/v1/webhooks/github/<workspace_repo_id>`.
+GitHub deliveries hit `POST /api/v1/webhooks/github/<path_hash>`.
 The endpoint is **public** in the auth sense (no Bearer/session check)
 but every delivery is HMAC-SHA256-validated against the per-row
-`webhook_secret`. The secret is shown exactly once on add-repo and on
-**Workspaces → Repo → Webhook info**.
+`webhook_secret` stored on the matching `git_repos` row. The secret is
+shown exactly once on add-repo and on **Project → Webhook info**.
 
 Supported events:
 
@@ -115,7 +115,7 @@ production but perfect for the first end-to-end smoke test.
 
 ### Manual webhook setup
 
-If `auto_webhook=false` (default) the dashboard surfaces the URL + secret
+If `webhook_mode=manual` (default) the dashboard surfaces the URL + secret
 after add-repo. Paste them into GitHub:
 
 1. Repo → **Settings → Webhooks → Add webhook**
@@ -130,12 +130,12 @@ GitHub's webhook page will mark the delivery green.
 
 ### Auto-register
 
-When the PAT carries `admin:repo_hook` scope and `auto_webhook=true`,
-the server calls `POST /repos/{owner}/{repo}/hooks` on your behalf
-during add-repo and persists the resulting hook id (used to
-de-register on delete). Failure is non-fatal — the response includes
-`auto_registered: false` and an operator-facing note explaining the
-specific reason (missing scope, network error, etc.).
+When the PAT carries `admin:repo_hook` scope and `webhook_mode=auto`,
+the server uses GitHub's hooks API on your behalf during add-repo and
+persists the resulting hook id (used to de-register on delete). Failure
+is non-fatal — the response includes `auto_registered: false` and an
+operator-facing note explaining the specific reason (missing scope,
+network error, etc.).
 
 ## Background workers
 
@@ -157,17 +157,17 @@ Future PRs add `build_call_graph` and `compute_workspace_communities`.
 
 ## Troubleshooting
 
-- **Status stuck at `cloning`** — check `GET /jobs?status=running` and
+- **Status stuck at `indexing`** — check `GET /jobs?status=running` and
   the cix-server logs. Most common cause: PAT missing `repo` scope on
   a private repo, or network not reaching github.com.
-- **Status stuck at `failed`** with `last_error` set — the message
-  comes directly from go-git or the indexer. Common fixes: rotate the
-  PAT, confirm the branch name, verify the runtime model is loaded
+- **Status stuck at `error`** — the underlying job's error message is
+  surfaced on the project detail page. Common fixes: rotate the PAT,
+  confirm the branch name, verify the runtime model is loaded
   (`GET /api/v1/admin/sidecar/status`).
 - **Webhook deliveries returning 401** — the secret in GitHub doesn't
   match what cix stored. Click **Webhook info** in the dashboard to
   see the canonical value, paste again. Secrets rotate when the
-  workspace_repo is recreated.
+  git_repos row is recreated.
 - **Encryption key mismatch on startup** — operator-readable error in
   the boot log. Recover the prior `CIX_SECRET_KEY` from your secrets
   manager or wipe `github_tokens` manually before retrying.
