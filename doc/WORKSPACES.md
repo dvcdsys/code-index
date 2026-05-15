@@ -5,10 +5,31 @@ together and serve cross-project semantic search against the union.
 This document covers everything an operator needs to enable, configure,
 and troubleshoot the feature in production.
 
-> **Status (PR1–PR3).** The skeleton, clone/index pipeline, and webhook
-> receiver are all in. Two-stage cross-project search is the deliverable
-> of PR4–PR6 — until those merge, `workspaces` behaves like a tag over
-> per-project indexes.
+For the user-facing workflow (when to reach for workspace search, the
+agent trust rules, query patterns), see [`../workspaces.md`](../workspaces.md).
+For the search algorithm, see [`SEARCH_ALGORITHM.md`](SEARCH_ALGORITHM.md).
+For the webhook lifecycle, see [`WEBHOOKS.md`](WEBHOOKS.md).
+
+> **Feature flag.** Workspaces are gated on `CIX_WORKSPACES_ENABLED=true`.
+> Without it every `/api/v1/workspaces/*` endpoint returns 503. The
+> end-to-end pipeline — clone, FTS5 + dense index, hybrid two-stage
+> search, agent skill — is in production as of `develop`.
+
+## Schema
+
+A workspace is a *membership* layer over per-project indexes. Three
+tables underpin it (post-`e433fee` refactor; the older
+`workspace_repos` table no longer exists):
+
+| Table | Role |
+|---|---|
+| `workspaces` | The workspace itself (id, name, description). |
+| `git_repos` | Clone metadata, 1:1 with `projects` — github_url, branch, token_id, webhook_secret, webhook_id, webhook_mode, auto_webhook, last_sha. Only populated for repos cix cloned (workspace adds); local `cix init` projects don't have a row here. |
+| `workspace_projects` | Many-to-many junction. A project (cloned or local) can belong to multiple workspaces; deleting a workspace doesn't drop the underlying project. |
+
+Migrations live in `server/internal/db/migrations.go`. The split-out
+migration is `19226aa` (crash-safe + `schema_migrations` versioning)
+and the table rename in `e433fee`.
 
 ## Quick start
 
@@ -172,13 +193,25 @@ Future PRs add `build_call_graph` and `compute_workspace_communities`.
   the boot log. Recover the prior `CIX_SECRET_KEY` from your secrets
   manager or wipe `github_tokens` manually before retrying.
 
-## What's coming (PR4 – PR7)
+## Shipped follow-ons (PR4 – PR8)
 
-- **PR4** — Intra-project call-graph extraction (`call_edges` table)
-  + eval harness so the rest of the pipeline can lean on it.
-- **PR5** — Louvain community detection per workspace; centroid
-  embeddings stored in a dedicated chromem collection.
-- **PR6** — Two-stage workspace search endpoint
-  (`GET /workspaces/{id}/search`).
-- **PR7** — CLI subcommand + `cix:workspace` Claude Code skill +
-  dashboard polish (per-repo status panels, search UI, graph viz).
+The original `PR4–PR7` placeholders have all landed on `develop`:
+
+- **PR4** (`f244643`) — Intra-project call-graph extraction
+  (`call_edges` table) + eval harness.
+- **PR5** (`ec32744`) — Louvain community detection per workspace +
+  workspace centroid embeddings in a dedicated chromem collection.
+- **PR6** (`207bfaf`) — Two-stage workspace search endpoint
+  (`POST /api/v1/workspaces/{id}/search`). Hybrid BM25 + dense ranking
+  with project-level gating — see [`SEARCH_ALGORITHM.md`](SEARCH_ALGORITHM.md#3-workspace-hybrid-search).
+- **PR7** (`e1aa785`) — CLI subcommand (`cix workspace …`,
+  name-first grammar from PR8 / `5db28fd`) + `cix-workspace`
+  Claude Code skill + dashboard search dialog.
+- **PR8** (`5db28fd`) — Workspace discovery: dashboard expansion
+  panels per project + name-first CLI grammar so an agent can do
+  `cix ws "<workspace name>" search "<query>"` without juggling
+  workspace ids.
+
+Subsequent fixes calibrated the hybrid defaults (`96b487d`), added
+the FTS5 chunk mirror across all projects (`f00e3d3`), and tightened
+webhook validation + PAT handling (`903d48f`, `57e091d`).

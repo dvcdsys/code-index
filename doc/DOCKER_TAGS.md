@@ -23,7 +23,8 @@
   `.github/workflows/prerelease-cli.yml`.
 
 Both are intended for staging the next release together against the
-RTX 3090 box without cutting a real tag.
+RTX 3090 box without cutting a real tag. See [`UPDATES.md`](UPDATES.md#cli-install-channels)
+for the develop-channel workflow.
 
 ## Retired Tags (kept for historical reference)
 

@@ -68,10 +68,9 @@ rm -rf ~/.cache/huggingface/hub/models--nomic-ai--CodeRankEmbed
 
 ## Per-query detail
 
-See supporting files:
-- `doc/benchmark-q8_0.md` — F16 ref vs Q8_0
-- `doc/benchmark-q5_k_m.md` — F16 ref vs Q5_K_M
-- `doc/benchmark-q4_k_m.md` — F16 ref vs Q4_K_M
-- `doc/benchmark-f16.md` — F16 ref vs F16 GGUF
-- `doc/benchmark-data/` — raw top-k JSON per quant (`benchmark-*.json`) and
-  `fp16-cache.json` (reusable reference cache; safe to delete after review)
+Raw top-k JSON per quant (`benchmark-*.json`) and the reusable fp16
+reference cache live in `doc/benchmark-data/`. The earlier per-quant
+markdown summaries (`benchmark-q8_0.md`, `benchmark-q5_k_m.md`,
+`benchmark-q4_k_m.md`, `benchmark-f16.md`) were never filled in past
+their stubs and were removed in the 2026-05 docs refactor — the table
+above is the authoritative comparison.

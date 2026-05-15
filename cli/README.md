@@ -1,38 +1,59 @@
-# cix - Claude Code Index CLI
+# `cix` — Code IndeX CLI
 
-Thin client for semantic code search. Watches files, triggers reindexing, provides console commands for agents to search code and navigate projects.
+A thin Go client for the `cix-server` semantic code index. Runs `init`,
+`search`, `symbols`, `def`, `refs`, `files`, `summary`, `watch`,
+`reindex`, `cancel`, `list`, `config`, `workspace`, and `version`
+commands against the HTTP API.
 
-## Architecture
+The full user-facing command catalogue lives in the top-level
+[`README.md`](../README.md#cli-reference). This file covers building
+the CLI from source, the internal layout, and how to add a new command.
+
+## Layout
 
 ```
-cix (thin Go client)                     API Server (Docker or local)
-├── watch  ─── fsnotify ─── debounce ──> POST /index (incremental)
-├── init   ─── register + index + watch
-├── search ─── semantic code search ───> POST /search
-├── symbols ── symbol lookup ──────────> POST /search/symbols
-├── files  ─── file path search ───────> POST /search/files
-├── summary ── project overview ───────> GET  /summary
-├── status ─── indexing progress ──────> GET  /index/status
-├── list   ─── list projects ──────────> GET  /projects
-├── reindex ── manual reindex ─────────> POST /index
-└── config ─── manage ~/.cix/config.yaml
-
 cli/
-├── cmd/                 - Cobra commands (init, search, symbols, files, summary, watch, ...)
+├── cmd/                 — cobra command implementations
+│   ├── root.go          — root command + global flags
+│   ├── init.go          — `cix init`
+│   ├── search.go        — `cix search`
+│   ├── symbols.go       — `cix symbols`
+│   ├── definitions.go   — `cix def` (+ goto alias)
+│   ├── references.go    — `cix refs`
+│   ├── files.go         — `cix files`
+│   ├── summary.go       — `cix summary`
+│   ├── status.go        — `cix status`
+│   ├── list.go          — `cix list`
+│   ├── reindex.go       — `cix reindex`
+│   ├── cancel.go        — `cix cancel`
+│   ├── watch.go         — `cix watch` (start/stop/status, daemon)
+│   ├── config.go        — `cix config show/set/path`
+│   ├── workspace.go     — `cix workspace …` (cross-repo, name-first)
+│   └── version.go       — `cix version`
 ├── internal/
-│   ├── client/          - HTTP client to FastAPI server
-│   ├── config/          - YAML config (~/.cix/config.yaml)
-│   ├── watcher/         - fsnotify file watcher with debounce
-│   └── daemon/          - Background process management (PID file, start/stop)
-└── main.go
+│   ├── client/          — HTTP client to cix-server
+│   ├── config/          — YAML config (~/.cix/config.yaml)
+│   ├── daemon/          — PID-file based watcher daemon
+│   ├── discovery/       — project-root detection for `cix init`
+│   ├── fileutil/        — binary/text + size helpers
+│   ├── indexer/         — file-walk + NDJSON upload pipeline
+│   ├── projectconfig/   — .cixignore / .cixconfig.yaml parsing
+│   └── watcher/         — fsnotify-based incremental reindex watcher
+├── main.go
+├── Makefile
+└── README.md            — this file
 ```
 
-## Installation
+Module path: `github.com/dvcdsys/code-index/cli`.
+
+## Build
+
+Prerequisites: Go 1.25+.
 
 ```bash
 cd cli
-make build        # builds to ./build/cix
-make install      # copies to /usr/local/bin/cix
+make build              # → cli/build/cix
+make install            # → /usr/local/bin/cix (uses sudo if needed)
 ```
 
 Or without make:
@@ -43,220 +64,102 @@ go build -o cix .
 sudo mv cix /usr/local/bin/
 ```
 
-## Quick Start
+For cross-builds and release tarballs, see [`doc/RELEASES.md`](../doc/RELEASES.md#cutting-a-cli-release).
+
+## Run against a server
+
+The CLI talks HTTP — there is no embedded server logic in this
+directory. Configure once:
 
 ```bash
-# 1. Start the API server (pick one)
-make server-docker   # Docker mode
-make server-local    # Local mode (requires Python 3.11+)
+cix config set api.url http://localhost:21847
+cix config set api.key <bearer-token>
+cix config show
+```
 
-# 2. Configure cix (API key is in .env)
-cix config set api.key $(grep API_KEY ../.env | cut -d= -f2)
+Then any command picks up the saved URL + key from `~/.cix/config.yaml`.
 
-# 3. Initialize a project (registers + indexes + starts file watcher)
-cd /path/to/your/code
-cix init
+The server can be local Docker (`docker compose up -d` in the repo
+root) or a remote server. The CLI doesn't care.
 
-# 4. Wait for indexing
+## Smoke test
+
+```bash
+# Server reachable?
 cix status
-# Status: ✓ Indexed
-# Files: 1250 | Chunks: 5432 | Symbols: 892
+# (without a project context, status prints the configured URL + key state)
 
-# 5. Search
-cix search "authentication middleware"
-cix symbols handleRequest --kind function
+# Index a fresh project + search it
+cd /path/to/some/repo
+cix init --watch=false
+cix status                          # wait for: Status: ✓ Indexed
+cix search "main entry point"
+cix symbols "Handler" --kind function
 cix files "config"
 cix summary
 ```
 
-## Commands
-
-### Project Lifecycle
+Watcher smoke (in a separate terminal):
 
 ```bash
-cix init [path]                  # Register project, index, start file watcher
-cix init --watch=false [path]    # Register + index without watcher
-cix list                         # List all indexed projects
-cix status [-p path]             # Show project indexing status
-cix summary [-p path]            # Project overview (languages, dirs, symbols)
-cix reindex [--full] [-p path]   # Trigger manual reindex
+cix watch /path/to/some/repo        # starts the background daemon
+cix watch status
+# edit a file in the project — watcher should log a reindex
+cix watch stop
 ```
 
-### Search (for agents)
+## Adding a new command
+
+Each command is a `cobra.Command` constructed in a `New<Name>Command()`
+factory and registered from `root.go`. Conventions:
+
+1. Place the command in `cmd/<name>.go`.
+2. The factory takes no global state — it reads config and builds an
+   `*client.Client` inside the command's `RunE`. This keeps unit tests
+   table-driven and free of init-order surprises.
+3. Network calls go through `internal/client`. Add a method there if
+   the existing surface doesn't cover your endpoint; don't reach for
+   `net/http` from inside `cmd/`.
+4. Errors propagate through `RunE`'s return — cobra prints the message
+   and sets a non-zero exit code. Don't `os.Exit` from a command.
+5. Output goes to `cmd.OutOrStdout()` / `cmd.ErrOrStderr()`, not the
+   process-wide `os.Stdout` — this is what makes tests work.
+
+Tests sit beside the file (`<name>_test.go`); they assemble the
+command, set `SetArgs`, and capture output via `bytes.Buffer`. See
+`cmd/root_test.go` for the established pattern.
+
+## Tests
 
 ```bash
-# Semantic code search (natural language)
-cix search <query> [flags]
-  --in <path>                    # Search within file or directory (repeatable)
-  --limit, -l <n>                # Max results (default: 10)
-  --lang <language>              # Filter by language (repeatable)
-  --min-score <0.0-1.0>          # Minimum relevance score (default: 0.1)
-  --project, -p <path>           # Project path (default: cwd)
-
-# Examples
-cix search "authentication middleware"
-cix search "error handling" --in ./api
-cix search "config" --in README.md
-cix search "routes" --in ./api --in ./mcp_server
-cix search "database" --lang python --limit 20
-
-# Symbol search (by name, fast)
-cix symbols <query> [flags]
-  --kind <type>                  # function, class, method, type (repeatable)
-  --limit, -l <n>                # Max results (default: 20)
-  --project, -p <path>
-
-# File path search
-cix files <pattern> [flags]
-  --limit, -l <n>                # Max results (default: 20)
-  --project, -p <path>
+cd cli
+go test ./...
+# or, for verbose / single-package:
+go test -v ./cmd/...
+go test -run TestSearch ./cmd/...
 ```
 
-### File Watching
+CI runs the suite on every PR (`.github/workflows/ci-cli.yml`).
 
-```bash
-cix watch [path]                 # Start as background daemon (default)
-cix watch --foreground [path]    # Run in terminal (Ctrl+C to stop)
-cix watch stop                   # Stop daemon
-cix watch status                 # Check if daemon is running
-```
+## Releasing
 
-The watcher uses `fsnotify` to monitor the project directory for changes. When files are modified, it debounces events (default 5s) and triggers incremental reindexing via the API.
+See [`doc/RELEASES.md`](../doc/RELEASES.md#cutting-a-cli-release).
+The short version: bump `cli/cmd/version.go`, push a `cli/v<version>`
+tag, CI builds the four-platform tarball set and uploads to GitHub
+Releases. The install scripts pick it up on next run.
 
-Excluded from watching: `node_modules`, `.git`, `.venv`, `__pycache__`, `dist`, `build`, `.next`, `.cache`, binary files, images, archives.
-
-### Configuration
-
-```bash
-cix config show                  # Show current config
-cix config set <key> <value>     # Set value
-cix config path                  # Show config file path
-
-# Keys:
-#   api.url              - API server URL (default: http://localhost:21847)
-#   api.key              - API authentication key
-#   watcher.debounce_ms  - Debounce delay in ms (default: 5000)
-```
-
-## Config File
-
-`~/.cix/config.yaml`:
-
-```yaml
-api:
-  url: http://localhost:21847
-  key: cix_your_key_here
-
-watcher:
-  enabled: true
-  debounce_ms: 5000
-  exclude:
-    - node_modules
-    - .git
-    - .venv
-
-projects:
-  - path: /Users/me/project1
-    auto_watch: true
-```
-
-## Testing Indexing Manually
-
-```bash
-# 1. Start the server
-make server-docker   # or make server-local
-
-# 2. Check health
-curl http://localhost:21847/health
-# {"status":"ok"}
-
-# 3. Init and index a project
-cix init /path/to/your/project
-
-# 4. Watch indexing progress
-cix status -p /path/to/your/project
-# repeat until Status: ✓ Indexed
-
-# 5. Test semantic search
-cix search "error handling" -p /path/to/your/project
-cix search "database connection" --lang go -p /path/to/your/project
-
-# 6. Test symbol search
-cix symbols main -p /path/to/your/project
-cix symbols "Handler" --kind function -p /path/to/your/project
-
-# 7. Test file search
-cix files "config" -p /path/to/your/project
-
-# 8. Test watcher (in a separate terminal)
-cix watch /path/to/your/project
-# now edit a file in the project — watcher should trigger reindex
-
-# 9. Test via raw API (without cix)
-source .env
-API=http://localhost:21847
-AUTH="Authorization: Bearer $API_KEY"
-PROJECT="/path/to/your/project"
-ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$PROJECT', safe=''))")
-
-# Create project
-curl -X POST "$API/api/v1/projects" -H "$AUTH" -H "Content-Type: application/json" \
-  -d "{\"host_path\": \"$PROJECT\"}"
-
-# Trigger indexing
-curl -X POST "$API/api/v1/projects/$ENCODED/index" -H "$AUTH" -H "Content-Type: application/json" \
-  -d '{"full": false}'
-
-# Check progress
-curl "$API/api/v1/projects/$ENCODED/index/status" -H "$AUTH"
-
-# Semantic search
-curl -X POST "$API/api/v1/projects/$ENCODED/search" -H "$AUTH" -H "Content-Type: application/json" \
-  -d '{"query": "authentication", "limit": 5}'
-
-# Symbol search
-curl -X POST "$API/api/v1/projects/$ENCODED/search/symbols" -H "$AUTH" -H "Content-Type: application/json" \
-  -d '{"query": "main", "limit": 10}'
-```
+For pre-release builds tracking `develop`, see
+[`doc/UPDATES.md`](../doc/UPDATES.md#cli-install-channels).
 
 ## Troubleshooting
 
-### "API key not set"
-
-```bash
-cix config set api.key $(grep API_KEY /path/to/code-index/.env | cut -d= -f2)
-```
-
-### "connection refused"
-
-Server is not running. Start it:
-
-```bash
-cd /path/to/code-index
-docker compose up -d          # Docker
-# or
-./setup-local.sh              # Local
-```
-
-### "project not found"
-
-```bash
-cix init /path/to/project
-```
-
-### Watcher not triggering
-
-```bash
-# Check if daemon is running
-cix watch status
-
-# Check logs
-cat ~/.cix/logs/watcher.log
-
-# Restart
-cix watch stop
-cix watch start /path/to/project
-```
+| Symptom | Fix |
+|---|---|
+| `API key not set` | `cix config set api.key <bearer>` — mint one from the dashboard's API Keys page if you don't have one. |
+| `connection refused` | The server isn't running, or `api.url` is wrong. `curl $(cix config show \| grep url)/health` should return `{"status":"ok"}`. |
+| `project not found` | Run `cix init` in the project root first. |
+| Watcher not reindexing | `cix watch status`; check `~/.cix/logs/watcher.log`; restart with `cix watch stop && cix watch <path>`. |
+| Search returns nothing | Lower the floor: `cix search "query" --min-score 0.25` (default is 0.4). See [`doc/SEARCH_ALGORITHM.md`](../doc/SEARCH_ALGORITHM.md). |
 
 ## License
 
