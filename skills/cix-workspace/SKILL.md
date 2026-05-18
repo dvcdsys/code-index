@@ -350,10 +350,21 @@ Sub-agents have zero prior context. Paste the original user request even
 if it feels redundant — your interpretation might be wrong, and the
 user's wording is the ground truth the sub-agent should reason from.
 
-#### 2. The `project_path` you're assigning
+#### 2. The project identifier you're assigning
 
-Plus the workspace ID or `cix` command-prefix if your setup needs it.
-One repo per spawn.
+Pass it in the exact form `cix list` shows. Two shapes are possible:
+
+- **Local working tree:** `/Users/.../some-repo`. The repo exists on disk;
+  the sub-agent can use `Read`/`Grep` on top of cix.
+- **Remote-only:** `github.com/<org>/<repo>@<branch>`. The repo is *not* on
+  disk — it's a GitHub-attached project indexed only by the cix server.
+  The sub-agent must rely entirely on `cix search/def/refs` (passing
+  `-n <project_name>`) and the chunks they return.
+
+Workspace search output gives you the identifier as `project_path` on each
+entry in `projects[]`. Paste that string verbatim into the sub-agent prompt,
+and tell the sub-agent explicitly which shape it is so it doesn't waste
+calls grepping a tree that isn't there. One repo per spawn.
 
 #### 3. Seed chunks **with your commentary**
 
@@ -434,6 +445,12 @@ execute in parallel. Wait for completion. Synthesize their reports
 yourself — sub-agents don't see each other's work; you do. Surface
 inconsistencies (e.g. two repos disagree on which event format is
 canonical) back to the user.
+
+**Model inheritance.** `cix-workspace-investigator` declares `model:
+inherit` in its frontmatter, so each spawn runs on the same model as the
+main session. You don't need to pass `model:` on Agent calls. If you do
+pass it, you'll override inheritance — only do that intentionally (e.g.
+forcing a smaller/faster model for a trivially-bounded look-up).
 
 ---
 
