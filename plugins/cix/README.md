@@ -39,13 +39,20 @@ Semantic code search and navigation for Claude Code, powered by the
     injects a one-line reminder on success.
   - **CwdChanged** — when Claude `cd`s into another directory mid-session,
     re-runs `cix status` for the new dir and caches the verdict. Silent
-    (no reminder); PreToolUse handles the first-Grep-in-new-project
+    (no reminder); PostToolUse handles the first-Grep-in-new-project
     nudge through its per-project backoff.
-  - **PreToolUse(Grep|Glob)** — reads the cache for the current
-    `(session, project_dir)` pair; no inline `cix` calls. If the
-    verdict is "yes" (`1`), suggests `cix search` with exponential
-    backoff per project (fires on call #1, 2, 4, 8, …). Missing cache
-    or "no" (`0`) → silent for the rest of the session in that project.
+  - **PostToolUse(Grep|Glob|Bash)** — fires after a Grep/Glob call or a
+    Bash command that looks like `grep`/`rg`/`find` (other Bash stays
+    silent). Reads the cache for the current `(session, project_dir)`
+    pair; no inline `cix` calls. If the verdict is "yes" (`1`),
+    suggests `cix search` with exponential backoff per project (fires
+    on call #1, 2, 4, 8, …). Missing cache or "no" (`0`) → silent for
+    the rest of the session in that project. (PostToolUse instead of
+    PreToolUse because current Claude Code only surfaces
+    `hookSpecificOutput.additionalContext` for PostToolUse,
+    UserPromptSubmit, and SessionStart — the model sees the nudge in
+    time for the NEXT decision, which is behaviorally equivalent for
+    an advisory hook. Rationale lives at `scripts/grep-nudge.sh:9-14`.)
   - **PostCompact** — after auto-compaction in long sessions, re-injects
     the SessionStart reminder if the current project is cix-aware
     (skill body itself survives compaction natively; the SessionStart
@@ -95,7 +102,7 @@ nudges don't spam the context:
 |---|---|---|
 | 1. Skill description | Native Claude Code (always-in-context, ~200 B) | ~200 B once |
 | 2. SessionStart hook | One-time reminder in indexed projects | ~200 B once |
-| 3. PreToolUse(Grep\|Glob) hook | Exponential-backoff nudge | ~80 B × ~7 calls = ~560 B |
+| 3. PostToolUse(Grep\|Glob\|Bash) hook | Exponential-backoff nudge | ~80 B × ~7 calls = ~560 B |
 | 4. SKILL.md body | Native lazy-load (skill mechanism) | ~7 KB **once** if invoked |
 
 Total plugin context overhead in a session that uses cix heavily:
@@ -132,8 +139,10 @@ enabling the plugin.
 
 Two per-session marker files live in `$CLAUDE_PLUGIN_DATA`
 (resolves to `~/.claude/plugins/data/cix-code-index/`):
-- `cix-aware-$SESSION_ID` — written by SessionStart, read by
-  PreToolUse. Single-byte file (`0` or `1`).
+- `cix-aware-$SESSION_ID-$DIR_HASH` — written by SessionStart (and
+  refreshed by CwdChanged), read by the PostToolUse nudge.
+  Single-byte file (`0` or `1`). The `$DIR_HASH` suffix isolates the
+  verdict per project directory within a session.
 - `cix-grep-count-$SESSION_ID` — counter for the exponential backoff.
 
 This directory is plugin-managed and **not** cleaned by the OS
@@ -154,7 +163,7 @@ in two tiers:
 | `skills/cix-workspace/SKILL.md` | Cross-project workflow skill *(experimental)* |
 | `agents/cix-workspace-investigator.md` | Read-only per-repo investigator sub-agent *(experimental)* |
 | `commands/*.md` | Six slash commands |
-| `hooks/hooks.json` | SessionStart + PreToolUse(Grep\|Glob\|Bash) registration |
+| `hooks/hooks.json` | SessionStart + PostToolUse(Grep\|Glob\|Bash) + CwdChanged + PostCompact + SessionEnd registration |
 | `scripts/cix-wrapper.sh` | "Use system or auto-install" CLI wrapper |
 | `scripts/session-start.sh` | One-time session reminder |
 | `scripts/grep-nudge.sh` | Exponential-backoff Grep nudge |
@@ -222,9 +231,9 @@ context for the rest of the session.
   "fade away".
 - **"This project has a cix semantic code index" never appears** —
   the project must contain a `.cix/` directory. Run `/cix:init` first.
-- **Nudge does not fire on `grep` invoked via Bash** — the `PreToolUse`
+- **Nudge does not fire on `grep` invoked via Bash** — the `PostToolUse`
   matcher works on `tool_name`, not on the command string. The plugin
-  matches `Bash` explicitly and filters grep/rg from
+  matches `Bash` explicitly and filters grep/rg/find/fd/ag/ack from
   `tool_input.command` inside `grep-nudge.sh`. Confirm
   `hooks/hooks.json` contains both `"matcher": "Grep|Glob"` and
   `"matcher": "Bash"` entries; the regression in

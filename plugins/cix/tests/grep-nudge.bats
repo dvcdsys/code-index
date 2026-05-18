@@ -231,6 +231,76 @@ teardown() { teardown_test_env; }
     [ "$(read_counter 'sess-fsub' "$TEST_PROJECT_DIR")" = "0" ]
 }
 
+@test "Bash + fd: nudge fires" {
+    make_cache "sess-fd" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-fd" "$TEST_PROJECT_DIR" "Bash" "fd somepattern"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hookSpecificOutput"* ]]
+    [[ "$output" == *"cix search"* ]]
+}
+
+@test "Bash + piped fd (fd | head): nudge fires" {
+    make_cache "sess-fdp" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-fdp" "$TEST_PROJECT_DIR" "Bash" "fd . | head -20"
+    [[ "$output" == *"hookSpecificOutput"* ]]
+}
+
+@test "Bash + ag (the_silver_searcher): nudge fires" {
+    make_cache "sess-ag" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-ag" "$TEST_PROJECT_DIR" "Bash" "ag pattern src/"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hookSpecificOutput"* ]]
+}
+
+@test "Bash + chained ag (cd && ag): nudge fires" {
+    make_cache "sess-agcd" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-agcd" "$TEST_PROJECT_DIR" "Bash" "cd x && ag foo"
+    [[ "$output" == *"hookSpecificOutput"* ]]
+}
+
+@test "Bash + ack: nudge fires" {
+    make_cache "sess-ack" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-ack" "$TEST_PROJECT_DIR" "Bash" "ack pattern"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hookSpecificOutput"* ]]
+}
+
+@test "Bash + agent (substring of ag): silent" {
+    # `agent` shares the `ag` prefix but is a distinct binary. The
+    # trailing-boundary anchor must keep `ag` from matching `agent`.
+    make_cache "sess-agent" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-agent" "$TEST_PROJECT_DIR" "Bash" "agent run --task foo"
+    [ -z "$output" ]
+    [ "$(read_counter 'sess-agent' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
+@test "Bash + \$ag shell var: silent" {
+    # `$ag` is shell-variable substitution, not the ag command. The
+    # leading-boundary anchor must not treat `$` as a separator.
+    make_cache "sess-agvar" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-agvar" "$TEST_PROJECT_DIR" "Bash" "echo \$ag"
+    [ -z "$output" ]
+    [ "$(read_counter 'sess-agvar' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
+@test "Bash + package (substring of ack via different prefix): silent" {
+    # `pack`/`package` do not contain `ack` as a standalone token —
+    # `package` has `ack` mid-word, no boundaries. Must stay silent.
+    make_cache "sess-pkg" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-pkg" "$TEST_PROJECT_DIR" "Bash" "package list --all"
+    [ -z "$output" ]
+    [ "$(read_counter 'sess-pkg' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
+@test "Bash + fdisk (substring of fd): silent" {
+    # `fdisk` shares the `fd` prefix but is the disk-partitioning
+    # binary. Trailing-boundary anchor must reject the substring match.
+    make_cache "sess-fdsk" "$TEST_PROJECT_DIR" "1"
+    run_hook grep-nudge.sh "sess-fdsk" "$TEST_PROJECT_DIR" "Bash" "fdisk -l"
+    [ -z "$output" ]
+    [ "$(read_counter 'sess-fdsk' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
 @test "Bash + git grep: nudge fires (git grep is still grep)" {
     # `git grep` is a grep-family command — same intent as plain `grep`,
     # cix should still be suggested. The regex matches because `grep`

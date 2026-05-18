@@ -14,15 +14,17 @@
 # the NEXT decision; behaviorally equivalent for an advisory hook.
 #
 # Bash is matched in addition to Grep/Glob because real-session usage
-# of `grep`/`rg`/`find` happens through the Bash tool (pipelines, `| head`,
-# `cd && grep …`). The Bash branch inspects tool_input.command and
-# only proceeds when it looks like a grep- or find-family call; other
-# Bash (ls, git status, make, go test) is fully silent and does not
-# even increment the backoff counter.
+# of `grep`/`rg`/`find`/`fd`/`ag`/`ack` happens through the Bash tool
+# (pipelines, `| head`, `cd && grep …`). The Bash branch inspects
+# tool_input.command and only proceeds when it looks like a grep- or
+# find-family call; other Bash (ls, git status, make, go test) is
+# fully silent and does not even increment the backoff counter.
 #
-# `find` is included because the agent often uses it to locate files
-# by name pattern when a cix symbol/semantic query would be faster —
-# `find . -name '*Auth*'` vs `cix search "auth"` / `cix def Auth`.
+# `find`/`fd` are included because the agent often uses them to locate
+# files by name pattern when a cix symbol/semantic query would be faster
+# — `find . -name '*Auth*'` vs `cix search "auth"` / `cix def Auth`.
+# `ag` (the_silver_searcher) and `ack` are grep alternatives covered
+# for the same reason.
 #
 # This hook does NOT call `cix status` itself — it relies entirely on
 # the cache written by SessionStart and refreshed by CwdChanged.
@@ -77,12 +79,15 @@ case "$TOOL_NAME" in
         if command -v jq >/dev/null 2>&1; then
             TOOL_CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
         fi
-        # Match grep/egrep/fgrep/rg/ripgrep/find as a standalone token.
-        # Anchors: start-of-string, whitespace, `|`, `;`, `&`, backtick, `(`.
-        # The regex rejects `git grep` (subcommand after `git`, not a
-        # standalone shell `grep`) and substring hits like `grepl`,
-        # `egrep_helper`, `findme`.
-        if ! [[ "$TOOL_CMD" =~ (^|[[:space:]\|\&\;\`\(])(grep|egrep|fgrep|rg|ripgrep|find)([[:space:]]|$) ]]; then
+        # Match grep/egrep/fgrep/rg/ripgrep/find/fd/ag/ack as a standalone
+        # token. Anchors: start-of-string, whitespace, `|`, `;`, `&`,
+        # backtick, `(`. The regex rejects `git grep` (subcommand after
+        # `git`, not a standalone shell `grep`) and substring hits like
+        # `grepl`, `egrep_helper`, `findme`, `agent`, `package`, `$ag`.
+        # fd, ag, ack are short names with collision potential; the
+        # boundary anchors keep them safe (e.g. `$ag`, `myag --help`,
+        # `agent run`, `pack list`, `addr show` all stay silent).
+        if ! [[ "$TOOL_CMD" =~ (^|[[:space:]\|\&\;\`\(])(grep|egrep|fgrep|rg|ripgrep|find|fd|ag|ack)([[:space:]]|$) ]]; then
             exit 0
         fi
         ;;
