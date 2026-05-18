@@ -78,6 +78,96 @@ func TestFindProjectRoot(t *testing.T) {
 	}
 }
 
+func TestResolveProjectByName(t *testing.T) {
+	githubSlug := "github.com/MythicalGames/pf3-backend@main"
+	localPath := "/Users/me/proj"
+
+	tests := []struct {
+		name      string
+		projects  []string
+		input     string
+		wantPath  string
+		wantErr   bool
+		errSubstr []string // each must appear in err message
+	}{
+		{
+			name:     "exact github slug match",
+			projects: []string{githubSlug, localPath},
+			input:    githubSlug,
+			wantPath: githubSlug,
+		},
+		{
+			name:     "exact local path match",
+			projects: []string{githubSlug, localPath},
+			input:    localPath,
+			wantPath: localPath,
+		},
+		{
+			name:      "miss lists every registered project",
+			projects:  []string{githubSlug, localPath},
+			input:     "pf3-backend",
+			wantErr:   true,
+			errSubstr: []string{`"pf3-backend"`, githubSlug, localPath},
+		},
+		{
+			name:      "miss with no registered projects mentions cix init",
+			projects:  []string{},
+			input:     "anything",
+			wantErr:   true,
+			errSubstr: []string{`"anything"`, "no projects are registered"},
+		},
+		{
+			name:     "no prefix or substring matching",
+			projects: []string{githubSlug},
+			input:    "github.com/MythicalGames/pf3-backend", // no @main
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := mockServer(t, listProjectsHandler(tc.projects))
+			useAPI(t, srv)
+
+			c, _ := getClient()
+			got, err := resolveProjectByName(tc.input, c)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got path %q", got)
+				}
+				for _, s := range tc.errSubstr {
+					if !strings.Contains(err.Error(), s) {
+						t.Errorf("error %q does not contain %q", err.Error(), s)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.wantPath {
+				t.Errorf("resolveProjectByName(%q) = %q, want %q", tc.input, got, tc.wantPath)
+			}
+		})
+	}
+}
+
+func TestResolveProjectByName_APIError(t *testing.T) {
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		apiError(w, 500, "server error")
+	})
+	useAPI(t, srv)
+
+	c, _ := getClient()
+	_, err := resolveProjectByName("anything", c)
+	if err == nil {
+		t.Fatal("expected error when ListProjects fails")
+	}
+	if !strings.Contains(err.Error(), "list projects") {
+		t.Errorf("expected 'list projects' in error, got: %v", err)
+	}
+}
+
 func TestFindProjectRoot_APIError(t *testing.T) {
 	// When ListProjects fails, the original path should be returned unchanged.
 	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {

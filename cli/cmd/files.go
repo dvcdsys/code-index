@@ -11,6 +11,7 @@ import (
 var (
 	filesLimit   int
 	filesProject string
+	filesName    string
 )
 
 // filesCmd represents the files command
@@ -24,7 +25,8 @@ Useful for finding files when you know part of the name or path.
 Examples:
   cix files "auth"
   cix files "controller" --limit 20
-  cix files "config.yaml" -p /path/to/project`,
+  cix files "config.yaml" -p /path/to/project
+  cix files config --name github.com/MythicalGames/pf3-backend@main`,
 	Args: cobra.ExactArgs(1),
 	RunE: runFiles,
 }
@@ -33,31 +35,39 @@ func init() {
 	rootCmd.AddCommand(filesCmd)
 	filesCmd.Flags().IntVarP(&filesLimit, "limit", "l", 20, "Maximum number of results")
 	filesCmd.Flags().StringVarP(&filesProject, "project", "p", "", "Project path (default: current directory)")
+	filesCmd.Flags().StringVarP(&filesName, "name", "n", "", "Project ID (exact match against `cix list`). Mutually exclusive with -p.")
+	filesCmd.MarkFlagsMutuallyExclusive("project", "name")
 }
 
 func runFiles(cmd *cobra.Command, args []string) error {
 	pattern := args[0]
-
-	projectPath := filesProject
-	if projectPath == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
-		}
-		projectPath = cwd
-	}
-
-	absPath, err := filepath.Abs(projectPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
 
 	apiClient, err := getClient()
 	if err != nil {
 		return err
 	}
 
-	absPath = findProjectRoot(absPath, apiClient)
+	var absPath string
+	if filesName != "" {
+		absPath, err = resolveProjectByName(filesName, apiClient)
+		if err != nil {
+			return err
+		}
+	} else {
+		projectPath := filesProject
+		if projectPath == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+			projectPath = cwd
+		}
+		absPath, err = filepath.Abs(projectPath)
+		if err != nil {
+			return fmt.Errorf("resolve path: %w", err)
+		}
+		absPath = findProjectRoot(absPath, apiClient)
+	}
 
 	fmt.Printf("Searching files in %s...\n\n", absPath)
 

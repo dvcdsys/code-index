@@ -17,6 +17,7 @@ var (
 	searchExcludes  []string
 	searchMinScore  float64
 	searchProject   string
+	searchName      string
 )
 
 // searchCmd represents the search command
@@ -39,7 +40,8 @@ Examples:
   cix search "error handling" --in src/api/
   cix search "config" --in README.md
   cix search "routes" --in ./api --in ./mcp_server
-  cix search "main entry point" --exclude bench/fixtures --exclude legacy`,
+  cix search "main entry point" --exclude bench/fixtures --exclude legacy
+  cix search "JWT" --name github.com/MythicalGames/pf3-backend@main`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSearch,
 }
@@ -56,6 +58,8 @@ func init() {
 	// long-tail queries via --min-score 0.2.
 	searchCmd.Flags().Float64Var(&searchMinScore, "min-score", 0.4, "Minimum relevance score (lower with --min-score 0.2 if your query returns nothing)")
 	searchCmd.Flags().StringVarP(&searchProject, "project", "p", "", "Project path (default: current directory)")
+	searchCmd.Flags().StringVarP(&searchName, "name", "n", "", "Project ID (exact match against `cix list`). Mutually exclusive with -p.")
+	searchCmd.MarkFlagsMutuallyExclusive("project", "name")
 }
 
 // resolveFilterPaths normalises --in / --exclude inputs to absolute paths
@@ -78,28 +82,33 @@ func resolveFilterPaths(in []string) []string {
 func runSearch(cmd *cobra.Command, args []string) error {
 	query := args[0]
 
-	// Get project path
-	projectPath := searchProject
-	if projectPath == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
-		}
-		projectPath = cwd
-	}
-
-	absPath, err := filepath.Abs(projectPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
 	// Get API client
 	apiClient, err := getClient()
 	if err != nil {
 		return err
 	}
 
-	absPath = findProjectRoot(absPath, apiClient)
+	var absPath string
+	if searchName != "" {
+		absPath, err = resolveProjectByName(searchName, apiClient)
+		if err != nil {
+			return err
+		}
+	} else {
+		projectPath := searchProject
+		if projectPath == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+			projectPath = cwd
+		}
+		absPath, err = filepath.Abs(projectPath)
+		if err != nil {
+			return fmt.Errorf("resolve path: %w", err)
+		}
+		absPath = findProjectRoot(absPath, apiClient)
+	}
 
 	// Resolve --in paths to absolute
 	resolvedPaths := resolveFilterPaths(searchPaths)

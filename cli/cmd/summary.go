@@ -11,7 +11,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var summaryProject string
+var (
+	summaryProject string
+	summaryName    string
+)
 
 // summaryCmd represents the summary command
 var summaryCmd = &cobra.Command{
@@ -24,36 +27,45 @@ var summaryCmd = &cobra.Command{
 
 Examples:
   cix summary
-  cix summary -p /path/to/project`,
+  cix summary -p /path/to/project
+  cix summary --name github.com/MythicalGames/pf3-backend@main`,
 	RunE: runSummary,
 }
 
 func init() {
 	rootCmd.AddCommand(summaryCmd)
 	summaryCmd.Flags().StringVarP(&summaryProject, "project", "p", "", "Project path (default: current directory)")
+	summaryCmd.Flags().StringVarP(&summaryName, "name", "n", "", "Project ID (exact match against `cix list`). Mutually exclusive with -p.")
+	summaryCmd.MarkFlagsMutuallyExclusive("project", "name")
 }
 
 func runSummary(cmd *cobra.Command, args []string) error {
-	projectPath := summaryProject
-	if projectPath == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
-		}
-		projectPath = cwd
-	}
-
-	absPath, err := filepath.Abs(projectPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
 	apiClient, err := getClient()
 	if err != nil {
 		return err
 	}
 
-	absPath = findProjectRoot(absPath, apiClient)
+	var absPath string
+	if summaryName != "" {
+		absPath, err = resolveProjectByName(summaryName, apiClient)
+		if err != nil {
+			return err
+		}
+	} else {
+		projectPath := summaryProject
+		if projectPath == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+			projectPath = cwd
+		}
+		absPath, err = filepath.Abs(projectPath)
+		if err != nil {
+			return fmt.Errorf("resolve path: %w", err)
+		}
+		absPath = findProjectRoot(absPath, apiClient)
+	}
 
 	summary, err := apiClient.GetSummary(absPath)
 	if err != nil {

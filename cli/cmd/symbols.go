@@ -12,6 +12,7 @@ var (
 	symbolsLimit   int
 	symbolsKinds   []string
 	symbolsProject string
+	symbolsName    string
 )
 
 // symbolsCmd represents the symbols command
@@ -25,7 +26,8 @@ Supported symbol kinds: function, class, method, type
 Examples:
   cix symbols handleRequest
   cix symbols AuthMiddleware --kind function --kind method
-  cix symbols User --kind class`,
+  cix symbols User --kind class
+  cix symbols Service --name github.com/MythicalGames/pf3-backend@main`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSymbols,
 }
@@ -35,25 +37,12 @@ func init() {
 	symbolsCmd.Flags().IntVarP(&symbolsLimit, "limit", "l", 20, "Maximum number of results")
 	symbolsCmd.Flags().StringSliceVar(&symbolsKinds, "kind", nil, "Filter by symbol kind")
 	symbolsCmd.Flags().StringVarP(&symbolsProject, "project", "p", "", "Project path (default: current directory)")
+	symbolsCmd.Flags().StringVarP(&symbolsName, "name", "n", "", "Project ID (exact match against `cix list`). Mutually exclusive with -p.")
+	symbolsCmd.MarkFlagsMutuallyExclusive("project", "name")
 }
 
 func runSymbols(cmd *cobra.Command, args []string) error {
 	query := args[0]
-
-	// Get project path
-	projectPath := symbolsProject
-	if projectPath == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
-		}
-		projectPath = cwd
-	}
-
-	absPath, err := filepath.Abs(projectPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
 
 	// Get API client
 	apiClient, err := getClient()
@@ -61,7 +50,27 @@ func runSymbols(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	absPath = findProjectRoot(absPath, apiClient)
+	var absPath string
+	if symbolsName != "" {
+		absPath, err = resolveProjectByName(symbolsName, apiClient)
+		if err != nil {
+			return err
+		}
+	} else {
+		projectPath := symbolsProject
+		if projectPath == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+			projectPath = cwd
+		}
+		absPath, err = filepath.Abs(projectPath)
+		if err != nil {
+			return fmt.Errorf("resolve path: %w", err)
+		}
+		absPath = findProjectRoot(absPath, apiClient)
+	}
 
 	// Search symbols
 	fmt.Printf("Searching symbols in %s...\n\n", absPath)

@@ -13,6 +13,7 @@ var (
 	refsFile    string
 	refsLimit   int
 	refsProject string
+	refsName    string
 )
 
 var referencesCmd = &cobra.Command{
@@ -24,7 +25,8 @@ var referencesCmd = &cobra.Command{
 Examples:
   cix references HandleRequest
   cix refs AuthMiddleware --limit 50
-  cix usages UserService --file ./internal/api/`,
+  cix usages UserService --file ./internal/api/
+  cix refs HandleRequest --name github.com/MythicalGames/pf3-backend@main`,
 	Args: cobra.ExactArgs(1),
 	RunE: runReferences,
 }
@@ -34,23 +36,37 @@ func init() {
 	referencesCmd.Flags().StringVar(&refsFile, "file", "", "Narrow to a specific file")
 	referencesCmd.Flags().IntVarP(&refsLimit, "limit", "l", 30, "Maximum results")
 	referencesCmd.Flags().StringVarP(&refsProject, "project", "p", "", "Project path (default: current directory)")
+	referencesCmd.Flags().StringVarP(&refsName, "name", "n", "", "Project ID (exact match against `cix list`). Mutually exclusive with -p.")
+	referencesCmd.MarkFlagsMutuallyExclusive("project", "name")
 }
 
 func runReferences(cmd *cobra.Command, args []string) error {
 	symbol := args[0]
 
-	projectPath := refsProject
-	if projectPath == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
-		}
-		projectPath = cwd
+	apiClient, err := getClient()
+	if err != nil {
+		return err
 	}
 
-	absPath, err := filepath.Abs(projectPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
+	var absPath string
+	if refsName != "" {
+		absPath, err = resolveProjectByName(refsName, apiClient)
+		if err != nil {
+			return err
+		}
+	} else {
+		projectPath := refsProject
+		if projectPath == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+			projectPath = cwd
+		}
+		absPath, err = filepath.Abs(projectPath)
+		if err != nil {
+			return fmt.Errorf("resolve path: %w", err)
+		}
 	}
 
 	filePath := refsFile
@@ -59,11 +75,6 @@ func runReferences(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("resolve file path: %w", err)
 		}
-	}
-
-	apiClient, err := getClient()
-	if err != nil {
-		return err
 	}
 
 	results, err := apiClient.SearchReferences(absPath, symbol, filePath, refsLimit)
