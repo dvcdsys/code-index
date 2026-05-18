@@ -1,15 +1,18 @@
 name: Plugin Tests
 
 # Trigger only when plugin files change — server/CLI/dashboard work
-# is unaffected and shouldn't run plugin tests.
+# is unaffected and shouldn't run plugin tests. Branch list matches
+# ci-cli.yml / ci-server.yml so plugin work lands on equal footing
+# (the integration branch is `develop`, not feature branches).
 on:
   push:
-    branches: [main, 'feat/*', 'fix/*']
+    branches: [main, develop]
     paths:
       - 'plugins/cix/**'
       - '.claude-plugin/**'
       - '.github/workflows/ci-plugin.yml'
   pull_request:
+    branches: [main, develop]
     paths:
       - 'plugins/cix/**'
       - '.claude-plugin/**'
