@@ -12,8 +12,59 @@ code-index/
 ├── cli/              # Go CLI (cix binary)
 │   ├── cmd/          # cobra commands
 │   └── internal/     # client, config, daemon, indexer, watcher
-└── skills/           # Claude Code skill definitions
+├── plugins/cix/      # Claude Code plugin (hooks, skills, slash commands, bats tests)
+├── skills/           # Canonical sources for cross-cutting skills
+│                     # (mirrored into plugins/cix/skills/ via sync-skills.sh)
+└── doc/              # Tracked documentation
 ```
+
+The `docs/` directory (with an `s`) is gitignored — it is for local notes
+only. New tracked documentation goes under `doc/`.
+
+## Branches and pull requests
+
+The repo runs a two-branch model:
+
+| Branch    | Purpose                                                       |
+|-----------|---------------------------------------------------------------|
+| `main`    | Release branch. Tags (`server/vX.Y.Z`, `cli/vX.Y.Z`) cut from here. |
+| `develop` | Integration branch. All feature and fix work merges here first. |
+
+**Open every PR against `develop`.** Promotion from `develop` to `main`
+happens as part of the release workflow, not per-feature.
+
+CI is wired in three workflows — `ci-cli.yml`, `ci-server.yml`,
+`ci-plugin.yml` — all gated on the same branch set:
+
+- Push to `main` or `develop` runs CI.
+- Pull request targeting `main` or `develop` runs CI.
+- Push to any other branch does **not** trigger CI directly — CI fires
+  when you open the PR.
+
+There is no required branch-name convention. You can name your feature
+branch anything (`feat/foo`, `fix/bug-123`, `your-handle/sandbox`, …);
+CI runs from the PR, not from the branch name.
+
+Each workflow has a path filter, so CLI-only changes don't run server
+tests and vice versa. Filters live at the top of each workflow file.
+
+## Commit messages
+
+The repo uses Conventional Commits:
+
+```
+<type>(<scope>): <imperative summary under ~70 chars>
+
+<optional body explaining the why, wrapped at ~72 cols>
+```
+
+Types in active use: `feat`, `fix`, `chore`, `docs`, `ci`, `build`,
+`refactor`. Scopes commonly seen: `cli`, `server`, `plugin`, `dashboard`,
+`db`, `workspaces`, `skill`. Pick the smallest accurate scope; if a
+change spans surfaces, the broader type without a scope is fine.
+
+The body should explain **why**, not **what** — the diff already shows
+what.
 
 ## Prerequisites
 
@@ -73,9 +124,46 @@ cd server && go test ./...
 # Server parity gate (requires make bundle + a local GGUF)
 cd server && make test-gate
 
-# CLI build check
+# CLI tests + build check
+cd cli && make test           # go test -v ./...
 cd cli && go build ./...
+
+# Plugin tests (bats + shellcheck + jq manifest validation)
+bats plugins/cix/tests/*.bats
+shellcheck --severity=warning plugins/cix/scripts/*.sh
+jq . plugins/cix/hooks/hooks.json
 ```
+
+`bats` is the test runner the plugin uses (`brew install bats-core` on
+macOS, `apt-get install bats` on Linux). CI runs the same three checks
+plus a symlink-integrity assertion for `plugins/cix/bin/cix`.
+
+### End-to-end plugin reload
+
+To smoke-test plugin changes against a real Claude Code installation:
+
+```bash
+make plugin-reload-local      # from repo root
+```
+
+This removes the cix plugin, purges the plugin cache, re-installs the
+marketplace from the working tree, and re-installs the plugin. Restart
+your Claude Code session to pick up the new bundle.
+
+### Skill source sync
+
+The `cix-workspace` skill has a canonical source under `skills/` and a
+byte-identical mirror under `plugins/cix/skills/`. Both must stay in
+sync. After editing the source:
+
+```bash
+plugins/cix/scripts/sync-skills.sh             # copy source → plugin
+plugins/cix/scripts/sync-skills.sh --check     # CI-friendly drift check
+```
+
+Do not edit the plugin copy directly; the next sync overwrites it. The
+standalone `skills/cix/SKILL.md` is **not** synced — the plugin version
+carries extra frontmatter the standalone loader does not need.
 
 ## Making changes
 
@@ -107,11 +195,14 @@ See [README — Building and Publishing](README.md#building-and-publishing-to-do
 
 ## Pull requests
 
-- All changes to `main` must go through a pull request
-- At least **1 approval** required before merging
-- Keep PRs focused — one feature or fix per PR
-- For server changes: `go test ./...` must pass in `server/`
-- For CLI changes: `go vet ./...` must pass in `cli/`
+- Open every PR against `develop` (not `main` — see "Branches and pull
+  requests" above).
+- At least **1 approval** required before merging.
+- Keep PRs focused — one feature or fix per PR.
+- For server changes: `go test ./...` must pass in `server/`.
+- For CLI changes: `go test ./...` must pass in `cli/`.
+- For plugin changes: `bats plugins/cix/tests/*.bats` must pass (CI runs
+  this on Linux and macOS).
 
 ## Reporting issues
 
