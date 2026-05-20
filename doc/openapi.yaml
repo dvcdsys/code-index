@@ -3449,6 +3449,14 @@ components:
           format: double
         run_id:
           type: string
+        current_files:
+          type: array
+          items:
+            type: string
+          description: |
+            Most recent files being indexed, newest first; up to 3. Lets a UI
+            show live forward motion during a run. Empty on the
+            historical-fallback variant.
 
     IndexProgressResponse:
       type: object

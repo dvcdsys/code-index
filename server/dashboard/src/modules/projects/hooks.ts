@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import type {
+  IndexProgressResponse,
   Project,
   ProjectListResponse,
   ProjectSummary,
@@ -12,6 +13,7 @@ export const projectKeys = {
   summary: (hash: string) => ['projects', hash, 'summary'] as const,
   workspaces: (hash: string) => ['projects', hash, 'workspaces'] as const,
   gitRepo: (hash: string) => ['projects', hash, 'git-repo'] as const,
+  indexStatus: (hash: string) => ['projects', hash, 'index-status'] as const,
 };
 
 // GitRepo mirrors the server's git_repos payload for an external project.
@@ -75,6 +77,20 @@ export function useProject(hash: string | undefined) {
     // Poll while the project is mid-index so the page reflects completion
     // without a manual refresh. Stops as soon as status flips to indexed/error.
     refetchInterval: (q) => (q.state.data?.status === 'indexing' ? 3000 : false),
+  });
+}
+
+// useIndexStatus polls the live indexing progress for a project while a run is
+// active (current files, files_processed / files_total, elapsed). Gate `enabled`
+// on the project being mid-index; it polls faster than the 3s detail poll so the
+// current-file list feels live, and stops the moment `enabled` goes false.
+export function useIndexStatus(hash: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: hash ? projectKeys.indexStatus(hash) : ['projects', 'unknown', 'index-status'],
+    queryFn: ({ signal }) =>
+      api.get<IndexProgressResponse>(`/projects/${hash}/index/status`, { signal }),
+    enabled: Boolean(hash) && enabled,
+    refetchInterval: enabled ? 1500 : false,
   });
 }
 

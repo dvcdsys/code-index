@@ -51,7 +51,12 @@ type Progress struct {
 	ChunksCreated    int
 	ElapsedSeconds   float64
 	RunID            string
+	RecentFiles      []string // most recent files processed, newest first; up to recentFilesCap
 }
+
+// recentFilesCap bounds the per-session ring of recently-processed file paths
+// surfaced via GetProgress / GET /index/status so a UI can show forward motion.
+const recentFilesCap = 3
 
 // Session is the in-memory state of an active indexing run.
 type session struct {
@@ -62,8 +67,9 @@ type session struct {
 	chunksCreated   int
 	languagesSeen   map[string]struct{}
 	startTime       time.Time
-	status          string // active|completed
-	phase           string // receiving|completed
+	status          string   // active|completed
+	phase           string   // receiving|completed
+	recentFiles     []string // ring of last recentFilesCap processed paths, oldest first
 }
 
 // Embedder is the minimal embeddings surface the indexer consumes. The real
@@ -379,6 +385,16 @@ func (s *Service) ProcessFilesStreaming(
 			BatchSize: len(files),
 			RunID:     runID,
 		})
+
+		// Record the current file in the session ring so GET /index/status
+		// can surface live forward motion. Runs for every caller (CLI stream
+		// and in-process repo indexer alike) regardless of progress channel.
+		s.mu.Lock()
+		sess.recentFiles = append(sess.recentFiles, fp.Path)
+		if len(sess.recentFiles) > recentFilesCap {
+			sess.recentFiles = sess.recentFiles[len(sess.recentFiles)-recentFilesCap:]
+		}
+		s.mu.Unlock()
 
 		if strings.TrimSpace(fp.Content) == "" {
 			continue
@@ -832,6 +848,11 @@ func (s *Service) GetProgress(projectPath string) *Progress {
 	defer s.mu.RUnlock()
 	for _, sess := range s.sessions {
 		if sess.projectPath == projectPath {
+			// Copy the ring newest-first so the UI shows the current file on top.
+			recent := make([]string, 0, len(sess.recentFiles))
+			for i := len(sess.recentFiles) - 1; i >= 0; i-- {
+				recent = append(recent, sess.recentFiles[i])
+			}
 			return &Progress{
 				RunID:           sess.runID,
 				Status:          sessStatusToHTTP(sess.status),
@@ -841,10 +862,32 @@ func (s *Service) GetProgress(projectPath string) *Progress {
 				FilesTotal:      sess.filesDiscovered, // CLI's reported total, best-known estimate mid-run
 				ChunksCreated:   sess.chunksCreated,
 				ElapsedSeconds:  time.Since(sess.startTime).Seconds(),
+				RecentFiles:     recent,
 			}
 		}
 	}
 	return nil
+}
+
+// SetDiscoveredTotal publishes the known file total for a project's active
+// session before the run finishes, so GET /index/status can report a real
+// denominator mid-run. Only raises the value (floor semantics) and no-ops when
+// no active session exists for the project. Used by the in-process repo indexer
+// for incremental runs, where the change-set size is known up front.
+func (s *Service) SetDiscoveredTotal(projectPath string, total int) {
+	if total <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessions {
+		if sess.projectPath == projectPath && sess.status == "active" {
+			if total > sess.filesDiscovered {
+				sess.filesDiscovered = total
+			}
+			return
+		}
+	}
 }
 
 // ErrNoSession signals that a request references an unknown run_id.

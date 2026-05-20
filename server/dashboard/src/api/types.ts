@@ -21,6 +21,8 @@ export type ProjectSummary = components['schemas']['ProjectSummary'];
 export type ProjectStats = components['schemas']['ProjectStats'];
 export type ProjectSettings = components['schemas']['ProjectSettings'];
 export type ProjectListResponse = components['schemas']['ProjectListResponse'];
+export type IndexProgressResponse = components['schemas']['IndexProgressResponse'];
+export type IndexProgressInfo = components['schemas']['IndexProgressInfo'];
 export type DirEntry = components['schemas']['DirEntry'];
 export type SymbolEntry = components['schemas']['SymbolEntry'];
 
