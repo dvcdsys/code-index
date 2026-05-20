@@ -182,3 +182,24 @@ export function useReindexProject() {
     },
   });
 }
+
+// Force-stop is external-only too: it hard-aborts the clone+index pipeline
+// (clears queued clone/index jobs + cancels the live index session). 422 for
+// local projects, which have no server-side pipeline. cancelled=true means a
+// live session was caught; jobs_cleared counts the queued jobs removed.
+export type ForceStopResponse = {
+  cancelled: boolean;
+  jobs_cleared: number;
+};
+
+export function useForceStopIndex() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (hash: string) =>
+      api.post<ForceStopResponse>(`/projects/${hash}/force-stop`, undefined),
+    onSuccess: (_data, hash) => {
+      qc.invalidateQueries({ queryKey: projectKeys.detail(hash) });
+      qc.invalidateQueries({ queryKey: projectKeys.all });
+    },
+  });
+}

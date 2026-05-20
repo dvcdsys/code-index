@@ -1,39 +1,28 @@
-import type { MouseEvent } from 'react';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { Hammer, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
 import { Button } from '@/ui/button';
 import { useReindexProject } from '../hooks';
 
-// ReindexProjectButton — the default click triggers an incremental
-// reindex (server picks based on git tree.Diff between indexed_sha and
-// new HEAD). Shift+click triggers a full reindex via ?full=true — the
-// server clears indexed_sha first so the next job runs the full
-// embedding pipeline. Use Shift+click as the manual recovery path when
-// index drift is suspected and the auto-detected model-change full
-// reindex isn't enough.
+// ReindexProjectButton triggers a FULL rebuild — the server clears
+// indexed_sha first, so the next job re-embeds every file (wipes prior
+// chunks/symbols/refs). This is the heavy "rebuild from scratch" path;
+// for the cheap "pull + incremental" path use the Sync button instead.
 export function ReindexProjectButton({ hash, hostPath }: { hash: string; hostPath: string }) {
   const reindex = useReindexProject();
 
-  async function trigger(full: boolean) {
+  async function onClick() {
     try {
-      const res = await reindex.mutateAsync({ hash, full });
-      const label = full ? 'Full reindex' : 'Reindex';
+      const res = await reindex.mutateAsync({ hash, full: true });
       if (res.status === 'already_running') {
-        toast.info(`${label} already running`, { description: hostPath });
+        toast.info('Reindex already running', { description: hostPath });
       } else {
-        toast.success(`${label} enqueued`, {
-          description: full ? `${hostPath} — full rebuild` : hostPath,
-        });
+        toast.success('Full reindex enqueued', { description: `${hostPath} — full rebuild` });
       }
     } catch (err) {
       const detail = err instanceof ApiError ? err.detail : String(err);
       toast.error('Failed to enqueue reindex', { description: detail });
     }
-  }
-
-  function onClick(e: MouseEvent<HTMLButtonElement>) {
-    void trigger(e.shiftKey);
   }
 
   return (
@@ -42,12 +31,12 @@ export function ReindexProjectButton({ hash, hostPath }: { hash: string; hostPat
       size="sm"
       onClick={onClick}
       disabled={reindex.isPending}
-      title="Click for incremental reindex (git diff). Shift+Click for full reindex (rebuild everything)."
+      title="Full reindex — clears the index and re-embeds every file. For a quick pull + incremental update, use Sync."
     >
       {reindex.isPending ? (
         <Loader2 className="mr-1 h-4 w-4 animate-spin" />
       ) : (
-        <RefreshCw className="mr-1 h-4 w-4" />
+        <Hammer className="mr-1 h-4 w-4" />
       )}
       Reindex
     </Button>

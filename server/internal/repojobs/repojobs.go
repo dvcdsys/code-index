@@ -12,27 +12,27 @@
 //
 // Lifecycle for an external project:
 //
-//	1. POST /api/v1/git-repos
-//	   - inserts a projects row (status='pending') and a git_repos row
-//	   - enqueues clone_repo job (dedupe_key="clone:<path_hash>")
+//  1. POST /api/v1/git-repos
+//     - inserts a projects row (status='pending') and a git_repos row
+//     - enqueues clone_repo job (dedupe_key="clone:<path_hash>")
 //
-//	2. clone_repo handler
-//	   - reveals PAT via githubtokens.Reveal (if token_id set)
-//	   - calls repocloner.CloneOrFetch into DataDir/repos/<path_hash>/
-//	     (passing git_repos.indexed_sha so the cloner can compute a
-//	      tree.Diff change set when the repo was indexed before)
-//	   - flips projects.status → indexing
-//	   - enqueues index_repo job with the determined mode + change set
-//	     (dedupe_key="index:<path_hash>")
+//  2. clone_repo handler
+//     - reveals PAT via githubtokens.Reveal (if token_id set)
+//     - calls repocloner.CloneOrFetch into DataDir/repos/<path_hash>/
+//     (passing git_repos.indexed_sha so the cloner can compute a
+//     tree.Diff change set when the repo was indexed before)
+//     - flips projects.status → indexing
+//     - enqueues index_repo job with the determined mode + change set
+//     (dedupe_key="index:<path_hash>")
 //
-//	3. index_repo handler
-//	   - calls repoindexer.IndexDir(changes=nil) for full reindex or
-//	     repoindexer.IndexDir(changes=&cs) for incremental — handed off
-//	     from clone_repo's mode determination
-//	   - flips projects.status → indexed (or 'error' on failure)
-//	   - writes last_indexed_at on the projects row
-//	   - writes git_repos.indexed_sha = last_sha so the NEXT clone job
-//	     can diff against this point
+//  3. index_repo handler
+//     - calls repoindexer.IndexDir(changes=nil) for full reindex or
+//     repoindexer.IndexDir(changes=&cs) for incremental — handed off
+//     from clone_repo's mode determination
+//     - flips projects.status → indexed (or 'error' on failure)
+//     - writes last_indexed_at on the projects row
+//     - writes git_repos.indexed_sha = last_sha so the NEXT clone job
+//     can diff against this point
 //
 // Mode determination (in handleClone):
 //   - first clone (no prior on-disk repo) → full
@@ -97,7 +97,7 @@ const (
 // previous one until that job completes.
 type IndexPayload struct {
 	ProjectPath  string   `json:"project_path"`
-	Mode         string   `json:"mode,omitempty"`         // "full" | "incremental"; empty = "full" for legacy rows
+	Mode         string   `json:"mode,omitempty"`          // "full" | "incremental"; empty = "full" for legacy rows
 	ChangedPaths []string `json:"changed_paths,omitempty"` // incremental: Modified + Added paths (incremental only)
 	DeletedPaths []string `json:"deleted_paths,omitempty"` // incremental: paths whose chunks/symbols must be removed
 	// TargetSHA is the SHA that handleIndex must persist to
@@ -311,6 +311,18 @@ func handleIndex(ctx context.Context, d Deps, job jobs.Job) error {
 
 	_, _, err = repoindexer.IndexDir(ctx, d.Indexer, g.ProjectPath, cloneDir, changes, repoindexer.DefaultFilter(), d.Logger)
 	if err != nil {
+		// A force-stop deletes the active indexer session out from under
+		// IndexDir; the next ProcessFiles/FinishIndexing then returns
+		// ErrNoSession. That's a deliberate cancellation, not a failure —
+		// don't mark the project 'error' or set last_error (CancelIndexing
+		// already flipped status back to a terminal state). Return nil so
+		// the queue marks the (likely already-deleted) job done instead of
+		// retrying it, which would just re-index what we asked to stop.
+		if errors.Is(err, indexer.ErrNoSession) {
+			d.Logger.Info("repojobs: index cancelled (session gone — force-stop)", "project", g.ProjectPath)
+			d.reschedulePoll(ctx, g)
+			return nil
+		}
 		d.recordFailure(ctx, g, fmt.Errorf("index: %w", err))
 		return err
 	}

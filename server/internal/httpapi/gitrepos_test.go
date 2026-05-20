@@ -5,17 +5,71 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/githubtokens"
+	"github.com/dvcdsys/code-index/server/internal/gitrepos"
+	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
+	"github.com/dvcdsys/code-index/server/internal/secrets"
+	"github.com/dvcdsys/code-index/server/internal/vectorstore"
+	"github.com/dvcdsys/code-index/server/internal/workspaceprojects"
+	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
+
+// reposRouterWithIndexer is reposRouterDB plus a wired indexer.Service
+// (fake embedder + temp vectorstore), returned so a test can drive an
+// active index session directly via BeginIndexing — needed to exercise
+// the force-stop cancelled=true path.
+func reposRouterWithIndexer(t *testing.T) (http.Handler, *sql.DB, *indexer.Service) {
+	t.Helper()
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Setenv("CIX_SECRET_KEY", "")
+	t.Setenv("CIX_SECRET_KEYFILE", "")
+	sec, err := secrets.Open(secrets.OpenOptions{DataDir: t.TempDir(), AllowGenerate: true})
+	if err != nil {
+		t.Fatalf("open secrets: %v", err)
+	}
+	vs, err := vectorstore.Open(filepath.Join(t.TempDir(), "chroma"))
+	if err != nil {
+		t.Fatalf("vectorstore open: %v", err)
+	}
+	emb := &fakeEmbedder{dim: 16}
+	idx := indexer.New(d, vs, emb, nil)
+	router := NewRouter(Deps{
+		DB:                d,
+		ServerVersion:     "test",
+		APIVersion:        "v1",
+		Backend:           "go",
+		AuthDisabled:      true,
+		Users:             seedlessUsers(d),
+		Sessions:          seedlessSessions(d),
+		APIKeys:           seedlessAPIKeys(d),
+		Workspaces:        workspaces.New(d),
+		GithubTokens:      githubtokens.New(d, sec),
+		GitRepos:          gitrepos.New(d),
+		WorkspaceProjects: workspaceprojects.New(d),
+		Jobs:              jobs.New(d, jobs.Options{Concurrency: 1, PollEvery: time.Hour}),
+		Indexer:           idx,
+		VectorStore:       vs,
+		EmbeddingSvc:      emb,
+		PublicBaseURL:     "https://cix.example.test",
+	})
+	return router, d, idx
+}
 
 func TestAddGitRepo_Succeeds(t *testing.T) {
 	router, jobsSvc := reposRouter(t)
@@ -393,6 +447,173 @@ func TestReindexProject_RequiresGitRepo(t *testing.T) {
 	rr = doJSON(t, router, http.MethodPost, "/api/v1/projects/"+p.PathHash+"/reindex", nil)
 	if rr.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422 for local-project reindex, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestForceStopIndex_ClearsPipelineJobs verifies force-stop deletes the
+// pending clone job that AddGitRepo auto-enqueues and reports it in
+// jobs_cleared, settling the project on a terminal status. No live session
+// exists in this harness (the worker pool isn't running), so cancelled=false.
+func TestForceStopIndex_ClearsPipelineJobs(t *testing.T) {
+	router, _, d := reposRouterDB(t)
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url": "https://github.com/a/b",
+		"branch":     "main",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed git_repo: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created struct {
+		GitRepo struct {
+			PathHash string `json:"path_hash"`
+		} `json:"git_repo"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+	hash := created.GitRepo.PathHash
+
+	// Sanity: the auto-enqueued clone job is queued.
+	var pending int
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM jobs WHERE dedupe_key = ? AND status IN ('pending','running')`,
+		"clone:"+hash,
+	).Scan(&pending); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("baseline pending clone jobs = %d, want 1", pending)
+	}
+
+	rr = doJSON(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/force-stop", nil)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("force-stop: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Cancelled   bool `json:"cancelled"`
+		JobsCleared int  `json:"jobs_cleared"`
+		Project     struct {
+			Status string `json:"status"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode force-stop response: %v", err)
+	}
+	if resp.JobsCleared != 1 {
+		t.Errorf("jobs_cleared = %d, want 1", resp.JobsCleared)
+	}
+	if resp.Cancelled {
+		t.Errorf("cancelled = true, want false (no live session in this harness)")
+	}
+	// Never indexed → terminal status is 'created'.
+	if resp.Project.Status != "created" {
+		t.Errorf("project.status = %q, want created", resp.Project.Status)
+	}
+
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM jobs WHERE dedupe_key = ? AND status IN ('pending','running')`,
+		"clone:"+hash,
+	).Scan(&pending); err != nil {
+		t.Fatalf("recount jobs: %v", err)
+	}
+	if pending != 0 {
+		t.Errorf("pending clone jobs after force-stop = %d, want 0", pending)
+	}
+}
+
+func TestForceStopIndex_RequiresGitRepo(t *testing.T) {
+	router, _ := reposRouter(t)
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/projects", map[string]any{
+		"host_path": "/Users/x/local-proj",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed local project: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var p struct {
+		PathHash string `json:"path_hash"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &p)
+
+	rr = doJSON(t, router, http.MethodPost, "/api/v1/projects/"+p.PathHash+"/force-stop", nil)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for local-project force-stop, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestForceStopIndex_UnknownHashIs404 pins that a hash matching no project
+// returns 404 (project not found), distinct from the 422 a real-but-local
+// project gets. Guards against the earlier behaviour where both collapsed
+// into a misleading "no git_repos row" 422.
+func TestForceStopIndex_UnknownHashIs404(t *testing.T) {
+	router, _ := reposRouter(t)
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/projects/deadbeefdeadbeef/force-stop", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown hash, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestForceStopIndex_CancelledNeverIndexed_StatusCreated covers the
+// cancelled=true path with the never-indexed guard: an external project
+// with a live index session but no recorded indexed_sha must settle on
+// 'created', NOT 'indexed'. (indexer.CancelIndexing flips to 'indexed'
+// unconditionally; the handler corrects it.)
+func TestForceStopIndex_CancelledNeverIndexed_StatusCreated(t *testing.T) {
+	router, d, idx := reposRouterWithIndexer(t)
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url": "https://github.com/a/b",
+		"branch":     "main",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed git_repo: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created struct {
+		GitRepo struct {
+			PathHash string `json:"path_hash"`
+		} `json:"git_repo"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+	hash := created.GitRepo.PathHash
+	const projectPath = "github.com/a/b@main"
+
+	// Simulate an in-flight index by opening a live session for the repo.
+	if _, _, err := idx.BeginIndexing(context.Background(), projectPath, true); err != nil {
+		t.Fatalf("begin indexing: %v", err)
+	}
+
+	rr = doJSON(t, router, http.MethodPost, "/api/v1/projects/"+hash+"/force-stop", nil)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("force-stop: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Cancelled bool `json:"cancelled"`
+		Project   struct {
+			Status string `json:"status"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode force-stop response: %v", err)
+	}
+	if !resp.Cancelled {
+		t.Errorf("cancelled = false, want true (a live session existed)")
+	}
+	if resp.Project.Status != "created" {
+		t.Errorf("project.status = %q, want created (never indexed)", resp.Project.Status)
+	}
+
+	var dbStatus string
+	if err := d.QueryRow(
+		`SELECT status FROM projects WHERE host_path = ?`, projectPath,
+	).Scan(&dbStatus); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if dbStatus != "created" {
+		t.Errorf("db project.status = %q, want created", dbStatus)
+	}
+
+	// Session must be gone — a fresh begin would otherwise 409.
+	if _, _, err := idx.BeginIndexing(context.Background(), projectPath, true); err != nil {
+		t.Errorf("re-begin after force-stop failed (session not released?): %v", err)
 	}
 }
 
