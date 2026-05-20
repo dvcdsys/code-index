@@ -335,6 +335,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     file_path,
     tokenize = 'trigram'
 );
+
+-- tunnel_config holds the single dashboard-managed Managed Tunnel row.
+-- The feature has no env enable flag — enable/mode/hostname/token live
+-- here and are edited from the dashboard. encrypted_token is the
+-- AES-GCM-encrypted Cloudflare named-tunnel connector token (NULL for
+-- quick mode). CHECK(id=1) enforces a single row; UPSERT on id=1.
+CREATE TABLE IF NOT EXISTS tunnel_config (
+    id              INTEGER PRIMARY KEY CHECK(id=1),
+    enabled         INTEGER NOT NULL DEFAULT 0,
+    provider        TEXT    NOT NULL DEFAULT 'cloudflare',
+    mode            TEXT    NOT NULL DEFAULT 'quick',
+    hostname        TEXT    NOT NULL DEFAULT '',
+    encrypted_token BLOB,
+    updated_at      TEXT    NOT NULL,
+    updated_by      TEXT
+);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -357,5 +373,6 @@ var ExpectedTables = []string{
 	"call_edges",
 	"chunks_meta",
 	"chunks_fts",
+	"tunnel_config",
 	"schema_migrations",
 }

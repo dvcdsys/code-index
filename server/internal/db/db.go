@@ -60,6 +60,7 @@ var registeredMigrations = []migration{
 	{5, "split_workspace_repos", func(db *sql.DB, opts OpenOptions) error { return migrateSplitWorkspaceRepos(db, opts.DataDir) }},
 	{6, "drop_communities", func(db *sql.DB, _ OpenOptions) error { return migrateDropCommunities(db) }},
 	{7, "git_repos_indexed_sha", func(db *sql.DB, _ OpenOptions) error { return migrateGitReposIndexedSHA(db) }},
+	{8, "tunnel_config", func(db *sql.DB, _ OpenOptions) error { return migrateTunnelConfig(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -191,6 +192,27 @@ func applyMigrations(db *sql.DB, opts OpenOptions) error {
 // and routes through the full-reindex branch, setting indexed_sha on
 // success. Idempotent via PRAGMA table_info: skip the ALTER if the
 // column is already present.
+// migrateTunnelConfig creates the single-row tunnel_config table on
+// existing DBs. Idempotent — CREATE TABLE IF NOT EXISTS matches the shape
+// in schema.go, so a fresh DB that already has the table is a no-op.
+func migrateTunnelConfig(db *sql.DB) error {
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS tunnel_config (
+    id              INTEGER PRIMARY KEY CHECK(id=1),
+    enabled         INTEGER NOT NULL DEFAULT 0,
+    provider        TEXT    NOT NULL DEFAULT 'cloudflare',
+    mode            TEXT    NOT NULL DEFAULT 'quick',
+    hostname        TEXT    NOT NULL DEFAULT '',
+    encrypted_token BLOB,
+    updated_at      TEXT    NOT NULL,
+    updated_by      TEXT
+)`)
+	if err != nil {
+		return fmt.Errorf("create tunnel_config: %w", err)
+	}
+	return nil
+}
+
 func migrateGitReposIndexedSHA(db *sql.DB) error {
 	exists, err := tableExists(db, "git_repos")
 	if err != nil {

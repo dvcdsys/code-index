@@ -107,6 +107,67 @@ func TestCreateWebhookForbiddenIsUnauthorized(t *testing.T) {
 	}
 }
 
+func TestUpdateWebhookSendsExpectedRequest(t *testing.T) {
+	c, recs := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id": 42, "url": "https://api.github.com/repos/o/r/hooks/42", "active": true}`))
+	}))
+	hr, err := c.UpdateWebhook(context.Background(), UpdateWebhookOptions{
+		Owner:  "o",
+		Repo:   "r",
+		PAT:    "ghp_xxx",
+		HookID: 42,
+		URL:    "https://new.tunnel/api/v1/webhooks/github/abc",
+		Secret: "s3cr3t",
+	})
+	if err != nil {
+		t.Fatalf("UpdateWebhook: %v", err)
+	}
+	if hr.ID != 42 {
+		t.Fatalf("expected id=42, got %d", hr.ID)
+	}
+	if len(*recs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*recs))
+	}
+	r := (*recs)[0]
+	if r.Path != "/repos/o/r/hooks/42" {
+		t.Fatalf("path: %q", r.Path)
+	}
+	if r.Method != http.MethodPatch {
+		t.Fatalf("method: %q", r.Method)
+	}
+	if r.Auth != "token ghp_xxx" {
+		t.Fatalf("auth: %q", r.Auth)
+	}
+	if cfg, _ := r.Body["config"].(map[string]any); cfg["url"] != "https://new.tunnel/api/v1/webhooks/github/abc" {
+		t.Fatalf("url not forwarded: %+v", r.Body)
+	}
+}
+
+func TestUpdateWebhookRequiresHookID(t *testing.T) {
+	c := New()
+	_, err := c.UpdateWebhook(context.Background(), UpdateWebhookOptions{
+		Owner: "o", Repo: "r", PAT: "x", URL: "https://x", Secret: "y",
+	})
+	if err == nil || !strings.Contains(err.Error(), "hook id required") {
+		t.Fatalf("expected hook id required error, got %v", err)
+	}
+}
+
+func TestUpdateWebhookNotFound(t *testing.T) {
+	c, _ := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message": "Not Found"}`))
+	}))
+	_, err := c.UpdateWebhook(context.Background(), UpdateWebhookOptions{
+		Owner: "o", Repo: "r", PAT: "x", HookID: 99, URL: "https://x", Secret: "y",
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
 func TestDeleteWebhookTreats404AsSuccess(t *testing.T) {
 	c, _ := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

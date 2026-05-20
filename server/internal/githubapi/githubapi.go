@@ -422,6 +422,81 @@ func (c *Client) CreateWebhook(ctx context.Context, opts CreateWebhookOptions) (
 	}
 }
 
+// UpdateWebhookOptions parameterises a hook update. HookID identifies the
+// existing hook; URL/Secret are the new delivery config. Events defaults
+// to ["push"] when nil.
+type UpdateWebhookOptions struct {
+	Owner    string
+	Repo     string
+	PAT      string
+	HookID   int64
+	URL      string // the new cix-server delivery URL
+	Secret   string // HMAC secret cix-server expects
+	Events   []string
+	Insecure bool
+}
+
+// UpdateWebhook calls PATCH /repos/{owner}/{repo}/hooks/{id}. It re-points
+// an existing hook at a new delivery URL (and refreshes the secret) — the
+// path taken when the managed tunnel's public URL changes. Returns the
+// hook id so callers keep the same persisted value.
+func (c *Client) UpdateWebhook(ctx context.Context, opts UpdateWebhookOptions) (HookResponse, error) {
+	if opts.Owner == "" || opts.Repo == "" {
+		return HookResponse{}, fmt.Errorf("owner/repo required")
+	}
+	if opts.PAT == "" {
+		return HookResponse{}, fmt.Errorf("PAT required")
+	}
+	if opts.HookID == 0 {
+		return HookResponse{}, fmt.Errorf("hook id required")
+	}
+	events := opts.Events
+	if len(events) == 0 {
+		events = []string{"push"}
+	}
+	body := map[string]any{
+		"active": true,
+		"events": events,
+		"config": map[string]any{
+			"url":          opts.URL,
+			"content_type": "json",
+			"secret":       opts.Secret,
+			"insecure_ssl": insecureSSLValue(opts.Insecure),
+		},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return HookResponse{}, err
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/hooks/%d", c.BaseURL,
+		url.PathEscape(opts.Owner), url.PathEscape(opts.Repo), opts.HookID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return HookResponse{}, err
+	}
+	c.signRequest(req, opts.PAT)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return HookResponse{}, fmt.Errorf("github API: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var hr HookResponse
+		if err := json.Unmarshal(respBody, &hr); err != nil {
+			return HookResponse{}, fmt.Errorf("parse hook response: %w", err)
+		}
+		return hr, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return HookResponse{}, fmt.Errorf("%w: %s", ErrUnauthorized, githubMessage(respBody))
+	case http.StatusNotFound:
+		return HookResponse{}, fmt.Errorf("%w: %s", ErrNotFound, githubMessage(respBody))
+	default:
+		return HookResponse{}, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(respBody))
+	}
+}
+
 // ValidateToken probes GET /user with the given PAT, returning the
 // authenticated login plus the scopes GitHub advertises in the
 // X-OAuth-Scopes response header. A 401/403 yields ErrUnauthorized so

@@ -21,6 +21,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/githubapi"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/httpapi"
@@ -29,6 +30,8 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
+	"github.com/dvcdsys/code-index/server/internal/tunnels"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
@@ -307,6 +310,71 @@ func run() error {
 	}, logger)
 	go vcSvc.Run(bgCtx)
 
+	// Managed tunnel + webhook reconciler. The feature has NO env enable
+	// flag — its config (enable/mode/hostname/token) lives in tunnel_config
+	// and is managed entirely from the dashboard. The reconciler is always
+	// wired (it re-registers webhook_mode=auto repos against whatever public
+	// base is current). The tunnel is a feature, not a core dependency — a
+	// start failure is logged, not fatal.
+	tunnelCfgSvc := tunnelcfg.New(database, secSvc)
+	webhookReconciler := tunnels.NewReconciler(grSvc, ghSvc, githubapi.New(), logger)
+	tunnelMgr := tunnels.NewManager(tunnels.ManagerConfig{
+		LocalPort: cfg.Port,
+		Cloudflare: tunnels.CloudflareInfra{
+			BinPath:     cfg.CloudflareBinPath,
+			MetricsAddr: cfg.CloudflareMetricsAddr,
+			StartupSec:  cfg.CloudflareStartupSec,
+		},
+		Ngrok: tunnels.NgrokInfra{
+			BinPath:    cfg.NgrokBinPath,
+			StartupSec: cfg.NgrokStartupSec,
+		},
+		BinManaged: cfg.TunnelBinManaged,
+		BinDir:     cfg.TunnelBinDir,
+	}, logger)
+	// Re-register auto webhooks whenever the public URL changes (quick
+	// tunnels mint a fresh URL on every restart). Reconcile is idempotent —
+	// a PATCH to the same URL is harmless — so we also run it once on boot.
+	tunnelMgr.OnURLChange(func(u string) {
+		if _, rerr := webhookReconciler.Reconcile(bgCtx, u); rerr != nil {
+			logger.Warn("webhook reconcile on URL change failed", "err", rerr)
+		}
+	})
+	defer func() {
+		ctx := shutdownCtx
+		if ctx == nil {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+		}
+		if err := tunnelMgr.Stop(ctx); err != nil {
+			logger.Warn("tunnel stop", "err", err)
+		}
+	}()
+	// Apply the persisted tunnel config on boot. Non-fatal: a failure (bad
+	// config, missing cloudflared binary) is surfaced via the dashboard.
+	if resolved, rerr := tunnelCfgSvc.Resolve(context.Background()); rerr != nil {
+		logger.Error("could not load tunnel config", "err", rerr)
+	} else if resolved.Enabled {
+		applyCtx, applyCancel := context.WithTimeout(context.Background(),
+			time.Duration(cfg.CloudflareStartupSec)*time.Second+10*time.Second)
+		if aerr := tunnelMgr.Apply(applyCtx, tunnels.Settings{
+			Enabled:  resolved.Enabled,
+			Provider: resolved.Provider,
+			Mode:     resolved.Mode,
+			Hostname: resolved.Hostname,
+			Token:    resolved.Token,
+		}); aerr != nil {
+			logger.Error("managed tunnel failed to start (continuing)", "err", aerr)
+		}
+		applyCancel()
+		go func() {
+			if _, rrerr := webhookReconciler.Reconcile(bgCtx, tunnelMgr.URL()); rrerr != nil {
+				logger.Warn("initial webhook reconcile failed", "err", rrerr)
+			}
+		}()
+	}
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		DB:                database,
 		ServerVersion:     version,
@@ -329,6 +397,9 @@ func run() error {
 		WorkspaceProjects: wpSvc,
 		Jobs:              jobsSvc,
 		PublicBaseURL:     cfg.PublicBaseURL,
+		Tunnel:            tunnelMgr,
+		WebhookReconciler: webhookReconciler,
+		TunnelConfig:      tunnelCfgSvc,
 	})
 
 	srv := &http.Server{
