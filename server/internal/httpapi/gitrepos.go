@@ -480,6 +480,87 @@ func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash str
 	writeJSON(w, http.StatusAccepted, resp)
 }
 
+// ForceStopIndex — POST /api/v1/projects/{hash}/force-stop.
+//
+// External projects only. Hard-aborts the clone + index pipeline:
+//
+//  1. Delete pending/running clone_repo + index_repo jobs so the queue
+//     can't retry or resume. Done first so a not-yet-started index job
+//     can't sneak in between the cancel and the cleanup.
+//  2. Cancel the active in-process index session, which unblocks the
+//     next index/begin; the in-flight IndexDir then sees ErrNoSession
+//     and stops cleanly (handled in repojobs.handleIndex).
+//  3. Settle the project on a terminal status (see below).
+//
+// 404 when no project resolves to the hash; 422 when the project exists
+// but is local (no git_repos row — local projects index via the CLI and
+// have no server-side pipeline to stop).
+//
+// Best-effort by design: chunks already committed are not rolled back,
+// and a force-stop landing in the brief clone/fetch window may not catch
+// an index job the clone goroutine enqueues a moment later — re-run if so.
+func (s *Server) ForceStopIndex(w http.ResponseWriter, r *http.Request, hash string) {
+	if s.gitReposUnavailable(w) {
+		return
+	}
+	// Distinguish "no such project" (404) from "local project" (422):
+	// GitRepos.GetByHash returns ErrNotFound for both, which would mislead.
+	if _, perr := projects.GetByHash(r.Context(), s.Deps.DB, hash); perr != nil {
+		if errors.Is(perr, projects.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "no project for this hash")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load project: "+perr.Error())
+		return
+	}
+	g, err := s.Deps.GitRepos.GetByHash(r.Context(), hash)
+	if err != nil {
+		if errors.Is(err, gitrepos.ErrNotFound) {
+			writeError(w, http.StatusUnprocessableEntity, "this is a local project — force-stop only applies to external (git-cloned) projects; cancel a local index via the CLI")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load git_repo: "+err.Error())
+		return
+	}
+
+	cleared, derr := s.Deps.Jobs.DeleteByDedupeKeys(r.Context(),
+		"clone:"+g.PathHash, "index:"+g.PathHash)
+	if derr != nil {
+		writeError(w, http.StatusInternalServerError, "could not clear pipeline jobs: "+derr.Error())
+		return
+	}
+
+	cancelled := false
+	if s.Deps.Indexer != nil {
+		cancelled, err = s.Deps.Indexer.CancelIndexing(r.Context(), g.ProjectPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not cancel index session: "+err.Error())
+			return
+		}
+	}
+
+	// Settle on a terminal status, regardless of whether a live session
+	// was found. CancelIndexing flips to 'indexed' unconditionally when a
+	// session existed — wrong for a project that was never fully indexed
+	// (partial/zero chunks). Best-effort cancel semantics: a repo with no
+	// recorded indexed_sha returns to 'created'; otherwise 'indexed'. This
+	// also covers the !cancelled case (stopped mid-clone, or nothing ran),
+	// where the project could be stuck at 'cloning'/'indexing'.
+	status := "created"
+	if g.IndexedSHA != "" {
+		status = "indexed"
+	}
+	if serr := projects.SetStatus(r.Context(), s.Deps.DB, g.ProjectPath, status); serr != nil {
+		s.Deps.Logger.Warn("force-stop: set terminal status failed", "project", g.ProjectPath, "err", serr)
+	}
+
+	resp := map[string]any{"cancelled": cancelled, "jobs_cleared": cleared}
+	if proj, _ := projects.Get(r.Context(), s.Deps.DB, g.ProjectPath); proj != nil {
+		resp["project"] = projectToOpenAPI(proj)
+	}
+	writeJSON(w, http.StatusAccepted, resp)
+}
+
 // tryAutoRegisterWebhook calls the GitHub API to register a push hook
 // for the given git_repo. Best-effort — failure does NOT roll back the
 // git_repos row; the operator can rerun manually via webhook-info.

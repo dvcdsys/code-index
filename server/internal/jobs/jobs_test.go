@@ -200,6 +200,42 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestDeleteByDedupeKeys(t *testing.T) {
+	ctx := context.Background()
+	svc := openSvc(t)
+
+	// Two keys we'll target + one we won't.
+	for _, key := range []string{"clone:abc", "index:abc", "clone:other"} {
+		if _, err := svc.Enqueue(ctx, EnqueueRequest{Type: "x", DedupeKey: key}); err != nil {
+			t.Fatalf("Enqueue %s: %v", key, err)
+		}
+	}
+
+	n, err := svc.DeleteByDedupeKeys(ctx, "clone:abc", "index:abc")
+	if err != nil {
+		t.Fatalf("DeleteByDedupeKeys: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("deleted = %d, want 2", n)
+	}
+
+	remaining, err := svc.List(ctx, "", "", 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].DedupeKey != "clone:other" {
+		t.Fatalf("remaining jobs = %+v, want only clone:other", remaining)
+	}
+
+	// Idempotent + empty-input safe.
+	if n, err := svc.DeleteByDedupeKeys(ctx, "clone:abc"); err != nil || n != 0 {
+		t.Fatalf("re-delete: n=%d err=%v, want 0/nil", n, err)
+	}
+	if n, err := svc.DeleteByDedupeKeys(ctx); err != nil || n != 0 {
+		t.Fatalf("empty-keys delete: n=%d err=%v, want 0/nil", n, err)
+	}
+}
+
 func waitFor(t *testing.T, max time.Duration, fn func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(max)

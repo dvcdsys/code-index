@@ -11,8 +11,10 @@ import { Skeleton } from '@/ui/skeleton';
 import { formatDateTime, formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
 import { DeleteProjectDialog } from './components/DeleteProjectDialog';
+import { ForceStopButton } from './components/ForceStopButton';
 import { ProjectInfoCard } from './components/ProjectInfoCard';
 import { ReindexProjectButton } from './components/ReindexProjectButton';
+import { SyncProjectButton } from './components/SyncProjectButton';
 import { SyncSettingsCard } from './components/SyncSettingsCard';
 import { useProject, useProjectSummary, useProjectWorkspaces } from './hooks';
 
@@ -100,7 +102,13 @@ export function ProjectDetailPage() {
             </Link>
           </Button>
           {isExternal ? (
-            <ReindexProjectButton hash={p.path_hash} hostPath={p.host_path} />
+            <>
+              <SyncProjectButton hash={p.path_hash} hostPath={p.host_path} />
+              <ReindexProjectButton hash={p.path_hash} hostPath={p.host_path} />
+              {p.status === 'indexing' ? (
+                <ForceStopButton hash={p.path_hash} hostPath={p.host_path} />
+              ) : null}
+            </>
           ) : null}
           {isAdmin ? (
             <DeleteProjectDialog hash={p.path_hash} hostPath={p.host_path} redirectAfter />

@@ -408,14 +408,46 @@ func (s *Service) List(ctx context.Context, status, jobType string, limit int) (
 	return out, rows.Err()
 }
 
+// DeleteByDedupeKeys removes all pending/running jobs whose dedupe_key is in
+// keys, returning how many rows were deleted. Used by the force-stop flow to
+// clear an external project's clone_repo + index_repo pipeline so it cannot
+// retry or resume.
+//
+// Only pending/running rows are touched — completed/failed rows are history
+// and left intact. Deleting a *running* row is intentional: the handler
+// goroutine keeps executing, but its terminal markCompleted/markFailed UPDATE
+// then matches zero rows, so the job neither retries nor flips status. The
+// in-flight work is stopped separately (the indexer session is cancelled),
+// which surfaces to the handler as indexer.ErrNoSession.
+func (s *Service) DeleteByDedupeKeys(ctx context.Context, keys ...string) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+	args := make([]any, 0, len(keys))
+	for _, k := range keys {
+		args = append(args, k)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM jobs
+		  WHERE status IN ('pending', 'running')
+		    AND dedupe_key IN (`+placeholders+`)`,
+		args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete jobs by dedupe key: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // --- helpers ---
 
 func scanRow(r interface{ Scan(dest ...any) error }) (Job, error) {
 	var (
-		j                                                Job
-		dedupe, lastErr, startedAt, completedAt          sql.NullString
-		payload                                          string
-		scheduledAt, createdAt                           string
+		j                                       Job
+		dedupe, lastErr, startedAt, completedAt sql.NullString
+		payload                                 string
+		scheduledAt, createdAt                  string
 	)
 	err := r.Scan(&j.ID, &j.Type, &j.Status, &dedupe, &payload,
 		&j.Attempts, &j.MaxAttempts, &lastErr,

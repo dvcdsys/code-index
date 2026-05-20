@@ -1642,6 +1642,50 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/projects/{hash}/force-stop:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: forceStopIndex
+      tags: [projects]
+      summary: Force-stop an in-flight index for an external project
+      description: |
+        Hard-aborts the clone + index pipeline for an external
+        (GitHub-cloned) project. 422 when the project is local — local
+        projects index via the CLI and have no server-side pipeline to
+        stop (use the CLI's own cancel/Ctrl-C).
+
+        Two effects, both best-effort:
+          1. Pending/running `clone_repo` + `index_repo` jobs for this
+             repo are deleted from the queue so the pipeline cannot
+             retry or resume.
+          2. The active in-process index session (if any) is cancelled,
+             which unblocks the next `cix index/begin` and flips the
+             project status back to a terminal state.
+
+        Already-committed chunks/symbols are NOT rolled back (matches
+        the CLI's cancel semantics) — a subsequent sync/reindex
+        overwrites them.
+      responses:
+        "202":
+          description: Force-stop processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForceStopResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
   /api/v1/webhooks/github/{hash}:
     parameters:
       - name: hash
@@ -3866,6 +3910,24 @@ components:
             and the clone-job's mode-determination picks the real
             mode (still may resolve to full at runtime for first-index,
             model-change, or partial-failure cases).
+        project:
+          $ref: "#/components/schemas/Project"
+
+    ForceStopResponse:
+      type: object
+      required: [cancelled, jobs_cleared]
+      properties:
+        cancelled:
+          type: boolean
+          description: |
+            True when an active in-process index session was found and
+            cancelled. False when nothing was indexing (the job-queue
+            cleanup still ran — see `jobs_cleared`).
+        jobs_cleared:
+          type: integer
+          description: |
+            Count of pending/running clone_repo + index_repo jobs that
+            were deleted from the queue for this repo.
         project:
           $ref: "#/components/schemas/Project"
 
