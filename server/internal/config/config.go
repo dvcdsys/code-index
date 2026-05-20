@@ -114,10 +114,12 @@ type Config struct {
 	// means losing both.
 	SecretsDataDir string
 
-	// WorkspacesDataDir is the parent directory the worker pool clones
-	// GitHub repositories under (each clone lives at
-	// <WorkspacesDataDir>/<path_hash>/). Defaults to
-	// <SQLite parent>/repos. Source: CIX_WORKSPACES_DATA_DIR.
+	// WorkspacesDataDir is the base directory the worker pool clones GitHub
+	// repositories under (each clone lives at
+	// <WorkspacesDataDir>/repos/<path_hash>/). Defaults to
+	// <SQLite parent>/repos. Source: CIX_REPOS_DIR (preferred), or the
+	// legacy CIX_WORKSPACES_DATA_DIR alias. Point this at a dedicated volume
+	// when cloned repos are large.
 	WorkspacesDataDir string
 
 	// WorkerConcurrency controls how many jobs goroutines drain the
@@ -347,7 +349,13 @@ func Load() (*Config, error) {
 	c.SecretKey = getenv("CIX_SECRET_KEY", "")
 	c.SecretKeyFile = getenv("CIX_SECRET_KEYFILE", "")
 	c.SecretsDataDir = getenv("CIX_SECRETS_DATA_DIR", filepath.Dir(c.SQLitePath))
-	c.WorkspacesDataDir = getenv("CIX_WORKSPACES_DATA_DIR", filepath.Join(filepath.Dir(c.SQLitePath), "repos"))
+	// CIX_REPOS_DIR is the clearly-named source; CIX_WORKSPACES_DATA_DIR is the
+	// legacy alias kept for backward compatibility (this used to be a
+	// workspace-only concept). First non-empty wins, else the default.
+	c.WorkspacesDataDir = firstEnv(
+		[]string{"CIX_REPOS_DIR", "CIX_WORKSPACES_DATA_DIR"},
+		filepath.Join(filepath.Dir(c.SQLitePath), "repos"),
+	)
 
 	workerConc, err := getenvInt("CIX_WORKER_CONCURRENCY", 2)
 	if err != nil {
@@ -515,6 +523,18 @@ func defaultLlamaSocketPath() string {
 func getenv(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok {
 		return v
+	}
+	return def
+}
+
+// firstEnv returns the value of the first set (present, possibly empty) env var
+// in keys, or def when none are set. Used for vars with a preferred name plus a
+// legacy alias.
+func firstEnv(keys []string, def string) string {
+	for _, k := range keys {
+		if v, ok := os.LookupEnv(k); ok {
+			return v
+		}
 	}
 	return def
 }

@@ -79,7 +79,8 @@ one under `<CIX_SECRETS_DATA_DIR>/.secret_key`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CIX_WORKSPACES_DATA_DIR` | `<sqlite parent>/repos` | Where cloned GitHub repos live. |
+| `CIX_REPOS_DIR` | `<sqlite parent>/repos` | Base directory for cloned GitHub repos. Each clone lives at `<dir>/repos/<path_hash>/`. Point this at a dedicated volume — cloned repos can be large. |
+| `CIX_WORKSPACES_DATA_DIR` | — | Legacy alias for `CIX_REPOS_DIR` (used when the latter is unset). Prefer `CIX_REPOS_DIR`. |
 | `CIX_WORKER_CONCURRENCY` | `2` | Parallel clone/index workers. |
 | `CIX_SECRET_KEY` | (auto-generate) | 32-byte AES key for GitHub token encryption. Hex or base64. |
 | `CIX_SECRET_KEYFILE` | — | Alternative — path to a 0600-perm key file. |
