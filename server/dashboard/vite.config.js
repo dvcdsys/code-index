@@ -1,6 +1,23 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
+const OUT_DIR = '../internal/httpapi/dashboard/dist';
+// keepGitkeep re-creates dist/.gitkeep after each build. `emptyOutDir: true`
+// (required below) wipes the whole output dir, including the committed
+// `.gitkeep` marker that keeps dist/ tracked in git for Go's
+// `//go:embed all:dist`. Without this, every `vite build` shows up as a
+// deleted .gitkeep — the marker keeps leaking out of commits and breaks
+// `go build`/CI on a fresh clone where dist/ holds only the marker. Runs in
+// `closeBundle`, which fires once the bundle is fully written.
+function keepGitkeep(outDir) {
+    return {
+        name: 'cix-keep-gitkeep',
+        closeBundle() {
+            writeFileSync(path.resolve(__dirname, outDir, '.gitkeep'), '');
+        },
+    };
+}
 // Vite is told two non-default things:
 //  1. base: '/dashboard/' — the Go server mounts the SPA under that prefix
 //     so all asset URLs need to be rewritten accordingly.
@@ -11,7 +28,7 @@ import path from 'node:path';
 // on the default cix-server port (21847) so cookie auth works through the
 // dev server origin.
 export default defineConfig({
-    plugins: [react()],
+    plugins: [react(), keepGitkeep(OUT_DIR)],
     base: '/dashboard/',
     resolve: {
         alias: {
@@ -29,7 +46,7 @@ export default defineConfig({
         },
     },
     build: {
-        outDir: '../internal/httpapi/dashboard/dist',
+        outDir: OUT_DIR,
         emptyOutDir: true,
         sourcemap: false,
         rollupOptions: {
