@@ -11,6 +11,35 @@ export const projectKeys = {
   detail: (hash: string) => ['projects', hash] as const,
   summary: (hash: string) => ['projects', hash, 'summary'] as const,
   workspaces: (hash: string) => ['projects', hash, 'workspaces'] as const,
+  gitRepo: (hash: string) => ['projects', hash, 'git-repo'] as const,
+};
+
+// GitRepo mirrors the server's git_repos payload for an external project.
+// Defined locally so the project page doesn't depend on a regen of
+// generated.ts. Only the fields the sync UI reads are typed.
+export type GitRepo = {
+  webhook_mode: 'manual' | 'auto' | 'disabled';
+  polling_enabled: boolean;
+  poll_interval_seconds: number | null;
+  next_poll_at: string | null;
+  last_sha: string | null;
+  last_error: string | null;
+};
+
+// The three sync methods the project page exposes. Maps on the server to
+// (webhook_mode, polling_enabled): webhook→auto, polling→disabled+polling,
+// manual→disabled+no-polling.
+export type SyncMethod = 'webhook' | 'polling' | 'manual';
+
+export type UpdateSyncArgs = {
+  hash: string;
+  sync_method: SyncMethod;
+  poll_interval_seconds?: number;
+};
+
+export type UpdateSyncResult = {
+  git_repo: GitRepo;
+  note?: string;
 };
 
 // ProjectWorkspaceEntry mirrors the Go response shape from
@@ -67,6 +96,35 @@ export function useProjectWorkspaces(hash: string | undefined) {
     queryFn: ({ signal }) =>
       api.get<ProjectWorkspaceList>(`/projects/${hash}/workspaces`, { signal }),
     enabled: Boolean(hash),
+  });
+}
+
+// useProjectGitRepo fetches the git_repos metadata for an external project.
+// 404 for local projects — the caller gates on host_path starting with
+// "github.com/". Polls while a poll is pending so next_poll_at stays fresh.
+export function useProjectGitRepo(hash: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: hash ? projectKeys.gitRepo(hash) : ['projects', 'unknown', 'git-repo'],
+    queryFn: ({ signal }) => api.get<GitRepo>(`/projects/${hash}/git-repo`, { signal }),
+    enabled: Boolean(hash) && enabled,
+  });
+}
+
+// useUpdateProjectSync switches a project's sync method (webhook / polling /
+// manual) from the project page. Invalidates the git-repo + detail queries so
+// the card and header reflect the new configuration.
+export function useUpdateProjectSync() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ hash, sync_method, poll_interval_seconds }: UpdateSyncArgs) =>
+      api.patch<UpdateSyncResult>(`/projects/${hash}/git-repo`, {
+        sync_method,
+        ...(poll_interval_seconds ? { poll_interval_seconds } : {}),
+      }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: projectKeys.gitRepo(vars.hash) });
+      qc.invalidateQueries({ queryKey: projectKeys.detail(vars.hash) });
+    },
   });
 }
 

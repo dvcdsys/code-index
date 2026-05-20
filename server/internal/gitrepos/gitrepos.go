@@ -291,50 +291,64 @@ func (s *Service) ListDue(ctx context.Context, now time.Time) ([]GitRepo, error)
 	return scanRows(rows)
 }
 
-// SetPolling toggles polling for a repo and records the new interval. On
-// enable it schedules the first poll immediately (next_poll_at = now); on
-// disable it clears next_poll_at. Enforces the webhook-XOR-polling rule:
-// enabling polling on a repo whose webhook_mode != 'disabled' returns
-// ErrPollingRequiresWebhookDisabled. intervalSeconds <= 0 stores NULL
-// (use server default). ErrNotFound when the row is gone.
-func (s *Service) SetPolling(ctx context.Context, projectPath string, enabled bool, intervalSeconds int) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if !enabled {
-		res, err := s.DB.ExecContext(ctx, `
-			UPDATE git_repos
-			   SET polling_enabled = 0,
-			       next_poll_at    = NULL,
-			       updated_at      = ?
-			 WHERE project_path = ?`,
-			now, projectPath)
-		if err != nil {
-			return fmt.Errorf("disable polling: %w", err)
-		}
-		return rowsAffectedOrNotFound(res)
-	}
-
-	// Enabling — verify webhook is disabled first.
-	g, err := s.GetByPath(ctx, projectPath)
+// SetSync atomically rewrites a repo's sync configuration: webhook_mode,
+// the auto_webhook mirror bool, polling on/off, and the poll interval.
+// Enforces the webhook-XOR-polling rule (polling requires
+// webhookMode='disabled', else ErrPollingRequiresWebhookDisabled).
+// When polling is enabled it schedules the first poll immediately
+// (next_poll_at=now); otherwise next_poll_at is cleared. intervalSeconds<=0
+// stores NULL (server default). It does NOT touch webhook_id — hook
+// registration / de-registration is the caller's concern (see the
+// UpdateProjectGitRepoSync handler). ErrNotFound when the row is gone.
+func (s *Service) SetSync(ctx context.Context, projectPath, webhookMode string, pollingEnabled bool, intervalSeconds int) error {
+	mode, err := NormaliseWebhookMode(webhookMode)
 	if err != nil {
 		return err
 	}
-	if g.WebhookMode != WebhookModeDisabled {
+	if pollingEnabled && mode != WebhookModeDisabled {
 		return ErrPollingRequiresWebhookDisabled
 	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	auto := 0
+	if mode == WebhookModeAuto {
+		auto = 1
+	}
+	pe := 0
 	var pollSecs any
-	if intervalSeconds > 0 {
-		pollSecs = intervalSeconds
+	var nextPoll any
+	if pollingEnabled {
+		pe = 1
+		if intervalSeconds > 0 {
+			pollSecs = intervalSeconds
+		}
+		nextPoll = now
 	}
 	res, err := s.DB.ExecContext(ctx, `
 		UPDATE git_repos
-		   SET polling_enabled       = 1,
+		   SET webhook_mode          = ?,
+		       auto_webhook          = ?,
+		       polling_enabled       = ?,
 		       poll_interval_seconds = ?,
 		       next_poll_at          = ?,
 		       updated_at            = ?
 		 WHERE project_path = ?`,
-		pollSecs, now, now, projectPath)
+		mode, auto, pe, pollSecs, nextPoll, now, projectPath)
 	if err != nil {
-		return fmt.Errorf("enable polling: %w", err)
+		return fmt.Errorf("set sync: %w", err)
+	}
+	return rowsAffectedOrNotFound(res)
+}
+
+// ClearWebhookID nulls the stored GitHub hook id — called after the hook is
+// de-registered (or assumed gone) when a repo switches away from webhook
+// sync, so the dashboard doesn't show a stale hook. ErrNotFound when gone.
+func (s *Service) ClearWebhookID(ctx context.Context, projectPath string) error {
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE git_repos SET webhook_id = NULL, updated_at = ?
+		 WHERE project_path = ?`,
+		time.Now().UTC().Format(time.RFC3339Nano), projectPath)
+	if err != nil {
+		return fmt.Errorf("clear webhook_id: %w", err)
 	}
 	return rowsAffectedOrNotFound(res)
 }

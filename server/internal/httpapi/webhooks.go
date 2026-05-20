@@ -14,8 +14,8 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/projects"
-	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/repojobs"
+	"github.com/dvcdsys/code-index/server/internal/secrets"
 )
 
 // GetProjectWebhookInfo — GET /api/v1/projects/{hash}/webhook-info.
@@ -85,6 +85,16 @@ func (s *Server) ReceiveGithubWebhook(w http.ResponseWriter, r *http.Request, ha
 	if !validHMAC(body, []byte(g.WebhookSecret), sigHeader) {
 		s.Deps.Logger.Warn("workspaces webhook: HMAC mismatch", "path_hash", hash)
 		writeError(w, http.StatusUnauthorized, "invalid signature")
+		return
+	}
+
+	// A repo set to polling or manual sync (webhook_mode='disabled') may still
+	// have a stale hook on GitHub — switching sync method de-registers
+	// best-effort, but a failed de-register or an externally-created hook can
+	// linger. Ignore those deliveries so the repo doesn't double-sync
+	// alongside the poll scheduler.
+	if g.WebhookMode == gitrepos.WebhookModeDisabled {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ignored"})
 		return
 	}
 
