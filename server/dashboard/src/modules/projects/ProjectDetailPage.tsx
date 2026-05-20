@@ -13,6 +13,7 @@ import { useRuntimeModel } from '@/lib/useServerStatus';
 import { DeleteProjectDialog } from './components/DeleteProjectDialog';
 import { ProjectInfoCard } from './components/ProjectInfoCard';
 import { ReindexProjectButton } from './components/ReindexProjectButton';
+import { SyncSettingsCard } from './components/SyncSettingsCard';
 import { useProject, useProjectSummary, useProjectWorkspaces } from './hooks';
 
 const STATUS_VARIANT: Record<Project['status'], 'default' | 'secondary' | 'destructive' | 'outline'> = {
@@ -146,6 +147,8 @@ export function ProjectDetailPage() {
       </section>
 
       <ProjectInfoCard project={p} />
+
+      {isExternal ? <SyncSettingsCard hash={p.path_hash} isAdmin={isAdmin} /> : null}
 
       <section>
         <h2 className="mb-3 text-sm font-medium text-muted-foreground">Workspaces</h2>

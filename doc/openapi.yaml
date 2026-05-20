@@ -1502,33 +1502,43 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
     patch:
-      operationId: updateProjectGitRepoPolling
+      operationId: updateProjectGitRepoSync
       tags: [projects]
-      summary: Enable/disable polling sync for an external project
+      summary: Reconfigure how an external project is kept in sync
       description: |
-        Toggles polling and (optionally) sets the per-repo poll interval.
-        Enabling polling requires the repo's webhook_mode to be 'disabled'
-        (a repo syncs via webhook OR polling, never both) — otherwise the
-        request is rejected with 422. 404 when the project is local.
+        Switches the project's sync method directly from the project page:
+
+        - `webhook` — GitHub push webhooks trigger reindex. Sets
+          webhook_mode='auto' and attempts to auto-register the hook
+          (needs CIX_PUBLIC_URL / a live tunnel and a PAT with
+          admin:repo_hook). If registration fails, the server falls back to
+          polling and says so in `note`.
+        - `polling` — the shared scheduler fetches on an interval
+          (`poll_interval_seconds`, optional). Sets webhook_mode='disabled'.
+        - `manual` — no automatic sync; reindex on demand. Sets
+          webhook_mode='disabled', polling off.
+
+        Switching away from `webhook` best-effort de-registers any hook the
+        server previously created. 404 when the project is local.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/UpdateGitRepoPollingRequest"
+              $ref: "#/components/schemas/UpdateGitRepoSyncRequest"
       responses:
         "200":
-          description: Updated git_repos row
+          description: Updated sync configuration
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GitRepo"
+                $ref: "#/components/schemas/UpdateGitRepoSyncResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
         "422":
-          description: Polling requires webhook_mode='disabled'
+          description: Invalid sync_method
           content:
             application/json:
               schema:
@@ -3669,15 +3679,35 @@ components:
           type: integer
           description: Optional per-repo poll cadence in seconds (0/omitted → server default).
 
-    UpdateGitRepoPollingRequest:
+    UpdateGitRepoSyncRequest:
       type: object
-      required: [polling_enabled]
+      required: [sync_method]
       properties:
-        polling_enabled:
-          type: boolean
+        sync_method:
+          type: string
+          enum: [webhook, polling, manual]
+          description: |
+            How the project should be kept in sync. `webhook` → push-driven
+            (auto-register, fall back to polling on failure); `polling` →
+            server fetches on an interval; `manual` → reindex on demand only.
         poll_interval_seconds:
           type: integer
-          description: Optional per-repo poll cadence in seconds (0/omitted → server default).
+          description: |
+            Per-repo poll cadence in seconds (0/omitted → server default).
+            Only meaningful when sync_method is `polling` (also used as the
+            interval if `webhook` falls back to polling).
+
+    UpdateGitRepoSyncResult:
+      type: object
+      required: [git_repo]
+      properties:
+        git_repo:
+          $ref: "#/components/schemas/GitRepo"
+        note:
+          type: string
+          description: |
+            Human-readable note about the outcome — e.g. that webhook
+            auto-registration failed and the server fell back to polling.
 
     GithubRepo:
       type: object

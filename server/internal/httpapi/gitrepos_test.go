@@ -1,9 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"sync"
 	"testing"
@@ -155,12 +160,22 @@ func TestAddGitRepo_AutoFallbackToPolling(t *testing.T) {
 	}
 }
 
-// TestUpdateProjectGitRepoPolling: PATCH toggles polling and enforces the
-// webhook-XOR-polling rule.
-func TestUpdateProjectGitRepoPolling(t *testing.T) {
+// syncResp is the PATCH /git-repo envelope: the updated git_repo + an
+// optional human note (e.g. webhook→polling fallback).
+type syncResp struct {
+	GitRepo struct {
+		WebhookMode    string  `json:"webhook_mode"`
+		PollingEnabled bool    `json:"polling_enabled"`
+		NextPollAt     *string `json:"next_poll_at"`
+	} `json:"git_repo"`
+	Note string `json:"note"`
+}
+
+// TestUpdateProjectGitRepoSync exercises the project-page sync-method switcher
+// across all three methods + the invalid case.
+func TestUpdateProjectGitRepoSync(t *testing.T) {
 	router, _ := reposRouter(t)
 
-	// A webhook-disabled repo can have polling toggled on via PATCH.
 	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
 		"github_url":   "https://github.com/a/b",
 		"branch":       "main",
@@ -177,42 +192,88 @@ func TestUpdateProjectGitRepoPolling(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &created)
 	patchPath := "/api/v1/projects/" + created.GitRepo.PathHash + "/git-repo"
 
-	rr = doJSON(t, router, http.MethodPatch, patchPath, map[string]any{
-		"polling_enabled":       true,
-		"poll_interval_seconds": 90,
-	})
-	if rr.Code != http.StatusOK {
-		t.Fatalf("patch enable: %d (%s)", rr.Code, rr.Body.String())
-	}
-	var patched struct {
-		PollingEnabled bool    `json:"polling_enabled"`
-		NextPollAt     *string `json:"next_poll_at"`
-	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &patched)
-	if !patched.PollingEnabled || patched.NextPollAt == nil {
-		t.Fatalf("after patch: polling=%v next=%v", patched.PollingEnabled, patched.NextPollAt)
+	patch := func(body map[string]any) syncResp {
+		t.Helper()
+		rr := doJSON(t, router, http.MethodPatch, patchPath, body)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("patch %v: %d (%s)", body, rr.Code, rr.Body.String())
+		}
+		var out syncResp
+		_ = json.Unmarshal(rr.Body.Bytes(), &out)
+		return out
 	}
 
-	// A webhook (manual) repo rejects enabling polling with 422.
-	rr = doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
-		"github_url":   "https://github.com/c/d",
+	// → polling
+	got := patch(map[string]any{"sync_method": "polling", "poll_interval_seconds": 90})
+	if got.GitRepo.WebhookMode != "disabled" || !got.GitRepo.PollingEnabled || got.GitRepo.NextPollAt == nil {
+		t.Fatalf("polling: mode=%q polling=%v next=%v", got.GitRepo.WebhookMode, got.GitRepo.PollingEnabled, got.GitRepo.NextPollAt)
+	}
+
+	// → manual
+	got = patch(map[string]any{"sync_method": "manual"})
+	if got.GitRepo.WebhookMode != "disabled" || got.GitRepo.PollingEnabled || got.GitRepo.NextPollAt != nil {
+		t.Fatalf("manual: mode=%q polling=%v next=%v", got.GitRepo.WebhookMode, got.GitRepo.PollingEnabled, got.GitRepo.NextPollAt)
+	}
+
+	// → webhook: no token + no public URL in this harness, so auto-register
+	// fails and the server falls back to polling (with a note).
+	got = patch(map[string]any{"sync_method": "webhook", "poll_interval_seconds": 120})
+	if !got.GitRepo.PollingEnabled || got.GitRepo.WebhookMode != "disabled" {
+		t.Fatalf("webhook fallback: mode=%q polling=%v", got.GitRepo.WebhookMode, got.GitRepo.PollingEnabled)
+	}
+	if got.Note == "" {
+		t.Error("expected a fallback note when webhook registration fails")
+	}
+
+	// invalid method → 422
+	rr = doJSON(t, router, http.MethodPatch, patchPath, map[string]any{"sync_method": "bogus"})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid sync_method should 422, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestWebhookReceiverIgnoresDisabledRepo: a repo switched to polling/manual
+// (webhook_mode='disabled') ignores any lingering webhook delivery so it
+// doesn't double-sync with the poll scheduler.
+func TestWebhookReceiverIgnoresDisabledRepo(t *testing.T) {
+	router, _ := reposRouter(t)
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url":   "https://github.com/a/b",
 		"branch":       "main",
-		"webhook_mode": "manual",
+		"webhook_mode": "disabled",
 	})
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("seed manual: %d (%s)", rr.Code, rr.Body.String())
+		t.Fatalf("seed: %d (%s)", rr.Code, rr.Body.String())
 	}
-	var manual struct {
+	var created struct {
 		GitRepo struct {
-			PathHash string `json:"path_hash"`
+			PathHash      string `json:"path_hash"`
+			WebhookSecret string `json:"-"`
 		} `json:"git_repo"`
+		WebhookSecret string `json:"webhook_secret"`
 	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &manual)
-	rr = doJSON(t, router, http.MethodPatch,
-		"/api/v1/projects/"+manual.GitRepo.PathHash+"/git-repo",
-		map[string]any{"polling_enabled": true})
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("patch enable on manual should 422, got %d (%s)", rr.Code, rr.Body.String())
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123"}`)
+	mac := hmac.New(sha256.New, []byte(created.WebhookSecret))
+	mac.Write(body)
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github/"+created.GitRepo.PathHash, bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", sig)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhook status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	var wr struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &wr)
+	if wr.Status != "ignored" {
+		t.Fatalf("status = %q, want ignored (webhook_mode=disabled)", wr.Status)
 	}
 }
 

@@ -267,15 +267,16 @@ func (s *Server) GetProjectGitRepo(w http.ResponseWriter, r *http.Request, hash 
 	writeJSON(w, http.StatusOK, gitRepoToPayload(g))
 }
 
-// UpdateProjectGitRepoPolling — PATCH /api/v1/projects/{hash}/git-repo.
+// UpdateProjectGitRepoSync — PATCH /api/v1/projects/{hash}/git-repo.
 //
-// Enables/disables polling sync and sets the per-repo interval. Enabling
-// requires webhook_mode='disabled' (422 otherwise). 404 for local projects.
-func (s *Server) UpdateProjectGitRepoPolling(w http.ResponseWriter, r *http.Request, hash string) {
+// Reconfigures how an external project is kept in sync (webhook | polling |
+// manual) directly from the project page. 422 on an unknown sync_method,
+// 404 for local projects.
+func (s *Server) UpdateProjectGitRepoSync(w http.ResponseWriter, r *http.Request, hash string) {
 	if s.gitReposUnavailable(w) {
 		return
 	}
-	var body openapi.UpdateGitRepoPollingRequest
+	var body openapi.UpdateGitRepoSyncRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
 		return
@@ -293,23 +294,98 @@ func (s *Server) UpdateProjectGitRepoPolling(w http.ResponseWriter, r *http.Requ
 	if body.PollIntervalSeconds != nil {
 		interval = *body.PollIntervalSeconds
 	}
-	if err := s.Deps.GitRepos.SetPolling(r.Context(), g.ProjectPath, body.PollingEnabled, interval); err != nil {
-		switch {
-		case errors.Is(err, gitrepos.ErrPollingRequiresWebhookDisabled):
-			writeError(w, http.StatusUnprocessableEntity, "polling requires webhook_mode='disabled'")
-		case errors.Is(err, gitrepos.ErrNotFound):
-			writeError(w, http.StatusNotFound, "no git_repos row for this project")
-		default:
-			writeError(w, http.StatusInternalServerError, "could not update polling: "+err.Error())
+
+	note := ""
+	switch body.SyncMethod {
+	case openapi.Polling:
+		s.deregisterWebhookIfAny(r.Context(), g)
+		if err := s.Deps.GitRepos.SetSync(r.Context(), g.ProjectPath, gitrepos.WebhookModeDisabled, true, interval); err != nil {
+			s.writeSyncError(w, err)
+			return
 		}
+	case openapi.Manual:
+		s.deregisterWebhookIfAny(r.Context(), g)
+		if err := s.Deps.GitRepos.SetSync(r.Context(), g.ProjectPath, gitrepos.WebhookModeDisabled, false, 0); err != nil {
+			s.writeSyncError(w, err)
+			return
+		}
+	case openapi.Webhook:
+		// webhook_mode=auto, polling off. Attempt auto-registration only when
+		// we don't already have a hook (avoid duplicate hooks on GitHub).
+		if err := s.Deps.GitRepos.SetSync(r.Context(), g.ProjectPath, gitrepos.WebhookModeAuto, false, 0); err != nil {
+			s.writeSyncError(w, err)
+			return
+		}
+		if g.WebhookID == nil {
+			fresh, gerr := s.Deps.GitRepos.GetByPath(r.Context(), g.ProjectPath)
+			if gerr == nil {
+				ok, regNote := s.tryAutoRegisterWebhook(r.Context(), fresh, s.buildWebhookURL(fresh.PathHash))
+				if !ok {
+					// Couldn't install the hook (not admin / no public URL).
+					// Fall back to polling so the repo still auto-syncs.
+					if ferr := s.Deps.GitRepos.EnablePollingFallback(r.Context(), g.ProjectPath, interval); ferr != nil {
+						s.writeSyncError(w, ferr)
+						return
+					}
+					note = "Webhook registration failed (" + regNote + "). Enabled polling instead."
+				}
+			}
+		} else {
+			note = "Webhook already registered; left it in place."
+		}
+	default:
+		writeError(w, http.StatusUnprocessableEntity, "sync_method must be one of webhook, polling, manual")
 		return
 	}
+
 	fresh, err := s.Deps.GitRepos.GetByPath(r.Context(), g.ProjectPath)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "polling updated but reload failed: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "sync updated but reload failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitRepoToPayload(fresh))
+	resp := map[string]any{"git_repo": gitRepoToPayload(fresh)}
+	if note != "" {
+		resp["note"] = note
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// writeSyncError maps gitrepos errors from a sync update to HTTP statuses.
+func (s *Server) writeSyncError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, gitrepos.ErrPollingRequiresWebhookDisabled):
+		writeError(w, http.StatusUnprocessableEntity, "polling requires webhook_mode='disabled'")
+	case errors.Is(err, gitrepos.ErrInvalidWebhookMode):
+		writeError(w, http.StatusUnprocessableEntity, "invalid webhook_mode")
+	case errors.Is(err, gitrepos.ErrNotFound):
+		writeError(w, http.StatusNotFound, "no git_repos row for this project")
+	default:
+		writeError(w, http.StatusInternalServerError, "could not update sync config: "+err.Error())
+	}
+}
+
+// deregisterWebhookIfAny best-effort removes a GitHub hook the server
+// previously created, when a repo switches away from webhook sync. Failure
+// is non-fatal (the receiver ignores pushes for webhook_mode='disabled'
+// repos anyway) — but we still clear webhook_id so the dashboard reflects
+// reality. No-op when there is no hook recorded.
+func (s *Server) deregisterWebhookIfAny(ctx context.Context, g gitrepos.GitRepo) {
+	if g.WebhookID == nil {
+		return
+	}
+	if g.TokenID != "" {
+		if pat, perr := s.Deps.GithubTokens.Reveal(ctx, g.TokenID); perr == nil {
+			if owner, repo, oerr := githubapi.ParseOwnerRepo(g.GitHubURL); oerr == nil {
+				if derr := githubapi.New().DeleteWebhook(ctx, owner, repo, pat, *g.WebhookID); derr != nil && s.Deps.Logger != nil {
+					s.Deps.Logger.Warn("UpdateProjectGitRepoSync: de-register webhook failed (continuing)",
+						"project", g.ProjectPath, "err", derr)
+				}
+			}
+		}
+	}
+	if cerr := s.Deps.GitRepos.ClearWebhookID(ctx, g.ProjectPath); cerr != nil && s.Deps.Logger != nil {
+		s.Deps.Logger.Warn("UpdateProjectGitRepoSync: clear webhook_id failed", "project", g.ProjectPath, "err", cerr)
+	}
 }
 
 // ReindexProject — POST /api/v1/projects/{hash}/reindex.
@@ -457,4 +533,3 @@ func (s *Server) publicBaseURL() string {
 	}
 	return s.Deps.PublicBaseURL
 }
-

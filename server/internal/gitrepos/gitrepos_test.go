@@ -294,8 +294,8 @@ func TestListDue(t *testing.T) {
 	}
 }
 
-// TestSetPolling covers enable/disable transitions and the gating rule.
-func TestSetPolling(t *testing.T) {
+// TestSetSync covers the sync-method transitions and the gating rule.
+func TestSetSync(t *testing.T) {
 	d, svc := mustOpen(t)
 	ctx := context.Background()
 	seedProject(t, d, "github.com/x/y@main")
@@ -306,27 +306,60 @@ func TestSetPolling(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Enabling while webhook_mode=manual is rejected.
-	if err := svc.SetPolling(ctx, "github.com/x/y@main", true, 0); !errors.Is(err, ErrPollingRequiresWebhookDisabled) {
-		t.Fatalf("enable+manual: got %v, want ErrPollingRequiresWebhookDisabled", err)
+	// Polling while webhook is NOT disabled is rejected (XOR rule).
+	if err := svc.SetSync(ctx, "github.com/x/y@main", WebhookModeManual, true, 0); !errors.Is(err, ErrPollingRequiresWebhookDisabled) {
+		t.Fatalf("polling+manual: got %v, want ErrPollingRequiresWebhookDisabled", err)
 	}
 
-	// Disable is always allowed and clears next_poll_at.
-	if err := svc.SetPolling(ctx, "github.com/x/y@main", false, 0); err != nil {
-		t.Fatalf("disable: %v", err)
-	}
-
-	// Flip webhook to disabled, then enabling polling succeeds.
-	if err := svc.EnablePollingFallback(ctx, "github.com/x/y@main", 90); err != nil {
-		t.Fatalf("EnablePollingFallback: %v", err)
+	// Switch to polling (webhook disabled) with an interval.
+	if err := svc.SetSync(ctx, "github.com/x/y@main", WebhookModeDisabled, true, 90); err != nil {
+		t.Fatalf("set polling: %v", err)
 	}
 	g, err := svc.GetByPath(ctx, "github.com/x/y@main")
 	if err != nil {
 		t.Fatalf("GetByPath: %v", err)
 	}
 	if g.WebhookMode != WebhookModeDisabled || !g.PollingEnabled || g.PollIntervalSeconds != 90 || g.NextPollAt == nil {
-		t.Fatalf("after fallback: mode=%q polling=%v interval=%d next=%v",
+		t.Fatalf("after polling: mode=%q polling=%v interval=%d next=%v",
 			g.WebhookMode, g.PollingEnabled, g.PollIntervalSeconds, g.NextPollAt)
+	}
+
+	// Switch to manual: webhook disabled, polling off, next_poll_at cleared.
+	if err := svc.SetSync(ctx, "github.com/x/y@main", WebhookModeDisabled, false, 0); err != nil {
+		t.Fatalf("set manual: %v", err)
+	}
+	g, _ = svc.GetByPath(ctx, "github.com/x/y@main")
+	if g.PollingEnabled || g.NextPollAt != nil {
+		t.Fatalf("after manual: polling=%v next=%v, want off/nil", g.PollingEnabled, g.NextPollAt)
+	}
+
+	// Switch to webhook=auto: auto_webhook mirror set, polling off.
+	if err := svc.SetSync(ctx, "github.com/x/y@main", WebhookModeAuto, false, 0); err != nil {
+		t.Fatalf("set webhook auto: %v", err)
+	}
+	g, _ = svc.GetByPath(ctx, "github.com/x/y@main")
+	if g.WebhookMode != WebhookModeAuto || !g.AutoWebhook || g.PollingEnabled {
+		t.Fatalf("after webhook: mode=%q auto=%v polling=%v", g.WebhookMode, g.AutoWebhook, g.PollingEnabled)
+	}
+}
+
+// TestClearWebhookID nulls a stored hook id.
+func TestClearWebhookID(t *testing.T) {
+	d, svc := mustOpen(t)
+	ctx := context.Background()
+	seedProject(t, d, "github.com/x/y@main")
+	if _, err := svc.Create(ctx, CreateRequest{GitHubURL: "https://github.com/x/y", Branch: "main"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := svc.SetWebhookID(ctx, "github.com/x/y@main", 12345); err != nil {
+		t.Fatalf("SetWebhookID: %v", err)
+	}
+	if err := svc.ClearWebhookID(ctx, "github.com/x/y@main"); err != nil {
+		t.Fatalf("ClearWebhookID: %v", err)
+	}
+	g, _ := svc.GetByPath(ctx, "github.com/x/y@main")
+	if g.WebhookID != nil {
+		t.Fatalf("WebhookID = %v, want nil", g.WebhookID)
 	}
 }
 
