@@ -332,9 +332,9 @@ func TestSetPolling(t *testing.T) {
 
 func TestEffectivePollInterval(t *testing.T) {
 	cases := []struct {
-		name              string
-		repoSecs          int
-		def, min, want    int
+		name           string
+		repoSecs       int
+		def, min, want int
 	}{
 		{"per-repo wins", 200, 300, 60, 200},
 		{"falls back to default", 0, 300, 60, 300},

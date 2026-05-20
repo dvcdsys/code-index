@@ -210,11 +210,12 @@ func TestOpenMigratesPreEDB(t *testing.T) {
 	}
 }
 
-// TestOpenMigratesPreM8DB simulates a pre-m8 database (git_repos without the
-// polling columns) and verifies Open adds them + the scheduler index without
-// crashing, and that an existing row reads back with the polling defaults.
-func TestOpenMigratesPreM8DB(t *testing.T) {
-	tmp := filepath.Join(t.TempDir(), "pre-m8.db")
+// TestOpenMigratesPreM9DB simulates a pre-m9 database (git_repos without the
+// polling columns — i.e. pre git_repos_polling migration) and verifies Open
+// adds them + the scheduler index without crashing, and that an existing row
+// reads back with the polling defaults.
+func TestOpenMigratesPreM9DB(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "pre-m9.db")
 
 	seed, err := sql.Open(DriverName, "file:"+tmp)
 	if err != nil {
@@ -233,7 +234,7 @@ func TestOpenMigratesPreM8DB(t *testing.T) {
 	)`); err != nil {
 		t.Fatalf("seed projects: %v", err)
 	}
-	// pre-m8 git_repos: has indexed_sha (post-m7) but no polling columns.
+	// pre-m9 git_repos: has indexed_sha (post-m7) but no polling columns.
 	if _, err := seed.Exec(`CREATE TABLE git_repos (
 		project_path   TEXT PRIMARY KEY,
 		github_url     TEXT NOT NULL,
@@ -267,7 +268,7 @@ func TestOpenMigratesPreM8DB(t *testing.T) {
 
 	database, err := Open(tmp)
 	if err != nil {
-		t.Fatalf("Open migrates pre-m8 DB: %v", err)
+		t.Fatalf("Open migrates pre-m9 DB: %v", err)
 	}
 	defer database.Close()
 	defer os.Remove(tmp)

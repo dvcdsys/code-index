@@ -27,6 +27,8 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/httpapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
+	"github.com/dvcdsys/code-index/server/internal/pollscheduler"
+	"github.com/dvcdsys/code-index/server/internal/repojobs"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
@@ -34,9 +36,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
-	"github.com/dvcdsys/code-index/server/internal/pollscheduler"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
-	"github.com/dvcdsys/code-index/server/internal/repojobs"
 	"github.com/dvcdsys/code-index/server/internal/workspaceprojects"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )

@@ -49,7 +49,7 @@ func TestReschedulePoll(t *testing.T) {
 	seedProject(t, d, "github.com/a/a@main")
 	if _, err := gr.Create(ctx, gitrepos.CreateRequest{
 		GitHubURL: "https://github.com/a/a", Branch: "main",
-		WebhookMode: gitrepos.WebhookModeDisabled,
+		WebhookMode:    gitrepos.WebhookModeDisabled,
 		PollingEnabled: true, PollIntervalSeconds: 120,
 	}); err != nil {
 		t.Fatalf("create polling repo: %v", err)
