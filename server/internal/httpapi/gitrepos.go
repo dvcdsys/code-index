@@ -310,28 +310,28 @@ func (s *Server) UpdateProjectGitRepoSync(w http.ResponseWriter, r *http.Request
 			return
 		}
 	case openapi.Webhook:
-		// webhook_mode=auto, polling off. Attempt auto-registration only when
-		// we don't already have a hook (avoid duplicate hooks on GitHub).
-		if err := s.Deps.GitRepos.SetSync(r.Context(), g.ProjectPath, gitrepos.WebhookModeAuto, false, 0); err != nil {
+		// Polling off either way. Pick webhook_mode by whether the server can
+		// install the hook itself:
+		//   - already have a hook → keep mode=auto, don't re-register.
+		//   - auto-register succeeds → mode=auto.
+		//   - auto-register fails (no admin token / no public URL) → mode=manual:
+		//     a perfectly valid webhook the operator finishes by pasting the
+		//     URL + secret into GitHub. We do NOT fall back to polling here —
+		//     the operator explicitly asked for webhook.
+		mode := gitrepos.WebhookModeAuto
+		switch {
+		case g.WebhookID != nil:
+			note = "Webhook already registered."
+		default:
+			ok, regNote := s.tryAutoRegisterWebhook(r.Context(), g, s.buildWebhookURL(g.PathHash))
+			if !ok {
+				mode = gitrepos.WebhookModeManual
+				note = "Couldn't auto-install the webhook (" + regNote + "). Add it manually: copy the URL and secret below into GitHub → Settings → Webhooks (content type application/json, event: push)."
+			}
+		}
+		if err := s.Deps.GitRepos.SetSync(r.Context(), g.ProjectPath, mode, false, 0); err != nil {
 			s.writeSyncError(w, err)
 			return
-		}
-		if g.WebhookID == nil {
-			fresh, gerr := s.Deps.GitRepos.GetByPath(r.Context(), g.ProjectPath)
-			if gerr == nil {
-				ok, regNote := s.tryAutoRegisterWebhook(r.Context(), fresh, s.buildWebhookURL(fresh.PathHash))
-				if !ok {
-					// Couldn't install the hook (not admin / no public URL).
-					// Fall back to polling so the repo still auto-syncs.
-					if ferr := s.Deps.GitRepos.EnablePollingFallback(r.Context(), g.ProjectPath, interval); ferr != nil {
-						s.writeSyncError(w, ferr)
-						return
-					}
-					note = "Webhook registration failed (" + regNote + "). Enabled polling instead."
-				}
-			}
-		} else {
-			note = "Webhook already registered; left it in place."
 		}
 	default:
 		writeError(w, http.StatusUnprocessableEntity, "sync_method must be one of webhook, polling, manual")

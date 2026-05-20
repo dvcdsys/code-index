@@ -110,6 +110,24 @@ export function useProjectGitRepo(hash: string | undefined, enabled: boolean) {
   });
 }
 
+// WebhookInfo is the per-project webhook delivery URL + HMAC secret an
+// operator pastes into GitHub when setting the hook up by hand.
+export type WebhookInfo = {
+  webhook_url: string;
+  webhook_secret: string;
+  auto_registered: boolean;
+};
+
+// useProjectWebhookInfo fetches the webhook URL + secret for manual setup.
+// Admin-only data (the secret is sensitive) — gate the call on isAdmin.
+export function useProjectWebhookInfo(hash: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: hash ? ['projects', hash, 'webhook-info'] : ['projects', 'unknown', 'webhook-info'],
+    queryFn: ({ signal }) => api.get<WebhookInfo>(`/projects/${hash}/webhook-info`, { signal }),
+    enabled: Boolean(hash) && enabled,
+  });
+}
+
 // useUpdateProjectSync switches a project's sync method (webhook / polling /
 // manual) from the project page. Invalidates the git-repo + detail queries so
 // the card and header reflect the new configuration.
@@ -124,6 +142,7 @@ export function useUpdateProjectSync() {
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: projectKeys.gitRepo(vars.hash) });
       qc.invalidateQueries({ queryKey: projectKeys.detail(vars.hash) });
+      qc.invalidateQueries({ queryKey: ['projects', vars.hash, 'webhook-info'] });
     },
   });
 }
