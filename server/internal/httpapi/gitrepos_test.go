@@ -72,6 +72,150 @@ func TestAddGitRepo_Succeeds(t *testing.T) {
 	}
 }
 
+// TestAddGitRepo_PollingRequiresWebhookDisabled: polling can't be enabled
+// while webhook_mode is the default ('manual').
+func TestAddGitRepo_PollingRequiresWebhookDisabled(t *testing.T) {
+	router, _ := reposRouter(t)
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url":      "https://github.com/a/b",
+		"branch":          "main",
+		"polling_enabled": true,
+	})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("polling+manual should 422, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestAddGitRepo_PollingEnabled: webhook_mode=disabled + polling → 201 with
+// polling fields surfaced and next_poll_at scheduled.
+func TestAddGitRepo_PollingEnabled(t *testing.T) {
+	router, _ := reposRouter(t)
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url":            "https://github.com/a/b",
+		"branch":                "main",
+		"webhook_mode":          "disabled",
+		"polling_enabled":       true,
+		"poll_interval_seconds": 120,
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("add: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		GitRepo struct {
+			WebhookMode         string  `json:"webhook_mode"`
+			PollingEnabled      bool    `json:"polling_enabled"`
+			PollIntervalSeconds *int    `json:"poll_interval_seconds"`
+			NextPollAt          *string `json:"next_poll_at"`
+		} `json:"git_repo"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.GitRepo.PollingEnabled {
+		t.Error("polling_enabled = false, want true")
+	}
+	if resp.GitRepo.PollIntervalSeconds == nil || *resp.GitRepo.PollIntervalSeconds != 120 {
+		t.Errorf("poll_interval_seconds = %v, want 120", resp.GitRepo.PollIntervalSeconds)
+	}
+	if resp.GitRepo.NextPollAt == nil {
+		t.Error("next_poll_at is null, want a scheduled time")
+	}
+}
+
+// TestAddGitRepo_AutoFallbackToPolling: webhook_mode=auto with no token_id
+// fails auto-registration, so the server flips the repo to disabled+polling.
+func TestAddGitRepo_AutoFallbackToPolling(t *testing.T) {
+	router, _ := reposRouter(t)
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url":   "https://github.com/a/b",
+		"branch":       "main",
+		"webhook_mode": "auto",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("add: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		AutoRegistered bool `json:"auto_registered"`
+		GitRepo        struct {
+			WebhookMode    string `json:"webhook_mode"`
+			PollingEnabled bool   `json:"polling_enabled"`
+		} `json:"git_repo"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.AutoRegistered {
+		t.Error("auto_registered = true, want false (no token)")
+	}
+	if resp.GitRepo.WebhookMode != "disabled" {
+		t.Errorf("webhook_mode = %q, want disabled (fallback)", resp.GitRepo.WebhookMode)
+	}
+	if !resp.GitRepo.PollingEnabled {
+		t.Error("polling_enabled = false, want true (fallback)")
+	}
+}
+
+// TestUpdateProjectGitRepoPolling: PATCH toggles polling and enforces the
+// webhook-XOR-polling rule.
+func TestUpdateProjectGitRepoPolling(t *testing.T) {
+	router, _ := reposRouter(t)
+
+	// A webhook-disabled repo can have polling toggled on via PATCH.
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url":   "https://github.com/a/b",
+		"branch":       "main",
+		"webhook_mode": "disabled",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created struct {
+		GitRepo struct {
+			PathHash string `json:"path_hash"`
+		} `json:"git_repo"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+	patchPath := "/api/v1/projects/" + created.GitRepo.PathHash + "/git-repo"
+
+	rr = doJSON(t, router, http.MethodPatch, patchPath, map[string]any{
+		"polling_enabled":       true,
+		"poll_interval_seconds": 90,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("patch enable: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var patched struct {
+		PollingEnabled bool    `json:"polling_enabled"`
+		NextPollAt     *string `json:"next_poll_at"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &patched)
+	if !patched.PollingEnabled || patched.NextPollAt == nil {
+		t.Fatalf("after patch: polling=%v next=%v", patched.PollingEnabled, patched.NextPollAt)
+	}
+
+	// A webhook (manual) repo rejects enabling polling with 422.
+	rr = doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url":   "https://github.com/c/d",
+		"branch":       "main",
+		"webhook_mode": "manual",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed manual: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var manual struct {
+		GitRepo struct {
+			PathHash string `json:"path_hash"`
+		} `json:"git_repo"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &manual)
+	rr = doJSON(t, router, http.MethodPatch,
+		"/api/v1/projects/"+manual.GitRepo.PathHash+"/git-repo",
+		map[string]any{"polling_enabled": true})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("patch enable on manual should 422, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
 // TestAddGitRepo_Duplicate confirms the UNIQUE(github_url, branch)
 // constraint on git_repos surfaces as 409 from the HTTP handler. Used
 // to be a workspace-scoped duplicate; with the split the same upstream

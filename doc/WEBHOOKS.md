@@ -10,6 +10,11 @@ repos the cix-server itself clones via the Workspaces page. A local
 project registered with `cix init` uses the file watcher
 (`cix watch`), not webhooks.
 
+> **Not a repo admin?** Webhooks require `admin:repo_hook` to install.
+> For repos you can only clone (not administer), use [polling](POLLING.md)
+> instead — the server periodically fetches and re-indexes. A repo syncs
+> via webhook **or** polling, never both.
+
 ## 1. Modes
 
 Each `git_repos` row carries a `webhook_mode` enum:

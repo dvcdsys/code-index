@@ -208,6 +208,156 @@ func TestSetIndexedSHA_UnknownProject(t *testing.T) {
 	}
 }
 
+// TestCreate_PollingRequiresWebhookDisabled guards the webhook-XOR-polling
+// rule at create time: polling can only be enabled when webhook_mode is
+// 'disabled'.
+func TestCreate_PollingRequiresWebhookDisabled(t *testing.T) {
+	d, svc := mustOpen(t)
+	ctx := context.Background()
+	seedProject(t, d, "github.com/x/y@main")
+
+	// webhook_mode defaults to manual → polling must be rejected.
+	if _, err := svc.Create(ctx, CreateRequest{
+		GitHubURL:      "https://github.com/x/y",
+		Branch:         "main",
+		PollingEnabled: true,
+	}); !errors.Is(err, ErrPollingRequiresWebhookDisabled) {
+		t.Fatalf("polling+manual: got %v, want ErrPollingRequiresWebhookDisabled", err)
+	}
+
+	// webhook_mode=disabled → polling accepted, next_poll_at scheduled now.
+	g, err := svc.Create(ctx, CreateRequest{
+		GitHubURL:           "https://github.com/x/y",
+		Branch:              "main",
+		WebhookMode:         WebhookModeDisabled,
+		PollingEnabled:      true,
+		PollIntervalSeconds: 120,
+	})
+	if err != nil {
+		t.Fatalf("polling+disabled: %v", err)
+	}
+	if !g.PollingEnabled {
+		t.Error("PollingEnabled = false, want true")
+	}
+	if g.PollIntervalSeconds != 120 {
+		t.Errorf("PollIntervalSeconds = %d, want 120", g.PollIntervalSeconds)
+	}
+	if g.NextPollAt == nil {
+		t.Error("NextPollAt is nil, want a scheduled time")
+	}
+}
+
+// TestListDue returns only polling-enabled repos whose next_poll_at is in
+// the past, ordered by due time.
+func TestListDue(t *testing.T) {
+	d, svc := mustOpen(t)
+	ctx := context.Background()
+
+	// Repo A: polling on, due in the past.
+	seedProject(t, d, "github.com/a/a@main")
+	if _, err := svc.Create(ctx, CreateRequest{
+		GitHubURL: "https://github.com/a/a", Branch: "main",
+		WebhookMode: WebhookModeDisabled, PollingEnabled: true,
+	}); err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	if err := svc.RescheduleNextPoll(ctx, "github.com/a/a@main", time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("reschedule A: %v", err)
+	}
+
+	// Repo B: polling on, due in the future → not returned.
+	seedProject(t, d, "github.com/b/b@main")
+	if _, err := svc.Create(ctx, CreateRequest{
+		GitHubURL: "https://github.com/b/b", Branch: "main",
+		WebhookMode: WebhookModeDisabled, PollingEnabled: true,
+	}); err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	if err := svc.RescheduleNextPoll(ctx, "github.com/b/b@main", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("reschedule B: %v", err)
+	}
+
+	// Repo C: polling off → never returned even if it had a due time.
+	seedProject(t, d, "github.com/c/c@main")
+	if _, err := svc.Create(ctx, CreateRequest{
+		GitHubURL: "https://github.com/c/c", Branch: "main",
+	}); err != nil {
+		t.Fatalf("create C: %v", err)
+	}
+
+	due, err := svc.ListDue(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("ListDue: %v", err)
+	}
+	if len(due) != 1 || due[0].ProjectPath != "github.com/a/a@main" {
+		t.Fatalf("ListDue returned %d repos %v, want only A", len(due), projectPaths(due))
+	}
+}
+
+// TestSetPolling covers enable/disable transitions and the gating rule.
+func TestSetPolling(t *testing.T) {
+	d, svc := mustOpen(t)
+	ctx := context.Background()
+	seedProject(t, d, "github.com/x/y@main")
+	if _, err := svc.Create(ctx, CreateRequest{
+		GitHubURL: "https://github.com/x/y", Branch: "main",
+		WebhookMode: WebhookModeManual,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Enabling while webhook_mode=manual is rejected.
+	if err := svc.SetPolling(ctx, "github.com/x/y@main", true, 0); !errors.Is(err, ErrPollingRequiresWebhookDisabled) {
+		t.Fatalf("enable+manual: got %v, want ErrPollingRequiresWebhookDisabled", err)
+	}
+
+	// Disable is always allowed and clears next_poll_at.
+	if err := svc.SetPolling(ctx, "github.com/x/y@main", false, 0); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	// Flip webhook to disabled, then enabling polling succeeds.
+	if err := svc.EnablePollingFallback(ctx, "github.com/x/y@main", 90); err != nil {
+		t.Fatalf("EnablePollingFallback: %v", err)
+	}
+	g, err := svc.GetByPath(ctx, "github.com/x/y@main")
+	if err != nil {
+		t.Fatalf("GetByPath: %v", err)
+	}
+	if g.WebhookMode != WebhookModeDisabled || !g.PollingEnabled || g.PollIntervalSeconds != 90 || g.NextPollAt == nil {
+		t.Fatalf("after fallback: mode=%q polling=%v interval=%d next=%v",
+			g.WebhookMode, g.PollingEnabled, g.PollIntervalSeconds, g.NextPollAt)
+	}
+}
+
+func TestEffectivePollInterval(t *testing.T) {
+	cases := []struct {
+		name              string
+		repoSecs          int
+		def, min, want    int
+	}{
+		{"per-repo wins", 200, 300, 60, 200},
+		{"falls back to default", 0, 300, 60, 300},
+		{"clamped up to floor", 10, 300, 60, 60},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EffectivePollInterval(GitRepo{PollIntervalSeconds: tc.repoSecs}, tc.def, tc.min)
+			if got != tc.want {
+				t.Errorf("EffectivePollInterval = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func projectPaths(rs []GitRepo) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.ProjectPath
+	}
+	return out
+}
+
 func TestDelete_Idempotent(t *testing.T) {
 	d, svc := mustOpen(t)
 	ctx := context.Background()

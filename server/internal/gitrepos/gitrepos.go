@@ -39,6 +39,10 @@ var (
 	ErrInvalidURL         = errors.New("github_url must be an https://github.com/owner/repo URL")
 	ErrBranchEmpty        = errors.New("branch is required")
 	ErrInvalidWebhookMode = errors.New("webhook_mode must be one of manual, auto, disabled")
+	// ErrPollingRequiresWebhookDisabled is returned when polling is enabled
+	// on a repo whose webhook_mode is not 'disabled'. A repo syncs via
+	// webhook OR polling, never both.
+	ErrPollingRequiresWebhookDisabled = errors.New("polling requires webhook_mode='disabled'")
 )
 
 // GitRepo is the wire view. The webhook_secret is in the response of
@@ -64,6 +68,17 @@ type GitRepo struct {
 	// gives the exact change set, no file hashing needed.
 	IndexedSHA string
 	LastError  string
+	// PollingEnabled gates this repo into the shared poll scheduler. Only
+	// valid when WebhookMode == 'disabled' (webhook XOR polling).
+	PollingEnabled bool
+	// PollIntervalSeconds is the per-repo poll cadence. 0 → use the server
+	// default (CIX_DEFAULT_POLL_INTERVAL). Always read through
+	// EffectivePollInterval, which applies the default and the floor.
+	PollIntervalSeconds int
+	// NextPollAt is the absolute time this repo is next due for a poll.
+	// nil → not scheduled (polling off). Set to now+interval at the END of
+	// each clone/index cycle so cadence is measured from the last index run.
+	NextPollAt *time.Time
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
@@ -82,6 +97,12 @@ type CreateRequest struct {
 	Branch      string
 	TokenID     string // optional
 	WebhookMode string // empty → manual
+	// PollingEnabled opts the repo into polling sync. Requires the
+	// effective WebhookMode to be 'disabled' (webhook XOR polling),
+	// otherwise Create returns ErrPollingRequiresWebhookDisabled.
+	PollingEnabled bool
+	// PollIntervalSeconds is the optional per-repo cadence (0 → default).
+	PollIntervalSeconds int
 }
 
 // Create inserts a git_repos row. The caller is responsible for
@@ -99,6 +120,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (GitRepo, error
 	if merr != nil {
 		return GitRepo{}, merr
 	}
+	if req.PollingEnabled && mode != WebhookModeDisabled {
+		return GitRepo{}, ErrPollingRequiresWebhookDisabled
+	}
 
 	projectPath := fmt.Sprintf("github.com/%s/%s@%s", owner, repo, req.Branch)
 	githubURL := canonicaliseURL(req.GitHubURL)
@@ -113,15 +137,31 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (GitRepo, error
 	tokenID := nullableString(req.TokenID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
+	pollEnabled := 0
+	var pollSecs any
+	var nextPollAt any
+	if req.PollingEnabled {
+		pollEnabled = 1
+		if req.PollIntervalSeconds > 0 {
+			pollSecs = req.PollIntervalSeconds
+		}
+		// Schedule the first poll promptly; the scheduler picks it up on
+		// its next tick and the completion handler then measures cadence
+		// from the end of the first index run.
+		nextPollAt = now
+	}
+
 	if _, err := s.DB.ExecContext(ctx, `
 		INSERT INTO git_repos (
 			project_path, github_url, branch,
 			token_id, webhook_secret,
 			webhook_mode, auto_webhook,
+			polling_enabled, poll_interval_seconds, next_poll_at,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		projectPath, githubURL, req.Branch,
 		tokenID, secret, mode, auto,
+		pollEnabled, pollSecs, nextPollAt,
 		now, now,
 	); err != nil {
 		if isUniqueConstraintViolation(err) {
@@ -235,6 +275,117 @@ func (s *Service) SetIndexedSHA(ctx context.Context, projectPath, sha string) er
 	return nil
 }
 
+// ListDue returns polling-enabled repos whose next_poll_at has elapsed,
+// oldest-due first. The shared poll scheduler calls this every tick.
+func (s *Service) ListDue(ctx context.Context, now time.Time) ([]GitRepo, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		selectColumns+` WHERE polling_enabled = 1
+		                  AND next_poll_at IS NOT NULL
+		                  AND next_poll_at <= ?
+		                ORDER BY next_poll_at`,
+		now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("list due polls: %w", err)
+	}
+	defer rows.Close()
+	return scanRows(rows)
+}
+
+// SetPolling toggles polling for a repo and records the new interval. On
+// enable it schedules the first poll immediately (next_poll_at = now); on
+// disable it clears next_poll_at. Enforces the webhook-XOR-polling rule:
+// enabling polling on a repo whose webhook_mode != 'disabled' returns
+// ErrPollingRequiresWebhookDisabled. intervalSeconds <= 0 stores NULL
+// (use server default). ErrNotFound when the row is gone.
+func (s *Service) SetPolling(ctx context.Context, projectPath string, enabled bool, intervalSeconds int) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if !enabled {
+		res, err := s.DB.ExecContext(ctx, `
+			UPDATE git_repos
+			   SET polling_enabled = 0,
+			       next_poll_at    = NULL,
+			       updated_at      = ?
+			 WHERE project_path = ?`,
+			now, projectPath)
+		if err != nil {
+			return fmt.Errorf("disable polling: %w", err)
+		}
+		return rowsAffectedOrNotFound(res)
+	}
+
+	// Enabling — verify webhook is disabled first.
+	g, err := s.GetByPath(ctx, projectPath)
+	if err != nil {
+		return err
+	}
+	if g.WebhookMode != WebhookModeDisabled {
+		return ErrPollingRequiresWebhookDisabled
+	}
+	var pollSecs any
+	if intervalSeconds > 0 {
+		pollSecs = intervalSeconds
+	}
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE git_repos
+		   SET polling_enabled       = 1,
+		       poll_interval_seconds = ?,
+		       next_poll_at          = ?,
+		       updated_at            = ?
+		 WHERE project_path = ?`,
+		pollSecs, now, now, projectPath)
+	if err != nil {
+		return fmt.Errorf("enable polling: %w", err)
+	}
+	return rowsAffectedOrNotFound(res)
+}
+
+// EnablePollingFallback atomically switches a repo from a failed
+// webhook-auto-register into polling sync: webhook_mode='disabled',
+// auto_webhook=0, polling_enabled=1, and next_poll_at=now (poll promptly).
+// Used by AddGitRepo when the user requested an auto webhook but lacks
+// admin rights on the repo. intervalSeconds <= 0 → NULL (server default).
+// ErrNotFound when the row is gone.
+func (s *Service) EnablePollingFallback(ctx context.Context, projectPath string, intervalSeconds int) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var pollSecs any
+	if intervalSeconds > 0 {
+		pollSecs = intervalSeconds
+	}
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE git_repos
+		   SET webhook_mode          = ?,
+		       auto_webhook          = 0,
+		       polling_enabled       = 1,
+		       poll_interval_seconds = ?,
+		       next_poll_at          = ?,
+		       updated_at            = ?
+		 WHERE project_path = ?`,
+		WebhookModeDisabled, pollSecs, now, now, projectPath)
+	if err != nil {
+		return fmt.Errorf("enable polling fallback: %w", err)
+	}
+	return rowsAffectedOrNotFound(res)
+}
+
+// RescheduleNextPoll sets next_poll_at to an absolute time. Used by the
+// scheduler (provisional floor at enqueue) and the clone/index completion
+// handlers (authoritative "interval from end of indexing"). No-op-safe on
+// non-polling repos — callers gate on PollingEnabled. ErrNotFound when gone.
+func (s *Service) RescheduleNextPoll(ctx context.Context, projectPath string, at time.Time) error {
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE git_repos
+		   SET next_poll_at = ?,
+		       updated_at   = ?
+		 WHERE project_path = ?`,
+		at.UTC().Format(time.RFC3339Nano),
+		time.Now().UTC().Format(time.RFC3339Nano),
+		projectPath)
+	if err != nil {
+		return fmt.Errorf("reschedule next poll: %w", err)
+	}
+	return rowsAffectedOrNotFound(res)
+}
+
 // Delete removes a git_repos row. Idempotent — re-deleting returns
 // ErrNotFound. The matching projects row + on-disk clone are NOT
 // cleaned up here; that's the project-delete handler's job.
@@ -257,6 +408,7 @@ const selectColumns = `
 	       token_id, webhook_secret, webhook_id,
 	       webhook_mode, auto_webhook,
 	       last_sha, indexed_sha, last_error,
+	       polling_enabled, poll_interval_seconds, next_poll_at,
 	       created_at, updated_at
 	  FROM git_repos`
 
@@ -270,6 +422,9 @@ func scanRow(r interface{ Scan(dest ...any) error }) (GitRepo, error) {
 		lastSHA     sql.NullString
 		indexedSHA  sql.NullString
 		lastError   sql.NullString
+		pollEnabled int
+		pollSecs    sql.NullInt64
+		nextPollAt  sql.NullString
 		createdAt   string
 		updatedAt   string
 	)
@@ -277,6 +432,7 @@ func scanRow(r interface{ Scan(dest ...any) error }) (GitRepo, error) {
 		&tokenID, &g.WebhookSecret, &webhookID,
 		&webhookMode, &autoWebhook,
 		&lastSHA, &indexedSHA, &lastError,
+		&pollEnabled, &pollSecs, &nextPollAt,
 		&createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -298,6 +454,15 @@ func scanRow(r interface{ Scan(dest ...any) error }) (GitRepo, error) {
 	g.LastSHA = lastSHA.String
 	g.IndexedSHA = indexedSHA.String
 	g.LastError = lastError.String
+	g.PollingEnabled = pollEnabled == 1
+	if pollSecs.Valid {
+		g.PollIntervalSeconds = int(pollSecs.Int64)
+	}
+	if nextPollAt.Valid && nextPollAt.String != "" {
+		if t, perr := time.Parse(time.RFC3339Nano, nextPollAt.String); perr == nil {
+			g.NextPollAt = &t
+		}
+	}
 	g.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	g.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	return g, nil
@@ -313,6 +478,28 @@ func scanRows(rows *sql.Rows) ([]GitRepo, error) {
 		out = append(out, g)
 	}
 	return out, rows.Err()
+}
+
+// EffectivePollInterval resolves the cadence (in seconds) for a repo:
+// the per-repo value when set, else defaultSecs, clamped up to minSecs.
+func EffectivePollInterval(repo GitRepo, defaultSecs, minSecs int) int {
+	secs := repo.PollIntervalSeconds
+	if secs <= 0 {
+		secs = defaultSecs
+	}
+	if minSecs > 0 && secs < minSecs {
+		secs = minSecs
+	}
+	return secs
+}
+
+// rowsAffectedOrNotFound maps a zero-row UPDATE/DELETE to ErrNotFound.
+func rowsAffectedOrNotFound(res sql.Result) error {
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // NormaliseWebhookMode rejects unknown values up front so the DB only

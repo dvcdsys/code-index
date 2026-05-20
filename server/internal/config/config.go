@@ -157,6 +157,20 @@ type Config struct {
 	// TunnelBinDir is the writable directory managed binaries are downloaded
 	// into. Default: <SQLite dir>/tunnel-bin. Source: CIX_TUNNEL_BIN_DIR.
 	TunnelBinDir string
+
+	// DefaultPollInterval is the cadence used for polling-enabled repos
+	// that don't set a per-repo interval. Cadence is measured from the end
+	// of the last index run. Source: CIX_DEFAULT_POLL_INTERVAL (default 5m).
+	DefaultPollInterval time.Duration
+
+	// MinPollInterval is the floor applied to every effective poll interval
+	// (per-repo or default), so an operator can't accidentally hammer
+	// GitHub. Source: CIX_MIN_POLL_INTERVAL (default 60s).
+	MinPollInterval time.Duration
+
+	// PollSchedulerTick is how often the shared poll scheduler scans for
+	// due repos. Source: CIX_POLL_SCHEDULER_TICK (default 30s).
+	PollSchedulerTick time.Duration
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -363,6 +377,24 @@ func Load() (*Config, error) {
 	}
 	c.TunnelBinManaged = binManaged
 	c.TunnelBinDir = strings.TrimSpace(getenv("CIX_TUNNEL_BIN_DIR", filepath.Join(filepath.Dir(c.SQLitePath), "tunnel-bin")))
+
+	defaultPoll, err := getenvDuration("CIX_DEFAULT_POLL_INTERVAL", 5*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	c.DefaultPollInterval = defaultPoll
+
+	minPoll, err := getenvDuration("CIX_MIN_POLL_INTERVAL", 60*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	c.MinPollInterval = minPoll
+
+	pollTick, err := getenvDuration("CIX_POLL_SCHEDULER_TICK", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	c.PollSchedulerTick = pollTick
 
 	return c, nil
 }

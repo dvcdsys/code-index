@@ -117,6 +117,11 @@ type Deps struct {
 	VectorStore  *vectorstore.Store
 	DataDir      string // root for cloned repos: <DataDir>/repos/<path_hash>/
 	Logger       *slog.Logger
+	// DefaultPollIntervalSeconds / MinPollIntervalSeconds resolve the poll
+	// cadence when a clone/index cycle finishes for a polling-enabled repo.
+	// Mirror config.DefaultPollInterval / config.MinPollInterval.
+	DefaultPollIntervalSeconds int
+	MinPollIntervalSeconds     int
 }
 
 // Register hooks the clone_repo and index_repo job handlers into a
@@ -220,6 +225,9 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 		}
 		d.Logger.Info("repojobs: no changes, skipping index",
 			"project", g.ProjectPath, "head", result.HeadSHA)
+		// Terminal point for this cycle (no index job enqueued) — advance
+		// the poll clock from here.
+		d.reschedulePoll(ctx, g)
 		return nil
 	}
 
@@ -330,6 +338,9 @@ func handleIndex(ctx context.Context, d Deps, job jobs.Job) error {
 			d.Logger.Warn("repojobs: set indexed_sha failed", "project", g.ProjectPath, "err", err)
 		}
 	}
+	// Index finished — this is the terminal point of the cycle, so the
+	// next poll is scheduled relative to "now" (end of indexing).
+	d.reschedulePoll(ctx, g)
 	return nil
 }
 
@@ -371,6 +382,26 @@ func (d Deps) recordFailure(ctx context.Context, g gitrepos.GitRepo, err error) 
 	}
 	if uerr := setProjectStatus(ctx, d.DB, g.ProjectPath, "error"); uerr != nil {
 		d.Logger.Error("repojobs: could not write status=error", "project", g.ProjectPath, "err", uerr)
+	}
+	// Even on terminal failure, keep polling alive so the repo retries
+	// on its next interval rather than going dark.
+	d.reschedulePoll(ctx, g)
+}
+
+// reschedulePoll advances next_poll_at to now + the effective interval for a
+// polling-enabled repo. Called at every terminal point of a clone/index cycle
+// (no-change clone, index success, terminal failure) so the poll cadence is
+// measured from the END of the last cycle. No-op for non-polling repos. The
+// passed-in repo snapshot's PollIntervalSeconds is authoritative for the
+// interval; PollingEnabled gates the write.
+func (d Deps) reschedulePoll(ctx context.Context, g gitrepos.GitRepo) {
+	if !g.PollingEnabled {
+		return
+	}
+	secs := gitrepos.EffectivePollInterval(g, d.DefaultPollIntervalSeconds, d.MinPollIntervalSeconds)
+	next := time.Now().UTC().Add(time.Duration(secs) * time.Second)
+	if err := d.GitRepos.RescheduleNextPoll(ctx, g.ProjectPath, next); err != nil {
+		d.Logger.Warn("repojobs: reschedule next poll failed", "project", g.ProjectPath, "err", err)
 	}
 }
 

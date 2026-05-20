@@ -1501,6 +1501,40 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
+    patch:
+      operationId: updateProjectGitRepoPolling
+      tags: [projects]
+      summary: Enable/disable polling sync for an external project
+      description: |
+        Toggles polling and (optionally) sets the per-repo poll interval.
+        Enabling polling requires the repo's webhook_mode to be 'disabled'
+        (a repo syncs via webhook OR polling, never both) — otherwise the
+        request is rejected with 422. 404 when the project is local.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGitRepoPollingRequest"
+      responses:
+        "200":
+          description: Updated git_repos row
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitRepo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Polling requires webhook_mode='disabled'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
 
   /api/v1/projects/{hash}/webhook-info:
     parameters:
@@ -3558,6 +3592,26 @@ components:
         last_error:
           type: string
           nullable: true
+        polling_enabled:
+          type: boolean
+          description: |
+            When true, the shared poll scheduler fetches this repo on an
+            interval (the alternative to webhooks for non-admin repos).
+            Mutually exclusive with webhook_mode != 'disabled'.
+        poll_interval_seconds:
+          type: integer
+          nullable: true
+          description: |
+            Per-repo poll cadence in seconds. Null → server default
+            (CIX_DEFAULT_POLL_INTERVAL). Always clamped up to the floor
+            (CIX_MIN_POLL_INTERVAL).
+        next_poll_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Absolute time this repo is next due for a poll. Null when
+            polling is disabled. Measured from the end of the last index run.
         created_at:
           type: string
           format: date-time
@@ -3582,6 +3636,24 @@ components:
           type: string
           enum: [manual, auto, disabled]
           default: manual
+        polling_enabled:
+          type: boolean
+          description: |
+            Enable polling sync. Requires webhook_mode='disabled'
+            (webhook XOR polling); otherwise the request is rejected 422.
+        poll_interval_seconds:
+          type: integer
+          description: Optional per-repo poll cadence in seconds (0/omitted → server default).
+
+    UpdateGitRepoPollingRequest:
+      type: object
+      required: [polling_enabled]
+      properties:
+        polling_enabled:
+          type: boolean
+        poll_interval_seconds:
+          type: integer
+          description: Optional per-repo poll cadence in seconds (0/omitted → server default).
 
     GithubRepo:
       type: object
