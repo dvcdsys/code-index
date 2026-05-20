@@ -82,7 +82,7 @@ teardown() { teardown_test_env; }
     [ -z "$(ls "$TEST_CACHE_DIR"/cix-aware-* 2>/dev/null)" ]
 }
 
-@test "cix status timeout: writes cache=0 within ~2s" {
+@test "cix status timeout: writes cache=unknown within ~2s" {
     export MOCK_CIX_DELAY=10
 
     local start_ms end_ms
@@ -92,5 +92,6 @@ teardown() { teardown_test_env; }
 
     [ "$status" -eq 0 ]
     [ "$((end_ms - start_ms))" -lt 5000 ]
-    [ "$(read_cache 'sess-to' "$TEST_PROJECT_DIR")" = "0" ]
+    # Timeout records "unknown" (not "0") for later re-probe by grep-nudge.
+    [ "$(read_cache 'sess-to' "$TEST_PROJECT_DIR")" = "unknown" ]
 }

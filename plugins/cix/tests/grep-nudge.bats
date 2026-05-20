@@ -106,14 +106,71 @@ teardown() { teardown_test_env; }
     [ -z "$output" ]
 }
 
-@test "does NOT call cix CLI (cache-only)" {
+@test "does NOT call cix CLI (cache-only) when verdict is definitive" {
     make_cache "sess-nc" "$TEST_PROJECT_DIR" "1"
 
     run_hook grep-nudge.sh "sess-nc" "$TEST_PROJECT_DIR"
     run_hook grep-nudge.sh "sess-nc" "$TEST_PROJECT_DIR"
 
-    # Mock cix should never have been invoked.
+    # Mock cix should never have been invoked for a definitive "1".
     [ "$(mock_cix_call_count)" -eq 0 ]
+}
+
+# ── "unknown" re-probe (R4 fix) ──────────────────────────────────────────────
+# SessionStart writes "unknown" when cix status timed out. The next Grep
+# re-probes once and upgrades the cache, so a server that was down at start
+# but came up later still produces nudges instead of being silenced forever.
+
+@test "cache=unknown + cix up: re-probes, upgrades cache to 1, nudge fires" {
+    make_cache "sess-unk1" "$TEST_PROJECT_DIR" "unknown"
+    export MOCK_CIX_EXIT=0
+
+    run_hook grep-nudge.sh "sess-unk1" "$TEST_PROJECT_DIR"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hookSpecificOutput"* ]]
+    [[ "$output" == *"cix search"* ]]
+    # Re-probe happened and persisted a definitive verdict.
+    [ "$(mock_cix_call_count)" -ge 1 ]
+    [ "$(read_cache 'sess-unk1' "$TEST_PROJECT_DIR")" = "1" ]
+}
+
+@test "cache=unknown + cix not-indexed: re-probes, upgrades to 0, stays silent" {
+    make_cache "sess-unk0" "$TEST_PROJECT_DIR" "unknown"
+    export MOCK_CIX_EXIT=1
+
+    run_hook grep-nudge.sh "sess-unk0" "$TEST_PROJECT_DIR"
+
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(mock_cix_call_count)" -ge 1 ]
+    [ "$(read_cache 'sess-unk0' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
+@test "cache=unknown + re-probe still times out: cache stays unknown, silent" {
+    make_cache "sess-unkT" "$TEST_PROJECT_DIR" "unknown"
+    export MOCK_CIX_DELAY=10   # re-probe will be killed at the 2s timeout
+
+    run_hook grep-nudge.sh "sess-unkT" "$TEST_PROJECT_DIR"
+
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # Not downgraded to "0" — left as "unknown" so the next Grep re-probes.
+    [ "$(read_cache 'sess-unkT' "$TEST_PROJECT_DIR")" = "unknown" ]
+}
+
+@test "cache=unknown + cix up: subsequent calls use cached 1 (no re-probe)" {
+    make_cache "sess-unkS" "$TEST_PROJECT_DIR" "unknown"
+    export MOCK_CIX_EXIT=0
+
+    run_hook grep-nudge.sh "sess-unkS" "$TEST_PROJECT_DIR"   # re-probes → 1
+    local after_first
+    after_first=$(mock_cix_call_count)
+
+    run_hook grep-nudge.sh "sess-unkS" "$TEST_PROJECT_DIR"   # cache is "1" now
+
+    # No additional cix call on the second invocation.
+    [ "$(mock_cix_call_count)" -eq "$after_first" ]
 }
 
 # ── Bash branch — grep-family detection in tool_input.command ────────────────

@@ -74,7 +74,7 @@ teardown() { teardown_test_env; }
     rm -rf "$tmp_cache"
 }
 
-@test "cix status timeout: kills child after 2s, writes cache=0" {
+@test "cix status timeout: kills child after 2s, writes cache=unknown" {
     export MOCK_CIX_EXIT=0
     export MOCK_CIX_DELAY=10   # mock would hang for 10s; script must kill at 2s
 
@@ -87,7 +87,9 @@ teardown() { teardown_test_env; }
     [ "$status" -eq 0 ]
     # Should be ≥ ~2000ms (timeout fires) and well under 10000ms (no hang).
     [ "$elapsed" -lt 5000 ]
-    [ "$(read_cache 'sess-timeout' "$TEST_PROJECT_DIR")" = "0" ]
+    # Timeout now records "unknown" (not "0") so grep-nudge can re-probe
+    # later instead of being silenced for the whole session.
+    [ "$(read_cache 'sess-timeout' "$TEST_PROJECT_DIR")" = "unknown" ]
 }
 
 @test "cache file uses session_id-DIR_HASH key" {

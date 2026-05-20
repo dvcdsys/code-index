@@ -135,6 +135,18 @@ Set `CIX_PLUGIN_BIN_DIR` to a directory that already contains a working
 `cix` binary, or simply make sure `cix` is in your `$PATH` before
 enabling the plugin.
 
+For corporate, regulated, or air-gapped environments where the plugin
+must never reach out to the network, set `CIX_NO_AUTOINSTALL=1`. When
+`cix` is not already installed, the wrapper then fails with a clear
+message (including the exact manual-install command) instead of
+fetching `install.sh`.
+
+The auto-bootstrap is **pinned** to a specific CLI release tag (see
+`CIX_PINNED_VERSION` at the top of `scripts/cix-wrapper.sh`): both the
+`install.sh` script reference and the installed binary version are
+fixed, so a fresh install is reproducible rather than tracking whatever
+is on `main`.
+
 ### Capping cix output (`CIX_MAX_OUTPUT_LINES`)
 
 By default the wrapper passes cix output through untouched. Set
@@ -182,9 +194,10 @@ in two tiers:
 | `agents/cix-workspace-investigator.md` | Read-only per-repo investigator sub-agent *(experimental)* |
 | `commands/*.md` | Six slash commands |
 | `hooks/hooks.json` | SessionStart + PostToolUse(Grep\|Glob\|Bash) + CwdChanged + PostCompact + SessionEnd registration |
-| `scripts/cix-wrapper.sh` | "Use system or auto-install" CLI wrapper |
+| `scripts/cix-wrapper.sh` | "Use system or auto-install" CLI wrapper (pinned, opt-out via `CIX_NO_AUTOINSTALL`) |
 | `scripts/session-start.sh` | One-time session reminder |
 | `scripts/grep-nudge.sh` | Exponential-backoff Grep nudge |
+| `scripts/lib-cix-probe.sh` | Shared `cix status` probe helpers (3-state verdict), sourced by the hooks |
 | `bin/cix` | Symlink to wrapper, exposed on `$PATH` while plugin enabled |
 
 ## Cross-project workflow (experimental, manual-only)

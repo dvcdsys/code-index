@@ -26,12 +26,15 @@
 # `ag` (the_silver_searcher) and `ack` are grep alternatives covered
 # for the same reason.
 #
-# This hook does NOT call `cix status` itself — it relies entirely on
-# the cache written by SessionStart and refreshed by CwdChanged.
-# Trade-off: a session that started before the cix-server came up will
-# stay in "silent" mode for the rest of its life in that project, even
-# if the server later comes back online. Intentional: better to miss a
-# few nudge opportunities than spam a developer whose server is down.
+# Cache states (written by SessionStart / CwdChanged): "1" indexed,
+# "0" definitively not indexed, "unknown" cix status timed out at start.
+# This hook normally relies on that cache and does NOT call cix. The ONE
+# exception is "unknown": that means SessionStart couldn't reach the
+# server (slow/down). On the next Grep we re-probe `cix status` once
+# (short timeout) and upgrade the cache to "0"/"1" — so a server that
+# was down at session start but came up later still gets nudges, instead
+# of being silenced for the whole session. A definitive "0" is NOT
+# re-probed (the server answered "not indexed"; respect that).
 #
 # Per-(session, project) backoff: each project Claude visits has its
 # own exponential-backoff counter. A new `cd` into a fresh project
@@ -44,6 +47,11 @@
 # as the model "learns" the workflow.
 
 set -euo pipefail
+
+# Shared probe helpers (cix_resolve_bin, cix_probe_verdict) — used only for
+# the "unknown" re-probe path below.
+# shellcheck source=lib-cix-probe.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-cix-probe.sh"
 
 INPUT=$(cat 2>/dev/null || echo "{}")
 if command -v jq >/dev/null 2>&1; then
@@ -107,13 +115,33 @@ if [ -z "$DIR_HASH" ]; then
 fi
 
 # ── Read SessionStart's verdict for THIS project ──────────────────────────────
-# Strict policy: only "1" allows nudges. Missing file or "0" → silent.
+# Policy: only "1" allows nudges. Missing file or "0" → silent. "unknown"
+# (SessionStart timed out) → re-probe once and upgrade the cache.
 CACHE_FILE="$CACHE_DIR/cix-aware-$SESSION_ID-$DIR_HASH"
 
 if [ ! -f "$CACHE_FILE" ]; then
     exit 0
 fi
-if [ "$(cat "$CACHE_FILE" 2>/dev/null)" != "1" ]; then
+
+VERDICT="$(cat "$CACHE_FILE" 2>/dev/null || echo "")"
+
+if [ "$VERDICT" = "unknown" ]; then
+    # Server was unreachable at session start. Re-probe once now (short
+    # timeout) and persist the fresh verdict so future calls short-circuit.
+    CIX_BIN="$(cix_resolve_bin)"
+    if [ -n "$CIX_BIN" ]; then
+        VERDICT="$(cix_probe_verdict "$CIX_BIN" "$PROJECT_DIR" 2)"
+        # Only persist a DEFINITIVE result; if still "unknown", leave the
+        # cache as-is so the next Grep re-probes again (cheap, converges).
+        if [ "$VERDICT" != "unknown" ]; then
+            printf '%s' "$VERDICT" > "$CACHE_FILE" 2>/dev/null || true
+        fi
+    else
+        VERDICT="0"
+    fi
+fi
+
+if [ "$VERDICT" != "1" ]; then
     exit 0
 fi
 

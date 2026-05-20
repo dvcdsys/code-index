@@ -18,17 +18,27 @@
 # Falls back to /tmp only when run outside a plugin context (tests).
 #
 # Decision contract (read by grep-nudge.sh, post-compact.sh):
-#   File present with content "1" → project is indexed, nudge allowed
-#   File present with content "0" → not indexed, nudge MUST stay silent
-#   File absent                   → no verdict yet, nudge stays silent
+#   File present with content "1"       → project is indexed, nudge allowed
+#   File present with content "0"       → not indexed, nudge MUST stay silent
+#   File present with content "unknown" → cix status timed out; grep-nudge
+#                                          re-probes and upgrades to 0 or 1
+#   File absent                         → no verdict yet, nudge stays silent
 #
-# Why no fallback in grep-nudge: if SessionStart (or CwdChanged) concluded
-# "not indexed" (server unreachable, project not registered, etc.), the
-# user should NOT see Grep nudges suggesting `cix search` for the rest
-# of the session. Sending nudges based on `.cixignore` presence anyway
-# would create false positives.
+# Why "unknown" instead of "0" on timeout: a slow/unreachable server at
+# session start used to write "0", which silenced nudges for the WHOLE
+# session even if the server came up moments later. "unknown" lets the
+# next Grep re-probe (see grep-nudge.sh) and recover.
+#
+# Why grep-nudge still won't fabricate nudges from "0": if cix status
+# completed and said "not indexed" (project not registered, etc.), the
+# user should NOT see Grep nudges suggesting `cix search` — that's a
+# definitive negative, not a transient one.
 
 set -euo pipefail
+
+# Shared probe helpers (cix_resolve_bin, cix_probe_verdict).
+# shellcheck source=lib-cix-probe.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-cix-probe.sh"
 
 # ── Read session_id from stdin JSON ───────────────────────────────────────────
 INPUT=$(cat 2>/dev/null || echo "{}")
@@ -83,12 +93,7 @@ find "$CACHE_DIR" -maxdepth 1 -type f \
     -mtime +30 -delete 2>/dev/null || true
 
 # ── Resolve a working `cix` binary ────────────────────────────────────────────
-CIX_BIN=""
-if [ -x "${CLAUDE_PLUGIN_ROOT:-}/bin/cix" ]; then
-    CIX_BIN="${CLAUDE_PLUGIN_ROOT}/bin/cix"
-elif command -v cix >/dev/null 2>&1; then
-    CIX_BIN="$(command -v cix)"
-fi
+CIX_BIN="$(cix_resolve_bin)"
 
 if [ -z "$CIX_BIN" ]; then
     # CLI not yet installed (would auto-bootstrap on first call). Mark off.
@@ -96,38 +101,18 @@ if [ -z "$CIX_BIN" ]; then
     exit 0
 fi
 
-# ── Run `cix status` with a 2-second timeout ──────────────────────────────────
-# macOS lacks `timeout`/`gtimeout` by default — implement in pure bash.
-EXIT_FILE="$CACHE_FILE.exit"
-(
-    "$CIX_BIN" status -p "$PROJECT_DIR" >/dev/null 2>&1
-    echo "$?" > "$EXIT_FILE" 2>/dev/null
-) &
-CIX_PID=$!
+# ── Probe `cix status` (2s timeout) → three-state verdict ─────────────────────
+VERDICT="$(cix_probe_verdict "$CIX_BIN" "$PROJECT_DIR" 2)"
 
-SLEPT=0
-while kill -0 "$CIX_PID" 2>/dev/null && [ "$SLEPT" -lt 20 ]; do
-    sleep 0.1
-    SLEPT=$((SLEPT + 1))
-done
-
-if kill -0 "$CIX_PID" 2>/dev/null; then
-    kill -9 "$CIX_PID" 2>/dev/null || true
-    wait "$CIX_PID" 2>/dev/null || true
-    printf '0' > "$CACHE_FILE"
-    rm -f "$EXIT_FILE"
+if [ "$VERDICT" = "unknown" ]; then
+    # Timed out — record "unknown" so grep-nudge re-probes later instead of
+    # being silenced for the whole session.
+    printf 'unknown' > "$CACHE_FILE"
     exit 0
 fi
-wait "$CIX_PID" 2>/dev/null || true
 
-EXIT_CODE=1
-if [ -f "$EXIT_FILE" ]; then
-    EXIT_CODE=$(cat "$EXIT_FILE" 2>/dev/null || echo 1)
-    rm -f "$EXIT_FILE"
-fi
-
-if [ "$EXIT_CODE" != "0" ]; then
-    # Not indexed (or server unreachable). Lock the session into "off" mode.
+if [ "$VERDICT" != "1" ]; then
+    # Definitive "not indexed". Stay silent for the session in this project.
     printf '0' > "$CACHE_FILE"
     exit 0
 fi

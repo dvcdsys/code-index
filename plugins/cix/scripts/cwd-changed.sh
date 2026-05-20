@@ -18,9 +18,13 @@
 #   Cache absent + cix status exit 0    → write "1" (cix-aware)
 #   Cache absent + cix status exit ≠ 0  → write "0" (silent for this dir)
 #   Cache absent + cix CLI not found    → write "0"
-#   Cache absent + cix status timeout   → write "0"
+#   Cache absent + cix status timeout   → write "unknown" (grep-nudge re-probes)
 
 set -euo pipefail
+
+# Shared probe helpers (cix_resolve_bin, cix_probe_verdict).
+# shellcheck source=lib-cix-probe.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-cix-probe.sh"
 
 INPUT=$(cat 2>/dev/null || echo "{}")
 if command -v jq >/dev/null 2>&1; then
@@ -49,53 +53,18 @@ if [ -f "$CACHE_FILE" ]; then
 fi
 
 # ── Resolve cix binary ────────────────────────────────────────────────────────
-CIX_BIN=""
-if [ -x "${CLAUDE_PLUGIN_ROOT:-}/bin/cix" ]; then
-    CIX_BIN="${CLAUDE_PLUGIN_ROOT}/bin/cix"
-elif command -v cix >/dev/null 2>&1; then
-    CIX_BIN="$(command -v cix)"
-fi
+CIX_BIN="$(cix_resolve_bin)"
 
 if [ -z "$CIX_BIN" ]; then
     printf '0' > "$CACHE_FILE"
     exit 0
 fi
 
-# ── Run cix status with 2s timeout (same pattern as session-start.sh) ─────────
-EXIT_FILE="$CACHE_FILE.exit"
-(
-    "$CIX_BIN" status -p "$PROJECT_DIR" >/dev/null 2>&1
-    echo "$?" > "$EXIT_FILE" 2>/dev/null
-) &
-CIX_PID=$!
+# ── Probe cix status (2s timeout) → three-state verdict ───────────────────────
+VERDICT="$(cix_probe_verdict "$CIX_BIN" "$PROJECT_DIR" 2)"
+# "1" cix-aware · "0" not indexed · "unknown" timed out (grep-nudge re-probes).
+printf '%s' "$VERDICT" > "$CACHE_FILE"
 
-SLEPT=0
-while kill -0 "$CIX_PID" 2>/dev/null && [ "$SLEPT" -lt 20 ]; do
-    sleep 0.1
-    SLEPT=$((SLEPT + 1))
-done
-
-if kill -0 "$CIX_PID" 2>/dev/null; then
-    kill -9 "$CIX_PID" 2>/dev/null || true
-    wait "$CIX_PID" 2>/dev/null || true
-    printf '0' > "$CACHE_FILE"
-    rm -f "$EXIT_FILE"
-    exit 0
-fi
-wait "$CIX_PID" 2>/dev/null || true
-
-EXIT_CODE=1
-if [ -f "$EXIT_FILE" ]; then
-    EXIT_CODE=$(cat "$EXIT_FILE" 2>/dev/null || echo 1)
-    rm -f "$EXIT_FILE"
-fi
-
-if [ "$EXIT_CODE" = "0" ]; then
-    printf '1' > "$CACHE_FILE"
-else
-    printf '0' > "$CACHE_FILE"
-fi
-
-# Silent — no context injection. PreToolUse(Grep|Glob) will handle the
+# Silent — no context injection. PostToolUse(Grep|Glob|Bash) handles the
 # first-Grep-in-new-project nudge through its own backoff counter.
 exit 0
