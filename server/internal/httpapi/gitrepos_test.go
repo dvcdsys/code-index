@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -224,6 +225,17 @@ func TestUpdateProjectGitRepoSync(t *testing.T) {
 	}
 	if got.Note == "" {
 		t.Error("expected a note explaining manual webhook setup")
+	}
+
+	// → webhook again: the repo is already a manual webhook (operator-managed,
+	// no stored hook id). Re-saving must PRESERVE manual and NOT try to
+	// register a duplicate hook — the note flips to the "left as-is" message.
+	got = patch(map[string]any{"sync_method": "webhook"})
+	if got.GitRepo.WebhookMode != "manual" {
+		t.Fatalf("re-save webhook: mode=%q, want manual preserved", got.GitRepo.WebhookMode)
+	}
+	if !strings.Contains(got.Note, "left as-is") {
+		t.Errorf("re-save note = %q, want manual-preserve message", got.Note)
 	}
 
 	// invalid method → 422

@@ -273,6 +273,14 @@ func (s *Server) GetProjectGitRepo(w http.ResponseWriter, r *http.Request, hash 
 // manual) directly from the project page. 422 on an unknown sync_method,
 // 404 for local projects.
 func (s *Server) UpdateProjectGitRepoSync(w http.ResponseWriter, r *http.Request, hash string) {
+	// Admin-only: this handler decrypts the stored PAT and registers/deletes
+	// webhooks on GitHub (via tryAutoRegisterWebhook / deregisterWebhookIfAny),
+	// matching the privilege level of ReconcileWebhooks. The dashboard already
+	// gates the card behind isAdmin; this closes the direct-API hole where a
+	// viewer could PATCH the endpoint and drive those privileged operations.
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.gitReposUnavailable(w) {
 		return
 	}
@@ -322,6 +330,16 @@ func (s *Server) UpdateProjectGitRepoSync(w http.ResponseWriter, r *http.Request
 		switch {
 		case g.WebhookID != nil:
 			note = "Webhook already registered."
+		case g.WebhookMode == gitrepos.WebhookModeManual:
+			// The repo is already a manually-configured webhook: the operator
+			// installed the hook in GitHub themselves and we never stored its
+			// id (WebhookID == nil). The dashboard collapses webhook_mode
+			// auto+manual into a single "Webhook" choice, so re-saving here
+			// would otherwise flip the mode to auto and call
+			// tryAutoRegisterWebhook — creating a SECOND hook beside the
+			// operator's. Preserve manual instead of duplicating.
+			mode = gitrepos.WebhookModeManual
+			note = "Webhook is configured manually — left as-is. Delete the manual hook in GitHub first if you want the server to manage it."
 		default:
 			ok, regNote := s.tryAutoRegisterWebhook(r.Context(), g, s.buildWebhookURL(g.PathHash))
 			if !ok {
