@@ -1,16 +1,17 @@
 // Package repoindexer is the in-process driver that turns a cloned git
 // repository on disk into an indexed cix project. It bridges the
-// workspaces feature's job pipeline (clone_repo → ??? → workspace_repo
-// status=indexed) and the existing three-phase indexer that drives all
-// other code indexing in cix.
+// clone_repo → index_repo job pipeline (run by package repojobs) and
+// the existing three-phase indexer that drives all other code indexing
+// in cix.
 //
 // Why in-process: the CLI traditionally walks the filesystem locally,
-// hashes files, then streams batches to the server over HTTP. For the
-// workspaces feature the "source" is already on the server's disk (the
-// worker just cloned it). Going out-and-back through HTTP for that case
-// would mean dragging the entire 3-phase NDJSON streaming machinery into
-// the worker, when we can call the same Service.BeginIndexing /
-// ProcessFiles / FinishIndexing methods directly.
+// hashes files, then streams batches to the server over HTTP. For
+// server-cloned GitHub repos the "source" is already on the server's
+// disk (the worker just cloned it). Going out-and-back through HTTP
+// for that case would mean dragging the entire 3-phase NDJSON
+// streaming machinery into the worker, when we can call the same
+// Service.BeginIndexing / ProcessFiles / FinishIndexing methods
+// directly.
 //
 // Boundary: this package owns walking + chunk-payload construction. It
 // does NOT own embedding, tokenisation, vectorstore mutation — those
@@ -33,6 +34,7 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/langdetect"
+	"github.com/dvcdsys/code-index/server/internal/repocloner"
 )
 
 // BatchSize controls how many files we hand the indexer per ProcessFiles
@@ -68,18 +70,32 @@ func DefaultFilter() FileFilter {
 	}
 }
 
-// IndexDir runs a full end-to-end index pass against a local directory:
-// BeginIndexing(full=true) → ProcessFiles batches → FinishIndexing. The
-// projects table row must already exist (caller's responsibility — the
-// worker creates it before clone_repo runs). On any error mid-way, the
-// indexer's internal session timer cleans up after an hour; we don't
-// explicitly cancel since "best-effort retry" is the expected pattern.
+// IndexDir runs an end-to-end index pass against a local directory.
+// Two modes selected by the changes parameter:
 //
-// Returns (filesIndexed, chunksCreated, err).
+//   - changes == nil → FULL: BeginIndexing(full=true) wipes the previous
+//     index state, WalkDir visits every file, FinishIndexing(deleted=nil)
+//     completes the run. Use for first-time clones, partial-failure
+//     recovery, and force-full reindex requests.
+//   - changes != nil → INCREMENTAL: BeginIndexing(full=false) preserves
+//     existing state, only files listed in changes.Modified+Added are
+//     read+processed, and changes.Deleted is fed to FinishIndexing for
+//     per-file cleanup of vectorstore + symbols + refs + chunks_fts +
+//     file_hashes. Use for normal webhook + manual reindex paths where
+//     tree.Diff already told us exactly what moved.
+//
+// On any error mid-way the indexer's session timer cleans up after an
+// hour; we don't explicitly cancel since "best-effort retry" is the
+// expected pattern.
+//
+// Returns (filesIndexed, chunksCreated, err). In incremental mode the
+// counts only cover the changed batch — they don't include the
+// unchanged files that remained in the index untouched.
 func IndexDir(
 	ctx context.Context,
 	idx *indexer.Service,
 	projectPath, rootDir string,
+	changes *repocloner.ChangeSet,
 	filter FileFilter,
 	logger *slog.Logger,
 ) (int, int, error) {
@@ -90,7 +106,8 @@ func IndexDir(
 		logger = slog.Default()
 	}
 
-	runID, _, err := idx.BeginIndexing(ctx, projectPath, true)
+	full := changes == nil
+	runID, _, err := idx.BeginIndexing(ctx, projectPath, full)
 	if err != nil {
 		return 0, 0, fmt.Errorf("begin indexing: %w", err)
 	}
@@ -114,31 +131,26 @@ func IndexDir(
 		return nil
 	}
 
-	err = filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			// Permission errors on a subtree shouldn't kill the whole index.
-			logger.Warn("repoindexer: walk skipped", "path", path, "err", walkErr)
-			if d != nil && d.IsDir() {
-				return fs.SkipDir
-			}
+	// considerFile builds a payload for a single relative path and
+	// appends it to the current batch. Shared by the WalkDir (full) and
+	// the explicit-list (incremental) drivers so the per-file pipeline
+	// stays identical: stat → size cap → read → binary probe → langdetect.
+	considerFile := func(rel string) error {
+		// Apply ExcludeDirs at the path-prefix level. In WalkDir mode
+		// the exclusion already happens via shouldSkipDir (fs.SkipDir
+		// prunes the subtree before we ever see its files), so this
+		// only fires for the incremental path where the caller hands
+		// us paths directly without a directory traversal.
+		if filter.shouldSkipPath(rel) {
 			return nil
 		}
-		if d.IsDir() {
-			if filter.shouldSkipDir(path, rootDir, d.Name()) {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		// Regular file.
-		rel, rerr := filepath.Rel(rootDir, path)
-		if rerr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		totalFiles++
-
-		fp, ok, ferr := buildPayload(path, rel, filter)
+		absPath := filepath.Join(rootDir, filepath.FromSlash(rel))
+		fp, ok, ferr := buildPayload(absPath, rel, filter)
 		if ferr != nil {
+			// Incremental mode: tree.Diff lists a file that vanished
+			// between fetch+reset and our read. Rare but observable
+			// (very fast subsequent push). Log and skip — the next
+			// reindex will see it as Deleted.
 			logger.Warn("repoindexer: file dropped", "path", rel, "err", ferr)
 			return nil
 		}
@@ -152,15 +164,66 @@ func IndexDir(
 			}
 		}
 		return nil
-	})
-	if err != nil {
-		return totalAccepted, totalChunks, fmt.Errorf("walk: %w", err)
 	}
+
+	if full {
+		err = filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				// Permission errors on a subtree shouldn't kill the whole index.
+				logger.Warn("repoindexer: walk skipped", "path", path, "err", walkErr)
+				if d != nil && d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				if filter.shouldSkipDir(path, rootDir, d.Name()) {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			// Regular file.
+			rel, rerr := filepath.Rel(rootDir, path)
+			if rerr != nil {
+				return nil
+			}
+			rel = filepath.ToSlash(rel)
+			totalFiles++
+			return considerFile(rel)
+		})
+		if err != nil {
+			return totalAccepted, totalChunks, fmt.Errorf("walk: %w", err)
+		}
+	} else {
+		// Incremental: iterate the explicit Modified+Added list. Deleted
+		// paths flow into FinishIndexing below (no read/process needed).
+		// DefaultFilter still applies — e.g. tree.Diff may list a now-too-large
+		// file or a path under vendor/, considerFile silently skips both.
+		// Modified and Added are processed identically; the indexer's
+		// per-file replace semantics make the prior state irrelevant.
+		for _, rel := range changes.Modified {
+			totalFiles++
+			if err := considerFile(rel); err != nil {
+				return totalAccepted, totalChunks, err
+			}
+		}
+		for _, rel := range changes.Added {
+			totalFiles++
+			if err := considerFile(rel); err != nil {
+				return totalAccepted, totalChunks, err
+			}
+		}
+	}
+
 	if err := flush(); err != nil {
 		return totalAccepted, totalChunks, err
 	}
 
-	if _, _, _, ferr := idx.FinishIndexing(ctx, projectPath, runID, nil, totalFiles); ferr != nil {
+	var deletedPaths []string
+	if !full {
+		deletedPaths = changes.Deleted
+	}
+	if _, _, _, ferr := idx.FinishIndexing(ctx, projectPath, runID, deletedPaths, totalFiles); ferr != nil {
 		return totalAccepted, totalChunks, fmt.Errorf("finish indexing: %w", ferr)
 	}
 	return totalAccepted, totalChunks, nil
@@ -215,6 +278,25 @@ func (f FileFilter) shouldSkipDir(absPath, rootDir, name string) bool {
 	for _, ex := range f.ExcludeDirs {
 		if strings.EqualFold(name, ex) {
 			return true
+		}
+	}
+	return false
+}
+
+// shouldSkipPath returns true when any component of the slash-separated
+// relative path matches an ExcludeDirs entry. Used by the incremental
+// driver, which receives explicit per-file paths (no WalkDir, so
+// shouldSkipDir's "prune the subtree" trick doesn't apply). Matching is
+// case-insensitive to mirror shouldSkipDir.
+func (f FileFilter) shouldSkipPath(relPath string) bool {
+	if relPath == "" {
+		return false
+	}
+	for _, seg := range strings.Split(relPath, "/") {
+		for _, ex := range f.ExcludeDirs {
+			if strings.EqualFold(seg, ex) {
+				return true
+			}
 		}
 	}
 	return false

@@ -1,6 +1,8 @@
 // Package jobs implements the persistent worker queue that drives the
-// workspaces feature's long-running operations (clone, fetch, index,
-// build-call-graph, community-recompute).
+// server's long-running operations (clone, fetch, index). It's a
+// generic primitive: handlers for specific job types are registered
+// by other packages (currently just repojobs, which handles the
+// GitHub-repo clone+index pipeline).
 //
 // Why persistent: clone+index can take minutes, webhook bursts can be
 // frequent, and a single binary that operators restart needs to keep its

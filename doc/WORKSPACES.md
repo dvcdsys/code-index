@@ -10,10 +10,12 @@ agent trust rules, query patterns), see [`../workspaces.md`](../workspaces.md).
 For the search algorithm, see [`SEARCH_ALGORITHM.md`](SEARCH_ALGORITHM.md).
 For the webhook lifecycle, see [`WEBHOOKS.md`](WEBHOOKS.md).
 
-> **Feature flag.** Workspaces are gated on `CIX_WORKSPACES_ENABLED=true`.
-> Without it every `/api/v1/workspaces/*` endpoint returns 503. The
-> end-to-end pipeline — clone, FTS5 + dense index, hybrid two-stage
-> search, agent skill — is in production as of `develop`.
+> **No feature flag.** Workspaces + GitHub-repo support are part of
+> every release. The previous `CIX_WORKSPACES_ENABLED` gate was removed
+> in the 0.4.x line — the only failure mode that still surfaces as a
+> 503 from `/api/v1/workspaces/*` is when the encryption layer needed
+> for `github_tokens` fails to wire (see "Encryption key resolution"
+> below).
 
 ## Schema
 
@@ -33,13 +35,13 @@ and the table rename in `e433fee`.
 
 ## Quick start
 
-1. **Enable the feature flag.** Add to the cix-server environment:
+1. **Set the encryption key** so `github_tokens` rows can be sealed:
    ```
-   CIX_WORKSPACES_ENABLED=true
    CIX_SECRET_KEY=<hex- or base64-encoded 32-byte key>  # see "Encryption"
    ```
-   Restart the server. Without the flag every workspaces endpoint
-   returns `503 service unavailable`.
+   Or skip and let the server auto-generate a keyfile under
+   `<CIX_SECRETS_DATA_DIR>/.secret_key` on first boot — fine for a
+   single-host dev setup, **back it up** before redeploying.
 2. **Open the dashboard** at `https://<host>/dashboard` and sign in.
 3. **Add a GitHub PAT** under **GitHub Tokens → Add token** if you need
    to clone private repos. The plaintext value is encrypted before it
@@ -57,7 +59,6 @@ and the table rename in `e433fee`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CIX_WORKSPACES_ENABLED` | `false` | Master switch for the feature. |
 | `CIX_SECRET_KEY` | (auto-generate) | 32-byte AES key encoding GitHub tokens. Hex or base64. |
 | `CIX_SECRET_KEYFILE` | unset | Alternative — path to a 0600-perm key file. |
 | `CIX_SECRETS_DATA_DIR` | `dirname(CIX_SQLITE_PATH)` | Where the auto-generated keyfile lives. |
@@ -71,11 +72,11 @@ Resolution order:
 
 1. `CIX_SECRET_KEY` (hex or base64 32-byte value)
 2. `CIX_SECRET_KEYFILE` (path; file must be `0600`)
-3. `<CIX_SECRETS_DATA_DIR>/.secret_key` — auto-generated on first run
-   with `CIX_WORKSPACES_ENABLED=true`. The server **refuses to start**
-   if `github_tokens` is non-empty and the resolved key cannot decrypt
-   the first row — protects against accidental key rotation that would
-   silently brick all tokens.
+3. `<CIX_SECRETS_DATA_DIR>/.secret_key` — auto-generated on first
+   boot if neither of the above resolve. The server **refuses to
+   start** if `github_tokens` is non-empty and the resolved key
+   cannot decrypt the first row — protects against accidental key
+   rotation that would silently brick all tokens.
 
 For production, supply `CIX_SECRET_KEY` explicitly or mount a keyfile
 via `CIX_SECRET_KEYFILE`. The auto-generated keyfile is a single-host

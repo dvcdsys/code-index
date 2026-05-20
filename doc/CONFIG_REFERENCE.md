@@ -70,12 +70,16 @@ the DB.
 | `CIX_MAX_EMBEDDING_CONCURRENCY` | `5` | Embedding queue parallelism. Drop to `1` if the GPU contends. |
 | `CIX_EMBEDDING_QUEUE_TIMEOUT` | `300` | Seconds before a queued embedding request is failed. |
 
-## Workspaces
+## Workspaces & GitHub repos
+
+Both surfaces ship in every release — there is no opt-in flag. The
+encryption key for `github_tokens` is required on first use; if neither
+`CIX_SECRET_KEY` nor `CIX_SECRET_KEYFILE` is set the server auto-generates
+one under `<CIX_SECRETS_DATA_DIR>/.secret_key`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CIX_WORKSPACES_ENABLED` | `false` | Master switch. Without it every `/api/v1/workspaces/*` endpoint returns 503. |
-| `CIX_WORKSPACES_DATA_DIR` | `<sqlite parent>/repos` | Where cloned workspace repos live. |
+| `CIX_WORKSPACES_DATA_DIR` | `<sqlite parent>/repos` | Where cloned GitHub repos live. |
 | `CIX_WORKER_CONCURRENCY` | `2` | Parallel clone/index workers. |
 | `CIX_SECRET_KEY` | (auto-generate) | 32-byte AES key for GitHub token encryption. Hex or base64. |
 | `CIX_SECRET_KEYFILE` | — | Alternative — path to a 0600-perm key file. |

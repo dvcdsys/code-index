@@ -11,11 +11,12 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
-// workspaceProjectsUnavailable returns 503 when the feature flag is
-// off OR any required service is nil.
+// workspaceProjectsUnavailable returns 503 when any required service
+// is nil. Main always wires both; this defensive check guards tests
+// that pass a partial Deps.
 func (s *Server) workspaceProjectsUnavailable(w http.ResponseWriter) bool {
-	if !s.Deps.WorkspacesEnabled || s.Deps.WorkspaceProjects == nil || s.Deps.Workspaces == nil {
-		writeError(w, http.StatusServiceUnavailable, "workspaces feature is disabled (set CIX_WORKSPACES_ENABLED=true and restart)")
+	if s.Deps.WorkspaceProjects == nil || s.Deps.Workspaces == nil {
+		writeError(w, http.StatusServiceUnavailable, "workspaces service is not configured on this server")
 		return true
 	}
 	return false

@@ -199,6 +199,15 @@ CREATE TABLE IF NOT EXISTS git_repos (
     webhook_mode    TEXT NOT NULL DEFAULT 'manual',
     auto_webhook    INTEGER NOT NULL DEFAULT 0,
     last_sha        TEXT,
+    -- indexed_sha is the SHA of the commit whose tree is currently
+    -- reflected in the index. Distinct from last_sha (which is "what's
+    -- on disk after fetch+reset"). Set atomically after a successful
+    -- FinishIndexing; NULL when the repo has never been indexed yet.
+    -- The diff between indexed_sha (old) and last_sha (new) drives the
+    -- incremental reindex path — git tree.Diff returns the exact set
+    -- of changed/added/deleted files without any disk I/O on unchanged
+    -- ones. NULL → forces a full reindex on the next clone_repo job.
+    indexed_sha     TEXT,
     last_error      TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,

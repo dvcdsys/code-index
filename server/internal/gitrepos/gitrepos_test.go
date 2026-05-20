@@ -152,6 +152,62 @@ func TestSetClone_UpdatesLastSHA(t *testing.T) {
 	}
 }
 
+// TestSetIndexedSHA covers the round-trip for the column that drives
+// the incremental reindex decision: tree.Diff(prev=indexed_sha, new=HEAD).
+// Three behaviours that must hold:
+//   - fresh row → IndexedSHA empty
+//   - SetIndexedSHA(sha) → IndexedSHA == sha on next GetByPath
+//   - SetIndexedSHA("") → IndexedSHA cleared back to empty (force-full path)
+func TestSetIndexedSHA(t *testing.T) {
+	d, svc := mustOpen(t)
+	ctx := context.Background()
+	seedProject(t, d, "github.com/x/y@main")
+	if _, err := svc.Create(ctx, CreateRequest{GitHubURL: "https://github.com/x/y", Branch: "main"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	g, err := svc.GetByPath(ctx, "github.com/x/y@main")
+	if err != nil {
+		t.Fatalf("initial GetByPath: %v", err)
+	}
+	if g.IndexedSHA != "" {
+		t.Errorf("fresh row IndexedSHA = %q, want empty", g.IndexedSHA)
+	}
+
+	if err := svc.SetIndexedSHA(ctx, "github.com/x/y@main", "abc123"); err != nil {
+		t.Fatalf("SetIndexedSHA: %v", err)
+	}
+	g, err = svc.GetByPath(ctx, "github.com/x/y@main")
+	if err != nil {
+		t.Fatalf("GetByPath after Set: %v", err)
+	}
+	if g.IndexedSHA != "abc123" {
+		t.Errorf("IndexedSHA after Set = %q, want abc123", g.IndexedSHA)
+	}
+
+	// Force-full path: empty arg clears the column. NULL on disk again.
+	if err := svc.SetIndexedSHA(ctx, "github.com/x/y@main", ""); err != nil {
+		t.Fatalf("SetIndexedSHA clear: %v", err)
+	}
+	g, err = svc.GetByPath(ctx, "github.com/x/y@main")
+	if err != nil {
+		t.Fatalf("GetByPath after clear: %v", err)
+	}
+	if g.IndexedSHA != "" {
+		t.Errorf("IndexedSHA after clear = %q, want empty", g.IndexedSHA)
+	}
+}
+
+// TestSetIndexedSHA_UnknownProject covers the missing-row error path.
+// ErrNotFound rather than a silent no-op makes the force-full handler
+// fail loudly when the operator races a project deletion.
+func TestSetIndexedSHA_UnknownProject(t *testing.T) {
+	_, svc := mustOpen(t)
+	err := svc.SetIndexedSHA(context.Background(), "github.com/never/existed@main", "abc")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetIndexedSHA(unknown) = %v, want ErrNotFound", err)
+	}
+}
+
 func TestDelete_Idempotent(t *testing.T) {
 	d, svc := mustOpen(t)
 	ctx := context.Background()

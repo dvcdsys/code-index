@@ -57,8 +57,8 @@ func jobToPayload(j jobs.Job) jobPayload {
 
 // ListJobs — GET /api/v1/jobs.
 func (s *Server) ListJobs(w http.ResponseWriter, r *http.Request, params openapi.ListJobsParams) {
-	if !s.Deps.WorkspacesEnabled || s.Deps.Jobs == nil {
-		writeError(w, http.StatusServiceUnavailable, "workspaces feature is disabled (set CIX_WORKSPACES_ENABLED=true and restart)")
+	if s.Deps.Jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "jobs queue is not configured on this server")
 		return
 	}
 	status := ""

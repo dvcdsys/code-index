@@ -81,13 +81,26 @@ export function useDeleteProject() {
 // Reindex is only meaningful for GitHub-cloned projects — the server enqueues a
 // clone_repo job that chains into index_repo. Local projects must reindex via
 // the CLI (`cix reindex` / `cix watch`); the endpoint returns 422 for those.
+//
+// `full: true` clears indexed_sha server-side so the job does a full reindex
+// instead of the default tree.Diff-driven incremental. Use as an escape hatch
+// when index drift is suspected (model change is auto-detected and forces full
+// without needing this flag).
+export type ReindexArgs = { hash: string; full?: boolean };
+export type ReindexResponse = {
+  status: 'enqueued' | 'already_running';
+  mode?: 'full' | 'incremental';
+};
+
 export function useReindexProject() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (hash: string) =>
-      api.post<{ status: 'enqueued' | 'already_running' }>(`/projects/${hash}/reindex`, undefined),
-    onSuccess: (_data, hash) => {
-      qc.invalidateQueries({ queryKey: projectKeys.detail(hash) });
+    mutationFn: ({ hash, full }: ReindexArgs) => {
+      const qs = full ? '?full=true' : '';
+      return api.post<ReindexResponse>(`/projects/${hash}/reindex${qs}`, undefined);
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: projectKeys.detail(vars.hash) });
       qc.invalidateQueries({ queryKey: projectKeys.all });
     },
   });

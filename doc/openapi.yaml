@@ -1556,6 +1556,26 @@ paths:
         row. 422 when the project is local (no clone pipeline — local
         projects reindex via the CLI). Dedupe collapses repeated
         triggers into the existing in-flight job.
+
+        Normally the clone job decides incremental vs full automatically
+        (incremental when an `indexed_sha` is recorded and tree.Diff
+        succeeds; full on first-index, partial-failure recovery,
+        or embedding-model change). Pass `full=true` to force a full
+        reindex — useful when index drift is suspected. The endpoint
+        clears `git_repos.indexed_sha` synchronously so the next
+        clone+index pass starts from a clean slate.
+      parameters:
+        - name: full
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            When true, clears `indexed_sha` for this repo before
+            enqueueing so the next index_repo run does a full reindex
+            (re-embeds every file, wipes prior chunks/symbols/refs/
+            file_hashes). Use to recover from suspected drift.
       responses:
         "202":
           description: Reindex enqueued (or already running — dedupe)
@@ -1965,8 +1985,10 @@ components:
             $ref: "#/components/schemas/Error"
     WorkspacesDisabled:
       description: |
-        Workspaces feature is disabled on this server. Set
-        `CIX_WORKSPACES_ENABLED=true` and restart to enable.
+        Required service is not configured on this server (commonly an
+        encryption-key boot failure preventing github_tokens from
+        wiring, or a partial-test Deps in non-production contexts).
+        Check the server logs and restart.
       content:
         application/json:
           schema:
@@ -3445,6 +3467,16 @@ components:
         status:
           type: string
           enum: [enqueued, already_running]
+        mode:
+          type: string
+          enum: [full, incremental]
+          description: |
+            Which reindex flavour the server will run. `full` is set
+            when the request used `?full=true` (the server cleared
+            `indexed_sha` before enqueueing); otherwise `incremental`
+            and the clone-job's mode-determination picks the real
+            mode (still may resolve to full at runtime for first-index,
+            model-change, or partial-failure cases).
         project:
           $ref: "#/components/schemas/Project"
 

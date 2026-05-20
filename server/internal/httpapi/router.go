@@ -78,15 +78,13 @@ type Deps struct {
 	// off; GetStatus then omits the version-check fields entirely.
 	VersionCheck *versioncheck.Service
 
-	// Workspaces enables the workspaces feature endpoints. Set via
-	// CIX_WORKSPACES_ENABLED=true. PR1 ships CRUD over workspaces and
-	// github_tokens behind this flag — when disabled, the handlers return
-	// 503 so the dashboard can render a "feature off" state without a 404
-	// confusion. Both Workspaces and GithubTokens services must be set
-	// together; either nil disables both endpoint groups.
-	WorkspacesEnabled bool
-	Workspaces        *workspaces.Service
-	GithubTokens      *githubtokens.Service
+	// Workspaces + GithubTokens services. Both are always wired by
+	// main; handlers fall back to 503 only if a service is nil (e.g.
+	// secrets boot returned nil for GithubTokens because the
+	// encryption key path failed). Test setups that don't need these
+	// pass nil and the handlers respond consistently.
+	Workspaces   *workspaces.Service
+	GithubTokens *githubtokens.Service
 	// GitRepos owns clone + webhook metadata for external projects;
 	// WorkspaceProjects owns the workspace ↔ project junction. Jobs is
 	// the persistent background queue.

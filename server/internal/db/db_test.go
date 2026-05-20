@@ -550,7 +550,7 @@ func TestMigrate_SplitWorkspaceRepos_PartialRename(t *testing.T) {
 // either a mock of the github_tokens FK or a goroutine deleting from a
 // parallel connection, both of which are out of scope for a DB-only
 // migration test. Tracked as a TODO; reintroduce when there's a
-// workspacejobs integration suite that can drive token lifecycle
+// repojobs integration suite that can drive token lifecycle
 // alongside the migration.
 func TestMigrate_SplitWorkspaceRepos_EdgeCases(t *testing.T) {
 	t.Run("PreExistingTarget_Skipped", func(t *testing.T) {

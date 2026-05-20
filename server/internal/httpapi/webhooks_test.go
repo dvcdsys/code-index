@@ -221,7 +221,6 @@ func TestAddGitRepo_AutoRegisterFailsCleanlyWithoutPublicURL(t *testing.T) {
 		Users:             seedlessUsers(d),
 		Sessions:          seedlessSessions(d),
 		APIKeys:           seedlessAPIKeys(d),
-		WorkspacesEnabled: true,
 		Workspaces:        wsSvc,
 		GithubTokens:      ghSvc,
 		GitRepos:          grSvc,

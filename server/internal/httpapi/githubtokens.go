@@ -49,11 +49,12 @@ func githubTokenToPayload(t githubtokens.Token) githubTokenPayload {
 	}
 }
 
-// githubTokensUnavailable returns 503 when the feature flag is off OR the
-// service is nil (e.g. no encryption key configured at boot).
+// githubTokensUnavailable returns 503 when the github_tokens service is
+// nil (e.g. encryption-key boot failed and main left it unwired). Main
+// always sets it on a successful boot; this is defensive for tests.
 func (s *Server) githubTokensUnavailable(w http.ResponseWriter) bool {
-	if !s.Deps.WorkspacesEnabled || s.Deps.GithubTokens == nil {
-		writeError(w, http.StatusServiceUnavailable, "workspaces feature is disabled (set CIX_WORKSPACES_ENABLED=true and restart)")
+	if s.Deps.GithubTokens == nil {
+		writeError(w, http.StatusServiceUnavailable, "GitHub tokens service is not configured on this server")
 		return true
 	}
 	return false

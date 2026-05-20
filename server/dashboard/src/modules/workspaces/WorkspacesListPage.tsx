@@ -38,10 +38,11 @@ export function WorkspacesListPage() {
         <Header />
         <Alert>
           <AlertCircle className="size-4" />
-          <AlertTitle>Workspaces feature is disabled</AlertTitle>
+          <AlertTitle>Workspaces service is not configured</AlertTitle>
           <AlertDescription>
-            Set <code>CIX_WORKSPACES_ENABLED=true</code> on the server and restart
-            to enable workspaces.
+            The server returned 503 — the workspaces backing service
+            failed to wire (commonly an encryption-key boot failure).
+            Check the server logs and restart.
           </AlertDescription>
         </Alert>
       </div>

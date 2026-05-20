@@ -149,6 +149,16 @@ func (s *Service) SetEmbeddingModel(model string) {
 	s.embeddingModel = model
 }
 
+// EmbeddingModel returns the identifier most recently passed to
+// SetEmbeddingModel. Used by callers (repojobs) that need to compare
+// the live model against projects.indexed_with_model to decide whether
+// an incremental reindex is safe (same model = vectors comparable) or
+// whether a full reindex is required (model change = embedding-space
+// drift, all vectors must be regenerated).
+func (s *Service) EmbeddingModel() string {
+	return s.embeddingModel
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1 — begin
 // ---------------------------------------------------------------------------

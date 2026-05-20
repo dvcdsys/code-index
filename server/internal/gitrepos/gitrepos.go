@@ -55,9 +55,17 @@ type GitRepo struct {
 	WebhookMode   string
 	AutoWebhook   bool
 	LastSHA       string
-	LastError     string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// IndexedSHA is the SHA of the commit whose tree is currently
+	// reflected in the cix index for this repo. Empty when the repo
+	// has never been indexed with the incremental pipeline (legacy
+	// rows pre-migration 7; freshly-cloned-but-not-yet-indexed rows
+	// during the indexing window). Drives the incremental reindex
+	// path: tree.Diff between IndexedSHA and the post-fetch HEAD
+	// gives the exact change set, no file hashing needed.
+	IndexedSHA string
+	LastError  string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // Service wraps the git_repos table.
@@ -199,6 +207,34 @@ func (s *Service) SetClone(ctx context.Context, projectPath, lastSHA, lastError 
 	return nil
 }
 
+// SetIndexedSHA records the SHA whose tree is now reflected in the
+// index for this repo. Called by the index_repo job handler after a
+// successful FinishIndexing. Empty sha clears the column — used by
+// the force-full path before re-enqueueing a clone job.
+func (s *Service) SetIndexedSHA(ctx context.Context, projectPath, sha string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var arg any
+	if sha == "" {
+		arg = nil
+	} else {
+		arg = sha
+	}
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE git_repos
+		   SET indexed_sha = ?,
+		       updated_at  = ?
+		 WHERE project_path = ?`,
+		arg, now, projectPath)
+	if err != nil {
+		return fmt.Errorf("set indexed_sha: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Delete removes a git_repos row. Idempotent — re-deleting returns
 // ErrNotFound. The matching projects row + on-disk clone are NOT
 // cleaned up here; that's the project-delete handler's job.
@@ -220,7 +256,7 @@ const selectColumns = `
 	SELECT project_path, github_url, branch,
 	       token_id, webhook_secret, webhook_id,
 	       webhook_mode, auto_webhook,
-	       last_sha, last_error,
+	       last_sha, indexed_sha, last_error,
 	       created_at, updated_at
 	  FROM git_repos`
 
@@ -232,6 +268,7 @@ func scanRow(r interface{ Scan(dest ...any) error }) (GitRepo, error) {
 		webhookMode string
 		autoWebhook int
 		lastSHA     sql.NullString
+		indexedSHA  sql.NullString
 		lastError   sql.NullString
 		createdAt   string
 		updatedAt   string
@@ -239,7 +276,7 @@ func scanRow(r interface{ Scan(dest ...any) error }) (GitRepo, error) {
 	err := r.Scan(&g.ProjectPath, &g.GitHubURL, &g.Branch,
 		&tokenID, &g.WebhookSecret, &webhookID,
 		&webhookMode, &autoWebhook,
-		&lastSHA, &lastError,
+		&lastSHA, &indexedSHA, &lastError,
 		&createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -259,6 +296,7 @@ func scanRow(r interface{ Scan(dest ...any) error }) (GitRepo, error) {
 	}
 	g.AutoWebhook = autoWebhook == 1
 	g.LastSHA = lastSHA.String
+	g.IndexedSHA = indexedSHA.String
 	g.LastError = lastError.String
 	g.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	g.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
