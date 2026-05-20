@@ -12,9 +12,9 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
 )
 
-// disabledTunnelStatus is the snapshot returned when no tunnel is wired
-// (CIX_TUNNEL_ENABLED=false). The cloudflare slot is "available but off";
-// ngrok is reported as not-yet-implemented.
+// disabledTunnelStatus is the snapshot returned when the tunnel manager is
+// not wired (no provider running). Both providers are available to enable
+// from the dashboard.
 func disabledTunnelStatus() tunnels.Status {
 	return tunnels.Status{Provider: tunnels.ProviderCloudflare, State: tunnels.StateDisabled, Available: true}
 }
@@ -177,10 +177,14 @@ func (s *Server) GetTunnelStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
-// TestTunnel — POST /api/v1/tunnels/test. End-to-end round-trip probe.
+// TestTunnel — POST /api/v1/tunnels/test. Admin-only. End-to-end round-trip
+// probe (initiates an outbound request through the tunnel).
 func (s *Server) TestTunnel(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.Deps.Tunnel == nil {
-		writeError(w, http.StatusConflict, "no active tunnel (CIX_TUNNEL_ENABLED=false)")
+		writeError(w, http.StatusConflict, "no active tunnel (enable it under Managed Tunnels)")
 		return
 	}
 	res, err := s.Deps.Tunnel.TestConnection(r.Context())
@@ -195,13 +199,22 @@ func (s *Server) TestTunnel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// RestartTunnel — POST /api/v1/tunnels/restart. Restart the subprocess.
+// RestartTunnel — POST /api/v1/tunnels/restart. Admin-only. Restarts the
+// subprocess (a soft DoS in the wrong hands, hence admin).
 func (s *Server) RestartTunnel(w http.ResponseWriter, r *http.Request) {
-	if s.Deps.Tunnel == nil {
-		writeError(w, http.StatusConflict, "no active tunnel (CIX_TUNNEL_ENABLED=false)")
+	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
-	if err := s.Deps.Tunnel.Restart(r.Context()); err != nil {
+	if s.Deps.Tunnel == nil {
+		writeError(w, http.StatusConflict, "no active tunnel (enable it under Managed Tunnels)")
+		return
+	}
+	// Restart spawns a subprocess and waits for readiness; drive it on a
+	// background-derived deadline so a client disconnect doesn't abort the
+	// spawn mid-flight (matches UpdateTunnelConfig).
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if err := s.Deps.Tunnel.Restart(ctx); err != nil {
 		if errors.Is(err, tunnels.ErrNoActiveTunnel) {
 			writeError(w, http.StatusConflict, "no active tunnel")
 			return
@@ -212,9 +225,13 @@ func (s *Server) RestartTunnel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.Deps.Tunnel.Status())
 }
 
-// ReconcileWebhooks — POST /api/v1/github/webhooks/reconcile. Re-register
-// every webhook_mode=auto repo against the current public base URL.
+// ReconcileWebhooks — POST /api/v1/github/webhooks/reconcile. Admin-only —
+// it decrypts stored PATs and registers webhooks on GitHub across every
+// webhook_mode=auto repo.
 func (s *Server) ReconcileWebhooks(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.Deps.WebhookReconciler == nil || s.Deps.GitRepos == nil {
 		writeError(w, http.StatusServiceUnavailable, "GitHub repo support is not configured on this server")
 		return

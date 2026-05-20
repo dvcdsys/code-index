@@ -60,6 +60,11 @@ type Manager struct {
 
 	installer *Installer // nil unless BinManaged
 
+	// applyMu serializes the whole Apply operation so two concurrent applies
+	// can't interleave their stop-old / start-new steps and leak an orphan
+	// provider. mu (below) only guards individual field reads/writes.
+	applyMu sync.Mutex
+
 	mu           sync.RWMutex
 	active       Provider
 	onURLChange  func(string)
@@ -144,6 +149,11 @@ func (m *Manager) InstallBinary(ctx context.Context, provider string) error {
 // can see the error and retry — Apply returns the error for the caller to
 // relay, it does not panic the server.
 func (m *Manager) Apply(ctx context.Context, set Settings) error {
+	// Serialize the entire apply so concurrent calls can't interleave the
+	// stop-old / start-new steps (which would orphan a running provider).
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+
 	m.mu.Lock()
 	m.lastSettings = set
 	old := m.active

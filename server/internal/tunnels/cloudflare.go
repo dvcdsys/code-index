@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -121,7 +122,9 @@ func (p *cloudflareProvider) argv() []string {
 	case CloudflareModeQuick:
 		args = append(args, "--url", fmt.Sprintf("http://localhost:%d", p.localPort))
 	case CloudflareModeNamed:
-		args = append(args, "run", "--token", p.token)
+		// Token is passed via the TUNNEL_TOKEN env var (see spawn), not argv,
+		// so it doesn't appear in ps / /proc/<pid>/cmdline.
+		args = append(args, "run")
 	}
 	return args
 }
@@ -136,6 +139,11 @@ func (p *cloudflareProvider) spawn(ctx context.Context) error {
 	)
 
 	cmd := exec.Command(p.binPath, argv...)
+	// Pass the named-tunnel token via env (TUNNEL_TOKEN) rather than argv so
+	// it never appears in the process table.
+	if p.token != "" {
+		cmd.Env = append(os.Environ(), "TUNNEL_TOKEN="+p.token)
+	}
 	// cloudflared writes its logs (including the quick-tunnel URL) to stderr.
 	stdoutLog := newLineLogWriter(p.logger, "cloudflared.stdout", p.scanLine)
 	stderrLog := newLineLogWriter(p.logger, "cloudflared.stderr", p.scanLine)
@@ -151,7 +159,8 @@ func (p *cloudflareProvider) spawn(ctx context.Context) error {
 	p.mu.Lock()
 	p.cmd = cmd
 	p.startedAt = time.Now()
-	p.readySignal = make(chan struct{})
+	readyCh := make(chan struct{})
+	p.readySignal = readyCh
 	p.waiterDone = make(chan struct{})
 	// A fresh quick tunnel gets a new URL; clear the stale one so waitReady
 	// blocks until the new URL is parsed.
@@ -171,7 +180,7 @@ func (p *cloudflareProvider) spawn(ctx context.Context) error {
 		<-p.waiterDone
 		return fmt.Errorf("cloudflared not ready: %w", err)
 	}
-	close(p.readySignal)
+	close(readyCh)
 	p.lastSpawnErr.Store("")
 	p.logger.Info("cloudflared ready", "public_url", p.URL(), "elapsed", time.Since(p.startedAt).String())
 	return nil
