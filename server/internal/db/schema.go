@@ -226,9 +226,9 @@ CREATE TABLE IF NOT EXISTS git_repos (
     FOREIGN KEY (project_path) REFERENCES projects(host_path) ON DELETE CASCADE,
     FOREIGN KEY (token_id) REFERENCES github_tokens(id) ON DELETE SET NULL
 );
--- NOTE: CREATE INDEX idx_git_repos_due is intentionally NOT here. Pre-m8
+-- NOTE: CREATE INDEX idx_git_repos_due is intentionally NOT here. Pre-m9
 -- databases lack the polling columns when Schema.Exec runs (migrations run
--- after), so the index is created by migration 8 instead — same pattern as
+-- after), so the index is created by migration 9 instead — same pattern as
 -- idx_projects_path_hash (see the path_hash note above).
 
 -- workspace_projects is the many-to-many junction between workspaces

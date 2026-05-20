@@ -259,7 +259,7 @@ func migrateGitReposIndexedSHA(db *sql.DB) error {
 // scheduler index. Idempotent: each ALTER is guarded by a PRAGMA table_info
 // check, and the index uses IF NOT EXISTS. On a fresh DB the columns already
 // exist (Schema's CREATE TABLE laid them down), so this only ALTERs existing
-// pre-m8 databases. The index lives here rather than in Schema because pre-m8
+// pre-m9 databases. The index lives here rather than in Schema because pre-m9
 // rows lack the columns when Schema.Exec runs (same constraint as path_hash).
 func migrateGitReposPolling(db *sql.DB) error {
 	exists, err := tableExists(db, "git_repos")
