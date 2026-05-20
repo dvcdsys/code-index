@@ -6,7 +6,13 @@ import { useAuth } from '@/auth/useAuth';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
-import type { TunnelStatus } from '../managed-tunnels/types';
+
+// Effective public origin webhook URLs are delivered to, and where it comes
+// from. `tunnel` — a live managed tunnel; `public_url` — CIX_PUBLIC_URL set,
+// i.e. the server is made public by infrastructure (reverse proxy / ingress /
+// static IP) and a tunnel is NOT needed; `none` — no origin configured.
+type WebhookOriginSource = 'tunnel' | 'public_url' | 'none';
+type WebhookOrigin = { origin: string; source: WebhookOriginSource };
 
 type ReconcileOutcome = {
   project_path: string;
@@ -38,16 +44,16 @@ const ACTION_COLOR: Record<ReconcileOutcome['action'], string> = {
 export default function WebhooksTab() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
-  const [tunnel, setTunnel] = useState<TunnelStatus | null>(null);
+  const [origin, setOrigin] = useState<WebhookOrigin | null>(null);
   const [result, setResult] = useState<ReconcileResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     void api
-      .get<TunnelStatus>('/tunnels/status')
-      .then(setTunnel)
-      .catch(() => setTunnel(null));
+      .get<WebhookOrigin>('/github/webhooks/origin')
+      .then(setOrigin)
+      .catch(() => setOrigin(null));
   }, []);
 
   async function reconcile() {
@@ -64,8 +70,6 @@ export default function WebhooksTab() {
     }
   }
 
-  const tunnelLive = tunnel?.state === 'live' && !!tunnel.public_url;
-
   return (
     <div className="space-y-4">
       <Card>
@@ -78,22 +82,45 @@ export default function WebhooksTab() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
-          {tunnelLive ? (
+          {origin?.source === 'tunnel' && (
             <div className="flex items-center justify-between gap-3">
               <span className="text-muted-foreground">Active tunnel URL</span>
-              <span className="font-mono">{tunnel?.public_url}</span>
+              <span className="font-mono">{origin.origin}</span>
             </div>
-          ) : (
+          )}
+
+          {origin?.source === 'public_url' && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-muted-foreground">
+                  Delivery origin (<code>CIX_PUBLIC_URL</code>)
+                </span>
+                <span className="font-mono">{origin.origin}</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                The server is made publicly reachable by your infrastructure,
+                so a managed tunnel is optional. Configure one under{' '}
+                <Link to="/tunnels" className="text-primary underline-offset-2 hover:underline">
+                  Managed Tunnels
+                </Link>{' '}
+                only if you need the server to mint its own public URL.
+              </p>
+            </div>
+          )}
+
+          {(!origin || origin.source === 'none') && (
             <Alert>
               <AlertCircle className="size-4" />
-              <AlertTitle>No live tunnel</AlertTitle>
+              <AlertTitle>No public origin configured</AlertTitle>
               <AlertDescription>
-                There is no active tunnel URL. Webhooks fall back to{' '}
-                <code>CIX_PUBLIC_URL</code> if set. Configure a tunnel under{' '}
+                Webhook delivery needs a public URL. Set{' '}
+                <code>CIX_PUBLIC_URL</code> if the server is already reachable
+                (reverse proxy, ingress, static IP), or configure a tunnel
+                under{' '}
                 <Link to="/tunnels" className="text-primary underline-offset-2 hover:underline">
                   Managed Tunnels
                 </Link>
-                .
+                . Repos where you aren't an admin can sync via polling instead.
               </AlertDescription>
             </Alert>
           )}
