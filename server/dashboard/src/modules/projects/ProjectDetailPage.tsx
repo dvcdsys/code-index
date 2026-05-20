@@ -12,6 +12,7 @@ import { formatDateTime, formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
 import { DeleteProjectDialog } from './components/DeleteProjectDialog';
 import { ForceStopButton } from './components/ForceStopButton';
+import { IndexingProgressCard } from './components/IndexingProgressCard';
 import { ProjectInfoCard } from './components/ProjectInfoCard';
 import { ReindexProjectButton } from './components/ReindexProjectButton';
 import { SyncProjectButton } from './components/SyncProjectButton';
@@ -117,14 +118,18 @@ export function ProjectDetailPage() {
       </header>
 
       {p.status === 'indexing' ? (
-        <Alert>
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <AlertTitle>Indexing in progress</AlertTitle>
-          <AlertDescription>
-            This project is being indexed. Stats and search results will be incomplete
-            until it finishes — this page auto-refreshes when the run completes.
-          </AlertDescription>
-        </Alert>
+        isExternal ? (
+          <IndexingProgressCard hash={p.path_hash} />
+        ) : (
+          <Alert>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <AlertTitle>Indexing in progress</AlertTitle>
+            <AlertDescription>
+              This project is being indexed. Stats and search results will be incomplete
+              until it finishes — this page auto-refreshes when the run completes.
+            </AlertDescription>
+          </Alert>
+        )
       ) : null}
 
       {drift ? (

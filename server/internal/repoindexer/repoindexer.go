@@ -112,6 +112,14 @@ func IndexDir(
 		return 0, 0, fmt.Errorf("begin indexing: %w", err)
 	}
 
+	// Incremental: the change set already tells us how many files we'll
+	// process, so publish the denominator up front for GET /index/status.
+	// Full reindex can't know the total until the walk completes (no
+	// pre-count), so the status endpoint reports progress without a total.
+	if !full {
+		idx.SetDiscoveredTotal(projectPath, len(changes.Modified)+len(changes.Added))
+	}
+
 	totalFiles := 0
 	totalChunks := 0
 	totalAccepted := 0

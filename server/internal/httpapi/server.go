@@ -935,6 +935,7 @@ func (s *Server) IndexStatus(w http.ResponseWriter, r *http.Request, path openap
 				ChunksCreated:   ptrInt(prog.ChunksCreated),
 				ElapsedSeconds:  ptrFloat64(roundFloat1(prog.ElapsedSeconds)),
 				RunId:           ptrString(prog.RunID),
+				CurrentFiles:    ptrStringSlice(prog.RecentFiles),
 			},
 		})
 		return
@@ -1058,6 +1059,15 @@ func progressPhasePtr(s string) *openapi.IndexProgressInfoPhase {
 func ptrInt(v int) *int             { return &v }
 func ptrFloat64(v float64) *float64 { return &v }
 func ptrString(v string) *string    { return &v }
+
+// ptrStringSlice returns a pointer to s, or nil when s is empty so the
+// `current_files` field is omitted (omitempty) rather than serialised as [].
+func ptrStringSlice(s []string) *[]string {
+	if len(s) == 0 {
+		return nil
+	}
+	return &s
+}
 
 // derefString returns the string pointed to by p, or "" if p is nil.
 func derefString(p *string) string {
