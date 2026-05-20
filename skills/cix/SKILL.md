@@ -34,6 +34,30 @@ back to grep — don't loop on cix.
 
 ---
 
+## Pick the cheapest tool that answers the question
+
+When you already know a symbol's **name**, reach for `cix def` / `cix refs`
+before `cix search`. They return **metadata only** (file, line, signature,
+call sites) — no source bodies — so they cost roughly an order of magnitude
+fewer tokens. Measured on one real symbol in this codebase:
+
+| Command | Returns | Output size |
+|---|---|---|
+| `cix def <symbol>`      | definition location + signature        | ~250 B |
+| `cix refs <symbol>`     | every call site (file:line)             | ~1 KB  |
+| `cix search "<intent>"` | matching code **with full source bodies** | ~7 KB  |
+
+So `cix search` is ~28× the bytes of `cix def` and ~6× `cix refs` for the
+same target. Rule of thumb:
+
+- Know the name, want "where is it defined / who calls it" → `cix def` /
+  `cix refs`. Cheap, precise, no source noise.
+- Don't know the name, searching by *meaning* → `cix search`.
+- Only escalate to `cix search` for a *known* symbol when you actually need
+  to read the surrounding implementation, not merely locate it.
+
+---
+
 ## Commands Reference
 
 ### Semantic Search — find code by meaning
@@ -50,8 +74,12 @@ cix search "main entry point" --exclude bench/fixtures --exclude legacy
 - `--in <path>` — restrict to file or directory (can repeat)
 - `--exclude <path>` — drop a directory or substring from results (can repeat)
 - `--lang <language>` — filter by language (can repeat)
-- `--limit <n>` — max **files** returned (default: 10) — output is
-  grouped per file with all matches inside, so 10 files ≈ many snippets
+- `--limit <n>` — max **files** returned (CLI default: 10) — output is
+  grouped per file with all matches inside, so 10 files ≈ many snippets.
+  **For agent use, prefer `--limit 5`**: five files is enough for most
+  lookups and keeps the result compact. This is a usage recommendation,
+  not a change to the CLI default — bump it back up when you genuinely
+  need broader exploration.
 - `--min-score <f>` — minimum relevance 0.0–1.0 (default: **0.4**)
 
 ### Go to Definition — find where a symbol is defined

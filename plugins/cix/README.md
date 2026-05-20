@@ -135,6 +135,24 @@ Set `CIX_PLUGIN_BIN_DIR` to a directory that already contains a working
 `cix` binary, or simply make sure `cix` is in your `$PATH` before
 enabling the plugin.
 
+### Capping cix output (`CIX_MAX_OUTPUT_LINES`)
+
+By default the wrapper passes cix output through untouched. Set
+`CIX_MAX_OUTPUT_LINES` to a positive integer to cap stdout to that many
+lines and append a one-line truncation notice:
+
+```bash
+export CIX_MAX_OUTPUT_LINES=80
+```
+
+The cap is layered on top of any `--limit N` flag, not a replacement for
+it — `--limit` bounds how many *files* cix returns; `CIX_MAX_OUTPUT_LINES`
+is a hard ceiling on total printed lines, useful for keeping a single
+`cix search` from flooding an agent's context. Unset (the default),
+`0`, or any non-numeric value disables the cap entirely: the wrapper
+`exec`s cix directly with full output, streaming, and the original exit
+code. stderr is never capped.
+
 ### Hook state cleanup
 
 Two per-session marker files live in `$CLAUDE_PLUGIN_DATA`

@@ -13,6 +13,39 @@
 
 set -euo pipefail
 
+# ── Optional stdout cap (CIX_MAX_OUTPUT_LINES) ────────────────────────────────
+# When CIX_MAX_OUTPUT_LINES is set to a positive integer, cap stdout to that
+# many lines and append a one-line truncation notice (on stdout, so the cap is
+# observable through a pipe). Unset/empty/0/non-numeric → behave EXACTLY like a
+# bare cix call: exec the binary directly, full output, streamed, original exit
+# code, zero overhead. stderr always passes through uncapped so errors are
+# never hidden. The cap is layered on top of any user `--limit N` flag, not a
+# replacement for it.
+run_cix() {
+    local bin="$1"
+    shift
+
+    case "${CIX_MAX_OUTPUT_LINES:-}" in
+        ''|*[!0-9]*|0)
+            exec "$bin" "$@"
+            ;;
+    esac
+
+    local max="$CIX_MAX_OUTPUT_LINES"
+    local out rc
+    if out="$("$bin" "$@")"; then rc=0; else rc=$?; fi
+
+    local total
+    total=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]')
+    if [ "$total" -gt "$max" ]; then
+        printf '%s\n' "$out" | head -n "$max" || true
+        printf '… [cix output truncated to %s of %s lines; unset CIX_MAX_OUTPUT_LINES for full output]\n' "$max" "$total"
+    else
+        printf '%s\n' "$out"
+    fi
+    exit "$rc"
+}
+
 # ── Resolve our own directory (real path, dereferencing symlinks) ─────────────
 # bin/cix is a symlink to ../scripts/cix-wrapper.sh, so BASH_SOURCE points to
 # the real script under scripts/, not the symlink under bin/. We need the
@@ -53,7 +86,7 @@ else
 fi
 
 if [ -n "$SYS_CIX" ]; then
-    exec "$SYS_CIX" "$@"
+    run_cix "$SYS_CIX" "$@"
 fi
 
 # ── Bootstrap install via install.sh (one-time) ───────────────────────────────
@@ -88,4 +121,4 @@ if [ ! -x "$CACHED_CIX" ]; then
     echo "cix installed successfully at $CACHED_CIX" >&2
 fi
 
-exec "$CACHED_CIX" "$@"
+run_cix "$CACHED_CIX" "$@"

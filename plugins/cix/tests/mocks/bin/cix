@@ -2,11 +2,14 @@
 # Mock cix CLI for testing the cix plugin hooks.
 #
 # Behavior controlled by environment variables (set by individual tests):
-#   MOCK_CIX_EXIT     — exit code to return (default: 0)
-#   MOCK_CIX_DELAY    — sleep this many seconds before exit (for timeout test)
-#   MOCK_CIX_LOG_FILE — append the invocation (cmd + args) to this file
-#                       (so tests can assert "was cix called with the
-#                       expected args?")
+#   MOCK_CIX_EXIT          — exit code to return (default: 0)
+#   MOCK_CIX_DELAY         — sleep this many seconds before exit (timeout test)
+#   MOCK_CIX_LOG_FILE      — append the invocation (cmd + args) to this file
+#                            (so tests can assert "was cix called with the
+#                            expected args?")
+#   MOCK_CIX_STDOUT_LINES  — if a positive integer, print that many lines of
+#                            stdout ("line 1\nline 2\n…"). Default: no stdout.
+#                            Used by the CIX_MAX_OUTPUT_LINES cap tests.
 
 if [ -n "${MOCK_CIX_LOG_FILE:-}" ]; then
     {
@@ -16,6 +19,14 @@ if [ -n "${MOCK_CIX_LOG_FILE:-}" ]; then
         done
         printf '\n'
     } >> "$MOCK_CIX_LOG_FILE" 2>/dev/null || true
+fi
+
+if [ -n "${MOCK_CIX_STDOUT_LINES:-}" ] && [ "${MOCK_CIX_STDOUT_LINES}" -gt 0 ] 2>/dev/null; then
+    i=1
+    while [ "$i" -le "$MOCK_CIX_STDOUT_LINES" ]; do
+        printf 'line %d\n' "$i"
+        i=$((i + 1))
+    done
 fi
 
 if [ -n "${MOCK_CIX_DELAY:-}" ] && [ "$MOCK_CIX_DELAY" != "0" ]; then

@@ -39,6 +39,80 @@ teardown() { teardown_test_env; }
     [ "$status" -eq 42 ]
 }
 
+@test "CIX_MAX_OUTPUT_LINES unset: full output passes through" {
+    export MOCK_CIX_EXIT=0 MOCK_CIX_STDOUT_LINES=20
+    run env \
+        PATH="$TEST_MOCK_BIN:/usr/bin:/bin" \
+        bash "$TEST_PLUGIN_ROOT/scripts/cix-wrapper.sh" search "x"
+
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 20 ]
+}
+
+@test "CIX_MAX_OUTPUT_LINES set below output: truncates and appends notice" {
+    export MOCK_CIX_EXIT=0 MOCK_CIX_STDOUT_LINES=20
+    run env \
+        PATH="$TEST_MOCK_BIN:/usr/bin:/bin" \
+        CIX_MAX_OUTPUT_LINES=5 \
+        bash "$TEST_PLUGIN_ROOT/scripts/cix-wrapper.sh" search "x"
+
+    [ "$status" -eq 0 ]
+    # 5 content lines + 1 notice line.
+    [ "${#lines[@]}" -eq 6 ]
+    [[ "${lines[0]}" == "line 1" ]]
+    [[ "${lines[4]}" == "line 5" ]]
+    [[ "${lines[5]}" == *"truncated to 5 of 20 lines"* ]]
+    [[ "${lines[5]}" == *"CIX_MAX_OUTPUT_LINES"* ]]
+}
+
+@test "CIX_MAX_OUTPUT_LINES set above output: no truncation, no notice" {
+    export MOCK_CIX_EXIT=0 MOCK_CIX_STDOUT_LINES=8
+    run env \
+        PATH="$TEST_MOCK_BIN:/usr/bin:/bin" \
+        CIX_MAX_OUTPUT_LINES=500 \
+        bash "$TEST_PLUGIN_ROOT/scripts/cix-wrapper.sh" search "x"
+
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 8 ]
+    [[ "${lines[7]}" == "line 8" ]]
+    # No truncation notice anywhere.
+    ! [[ "$output" == *"truncated"* ]]
+}
+
+@test "CIX_MAX_OUTPUT_LINES invalid (non-numeric): treated as unset" {
+    export MOCK_CIX_EXIT=0 MOCK_CIX_STDOUT_LINES=12
+    run env \
+        PATH="$TEST_MOCK_BIN:/usr/bin:/bin" \
+        CIX_MAX_OUTPUT_LINES=abc \
+        bash "$TEST_PLUGIN_ROOT/scripts/cix-wrapper.sh" search "x"
+
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 12 ]
+    ! [[ "$output" == *"truncated"* ]]
+}
+
+@test "CIX_MAX_OUTPUT_LINES=0: treated as unset (no cap)" {
+    export MOCK_CIX_EXIT=0 MOCK_CIX_STDOUT_LINES=7
+    run env \
+        PATH="$TEST_MOCK_BIN:/usr/bin:/bin" \
+        CIX_MAX_OUTPUT_LINES=0 \
+        bash "$TEST_PLUGIN_ROOT/scripts/cix-wrapper.sh" search "x"
+
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 7 ]
+    ! [[ "$output" == *"truncated"* ]]
+}
+
+@test "CIX_MAX_OUTPUT_LINES set: still propagates cix exit code" {
+    export MOCK_CIX_EXIT=42 MOCK_CIX_STDOUT_LINES=20
+    run env \
+        PATH="$TEST_MOCK_BIN:/usr/bin:/bin" \
+        CIX_MAX_OUTPUT_LINES=5 \
+        bash "$TEST_PLUGIN_ROOT/scripts/cix-wrapper.sh" status
+
+    [ "$status" -eq 42 ]
+}
+
 @test "self-recursion guard: removes own dir from PATH before lookup" {
     # Simulate plugin's bin/ on PATH before any system cix.
     # The wrapper itself sits in scripts/, but the plugin's bin/cix is a
