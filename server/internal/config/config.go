@@ -94,16 +94,9 @@ type Config struct {
 	VersionCheckInterval time.Duration
 	VersionCheckRepo     string
 
-	// WorkspacesEnabled gates the entire workspaces feature surface
-	// (workspaces / github_tokens CRUD; later releases add webhook receiver,
-	// jobs, communities, two-stage search). Default OFF — the feature is in
-	// active development on the feature branch and disabled in main releases
-	// until the full pipeline ships. Source: CIX_WORKSPACES_ENABLED (default
-	// false).
-	WorkspacesEnabled bool
-
 	// SecretKey / SecretKeyFile control encryption-at-rest for the
-	// workspaces feature's github_tokens. Resolution order:
+	// github_tokens table (PATs used by clone_repo to authenticate
+	// against private GitHub repos). Resolution order:
 	//   1. CIX_SECRET_KEY (env var, hex or base64 32-byte value)
 	//   2. CIX_SECRET_KEYFILE (env var, path to a 0600-perm key file)
 	//   3. <DataDir>/.secret_key (auto-generated on first run; only used
@@ -312,11 +305,6 @@ func Load() (*Config, error) {
 
 	c.VersionCheckRepo = getenv("CIX_VERSION_CHECK_REPO", "dvcdsys/code-index")
 
-	workspacesOn, err := getenvBool("CIX_WORKSPACES_ENABLED", false)
-	if err != nil {
-		return nil, err
-	}
-	c.WorkspacesEnabled = workspacesOn
 
 	c.SecretKey = getenv("CIX_SECRET_KEY", "")
 	c.SecretKeyFile = getenv("CIX_SECRET_KEYFILE", "")

@@ -1,8 +1,9 @@
-// Package githubtokens manages GitHub Personal Access Tokens used by the
-// workspaces feature to clone private repositories and (optionally) register
-// webhooks. Tokens are encrypted at rest via internal/secrets — the plaintext
-// is supplied by the dashboard exactly once on POST /api/v1/github-tokens
-// and never returned in any subsequent response.
+// Package githubtokens manages GitHub Personal Access Tokens used by
+// the server-side clone+index pipeline to clone private repositories
+// and (optionally) register webhooks on the remote. Tokens are
+// encrypted at rest via internal/secrets — the plaintext is supplied
+// by the dashboard exactly once on POST /api/v1/github-tokens and
+// never returned in any subsequent response.
 //
 // Server-wide shared model: any authenticated user may create / select / delete
 // tokens. Track of "owner" is omitted in PR1 by design — when the feature

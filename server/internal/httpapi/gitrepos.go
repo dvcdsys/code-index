@@ -13,15 +13,16 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/projects"
-	"github.com/dvcdsys/code-index/server/internal/workspacejobs"
+	"github.com/dvcdsys/code-index/server/internal/repojobs"
 )
 
-// gitReposUnavailable returns 503 when the workspaces feature flag is
-// off OR any required service is nil. Single source for the message so
-// the dashboard's "feature off" UI key is stable.
+// gitReposUnavailable returns 503 when a required GitHub-repo service
+// is nil. Main always wires both services; this defensive check exists
+// so test harnesses that build a partial Deps still get a clean 503
+// rather than a nil-pointer panic.
 func (s *Server) gitReposUnavailable(w http.ResponseWriter) bool {
-	if !s.Deps.WorkspacesEnabled || s.Deps.GitRepos == nil || s.Deps.Jobs == nil {
-		writeError(w, http.StatusServiceUnavailable, "workspaces feature is disabled (set CIX_WORKSPACES_ENABLED=true and restart)")
+	if s.Deps.GitRepos == nil || s.Deps.Jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "GitHub repo support is not configured on this server")
 		return true
 	}
 	return false
@@ -172,7 +173,7 @@ func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := workspacejobs.EnqueueClone(r.Context(), s.Deps.Jobs, g.ProjectPath); err != nil {
+	if err := repojobs.EnqueueClone(r.Context(), s.Deps.Jobs, g.ProjectPath); err != nil {
 		writeError(w, http.StatusInternalServerError, "git repo registered but clone could not be enqueued: "+err.Error())
 		return
 	}
@@ -232,11 +233,17 @@ func (s *Server) GetProjectGitRepo(w http.ResponseWriter, r *http.Request, hash 
 // Looks up the matching git_repos row and enqueues a clone_repo job
 // (which chains into index_repo on success). 422 for local projects
 // — they have no clone pipeline and must be reindexed via the CLI.
-func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash openapi.ProjectHash) {
+//
+// Query parameter `full=true` clears git_repos.indexed_sha before
+// enqueueing the job, which forces the clone-job's mode-determination
+// to land on "full" (first-index branch). Use this to recover from
+// suspected index drift — manual rebuild without losing tokens or
+// workspace memberships.
+func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash string, params openapi.ReindexProjectParams) {
 	if s.gitReposUnavailable(w) {
 		return
 	}
-	g, err := s.Deps.GitRepos.GetByHash(r.Context(), string(hash))
+	g, err := s.Deps.GitRepos.GetByHash(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, gitrepos.ErrNotFound) {
 			writeError(w, http.StatusUnprocessableEntity, "this project has no git_repos row — reindex via `cix reindex <path>` for local projects")
@@ -246,11 +253,24 @@ func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash ope
 		return
 	}
 
+	// Force-full path: drop indexed_sha BEFORE enqueueing so the
+	// clone_repo handler's mode-determination sees IndexedSHA="" and
+	// routes through the full-reindex branch. Doing the clear here
+	// (rather than inside the job) means a dashboard refetch
+	// immediately reflects the "uncommitted" state.
+	forceFull := params.Full != nil && *params.Full
+	if forceFull && g.IndexedSHA != "" {
+		if err := s.Deps.GitRepos.SetIndexedSHA(r.Context(), g.ProjectPath, ""); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not clear indexed_sha for force-full: "+err.Error())
+			return
+		}
+	}
+
 	enqueued := true
 	if _, eerr := s.Deps.Jobs.Enqueue(r.Context(), jobs.EnqueueRequest{
-		Type:      workspacejobs.TypeCloneRepo,
+		Type:      repojobs.TypeCloneRepo,
 		DedupeKey: "clone:" + g.PathHash,
-		Payload:   workspacejobs.ClonePayload{ProjectPath: g.ProjectPath},
+		Payload:   repojobs.ClonePayload{ProjectPath: g.ProjectPath},
 	}); eerr != nil {
 		if errors.Is(eerr, jobs.ErrDuplicate) {
 			enqueued = false
@@ -272,7 +292,10 @@ func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash ope
 		s.Deps.Logger.Warn("reindex: set status indexing failed", "project", g.ProjectPath, "err", err)
 	}
 	proj, _ := projects.Get(r.Context(), s.Deps.DB, g.ProjectPath)
-	resp := map[string]any{"status": status}
+	resp := map[string]any{"status": status, "mode": "incremental"}
+	if forceFull {
+		resp["mode"] = "full"
+	}
 	if proj != nil {
 		resp["project"] = projectToOpenAPI(proj)
 	}

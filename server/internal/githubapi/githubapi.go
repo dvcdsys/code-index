@@ -1,7 +1,8 @@
 // Package githubapi is a tiny raw-HTTP client for the handful of GitHub
-// REST calls the workspaces feature needs. We deliberately do NOT pull
-// in google/go-github (which is ~10MB of generated code) for just the
-// two operations we use — registering and deleting a repository webhook.
+// REST calls the server-side GitHub-repo lifecycle needs. We
+// deliberately do NOT pull in google/go-github (which is ~10MB of
+// generated code) for just the two operations we use — registering
+// and deleting a repository webhook.
 //
 // Authentication: callers pass a Personal Access Token (PAT). The token
 // is sent as `Authorization: token <PAT>` which matches what GitHub

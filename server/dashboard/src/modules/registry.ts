@@ -12,9 +12,9 @@ import type { Module } from './types';
 // Static registry of every dashboard feature. Order in the sidebar is
 // determined by `weight` (default 100). PR-D adds API Keys, Users, Settings.
 // PR-E adds Server (admin-only runtime config + sidecar lifecycle).
-// Workspaces feature PR1 adds Workspaces + GitHub Tokens — these self-hide
-// when CIX_WORKSPACES_ENABLED is false (the pages render a "feature off"
-// alert; the sidebar still shows the modules so operators can discover them).
+// Workspaces + GitHub Tokens ship in every release; the pages render a
+// "not configured" alert on 503 (commonly an encryption-key boot
+// failure) and the sidebar entries stay visible regardless.
 export const MODULES: Module[] = [
   HomeModule,
   ProjectsModule,

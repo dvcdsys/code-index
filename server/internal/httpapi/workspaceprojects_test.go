@@ -182,20 +182,21 @@ func TestListWorkspaceProjects_WorkspaceMissing(t *testing.T) {
 	}
 }
 
-// TestListWorkspaceProjects_FeatureDisabled — when CIX_WORKSPACES_ENABLED
-// is false the handler must short-circuit with 503 *before* touching DB.
-// The CLI relies on this so `cix ws <name> list` against a disabled
-// server prints a useful "feature is disabled" hint, not a generic
-// failure.
-func TestListWorkspaceProjects_FeatureDisabled(t *testing.T) {
+// TestListWorkspaceProjects_ServiceMissing — defensive: when the
+// workspaces services are not wired (e.g. a partial test Deps), the
+// handler must short-circuit with 503 *before* touching DB. CLI
+// integration relies on this so `cix ws <name> list` against a
+// half-wired server prints a useful "not configured" hint, not a
+// generic failure.
+func TestListWorkspaceProjects_ServiceMissing(t *testing.T) {
 	router := workspaceRouter(t, false)
 	// Any path id will do — 503 must come before the workspace lookup.
 	rr := doJSON(t, router, http.MethodGet, "/api/v1/workspaces/ws_any/projects", nil)
 	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 with feature disabled, got %d (%s)", rr.Code, rr.Body.String())
+		t.Fatalf("expected 503 with services unwired, got %d (%s)", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "workspaces feature is disabled") {
-		t.Errorf("expected 503 body to mention 'workspaces feature is disabled', got: %s", rr.Body.String())
+	if !strings.Contains(rr.Body.String(), "workspaces service is not configured") {
+		t.Errorf("expected 503 body to mention 'workspaces service is not configured', got: %s", rr.Body.String())
 	}
 }
 

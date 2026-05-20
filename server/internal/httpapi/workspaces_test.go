@@ -65,21 +65,23 @@ func workspaceRouter(t *testing.T, enabled bool) http.Handler {
 		wsSvc = workspaces.New(d)
 		ghSvc = githubtokens.New(d, sec)
 	}
+	// When `enabled` is false the services stay nil so the handler
+	// helpers return 503 — keeps the disabled-by-default smoke test
+	// working without relying on a feature flag.
 
 	return NewRouter(Deps{
-		DB:                d,
-		ServerVersion:     "test",
-		APIVersion:        "v1",
-		Backend:           "go",
-		Logger:            nil,
-		AuthDisabled:      true,
-		Users:             seedlessUsers(d),
-		Sessions:          seedlessSessions(d),
-		APIKeys:           seedlessAPIKeys(d),
-		WorkspacesEnabled: enabled,
-		Workspaces:        wsSvc,
-		GithubTokens:      ghSvc,
-		GithubAPIBaseURL:  fakeGithubAPI(t),
+		DB:               d,
+		ServerVersion:    "test",
+		APIVersion:       "v1",
+		Backend:          "go",
+		Logger:           nil,
+		AuthDisabled:     true,
+		Users:            seedlessUsers(d),
+		Sessions:         seedlessSessions(d),
+		APIKeys:          seedlessAPIKeys(d),
+		Workspaces:       wsSvc,
+		GithubTokens:     ghSvc,
+		GithubAPIBaseURL: fakeGithubAPI(t),
 	})
 }
 
@@ -101,11 +103,15 @@ func doJSON(t *testing.T, router http.Handler, method, path string, body any) *h
 	return rr
 }
 
-func TestWorkspaces_DisabledByDefault(t *testing.T) {
+// TestWorkspaces_ServicesMissingReturns503 covers the defensive path
+// in workspacesUnavailable: when Deps.Workspaces is nil (test passed a
+// partial Deps, or boot failed to wire it), the handler returns 503
+// rather than nil-panicking.
+func TestWorkspaces_ServicesMissingReturns503(t *testing.T) {
 	router := workspaceRouter(t, false)
 	rr := doJSON(t, router, http.MethodGet, "/api/v1/workspaces", nil)
 	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 when feature disabled, got %d (body: %s)", rr.Code, rr.Body.String())
+		t.Fatalf("expected 503 when workspaces service unwired, got %d (body: %s)", rr.Code, rr.Body.String())
 	}
 }
 
@@ -254,7 +260,6 @@ func TestGithubTokens_RejectInvalidToken(t *testing.T) {
 		Users:             seedlessUsers(d),
 		Sessions:          seedlessSessions(d),
 		APIKeys:           seedlessAPIKeys(d),
-		WorkspacesEnabled: true,
 		Workspaces:        workspaces.New(d),
 		GithubTokens:      githubtokens.New(d, sec),
 		GithubAPIBaseURL:  stub.URL,
@@ -317,7 +322,6 @@ func TestGithubTokens_ListRepos(t *testing.T) {
 		Users:             seedlessUsers(d),
 		Sessions:          seedlessSessions(d),
 		APIKeys:           seedlessAPIKeys(d),
-		WorkspacesEnabled: true,
 		Workspaces:        workspaces.New(d),
 		GithubTokens:      githubtokens.New(d, sec),
 		GithubAPIBaseURL:  stub.URL,
@@ -417,7 +421,6 @@ func TestGithubTokens_ListAccountsAndScopedRepos(t *testing.T) {
 		Users:             seedlessUsers(d),
 		Sessions:          seedlessSessions(d),
 		APIKeys:           seedlessAPIKeys(d),
-		WorkspacesEnabled: true,
 		Workspaces:        workspaces.New(d),
 		GithubTokens:      githubtokens.New(d, sec),
 		GithubAPIBaseURL:  stub.URL,

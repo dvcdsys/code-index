@@ -55,7 +55,6 @@ func newSearchRouter(t *testing.T, d *sql.DB, vs *vectorstore.Store, emb fixedEm
 		Users:             seedlessUsers(d),
 		Sessions:          seedlessSessions(d),
 		APIKeys:           seedlessAPIKeys(d),
-		WorkspacesEnabled: true,
 		Workspaces:        workspaces.New(d),
 		GithubTokens:      githubtokens.New(d, sec),
 		GitRepos:          gitrepos.New(d),

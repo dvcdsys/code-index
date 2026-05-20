@@ -35,8 +35,8 @@ func workspaceToPayload(w workspaces.Workspace) workspacePayload {
 // service is nil. Single source for the message so the dashboard's
 // "feature off" UI key is stable.
 func (s *Server) workspacesUnavailable(w http.ResponseWriter) bool {
-	if !s.Deps.WorkspacesEnabled || s.Deps.Workspaces == nil {
-		writeError(w, http.StatusServiceUnavailable, "workspaces feature is disabled (set CIX_WORKSPACES_ENABLED=true and restart)")
+	if s.Deps.Workspaces == nil {
+		writeError(w, http.StatusServiceUnavailable, "workspaces service is not configured on this server")
 		return true
 	}
 	return false

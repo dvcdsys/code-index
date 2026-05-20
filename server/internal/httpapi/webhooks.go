@@ -15,7 +15,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
-	"github.com/dvcdsys/code-index/server/internal/workspacejobs"
+	"github.com/dvcdsys/code-index/server/internal/repojobs"
 )
 
 // GetProjectWebhookInfo — GET /api/v1/projects/{hash}/webhook-info.
@@ -56,8 +56,8 @@ type pushEvent struct {
 // Public endpoint. Authenticated per-row by HMAC-SHA256 over the body
 // keyed by git_repos.webhook_secret (looked up via projects.path_hash).
 func (s *Server) ReceiveGithubWebhook(w http.ResponseWriter, r *http.Request, hash string, params openapi.ReceiveGithubWebhookParams) {
-	if !s.Deps.WorkspacesEnabled || s.Deps.GitRepos == nil || s.Deps.Jobs == nil {
-		writeError(w, http.StatusServiceUnavailable, "workspaces feature is disabled (set CIX_WORKSPACES_ENABLED=true and restart)")
+	if s.Deps.GitRepos == nil || s.Deps.Jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "GitHub repo support is not configured on this server")
 		return
 	}
 
@@ -138,9 +138,9 @@ func (s *Server) ReceiveGithubWebhook(w http.ResponseWriter, r *http.Request, ha
 
 	enqueued := true
 	if _, eerr := s.Deps.Jobs.Enqueue(r.Context(), jobs.EnqueueRequest{
-		Type:      workspacejobs.TypeCloneRepo,
+		Type:      repojobs.TypeCloneRepo,
 		DedupeKey: "clone:" + g.PathHash,
-		Payload:   workspacejobs.ClonePayload{ProjectPath: g.ProjectPath},
+		Payload:   repojobs.ClonePayload{ProjectPath: g.ProjectPath},
 	}); eerr != nil {
 		if errors.Is(eerr, jobs.ErrDuplicate) {
 			enqueued = false

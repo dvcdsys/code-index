@@ -64,11 +64,12 @@ export default function GithubTokensPage() {
         <Header />
         <Alert>
           <AlertCircle className="size-4" />
-          <AlertTitle>Workspaces feature is disabled</AlertTitle>
+          <AlertTitle>GitHub tokens service is not configured</AlertTitle>
           <AlertDescription>
-            GitHub tokens are part of the workspaces feature. Set{' '}
-            <code>CIX_WORKSPACES_ENABLED=true</code> and restart the server
-            to enable.
+            The server returned 503 — the encryption layer for
+            github_tokens failed to wire. Check the server logs (most
+            common cause: <code>CIX_SECRET_KEY</code> /{' '}
+            <code>CIX_SECRET_KEYFILE</code> resolution) and restart.
           </AlertDescription>
         </Alert>
       </div>

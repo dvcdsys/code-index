@@ -59,6 +59,7 @@ var registeredMigrations = []migration{
 	{4, "workspace_repos_linked", func(db *sql.DB, _ OpenOptions) error { return migrateWorkspaceReposLinked(db) }},
 	{5, "split_workspace_repos", func(db *sql.DB, opts OpenOptions) error { return migrateSplitWorkspaceRepos(db, opts.DataDir) }},
 	{6, "drop_communities", func(db *sql.DB, _ OpenOptions) error { return migrateDropCommunities(db) }},
+	{7, "git_repos_indexed_sha", func(db *sql.DB, _ OpenOptions) error { return migrateGitReposIndexedSHA(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -180,6 +181,53 @@ func applyMigrations(db *sql.DB, opts OpenOptions) error {
 		); err != nil {
 			return fmt.Errorf("record migration %d (%s): %w", m.version, m.name, err)
 		}
+	}
+	return nil
+}
+
+// migrateGitReposIndexedSHA adds git_repos.indexed_sha to pre-incremental
+// databases. NULL on existing rows is the explicit signal "never indexed
+// with the new pipeline" — the next clone_repo job sees IndexedSHA=""
+// and routes through the full-reindex branch, setting indexed_sha on
+// success. Idempotent via PRAGMA table_info: skip the ALTER if the
+// column is already present.
+func migrateGitReposIndexedSHA(db *sql.DB) error {
+	exists, err := tableExists(db, "git_repos")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		// Fresh DB before workspaces feature ever ran — Schema's
+		// CREATE TABLE IF NOT EXISTS already laid the new shape down
+		// elsewhere in this boot.
+		return nil
+	}
+	rows, err := db.Query(`PRAGMA table_info(git_repos)`)
+	if err != nil {
+		return fmt.Errorf("table_info git_repos: %w", err)
+	}
+	have := false
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "indexed_sha" {
+			have = true
+		}
+	}
+	rows.Close()
+	if have {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE git_repos ADD COLUMN indexed_sha TEXT`); err != nil {
+		return fmt.Errorf("add indexed_sha column: %w", err)
 	}
 	return nil
 }
