@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -104,8 +105,9 @@ func (p *ngrokProvider) Name() string { return ProviderNgrok }
 func (p *ngrokProvider) Start(ctx context.Context) error { return p.spawn(ctx) }
 
 func (p *ngrokProvider) argv() []string {
+	// The authtoken is passed via NGROK_AUTHTOKEN env (see spawn), not argv,
+	// so it doesn't appear in ps / /proc/<pid>/cmdline.
 	args := []string{"http", strconv.Itoa(p.localPort),
-		"--authtoken", p.token,
 		"--log", "stdout", "--log-format", "json"}
 	if p.cfg.Mode == ngrokModeNamed {
 		// --url takes a full origin (ngrok v3.5+); older agents used
@@ -120,6 +122,9 @@ func (p *ngrokProvider) spawn(ctx context.Context) error {
 	p.logger.Info("spawning ngrok", "bin", p.binPath, "mode", p.cfg.Mode, "local_port", p.localPort)
 
 	cmd := exec.Command(p.binPath, p.argv()...)
+	// Pass the authtoken via env (NGROK_AUTHTOKEN) rather than argv so it
+	// never appears in the process table.
+	cmd.Env = append(os.Environ(), "NGROK_AUTHTOKEN="+p.token)
 	stdoutLog := newLineLogWriter(p.logger, "ngrok.stdout", p.scanLine)
 	stderrLog := newLineLogWriter(p.logger, "ngrok.stderr", p.scanLine)
 	cmd.Stdout = stdoutLog
@@ -133,7 +138,8 @@ func (p *ngrokProvider) spawn(ctx context.Context) error {
 	p.mu.Lock()
 	p.cmd = cmd
 	p.startedAt = time.Now()
-	p.readySignal = make(chan struct{})
+	readyCh := make(chan struct{})
+	p.readySignal = readyCh
 	p.waiterDone = make(chan struct{})
 	p.publicURL = ""
 	p.mu.Unlock()
@@ -150,7 +156,7 @@ func (p *ngrokProvider) spawn(ctx context.Context) error {
 		<-p.waiterDone
 		return fmt.Errorf("ngrok not ready: %w", err)
 	}
-	close(p.readySignal)
+	close(readyCh)
 	p.lastSpawnErr.Store("")
 	p.logger.Info("ngrok ready", "public_url", p.URL(), "elapsed", time.Since(p.startedAt).String())
 	return nil

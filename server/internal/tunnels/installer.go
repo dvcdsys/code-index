@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +17,24 @@ import (
 	"strings"
 	"time"
 )
+
+// cloudflaredVersion pins the cloudflared release the managed installer
+// downloads. Pinned (not "latest") for reproducibility — keep it in sync
+// with the CLOUDFLARED_VERSION arg in server/Dockerfile*. ngrok is fetched
+// from its "v3-stable" channel (ngrok publishes no per-version URLs).
+const cloudflaredVersion = "2025.2.1"
+
+// maxBinaryBytes caps a managed download to guard against a decompression
+// bomb / runaway response. Comfortably above the real agents (~35 MB).
+const maxBinaryBytes = 300 << 20 // 300 MiB
+
+// pinnedSHA256 maps "<provider>/<version>/<goos>/<goarch>" → expected
+// hex SHA-256 of the downloaded artifact (raw binary for cloudflared/linux,
+// the .tgz for archived assets). When an entry exists the download is
+// verified against it; when absent the installer logs a warning with the
+// computed sum so an operator can pin it. Populate from the vendor's
+// published checksums.
+var pinnedSHA256 = map[string]string{}
 
 // BinaryStatus describes a provider's agent binary for the dashboard, so it
 // can render install instructions (local) or Install/Update buttons
@@ -108,17 +128,37 @@ func (in *Installer) Install(ctx context.Context, provider string) error {
 	}
 	cleanup := func() { _ = out.Close(); _ = os.Remove(partial) }
 
+	// Hash the downloaded artifact (the .tgz for archived assets, the raw
+	// binary otherwise) while writing, bounded by maxBinaryBytes.
+	hasher := sha256.New()
+	src := io.TeeReader(io.LimitReader(resp.Body, maxBinaryBytes), hasher)
 	if archived {
-		if err := extractFromTarGz(resp.Body, member, out); err != nil {
+		if err := extractFromTarGz(src, member, out); err != nil {
 			cleanup()
 			return err
 		}
+		// Drain the rest of the archive so the hash covers the whole .tgz.
+		_, _ = io.Copy(io.Discard, src)
 	} else {
-		if _, err := io.Copy(out, resp.Body); err != nil {
+		if _, err := io.Copy(out, src); err != nil {
 			cleanup()
 			return fmt.Errorf("write binary: %w", err)
 		}
 	}
+
+	sum := hex.EncodeToString(hasher.Sum(nil))
+	key := provider + "/" + assetVersion(provider) + "/" + runtime.GOOS + "/" + runtime.GOARCH
+	if want, ok := pinnedSHA256[key]; ok {
+		if !strings.EqualFold(want, sum) {
+			cleanup()
+			return fmt.Errorf("checksum mismatch for %s: got %s, want %s", key, sum, want)
+		}
+		in.logger.Info("tunnel binary checksum verified", "provider", provider, "sha256", sum)
+	} else {
+		in.logger.Warn("tunnel binary downloaded without checksum verification (HTTPS from official source)",
+			"provider", provider, "url", url, "sha256", sum)
+	}
+
 	if err := out.Sync(); err != nil {
 		cleanup()
 		return fmt.Errorf("fsync binary: %w", err)
@@ -168,7 +208,8 @@ func extractFromTarGz(r io.Reader, member string, out io.Writer) error {
 func assetURL(provider, goos, goarch string) (url string, archived bool, member string, err error) {
 	switch provider {
 	case ProviderCloudflare:
-		const base = "https://github.com/cloudflare/cloudflared/releases/latest/download/"
+		// Pinned version (not "latest") for reproducibility.
+		base := "https://github.com/cloudflare/cloudflared/releases/download/" + cloudflaredVersion + "/"
 		switch goos {
 		case "linux":
 			return base + "cloudflared-linux-" + goarch, false, "", nil
@@ -183,6 +224,15 @@ func assetURL(provider, goos, goarch string) (url string, archived bool, member 
 	default:
 		return "", false, "", fmt.Errorf("unknown provider %q", provider)
 	}
+}
+
+// assetVersion is the version identifier used in the pinnedSHA256 key for a
+// provider (cloudflared is pinned; ngrok tracks its stable channel).
+func assetVersion(provider string) string {
+	if provider == ProviderNgrok {
+		return "v3-stable"
+	}
+	return cloudflaredVersion
 }
 
 // binaryVersion runs the agent's version subcommand best-effort. Returns ""

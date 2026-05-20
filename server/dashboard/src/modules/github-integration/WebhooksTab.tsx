@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 import { api } from '@/api/client';
+import { useAuth } from '@/auth/useAuth';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
@@ -35,6 +36,8 @@ const ACTION_COLOR: Record<ReconcileOutcome['action'], string> = {
 // that provides the public URL is managed under Managed Tunnels — this tab
 // only consumes it.
 export default function WebhooksTab() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [tunnel, setTunnel] = useState<TunnelStatus | null>(null);
   const [result, setResult] = useState<ReconcileResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -98,12 +101,15 @@ export default function WebhooksTab() {
           <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
             <p className="text-xs text-muted-foreground">
               Re-registration runs automatically on boot and when the tunnel URL
-              changes. Use this to trigger it manually.
+              changes.{' '}
+              {isAdmin ? 'Use this to trigger it manually.' : 'Manual re-registration requires an admin.'}
             </p>
-            <Button variant="outline" size="sm" disabled={busy} onClick={reconcile}>
-              <RefreshCw className="mr-1 size-4" />
-              {busy ? 'Re-registering…' : 'Re-register webhooks'}
-            </Button>
+            {isAdmin && (
+              <Button variant="outline" size="sm" disabled={busy} onClick={reconcile}>
+                <RefreshCw className="mr-1 size-4" />
+                {busy ? 'Re-registering…' : 'Re-register webhooks'}
+              </Button>
+            )}
           </div>
 
           {err && (

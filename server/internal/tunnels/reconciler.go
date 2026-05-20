@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/dvcdsys/code-index/server/internal/githubapi"
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
@@ -45,6 +46,14 @@ type Reconciler struct {
 	tokens TokenRevealer
 	gh     WebhookClient
 	logger *slog.Logger
+
+	// mu serializes Reconcile. On boot two reconciles can race (the
+	// OnURLChange callback for a freshly-parsed quick-tunnel URL + the
+	// explicit boot reconcile); without serialization both would take the
+	// create branch for a repo that has no WebhookID yet and register
+	// duplicate hooks on GitHub. Serializing means the second run re-reads
+	// the now-persisted WebhookID and PATCHes instead.
+	mu sync.Mutex
 }
 
 func NewReconciler(repos RepoStore, tokens TokenRevealer, gh WebhookClient, logger *slog.Logger) *Reconciler {
@@ -77,6 +86,9 @@ type ReconcileResult struct {
 // has the hook); one without is created. baseURL must be an absolute http(s)
 // origin — when empty (no live tunnel) reconcile is a no-op.
 func (r *Reconciler) Reconcile(ctx context.Context, baseURL string) (ReconcileResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	res := ReconcileResult{BaseURL: baseURL}
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if !strings.HasPrefix(baseURL, "http") {
