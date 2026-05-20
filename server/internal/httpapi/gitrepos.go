@@ -30,17 +30,20 @@ func (s *Server) gitReposUnavailable(w http.ResponseWriter) bool {
 
 // gitRepoPayload mirrors the OpenAPI GitRepo schema.
 type gitRepoPayload struct {
-	ProjectPath string  `json:"project_path"`
-	PathHash    string  `json:"path_hash"`
-	GitHubURL   string  `json:"github_url"`
-	Branch      string  `json:"branch"`
-	TokenID     *string `json:"token_id"`
-	AutoWebhook bool    `json:"auto_webhook"`
-	WebhookMode string  `json:"webhook_mode"`
-	LastSHA     *string `json:"last_sha"`
-	LastError   *string `json:"last_error"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
+	ProjectPath         string  `json:"project_path"`
+	PathHash            string  `json:"path_hash"`
+	GitHubURL           string  `json:"github_url"`
+	Branch              string  `json:"branch"`
+	TokenID             *string `json:"token_id"`
+	AutoWebhook         bool    `json:"auto_webhook"`
+	WebhookMode         string  `json:"webhook_mode"`
+	LastSHA             *string `json:"last_sha"`
+	LastError           *string `json:"last_error"`
+	PollingEnabled      bool    `json:"polling_enabled"`
+	PollIntervalSeconds *int    `json:"poll_interval_seconds"`
+	NextPollAt          *string `json:"next_poll_at"`
+	CreatedAt           string  `json:"created_at"`
+	UpdatedAt           string  `json:"updated_at"`
 }
 
 func gitRepoToPayload(g gitrepos.GitRepo) gitRepoPayload {
@@ -59,18 +62,31 @@ func gitRepoToPayload(g gitrepos.GitRepo) gitRepoPayload {
 		v := g.LastError
 		lastErr = &v
 	}
+	var pollSecs *int
+	if g.PollIntervalSeconds > 0 {
+		v := g.PollIntervalSeconds
+		pollSecs = &v
+	}
+	var nextPollAt *string
+	if g.NextPollAt != nil {
+		v := g.NextPollAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
+		nextPollAt = &v
+	}
 	return gitRepoPayload{
-		ProjectPath: g.ProjectPath,
-		PathHash:    g.PathHash,
-		GitHubURL:   g.GitHubURL,
-		Branch:      g.Branch,
-		TokenID:     tokenID,
-		AutoWebhook: g.AutoWebhook,
-		WebhookMode: g.WebhookMode,
-		LastSHA:     lastSHA,
-		LastError:   lastErr,
-		CreatedAt:   g.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
-		UpdatedAt:   g.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		ProjectPath:         g.ProjectPath,
+		PathHash:            g.PathHash,
+		GitHubURL:           g.GitHubURL,
+		Branch:              g.Branch,
+		TokenID:             tokenID,
+		AutoWebhook:         g.AutoWebhook,
+		WebhookMode:         g.WebhookMode,
+		LastSHA:             lastSHA,
+		LastError:           lastErr,
+		PollingEnabled:      g.PollingEnabled,
+		PollIntervalSeconds: pollSecs,
+		NextPollAt:          nextPollAt,
+		CreatedAt:           g.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		UpdatedAt:           g.UpdatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	}
 }
 
@@ -96,6 +112,11 @@ func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
 	tokenID := ""
 	if body.TokenId != nil {
 		tokenID = *body.TokenId
+	}
+	pollingEnabled := body.PollingEnabled != nil && *body.PollingEnabled
+	pollIntervalSecs := 0
+	if body.PollIntervalSeconds != nil {
+		pollIntervalSecs = *body.PollIntervalSeconds
 	}
 
 	// Parse the URL up front so we know the canonical project_path and
@@ -131,10 +152,12 @@ func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g, err := s.Deps.GitRepos.Create(r.Context(), gitrepos.CreateRequest{
-		GitHubURL:   body.GithubUrl,
-		Branch:      body.Branch,
-		TokenID:     tokenID,
-		WebhookMode: mode,
+		GitHubURL:           body.GithubUrl,
+		Branch:              body.Branch,
+		TokenID:             tokenID,
+		WebhookMode:         mode,
+		PollingEnabled:      pollingEnabled,
+		PollIntervalSeconds: pollIntervalSecs,
 	})
 	if err != nil {
 		// Compensating delete (Fix #5): drop the project we staged so
@@ -165,6 +188,8 @@ func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, "branch is required")
 		case errors.Is(err, gitrepos.ErrInvalidWebhookMode):
 			writeError(w, http.StatusUnprocessableEntity, "webhook_mode must be one of manual, auto, disabled")
+		case errors.Is(err, gitrepos.ErrPollingRequiresWebhookDisabled):
+			writeError(w, http.StatusUnprocessableEntity, "polling requires webhook_mode='disabled'")
 		case errors.Is(err, gitrepos.ErrDuplicate):
 			writeError(w, http.StatusConflict, "a project for this github_url + branch already exists")
 		default:
@@ -189,6 +214,20 @@ func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
 			// Reload so the response reflects the persisted webhook_id.
 			if fresh, ferr := s.Deps.GitRepos.GetByPath(r.Context(), g.ProjectPath); ferr == nil {
 				g = fresh
+			}
+		} else {
+			// Auto-register failed (typically: the user isn't a repo admin,
+			// so the hook can't be installed). Fall back to polling so the
+			// repo still auto-syncs. Flips webhook off + polling on.
+			if ferr := s.Deps.GitRepos.EnablePollingFallback(r.Context(), g.ProjectPath, pollIntervalSecs); ferr != nil {
+				if s.Deps.Logger != nil {
+					s.Deps.Logger.Warn("AddGitRepo: polling fallback failed", "project_path", g.ProjectPath, "err", ferr)
+				}
+			} else {
+				autoNote = strings.TrimSpace(note + " Enabled polling sync as a fallback.")
+				if fresh, ferr := s.Deps.GitRepos.GetByPath(r.Context(), g.ProjectPath); ferr == nil {
+					g = fresh
+				}
 			}
 		}
 	}
@@ -226,6 +265,51 @@ func (s *Server) GetProjectGitRepo(w http.ResponseWriter, r *http.Request, hash 
 		return
 	}
 	writeJSON(w, http.StatusOK, gitRepoToPayload(g))
+}
+
+// UpdateProjectGitRepoPolling — PATCH /api/v1/projects/{hash}/git-repo.
+//
+// Enables/disables polling sync and sets the per-repo interval. Enabling
+// requires webhook_mode='disabled' (422 otherwise). 404 for local projects.
+func (s *Server) UpdateProjectGitRepoPolling(w http.ResponseWriter, r *http.Request, hash string) {
+	if s.gitReposUnavailable(w) {
+		return
+	}
+	var body openapi.UpdateGitRepoPollingRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
+		return
+	}
+	g, err := s.Deps.GitRepos.GetByHash(r.Context(), hash)
+	if err != nil {
+		if errors.Is(err, gitrepos.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "no git_repos row for this project (likely a local project)")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load git_repo: "+err.Error())
+		return
+	}
+	interval := 0
+	if body.PollIntervalSeconds != nil {
+		interval = *body.PollIntervalSeconds
+	}
+	if err := s.Deps.GitRepos.SetPolling(r.Context(), g.ProjectPath, body.PollingEnabled, interval); err != nil {
+		switch {
+		case errors.Is(err, gitrepos.ErrPollingRequiresWebhookDisabled):
+			writeError(w, http.StatusUnprocessableEntity, "polling requires webhook_mode='disabled'")
+		case errors.Is(err, gitrepos.ErrNotFound):
+			writeError(w, http.StatusNotFound, "no git_repos row for this project")
+		default:
+			writeError(w, http.StatusInternalServerError, "could not update polling: "+err.Error())
+		}
+		return
+	}
+	fresh, err := s.Deps.GitRepos.GetByPath(r.Context(), g.ProjectPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "polling updated but reload failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, gitRepoToPayload(fresh))
 }
 
 // ReindexProject — POST /api/v1/projects/{hash}/reindex.

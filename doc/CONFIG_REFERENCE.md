@@ -84,9 +84,13 @@ one under `<CIX_SECRETS_DATA_DIR>/.secret_key`.
 | `CIX_SECRET_KEY` | (auto-generate) | 32-byte AES key for GitHub token encryption. Hex or base64. |
 | `CIX_SECRET_KEYFILE` | — | Alternative — path to a 0600-perm key file. |
 | `CIX_SECRETS_DATA_DIR` | `dirname(CIX_SQLITE_PATH)` | Where the auto-generated keyfile lives. |
+| `CIX_DEFAULT_POLL_INTERVAL` | `5m` | Default git-polling cadence for polling repos without a per-repo interval. Go duration string. |
+| `CIX_MIN_POLL_INTERVAL` | `60s` | Floor applied to every effective poll interval. Go duration string. |
+| `CIX_POLL_SCHEDULER_TICK` | `30s` | How often the shared poll scheduler scans for due repos. Go duration string. |
 
-See [`WORKSPACES.md`](WORKSPACES.md) for the operator guide and
-[`WEBHOOKS.md`](WEBHOOKS.md) for webhook lifecycle.
+See [`WORKSPACES.md`](WORKSPACES.md) for the operator guide,
+[`WEBHOOKS.md`](WEBHOOKS.md) for webhook lifecycle, and
+[`POLLING.md`](POLLING.md) for the polling alternative.
 
 ## Version-check banner
 

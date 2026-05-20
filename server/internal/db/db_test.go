@@ -210,6 +210,103 @@ func TestOpenMigratesPreEDB(t *testing.T) {
 	}
 }
 
+// TestOpenMigratesPreM8DB simulates a pre-m8 database (git_repos without the
+// polling columns) and verifies Open adds them + the scheduler index without
+// crashing, and that an existing row reads back with the polling defaults.
+func TestOpenMigratesPreM8DB(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "pre-m8.db")
+
+	seed, err := sql.Open(DriverName, "file:"+tmp)
+	if err != nil {
+		t.Fatalf("seed Open: %v", err)
+	}
+	if _, err := seed.Exec(`CREATE TABLE projects (
+		host_path TEXT PRIMARY KEY,
+		container_path TEXT NOT NULL,
+		languages TEXT DEFAULT '[]',
+		settings TEXT DEFAULT '{}',
+		stats TEXT DEFAULT '{}',
+		status TEXT DEFAULT 'created',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		path_hash TEXT
+	)`); err != nil {
+		t.Fatalf("seed projects: %v", err)
+	}
+	// pre-m8 git_repos: has indexed_sha (post-m7) but no polling columns.
+	if _, err := seed.Exec(`CREATE TABLE git_repos (
+		project_path   TEXT PRIMARY KEY,
+		github_url     TEXT NOT NULL,
+		branch         TEXT NOT NULL,
+		token_id       TEXT,
+		webhook_secret TEXT NOT NULL,
+		webhook_id     INTEGER,
+		webhook_mode   TEXT NOT NULL DEFAULT 'manual',
+		auto_webhook   INTEGER NOT NULL DEFAULT 0,
+		last_sha       TEXT,
+		indexed_sha    TEXT,
+		last_error     TEXT,
+		created_at     TEXT NOT NULL,
+		updated_at     TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("seed git_repos: %v", err)
+	}
+	if _, err := seed.Exec(
+		`INSERT INTO projects (host_path, container_path, created_at, updated_at, path_hash)
+		 VALUES ('github.com/x/y@main', 'github.com/x/y@main', '2024-01-01', '2024-01-01', 'deadbeefdeadbeef')`,
+	); err != nil {
+		t.Fatalf("seed projects row: %v", err)
+	}
+	if _, err := seed.Exec(
+		`INSERT INTO git_repos (project_path, github_url, branch, webhook_secret, created_at, updated_at)
+		 VALUES ('github.com/x/y@main', 'https://github.com/x/y', 'main', 'sekret', '2024-01-01', '2024-01-01')`,
+	); err != nil {
+		t.Fatalf("seed git_repos row: %v", err)
+	}
+	seed.Close()
+
+	database, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("Open migrates pre-m8 DB: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(tmp)
+
+	// Columns must be queryable and default correctly on the existing row.
+	var (
+		pollEnabled int
+		pollSecs    sql.NullInt64
+		nextPollAt  sql.NullString
+	)
+	if err := database.QueryRow(
+		`SELECT polling_enabled, poll_interval_seconds, next_poll_at
+		   FROM git_repos WHERE project_path = ?`, "github.com/x/y@main",
+	).Scan(&pollEnabled, &pollSecs, &nextPollAt); err != nil {
+		t.Fatalf("select polling columns: %v", err)
+	}
+	if pollEnabled != 0 || pollSecs.Valid || nextPollAt.Valid {
+		t.Errorf("defaults wrong: enabled=%d secs=%v next=%v", pollEnabled, pollSecs, nextPollAt)
+	}
+
+	var idxCount int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_git_repos_due'`,
+	).Scan(&idxCount); err != nil {
+		t.Fatalf("idx count: %v", err)
+	}
+	if idxCount != 1 {
+		t.Errorf("idx_git_repos_due count = %d, want 1", idxCount)
+	}
+
+	// Second Open is a no-op (idempotent) — must not error.
+	database.Close()
+	again, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("second Open (idempotent): %v", err)
+	}
+	again.Close()
+}
+
 func TestSymbolsIndexExists(t *testing.T) {
 	database, err := Open(":memory:")
 	if err != nil {

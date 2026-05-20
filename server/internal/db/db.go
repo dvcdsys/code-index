@@ -61,6 +61,7 @@ var registeredMigrations = []migration{
 	{6, "drop_communities", func(db *sql.DB, _ OpenOptions) error { return migrateDropCommunities(db) }},
 	{7, "git_repos_indexed_sha", func(db *sql.DB, _ OpenOptions) error { return migrateGitReposIndexedSHA(db) }},
 	{8, "tunnel_config", func(db *sql.DB, _ OpenOptions) error { return migrateTunnelConfig(db) }},
+	{9, "git_repos_polling", func(db *sql.DB, _ OpenOptions) error { return migrateGitReposPolling(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -250,6 +251,65 @@ func migrateGitReposIndexedSHA(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`ALTER TABLE git_repos ADD COLUMN indexed_sha TEXT`); err != nil {
 		return fmt.Errorf("add indexed_sha column: %w", err)
+	}
+	return nil
+}
+
+// migrateGitReposPolling adds the polling-sync columns to git_repos and the
+// scheduler index. Idempotent: each ALTER is guarded by a PRAGMA table_info
+// check, and the index uses IF NOT EXISTS. On a fresh DB the columns already
+// exist (Schema's CREATE TABLE laid them down), so this only ALTERs existing
+// pre-m8 databases. The index lives here rather than in Schema because pre-m8
+// rows lack the columns when Schema.Exec runs (same constraint as path_hash).
+func migrateGitReposPolling(db *sql.DB) error {
+	exists, err := tableExists(db, "git_repos")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		// Fresh DB — Schema's CREATE TABLE IF NOT EXISTS already created
+		// git_repos with the polling columns this boot.
+		return nil
+	}
+
+	have := map[string]bool{}
+	rows, err := db.Query(`PRAGMA table_info(git_repos)`)
+	if err != nil {
+		return fmt.Errorf("table_info git_repos: %w", err)
+	}
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+
+	adds := []struct{ col, ddl string }{
+		{"polling_enabled", `ALTER TABLE git_repos ADD COLUMN polling_enabled INTEGER NOT NULL DEFAULT 0`},
+		{"poll_interval_seconds", `ALTER TABLE git_repos ADD COLUMN poll_interval_seconds INTEGER`},
+		{"next_poll_at", `ALTER TABLE git_repos ADD COLUMN next_poll_at TEXT`},
+	}
+	for _, a := range adds {
+		if have[a.col] {
+			continue
+		}
+		if _, err := db.Exec(a.ddl); err != nil {
+			return fmt.Errorf("add %s column: %w", a.col, err)
+		}
+	}
+
+	if _, err := db.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_git_repos_due ON git_repos(polling_enabled, next_poll_at)`,
+	); err != nil {
+		return fmt.Errorf("create idx_git_repos_due: %w", err)
 	}
 	return nil
 }

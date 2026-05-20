@@ -209,12 +209,27 @@ CREATE TABLE IF NOT EXISTS git_repos (
     -- ones. NULL → forces a full reindex on the next clone_repo job.
     indexed_sha     TEXT,
     last_error      TEXT,
+    -- Polling sync (alternative to webhooks, for repos where the user is
+    -- not an admin and cannot install a hook). Gated on webhook_mode =
+    -- 'disabled' — a repo uses webhook OR polling, never both. When
+    -- polling_enabled = 1 the shared poll scheduler enqueues a clone_repo
+    -- job whenever next_poll_at is due. poll_interval_seconds NULL → use
+    -- the server default (CIX_DEFAULT_POLL_INTERVAL). next_poll_at NULL →
+    -- not scheduled (polling off). Cadence is measured from the END of the
+    -- last index run, written by the clone/index completion handlers.
+    polling_enabled       INTEGER NOT NULL DEFAULT 0,
+    poll_interval_seconds INTEGER,
+    next_poll_at          TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     UNIQUE (github_url, branch),
     FOREIGN KEY (project_path) REFERENCES projects(host_path) ON DELETE CASCADE,
     FOREIGN KEY (token_id) REFERENCES github_tokens(id) ON DELETE SET NULL
 );
+-- NOTE: CREATE INDEX idx_git_repos_due is intentionally NOT here. Pre-m8
+-- databases lack the polling columns when Schema.Exec runs (migrations run
+-- after), so the index is created by migration 8 instead — same pattern as
+-- idx_projects_path_hash (see the path_hash note above).
 
 -- workspace_projects is the many-to-many junction between workspaces
 -- and projects. A workspace is just a labelled collection — adding a

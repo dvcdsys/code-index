@@ -34,6 +34,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
+	"github.com/dvcdsys/code-index/server/internal/pollscheduler"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
 	"github.com/dvcdsys/code-index/server/internal/repojobs"
 	"github.com/dvcdsys/code-index/server/internal/workspaceprojects"
@@ -275,14 +276,16 @@ func run() error {
 		Logger:      logger,
 	})
 	repojobs.Register(repojobs.Deps{
-		DB:           database,
-		Jobs:         jobsSvc,
-		GitRepos:     grSvc,
-		GithubTokens: ghSvc,
-		Indexer:      idx,
-		VectorStore:  vs,
-		DataDir:      cfg.WorkspacesDataDir,
-		Logger:       logger,
+		DB:                         database,
+		Jobs:                       jobsSvc,
+		GitRepos:                   grSvc,
+		GithubTokens:               ghSvc,
+		Indexer:                    idx,
+		VectorStore:                vs,
+		DataDir:                    cfg.WorkspacesDataDir,
+		Logger:                     logger,
+		DefaultPollIntervalSeconds: int(cfg.DefaultPollInterval.Seconds()),
+		MinPollIntervalSeconds:     int(cfg.MinPollInterval.Seconds()),
 	})
 	jobsSvc.Start(context.Background())
 	defer func() {
@@ -374,6 +377,18 @@ func run() error {
 			}
 		}()
 	}
+
+	// Shared poll scheduler: one watcher driving git polling for every
+	// polling-enabled repo, feeding the same bounded jobs queue. Exits
+	// cleanly when bgCtx is cancelled in the shutdown branch.
+	pollSvc := pollscheduler.New(
+		grSvc, jobsSvc,
+		cfg.PollSchedulerTick,
+		int(cfg.DefaultPollInterval.Seconds()),
+		int(cfg.MinPollInterval.Seconds()),
+		logger,
+	)
+	go pollSvc.Run(bgCtx)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		DB:                database,
