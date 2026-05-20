@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { Check, Copy, Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
 import { Button } from '@/ui/button';
@@ -9,7 +9,13 @@ import { Label } from '@/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/ui/radio-group';
 import { Skeleton } from '@/ui/skeleton';
 import { formatDateTime, formatRelative } from '@/lib/formatDate';
-import { useProjectGitRepo, useUpdateProjectSync, type GitRepo, type SyncMethod } from '../hooks';
+import {
+  useProjectGitRepo,
+  useProjectWebhookInfo,
+  useUpdateProjectSync,
+  type GitRepo,
+  type SyncMethod,
+} from '../hooks';
 
 const METHODS: ReadonlyArray<{ value: SyncMethod; label: string; hint: string }> = [
   {
@@ -46,6 +52,7 @@ export function SyncSettingsCard({ hash, isAdmin }: { hash: string; isAdmin: boo
 
   const [method, setMethod] = useState<SyncMethod | null>(null);
   const [intervalSec, setIntervalSec] = useState<string>('');
+  const [showSecret, setShowSecret] = useState(false);
 
   useEffect(() => {
     if (data) {
@@ -53,6 +60,11 @@ export function SyncSettingsCard({ hash, isAdmin }: { hash: string; isAdmin: boo
       setIntervalSec(String(data.poll_interval_seconds ?? DEFAULT_INTERVAL_SEC));
     }
   }, [data]);
+
+  const selectedIsWebhook = (method ?? (data ? deriveMethod(data) : 'manual')) === 'webhook';
+  // Webhook URL + secret for manual GitHub setup. Only fetched for admins
+  // viewing the webhook method (the secret is sensitive).
+  const webhookInfo = useProjectWebhookInfo(hash, isAdmin && selectedIsWebhook);
 
   if (gitRepo.isLoading) {
     return <Skeleton className="h-56 w-full" />;
@@ -64,6 +76,13 @@ export function SyncSettingsCard({ hash, isAdmin }: { hash: string; isAdmin: boo
   }
 
   const selected = method ?? deriveMethod(data);
+
+  function copy(label: string, value: string) {
+    void navigator.clipboard?.writeText(value).then(
+      () => toast.success(`${label} copied`),
+      () => toast.error(`Couldn't copy ${label}`),
+    );
+  }
 
   async function save() {
     const secs = Number(intervalSec);
@@ -112,6 +131,82 @@ export function SyncSettingsCard({ hash, isAdmin }: { hash: string; isAdmin: boo
             </div>
           ))}
         </RadioGroup>
+
+        {selected === 'webhook' && isAdmin && (
+          <div className="space-y-3 rounded-md border bg-muted/30 p-3">
+            <p className="text-xs text-muted-foreground">
+              Auto-registration needs a public URL (CIX_PUBLIC_URL or a live
+              tunnel) and a token with <code>admin:repo_hook</code>. Otherwise
+              add the hook by hand in GitHub → Settings → Webhooks (content
+              type <code>application/json</code>, event <code>push</code>).
+            </p>
+            {webhookInfo.isLoading ? (
+              <Skeleton className="h-16 w-full" />
+            ) : webhookInfo.data ? (
+              <div className="space-y-2 text-sm">
+                <div className="space-y-1">
+                  <Label className="text-xs">Payload URL</Label>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 truncate rounded bg-background px-2 py-1 text-xs">
+                      {webhookInfo.data.webhook_url}
+                    </code>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-7 w-7 shrink-0"
+                      onClick={() => copy('Payload URL', webhookInfo.data!.webhook_url)}
+                      title="Copy URL"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                  {!webhookInfo.data.webhook_url.startsWith('http') && (
+                    <p className="text-xs text-destructive">
+                      No public origin configured — set CIX_PUBLIC_URL or a tunnel,
+                      then prepend it to this path.
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Secret</Label>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 truncate rounded bg-background px-2 py-1 font-mono text-xs">
+                      {showSecret ? webhookInfo.data.webhook_secret : '•'.repeat(24)}
+                    </code>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-7 w-7 shrink-0"
+                      onClick={() => setShowSecret((v) => !v)}
+                      title={showSecret ? 'Hide secret' : 'Reveal secret'}
+                    >
+                      {showSecret ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-7 w-7 shrink-0"
+                      onClick={() => copy('Secret', webhookInfo.data!.webhook_secret)}
+                      title="Copy secret"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  {webhookInfo.data.auto_registered ? (
+                    <>
+                      <Check className="h-3.5 w-3.5 text-green-600" />
+                      Hook auto-registered by the server.
+                    </>
+                  ) : (
+                    'Hook not auto-registered — add it manually with the values above.'
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        )}
 
         {selected === 'polling' && (
           <div className="flex flex-wrap items-end gap-3">

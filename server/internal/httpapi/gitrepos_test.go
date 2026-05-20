@@ -215,14 +215,15 @@ func TestUpdateProjectGitRepoSync(t *testing.T) {
 		t.Fatalf("manual: mode=%q polling=%v next=%v", got.GitRepo.WebhookMode, got.GitRepo.PollingEnabled, got.GitRepo.NextPollAt)
 	}
 
-	// → webhook: no token + no public URL in this harness, so auto-register
-	// fails and the server falls back to polling (with a note).
-	got = patch(map[string]any{"sync_method": "webhook", "poll_interval_seconds": 120})
-	if !got.GitRepo.PollingEnabled || got.GitRepo.WebhookMode != "disabled" {
-		t.Fatalf("webhook fallback: mode=%q polling=%v", got.GitRepo.WebhookMode, got.GitRepo.PollingEnabled)
+	// → webhook: this repo has no token, so auto-register can't install the
+	// hook → the server leaves webhook_mode='manual' (a valid webhook the
+	// operator finishes by hand) and does NOT fall back to polling.
+	got = patch(map[string]any{"sync_method": "webhook"})
+	if got.GitRepo.WebhookMode != "manual" || got.GitRepo.PollingEnabled {
+		t.Fatalf("webhook manual fallback: mode=%q polling=%v", got.GitRepo.WebhookMode, got.GitRepo.PollingEnabled)
 	}
 	if got.Note == "" {
-		t.Error("expected a fallback note when webhook registration fails")
+		t.Error("expected a note explaining manual webhook setup")
 	}
 
 	// invalid method → 422
