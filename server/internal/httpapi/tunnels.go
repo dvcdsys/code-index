@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
@@ -175,6 +176,28 @@ func (s *Server) GetTunnelStatus(w http.ResponseWriter, _ *http.Request) {
 		st = s.Deps.Tunnel.Status()
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// GetWebhookOrigin — GET /api/v1/github/webhooks/origin. Reports the
+// effective public origin webhook URLs are built against and where it comes
+// from. A live tunnel takes precedence over CIX_PUBLIC_URL (mirrors
+// publicBaseURL). The `source` field lets the dashboard distinguish "origin
+// provided by infrastructure via CIX_PUBLIC_URL" (fine — a tunnel is
+// optional) from "no origin at all" (the only real problem).
+func (s *Server) GetWebhookOrigin(w http.ResponseWriter, _ *http.Request) {
+	origin, source := "", openapi.None
+	if s.Deps.Tunnel != nil {
+		if u := s.Deps.Tunnel.URL(); u != "" {
+			origin, source = u, openapi.Tunnel
+		}
+	}
+	if origin == "" && s.Deps.PublicBaseURL != "" {
+		origin, source = s.Deps.PublicBaseURL, openapi.PublicUrl
+	}
+	writeJSON(w, http.StatusOK, openapi.WebhookOrigin{
+		Origin: strings.TrimRight(origin, "/"),
+		Source: source,
+	})
 }
 
 // TestTunnel — POST /api/v1/tunnels/test. Admin-only. End-to-end round-trip

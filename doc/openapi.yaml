@@ -2217,6 +2217,30 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/github/webhooks/origin:
+    get:
+      operationId: getWebhookOrigin
+      tags: [tunnels]
+      summary: Effective public origin for GitHub webhook delivery
+      description: |
+        Reports the public origin that webhook delivery URLs are built
+        against, and where it comes from: a live managed tunnel, the
+        operator-set CIX_PUBLIC_URL (i.e. the server is made public by
+        infrastructure — reverse proxy, ingress, static IP), or none.
+
+        A managed tunnel is OPTIONAL: when CIX_PUBLIC_URL is set, webhooks
+        work without any tunnel. The dashboard uses this to avoid presenting
+        "no tunnel" as a problem when the origin is provided by infra.
+      responses:
+        "200":
+          description: Effective webhook delivery origin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookOrigin"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -4060,6 +4084,24 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/WebhookReconcileOutcome"
+
+    WebhookOrigin:
+      type: object
+      required: [origin, source]
+      properties:
+        origin:
+          type: string
+          description: |
+            The public base URL webhook delivery URLs are built against
+            (no trailing slash). Empty when source is "none".
+        source:
+          type: string
+          enum: [tunnel, public_url, none]
+          description: |
+            Where `origin` comes from. `tunnel` — a live managed tunnel.
+            `public_url` — the operator-set CIX_PUBLIC_URL (infrastructure
+            provides public reachability; a tunnel is not needed). `none` —
+            no public origin is configured, so webhooks can't be delivered.
 
     WorkspaceSearchResponse:
       type: object
