@@ -133,6 +133,30 @@ type Config struct {
 	// the operator to prepend their tunnel/proxy origin. Source:
 	// CIX_PUBLIC_URL.
 	PublicBaseURL string
+
+	// Managed Tunnels — DEPLOYMENT INFRA ONLY. The feature itself has no
+	// enable flag: whether a tunnel runs and how it's configured (mode,
+	// hostname, token) lives in the DB (tunnel_config) and is managed
+	// entirely from the dashboard. These env vars only describe where the
+	// cloudflared binary lives and its tuning knobs, which are deployment
+	// concerns the operator can't set from the UI.
+	CloudflareBinPath     string // CIX_TUNNEL_CLOUDFLARE_BIN_PATH; default "cloudflared" (PATH) — images set /cloudflared
+	CloudflareMetricsAddr string // CIX_TUNNEL_CLOUDFLARE_METRICS_ADDR; default 127.0.0.1:21848
+	CloudflareStartupSec  int    // CIX_TUNNEL_CLOUDFLARE_STARTUP_TIMEOUT; readiness ceiling, default 30
+	NgrokBinPath          string // CIX_TUNNEL_NGROK_BIN_PATH; default "ngrok" (PATH)
+	NgrokStartupSec       int    // CIX_TUNNEL_NGROK_STARTUP_TIMEOUT; readiness ceiling, default 30
+
+	// TunnelBinManaged enables installing/updating the provider binaries
+	// from the dashboard (the server downloads them into TunnelBinDir). The
+	// Docker images set this true — the bundled binaries can't be updated in
+	// place (read-only image layer), so a writable managed dir on the data
+	// volume lets operators update without rebuilding. Off by default for
+	// local runs, where binaries come from the system (brew/apt/etc).
+	// Source: CIX_TUNNEL_BIN_MANAGED.
+	TunnelBinManaged bool
+	// TunnelBinDir is the writable directory managed binaries are downloaded
+	// into. Default: <SQLite dir>/tunnel-bin. Source: CIX_TUNNEL_BIN_DIR.
+	TunnelBinDir string
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -318,6 +342,27 @@ func Load() (*Config, error) {
 	c.WorkerConcurrency = workerConc
 
 	c.PublicBaseURL = strings.TrimSpace(getenv("CIX_PUBLIC_URL", ""))
+
+	c.CloudflareBinPath = strings.TrimSpace(getenv("CIX_TUNNEL_CLOUDFLARE_BIN_PATH", "cloudflared"))
+	c.CloudflareMetricsAddr = strings.TrimSpace(getenv("CIX_TUNNEL_CLOUDFLARE_METRICS_ADDR", "127.0.0.1:21848"))
+	cfStartup, err := getenvInt("CIX_TUNNEL_CLOUDFLARE_STARTUP_TIMEOUT", 30)
+	if err != nil {
+		return nil, err
+	}
+	c.CloudflareStartupSec = cfStartup
+	c.NgrokBinPath = strings.TrimSpace(getenv("CIX_TUNNEL_NGROK_BIN_PATH", "ngrok"))
+	ngrokStartup, err := getenvInt("CIX_TUNNEL_NGROK_STARTUP_TIMEOUT", 30)
+	if err != nil {
+		return nil, err
+	}
+	c.NgrokStartupSec = ngrokStartup
+
+	binManaged, err := getenvBool("CIX_TUNNEL_BIN_MANAGED", false)
+	if err != nil {
+		return nil, err
+	}
+	c.TunnelBinManaged = binManaged
+	c.TunnelBinDir = strings.TrimSpace(getenv("CIX_TUNNEL_BIN_DIR", filepath.Join(filepath.Dir(c.SQLitePath), "tunnel-bin")))
 
 	return c, nil
 }

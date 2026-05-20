@@ -29,11 +29,10 @@ type GithubTokenListResponse = {
   total: number;
 };
 
-// GithubTokensPage manages encrypted-at-rest GitHub PATs used by the
-// workspaces feature for cloning private repos and (optionally) registering
-// webhooks. The plaintext value is sent on POST and never returned —
-// subsequent operations identify tokens by id.
-export default function GithubTokensPage() {
+// TokensTab manages encrypted-at-rest GitHub PATs used for cloning private
+// repos and registering webhooks. The plaintext value is sent on POST and
+// never returned — subsequent operations identify tokens by id.
+export default function TokensTab() {
   const [list, setList] = useState<GithubToken[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [featureOff, setFeatureOff] = useState(false);
@@ -60,25 +59,29 @@ export default function GithubTokensPage() {
 
   if (featureOff) {
     return (
-      <div className="space-y-6">
-        <Header />
-        <Alert>
-          <AlertCircle className="size-4" />
-          <AlertTitle>GitHub tokens service is not configured</AlertTitle>
-          <AlertDescription>
-            The server returned 503 — the encryption layer for
-            github_tokens failed to wire. Check the server logs (most
-            common cause: <code>CIX_SECRET_KEY</code> /{' '}
-            <code>CIX_SECRET_KEYFILE</code> resolution) and restart.
-          </AlertDescription>
-        </Alert>
-      </div>
+      <Alert>
+        <AlertCircle className="size-4" />
+        <AlertTitle>GitHub tokens service is not configured</AlertTitle>
+        <AlertDescription>
+          The server returned 503 — the encryption layer for github_tokens
+          failed to wire. Check the server logs (most common cause:{' '}
+          <code>CIX_SECRET_KEY</code> / <code>CIX_SECRET_KEYFILE</code>{' '}
+          resolution) and restart.
+        </AlertDescription>
+      </Alert>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <Header onCreated={reload} />
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          Personal Access Tokens for cloning private repositories and
+          registering webhooks. Stored encrypted; the plaintext value is never
+          returned after creation.
+        </p>
+        <CreateTokenDialog onCreated={reload} />
+      </div>
       {error && (
         <Alert variant="destructive">
           <AlertCircle className="size-4" />
@@ -101,21 +104,6 @@ export default function GithubTokensPage() {
         </ul>
       )}
     </div>
-  );
-}
-
-function Header({ onCreated }: { onCreated?: () => void }) {
-  return (
-    <header className="flex flex-wrap items-center justify-between gap-3">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">GitHub Tokens</h1>
-        <p className="text-sm text-muted-foreground">
-          Personal Access Tokens for cloning private repositories. Stored
-          encrypted; the plaintext value is never returned after creation.
-        </p>
-      </div>
-      {onCreated && <CreateTokenDialog onCreated={onCreated} />}
-    </header>
   );
 }
 
@@ -153,9 +141,7 @@ function TokenRow({ token, onDeleted }: { token: GithubToken; onDeleted: () => v
         <div className="truncate font-medium">{token.name}</div>
         <div className="truncate text-xs text-muted-foreground">
           scopes:{' '}
-          {token.scopes.length
-            ? token.scopes.join(', ')
-            : '(fine-grained or none)'}
+          {token.scopes.length ? token.scopes.join(', ') : '(fine-grained or none)'}
           {token.last_used_at && (
             <> · last used {new Date(token.last_used_at).toLocaleString()}</>
           )}
@@ -175,10 +161,9 @@ function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Scopes are intentionally not asked for — the server validates the
-  // token against GET /user and reads the real X-OAuth-Scopes header,
-  // which is the only thing GitHub will actually enforce. Asking the
-  // user just invites drift between displayed and effective scopes.
+  // Scopes are intentionally not asked for — the server validates the token
+  // against GET /user and reads the real X-OAuth-Scopes header, which is the
+  // only thing GitHub will actually enforce.
   async function submit() {
     setBusy(true);
     setErr(null);
@@ -209,8 +194,9 @@ function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
           <DialogDescription>
             Stored encrypted-at-rest with AES-256-GCM. The plaintext value
             never leaves this request — there is no way to retrieve it after
-            saving. Scopes are read from GitHub on save (no need to enter
-            them here).
+            saving. Scopes are read from GitHub on save (no need to enter them
+            here). For auto webhook registration the token needs the{' '}
+            <code>admin:repo_hook</code> scope.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">

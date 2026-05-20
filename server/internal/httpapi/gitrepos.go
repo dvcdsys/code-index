@@ -350,14 +350,27 @@ func (s *Server) tryAutoRegisterWebhook(ctx context.Context, g gitrepos.GitRepo,
 }
 
 // buildWebhookURL constructs the publicly-reachable webhook delivery URL
-// for a project's path_hash. When PublicBaseURL is empty, returns the
+// for a project's path_hash. When no public base is known, returns the
 // path only so the dashboard can render with a helper note.
 func (s *Server) buildWebhookURL(pathHash string) string {
 	path := "/api/v1/webhooks/github/" + pathHash
-	base := strings.TrimRight(s.Deps.PublicBaseURL, "/")
+	base := strings.TrimRight(s.publicBaseURL(), "/")
 	if base == "" {
 		return path
 	}
 	return base + path
+}
+
+// publicBaseURL returns the origin webhook URLs should be built against.
+// A live managed tunnel takes precedence over the operator-set
+// CIX_PUBLIC_URL, since the tunnel is the path that actually reaches a
+// NAT'd server.
+func (s *Server) publicBaseURL() string {
+	if s.Deps.Tunnel != nil {
+		if u := s.Deps.Tunnel.URL(); u != "" {
+			return u
+		}
+	}
+	return s.Deps.PublicBaseURL
 }
 

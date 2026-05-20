@@ -20,6 +20,8 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
+	"github.com/dvcdsys/code-index/server/internal/tunnels"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
@@ -103,6 +105,19 @@ type Deps struct {
 	// Tests set this to an httptest server so they can assert the
 	// scopes / validation flow without hitting the real API.
 	GithubAPIBaseURL string
+
+	// Tunnel manages the optional managed-tunnel provider (Cloudflare).
+	// Nil when CIX_TUNNEL_ENABLED=false — tunnel handlers then report a
+	// disabled status and buildWebhookURL falls back to PublicBaseURL.
+	// When live, its public URL takes precedence over PublicBaseURL for
+	// webhook delivery URLs.
+	Tunnel *tunnels.Manager
+	// WebhookReconciler re-registers webhook_mode=auto repos against the
+	// current public base URL. Nil in tests / when tunnels are off.
+	WebhookReconciler *tunnels.Reconciler
+	// TunnelConfig persists the dashboard-managed tunnel settings. Nil in
+	// tests; the config handlers return 503 when absent.
+	TunnelConfig *tunnelcfg.Service
 }
 
 // NewRouter builds the chi router with middleware and the generated

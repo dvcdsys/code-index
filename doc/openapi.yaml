@@ -93,6 +93,12 @@ tags:
       cloning private repos and (optionally) registering webhooks. Stored
       encrypted-at-rest via AES-GCM; the plaintext is surfaced exactly
       once on POST and never returned thereafter.
+  - name: tunnels
+    description: |
+      Managed Tunnels — a server-orchestrated outbound tunnel that gives
+      the server a public URL while it sits behind NAT. Cloudflare Tunnel
+      ships now; ngrok is reserved. The live tunnel URL is the preferred
+      origin for GitHub webhook delivery URLs.
 
 paths:
   /health:
@@ -1920,6 +1926,263 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/tunnels:
+    get:
+      operationId: listTunnels
+      tags: [tunnels]
+      summary: List tunnel providers and their status
+      description: |
+        Returns one entry per known provider (cloudflare, ngrok). The
+        active provider carries live status; others are reported as
+        unavailable / "coming soon".
+      responses:
+        "200":
+          description: Provider catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelCatalog"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/config:
+    get:
+      operationId: getTunnelConfig
+      tags: [tunnels]
+      summary: Get the dashboard-managed tunnel configuration
+      description: |
+        Returns the persisted tunnel config (enable/mode/hostname). The
+        connector token is never returned — `token_set` reports whether one
+        is stored.
+      responses:
+        "200":
+          description: Current config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    put:
+      operationId: updateTunnelConfig
+      tags: [tunnels]
+      summary: Update tunnel configuration and apply it
+      description: |
+        Persists the config and immediately applies it: enabling starts the
+        tunnel, disabling stops it, changing mode/hostname/token restarts it.
+        Omit `token` to keep the existing one; send an empty string to clear.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TunnelConfigUpdate"
+      responses:
+        "200":
+          description: Applied; returns the resulting status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelStatus"
+        "400":
+          description: Invalid configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/tunnels/binaries:
+    get:
+      operationId: listTunnelBinaries
+      tags: [tunnels]
+      summary: Agent-binary status per provider
+      description: |
+        Reports whether each provider's agent binary (cloudflared, ngrok) is
+        present on this server, its path/version, and whether the server can
+        install/update it from the UI (managed mode — set by the Docker
+        images). When not installed and not managed, the dashboard shows
+        manual install instructions (local runs only).
+      responses:
+        "200":
+          description: Per-provider binary status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelBinaryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/binaries/{provider}/install:
+    post:
+      operationId: installTunnelBinary
+      tags: [tunnels]
+      summary: Download/install a provider's agent binary (managed mode)
+      description: |
+        Downloads the latest stable agent binary into the managed directory.
+        Only available when binary management is enabled
+        (CIX_TUNNEL_BIN_MANAGED=true); otherwise returns 409.
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [cloudflare, ngrok]
+      responses:
+        "200":
+          description: Installed; returns the new binary status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelBinaryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Binary management is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Download/install failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tunnels/binaries/{provider}/update:
+    post:
+      operationId: updateTunnelBinary
+      tags: [tunnels]
+      summary: Update a provider's agent binary to the latest (managed mode)
+      description: |
+        Re-downloads the latest stable agent binary, replacing the managed
+        copy. Restart the tunnel afterwards to run the new version. Only
+        available when CIX_TUNNEL_BIN_MANAGED=true.
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [cloudflare, ngrok]
+      responses:
+        "200":
+          description: Updated; returns the new binary status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelBinaryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Binary management is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Download/update failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tunnels/status:
+    get:
+      operationId: getTunnelStatus
+      tags: [tunnels]
+      summary: Active tunnel status snapshot
+      responses:
+        "200":
+          description: Active provider status (or disabled placeholder)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/test:
+    post:
+      operationId: testTunnel
+      tags: [tunnels]
+      summary: End-to-end connectivity test through the tunnel
+      description: |
+        Issues a GET to the tunnel's public URL + `/health`; the request
+        egresses to the provider edge and routes back through the tunnel
+        to this server — a true round-trip, not just a liveness check.
+      responses:
+        "200":
+          description: Test result (ok=false when unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelTestResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: No active tunnel
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tunnels/restart:
+    post:
+      operationId: restartTunnel
+      tags: [tunnels]
+      summary: Restart the active tunnel subprocess
+      responses:
+        "200":
+          description: Restarted; returns the new status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: No active tunnel
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Restart failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/github/webhooks/reconcile:
+    post:
+      operationId: reconcileWebhooks
+      tags: [tunnels]
+      summary: Re-register all webhook_mode=auto repos against the current public URL
+      description: |
+        Re-points every `webhook_mode=auto` repository's GitHub webhook at
+        the current public base URL (the live tunnel URL when present, else
+        CIX_PUBLIC_URL). Idempotent. Runs automatically on boot and on
+        tunnel URL changes; this endpoint triggers it manually.
+      responses:
+        "200":
+          description: Reconcile outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookReconcileResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -3570,6 +3833,161 @@ components:
           enum: [enqueued, already_running, ignored, ping]
         repo_id:
           type: string
+
+    TunnelStatus:
+      type: object
+      required: [provider, state, available]
+      properties:
+        provider:
+          type: string
+          enum: [cloudflare, ngrok]
+        state:
+          type: string
+          enum: [disabled, connecting, live, failed]
+        mode:
+          type: string
+          description: '"named" or "quick" for cloudflare; omitted otherwise.'
+        public_url:
+          type: string
+          description: Public base URL (no trailing slash) when live.
+        pid:
+          type: integer
+        uptime_sec:
+          type: integer
+          format: int64
+        last_error:
+          type: string
+        available:
+          type: boolean
+          description: False for providers that are not yet implemented.
+        note:
+          type: string
+
+    TunnelCatalog:
+      type: object
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/TunnelStatus"
+
+    TunnelBinary:
+      type: object
+      required: [provider, installed, managed]
+      properties:
+        provider:
+          type: string
+          enum: [cloudflare, ngrok]
+        installed:
+          type: boolean
+        managed:
+          type: boolean
+          description: Whether the server can install/update this binary from the UI.
+        path:
+          type: string
+        version:
+          type: string
+
+    TunnelBinaryList:
+      type: object
+      required: [binaries]
+      properties:
+        binaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/TunnelBinary"
+
+    TunnelConfig:
+      type: object
+      required: [enabled, provider, mode, hostname, token_set]
+      properties:
+        enabled:
+          type: boolean
+        provider:
+          type: string
+          enum: [cloudflare, ngrok]
+        mode:
+          type: string
+          enum: [named, quick]
+        hostname:
+          type: string
+          description: Named-tunnel public hostname (named mode only).
+        token_set:
+          type: boolean
+          description: Whether a connector token is stored (never returned).
+        updated_at:
+          type: string
+        updated_by:
+          type: string
+
+    TunnelConfigUpdate:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        provider:
+          type: string
+          enum: [cloudflare, ngrok]
+        mode:
+          type: string
+          enum: [named, quick]
+        hostname:
+          type: string
+        token:
+          type: string
+          description: |
+            Cloudflare named-tunnel connector token. Omit to keep the
+            existing token; send "" to clear it.
+
+    TunnelTestResult:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        public_url:
+          type: string
+        status_code:
+          type: integer
+        latency_ms:
+          type: integer
+          format: int64
+        detail:
+          type: string
+
+    WebhookReconcileOutcome:
+      type: object
+      required: [project_path, action]
+      properties:
+        project_path:
+          type: string
+        action:
+          type: string
+          enum: [updated, created, skipped, failed]
+        note:
+          type: string
+
+    WebhookReconcileResult:
+      type: object
+      required: [base_url, total, created, updated, skipped, failed]
+      properties:
+        base_url:
+          type: string
+        total:
+          type: integer
+        created:
+          type: integer
+        updated:
+          type: integer
+        skipped:
+          type: integer
+        failed:
+          type: integer
+        outcomes:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebhookReconcileOutcome"
 
     WorkspaceSearchResponse:
       type: object

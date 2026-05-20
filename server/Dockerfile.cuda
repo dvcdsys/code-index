@@ -55,6 +55,33 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o /out/cix-server \
     ./cmd/cix-server
 
+# ── Stage 1b: fetch cloudflared (Managed Tunnels feature, off by default) ──
+# Static amd64 binary (this image is amd64-only). Bump CLOUDFLARED_VERSION
+# deliberately and re-run `make scout-cuda` before any prod push. Optionally
+# pass CLOUDFLARED_SHA256 to verify the download.
+FROM --platform=linux/amd64 alpine:3.20 AS cloudflared
+ARG CLOUDFLARED_VERSION=2025.2.1
+ARG CLOUDFLARED_SHA256=""
+RUN apk add --no-cache curl ca-certificates
+RUN curl -fsSL \
+      "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
+      -o /cloudflared && \
+    if [ -n "${CLOUDFLARED_SHA256}" ]; then \
+      echo "${CLOUDFLARED_SHA256}  /cloudflared" | sha256sum -c - ; \
+    fi && \
+    chmod 0755 /cloudflared
+
+# ── Stage 1c: fetch the ngrok agent (Managed Tunnels — ngrok provider) ─────
+# Single static amd64 binary from ngrok's equinox CDN stable channel.
+FROM --platform=linux/amd64 alpine:3.20 AS ngrok
+ARG NGROK_CHANNEL=v3-stable
+RUN apk add --no-cache curl ca-certificates tar
+RUN curl -fsSL \
+      "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-${NGROK_CHANNEL}-linux-amd64.tgz" \
+      -o /tmp/ngrok.tgz && \
+    tar -xzf /tmp/ngrok.tgz -C /usr/local/bin ngrok && \
+    chmod 0755 /usr/local/bin/ngrok
+
 # ── Stage 2: llama.cpp CUDA binaries (source only) ─────────────────────────
 FROM ghcr.io/ggml-org/llama.cpp:server-cuda AS llama-source
 
@@ -114,6 +141,17 @@ COPY --from=llama-source /app/libllama-common.so*       /app/
 COPY --from=llama-source /app/libmtmd.so*               /app/
 
 COPY --from=builder /out/cix-server /cix-server
+# Managed Tunnels provider binaries (configured & enabled from the
+# dashboard; exec'd directly — no shell needed).
+COPY --from=cloudflared /cloudflared /cloudflared
+ENV CIX_TUNNEL_CLOUDFLARE_BIN_PATH=/cloudflared
+COPY --from=ngrok /usr/local/bin/ngrok /ngrok
+ENV CIX_TUNNEL_NGROK_BIN_PATH=/ngrok
+# Dashboard-managed agent install/update into a writable dir on /data
+# (bundled binaries are on a read-only layer; this lets operators update
+# without rebuilding).
+ENV CIX_TUNNEL_BIN_MANAGED=true
+ENV CIX_TUNNEL_BIN_DIR=/data/tunnel-bin
 
 # Pre-owned /data directory (distroless has no shell to mkdir+chown).
 COPY --from=cuda-libs --chown=1001:1001 /opt/cix-data /data
