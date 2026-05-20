@@ -50,7 +50,7 @@ export function IndexingProgressCard({ hash }: { hash: string }) {
             <ul className="space-y-0.5 font-mono text-xs">
               {currentFiles.map((f, i) => (
                 <li
-                  key={f}
+                  key={`${i}-${f}`}
                   className={i === 0 ? 'break-all text-foreground' : 'break-all text-muted-foreground'}
                 >
                   {f}
