@@ -5,6 +5,7 @@ import { Badge } from '@/ui/badge';
 import { Card, CardContent } from '@/ui/card';
 import { formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
+import { SyncProjectButton } from './SyncProjectButton';
 
 function basename(p: string): string {
   const parts = p.replace(/\/+$/, '').split('/');
@@ -27,6 +28,9 @@ export function ProjectCard({ project }: { project: Project }) {
     !!project.indexed_with_model &&
     !!currentModel &&
     project.indexed_with_model !== currentModel;
+  // Sync only makes sense for GitHub-cloned projects — the server can pull +
+  // incrementally index those. Local projects are driven by the CLI.
+  const isExternal = project.host_path.startsWith('github.com/');
 
   return (
     <Link to={`/projects/${project.path_hash}`} className="group">
@@ -83,6 +87,26 @@ export function ProjectCard({ project }: { project: Project }) {
                 : 'Never indexed'}
             </span>
           </div>
+          {isExternal ? (
+            // Dedicated action area for GitHub-synced projects. The card is a
+            // <Link>, so intercept the click here to run the mutation instead
+            // of navigating to the detail page.
+            <div
+              className="flex justify-end border-t pt-3"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+            >
+              <SyncProjectButton
+                hash={project.path_hash}
+                hostPath={project.host_path}
+                variant="outline"
+                size="sm"
+                className="h-7 px-2.5 text-xs"
+              />
+            </div>
+          ) : null}
         </CardContent>
       </Card>
     </Link>

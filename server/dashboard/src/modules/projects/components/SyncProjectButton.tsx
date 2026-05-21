@@ -1,14 +1,29 @@
 import { Loader2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Button } from '@/ui/button';
+import { Button, type ButtonProps } from '@/ui/button';
 import { useReindexProject } from '../hooks';
 
 // SyncProjectButton triggers a SOFT update: the server fetches the latest
 // commits and runs an incremental index over just the tree.Diff change set
 // (no indexed_sha clear). This is the cheap, common path — for a from-scratch
 // rebuild use the Reindex button. External projects only.
-export function SyncProjectButton({ hash, hostPath }: { hash: string; hostPath: string }) {
+//
+// variant/size/className are forwarded to the underlying Button so callers can
+// render it prominently (project detail header) or compact (project card).
+export function SyncProjectButton({
+  hash,
+  hostPath,
+  variant = 'default',
+  size = 'sm',
+  className,
+}: {
+  hash: string;
+  hostPath: string;
+  variant?: ButtonProps['variant'];
+  size?: ButtonProps['size'];
+  className?: string;
+}) {
   const sync = useReindexProject();
 
   async function onClick() {
@@ -27,8 +42,9 @@ export function SyncProjectButton({ hash, hostPath }: { hash: string; hostPath: 
 
   return (
     <Button
-      variant="default"
-      size="sm"
+      variant={variant}
+      size={size}
+      className={className}
       onClick={onClick}
       disabled={sync.isPending}
       title="Sync — pull the latest commits and incrementally index the changed files."
