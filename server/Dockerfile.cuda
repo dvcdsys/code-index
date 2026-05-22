@@ -83,7 +83,15 @@ RUN curl -fsSL \
     chmod 0755 /usr/local/bin/ngrok
 
 # ── Stage 2: llama.cpp CUDA binaries (source only) ─────────────────────────
-FROM ghcr.io/ggml-org/llama.cpp:server-cuda AS llama-source
+# PINNED BY DIGEST. The floating :server-cuda tag drifts on every upstream
+# release, and upstream periodically refactors the shared-library layout (it
+# recently split the server logic into libllama-server-impl.so). An unpinned
+# tag means a rebuild silently picks up a new layout and breaks the runtime
+# copy below — that is exactly what took prod down (llama-server exit 127:
+# missing libllama-server-impl.so). Bump this digest deliberately and re-run
+# `make scout-cuda` to validate. Resolve a new digest with:
+#   docker buildx imagetools inspect ghcr.io/ggml-org/llama.cpp:server-cuda
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:67bf4625a2f788864cecfabb30c33f4cee97f055326e008e1d608c2ba44a1c94 AS llama-source
 
 # ── Stage 3: extract CUDA shared libraries ─────────────────────────────────
 # Install the CUDA libs here, then COPY individual .so files into the
@@ -127,18 +135,16 @@ FROM gcr.io/distroless/cc-debian13:nonroot
 # preserved as actual symlinks instead of being duplicated as regular files.
 COPY --from=cuda-libs /opt/cuda-runtime/ /
 
-# llama.cpp runtime — selective copy (skip 12 unused CPU backend variants)
-COPY --from=llama-source /app/llama-server              /app/llama-server
-COPY --from=llama-source /app/libggml-base.so*          /app/
-COPY --from=llama-source /app/libggml.so*               /app/
-COPY --from=llama-source /app/libggml-cuda.so           /app/
-# CPU backends — required even in GPU mode (GGML uses them for I/O buffers).
-# x64: baseline SSE2 fallback; haswell: AVX2 for modern CPUs (most x86_64 servers).
-COPY --from=llama-source /app/libggml-cpu-x64.so        /app/
-COPY --from=llama-source /app/libggml-cpu-haswell.so    /app/
-COPY --from=llama-source /app/libllama.so*              /app/
-COPY --from=llama-source /app/libllama-common.so*       /app/
-COPY --from=llama-source /app/libmtmd.so*               /app/
+# llama.cpp runtime — the server binary plus ALL of its shared libraries.
+# We deliberately copy the whole /app/*.so* set rather than cherry-picking a
+# fixed file list: upstream refactors the layout between releases (CPU backend
+# variant names change; the server logic now lives in libllama-server-impl.so),
+# and a fixed list silently drops a now-required .so → llama-server exit 127.
+# The extra unused CPU-backend variants add only a few MB; correctness wins.
+# Required system libs (libssl.so.3, libcrypto.so.3, libgomp.so.1, libstdc++,
+# libgcc_s) are already provided by the distroless/cc-debian13 base.
+COPY --from=llama-source /app/llama-server /app/llama-server
+COPY --from=llama-source /app/*.so* /app/
 
 COPY --from=builder /out/cix-server /cix-server
 # Managed Tunnels provider binaries (configured & enabled from the
