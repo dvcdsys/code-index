@@ -1,0 +1,65 @@
+name: "llama.cpp pin freshness"
+
+# The CUDA image pins ghcr.io/ggml-org/llama.cpp:server-cuda by digest for
+# reproducible builds (see server/Dockerfile.cuda). That pin would otherwise
+# rot silently. This job checks weekly whether upstream has shipped a newer
+# build and, if so, opens (or updates) a tracking issue so the bump doesn't
+# get forgotten. The same check also runs on every CUDA image build as a
+# build-log annotation — this workflow is the persistent, can't-miss reminder.
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Check pinned llama.cpp digest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compare pinned vs upstream digest
+        id: check
+        run: server/scripts/check-llama-pin.sh server/Dockerfile.cuda
+
+      - name: Open or update reminder issue
+        if: steps.check.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ steps.check.outputs.pinned }}
+          CURRENT: ${{ steps.check.outputs.current }}
+        run: |
+          set -euo pipefail
+          title="chore(server/cuda): bump pinned llama.cpp digest"
+          body="$(cat <<EOF
+          Upstream \`ghcr.io/ggml-org/llama.cpp:server-cuda\` has moved past the digest pinned in \`server/Dockerfile.cuda\`.
+
+          | | digest |
+          |---|---|
+          | pinned | \`${PINNED}\` |
+          | current | \`${CURRENT}\` |
+
+          ### To update
+          1. Bump the \`FROM ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:…\` digest in \`server/Dockerfile.cuda\` to \`${CURRENT}\`.
+          2. \`cd server && make scout-cuda\` to rebuild + scan (the shared-lib layout may have changed — the Dockerfile copies all \`/app/*.so*\` to stay robust).
+          3. Confirm \`/app/llama-server\` still resolves all libs, then promote.
+
+          _Auto-filed by the weekly \`llama.cpp pin freshness\` workflow._
+          EOF
+          )"
+          existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            echo "Updating existing issue #$existing"
+            gh issue comment "$existing" --body "$body"
+          else
+            echo "Opening new reminder issue"
+            gh issue create --title "$title" --body "$body"
+          fi
