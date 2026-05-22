@@ -40,6 +40,10 @@ type Workspace struct {
 	Description string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// OwnerUserID is the creator. nil only for workspaces orphaned by a user
+	// deletion (FK SET NULL). Visible to the owner, members of any view-group
+	// it is shared to, and admins.
+	OwnerUserID *string
 }
 
 // Service wraps the workspaces table.
@@ -50,8 +54,15 @@ type Service struct {
 // New returns a Service.
 func New(db *sql.DB) *Service { return &Service{DB: db} }
 
-// Create inserts a new workspace. Name must be non-empty and unique.
+// Create inserts a new ownerless workspace. Equivalent to CreateOwned with an
+// empty owner — retained for callers (and tests) that don't set ownership.
 func (s *Service) Create(ctx context.Context, name, description string) (Workspace, error) {
+	return s.CreateOwned(ctx, name, description, "")
+}
+
+// CreateOwned inserts a new workspace owned by ownerUserID (empty → NULL).
+// Name must be non-empty and unique.
+func (s *Service) CreateOwned(ctx context.Context, name, description, ownerUserID string) (Workspace, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return Workspace{}, ErrNameEmpty
@@ -62,9 +73,9 @@ func (s *Service) Create(ctx context.Context, name, description string) (Workspa
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	_, err := s.DB.ExecContext(ctx,
-		`INSERT INTO workspaces (id, name, description, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		id, name, nullableString(description), now, now,
+		`INSERT INTO workspaces (id, name, description, created_at, updated_at, owner_user_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		id, name, nullableString(description), now, now, nullableString(ownerUserID),
 	)
 	if err != nil {
 		if isUniqueConstraintViolation(err) {
@@ -78,7 +89,7 @@ func (s *Service) Create(ctx context.Context, name, description string) (Workspa
 // GetByID returns one workspace. ErrNotFound when absent.
 func (s *Service) GetByID(ctx context.Context, id string) (Workspace, error) {
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, name, description, created_at, updated_at
+		`SELECT id, name, description, created_at, updated_at, owner_user_id
 		   FROM workspaces WHERE id = ?`, id)
 	return scanRow(row)
 }
@@ -86,7 +97,7 @@ func (s *Service) GetByID(ctx context.Context, id string) (Workspace, error) {
 // List returns every workspace, newest first.
 func (s *Service) List(ctx context.Context) ([]Workspace, error) {
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT id, name, description, created_at, updated_at
+		`SELECT id, name, description, created_at, updated_at, owner_user_id
 		   FROM workspaces ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list workspaces: %w", err)
@@ -149,12 +160,13 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 
 func scanRow(r interface{ Scan(dest ...any) error }) (Workspace, error) {
 	var (
-		w               Workspace
-		description     sql.NullString
-		createdAt       string
-		updatedAt       string
+		w           Workspace
+		description sql.NullString
+		createdAt   string
+		updatedAt   string
+		ownerUserID sql.NullString
 	)
-	err := r.Scan(&w.ID, &w.Name, &description, &createdAt, &updatedAt)
+	err := r.Scan(&w.ID, &w.Name, &description, &createdAt, &updatedAt, &ownerUserID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Workspace{}, ErrNotFound
@@ -164,6 +176,9 @@ func scanRow(r interface{ Scan(dest ...any) error }) (Workspace, error) {
 	w.Description = description.String
 	w.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	w.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	if ownerUserID.Valid {
+		w.OwnerUserID = &ownerUserID.String
+	}
 	return w, nil
 }
 

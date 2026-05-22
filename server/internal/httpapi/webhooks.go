@@ -20,11 +20,14 @@ import (
 
 // GetProjectWebhookInfo — GET /api/v1/projects/{hash}/webhook-info.
 //
-// Authenticated. Returns the publicly-reachable webhook URL + the HMAC
-// secret. Operators copy these into GitHub's webhook config when
-// webhook_mode is not 'auto'. 404 when the project is local (no
-// git_repos row).
+// Admin-only. Returns the publicly-reachable webhook URL + the HMAC
+// secret (a credential) for an external project. Operators copy these into
+// GitHub's webhook config when webhook_mode is not 'auto'. 404 when the
+// project is local (no git_repos row).
 func (s *Server) GetProjectWebhookInfo(w http.ResponseWriter, r *http.Request, hash openapi.ProjectHash) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.gitReposUnavailable(w) {
 		return
 	}

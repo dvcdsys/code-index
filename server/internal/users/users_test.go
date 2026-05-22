@@ -45,7 +45,7 @@ func TestCreateAndAuthenticate(t *testing.T) {
 
 func TestAuthenticate_Wrong(t *testing.T) {
 	s := newTestService(t)
-	_, _ = s.Create(context.Background(), "a@b.com", "rightpassword", RoleViewer, false)
+	_, _ = s.Create(context.Background(), "a@b.com", "rightpassword", RoleUser, false)
 	_, err := s.Authenticate(context.Background(), "a@b.com", "wrong")
 	if !errors.Is(err, ErrInvalidLogin) {
 		t.Errorf("err = %v, want ErrInvalidLogin", err)
@@ -58,11 +58,11 @@ func TestAuthenticate_Wrong(t *testing.T) {
 
 func TestEmailUniqueness(t *testing.T) {
 	s := newTestService(t)
-	_, err := s.Create(context.Background(), "a@b.com", "password1", RoleViewer, false)
+	_, err := s.Create(context.Background(), "a@b.com", "password1", RoleUser, false)
 	if err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
-	_, err = s.Create(context.Background(), "A@B.com", "password2", RoleViewer, false)
+	_, err = s.Create(context.Background(), "A@B.com", "password2", RoleUser, false)
 	if !errors.Is(err, ErrEmailTaken) {
 		t.Errorf("err = %v, want ErrEmailTaken (case-insensitive uniqueness)", err)
 	}
@@ -70,7 +70,7 @@ func TestEmailUniqueness(t *testing.T) {
 
 func TestUpdatePassword_ClearsMustChange(t *testing.T) {
 	s := newTestService(t)
-	u, _ := s.Create(context.Background(), "a@b.com", "initial-password", RoleViewer, true)
+	u, _ := s.Create(context.Background(), "a@b.com", "initial-password", RoleUser, true)
 	if err := s.UpdatePassword(context.Background(), u.ID, "newpassword123"); err != nil {
 		t.Fatalf("UpdatePassword: %v", err)
 	}
@@ -92,12 +92,12 @@ func TestUpdatePassword_ClearsMustChange(t *testing.T) {
 func TestSetRole_LastAdminBlock(t *testing.T) {
 	s := newTestService(t)
 	a, _ := s.Create(context.Background(), "a@b.com", "password1", RoleAdmin, false)
-	if err := s.SetRole(context.Background(), a.ID, RoleViewer); !errors.Is(err, ErrLastAdminBlock) {
+	if err := s.SetRole(context.Background(), a.ID, RoleUser); !errors.Is(err, ErrLastAdminBlock) {
 		t.Errorf("demoting last admin err = %v, want ErrLastAdminBlock", err)
 	}
 	// Add a second admin — now demotion of the first must succeed.
 	_, _ = s.Create(context.Background(), "b@b.com", "password2", RoleAdmin, false)
-	if err := s.SetRole(context.Background(), a.ID, RoleViewer); err != nil {
+	if err := s.SetRole(context.Background(), a.ID, RoleUser); err != nil {
 		t.Errorf("demoting with another admin around: %v", err)
 	}
 }
@@ -129,7 +129,7 @@ func TestInvalidRole(t *testing.T) {
 func TestList(t *testing.T) {
 	s := newTestService(t)
 	for _, em := range []string{"a@b.com", "b@b.com", "c@b.com"} {
-		_, _ = s.Create(context.Background(), em, "password1234", RoleViewer, false)
+		_, _ = s.Create(context.Background(), em, "password1234", RoleUser, false)
 	}
 	list, err := s.List(context.Background())
 	if err != nil {
@@ -165,11 +165,11 @@ func TestListWithStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create alice: %v", err)
 	}
-	bob, err := s.Create(ctx, "bob@b.com", "password1234", RoleViewer, false)
+	bob, err := s.Create(ctx, "bob@b.com", "password1234", RoleUser, false)
 	if err != nil {
 		t.Fatalf("create bob: %v", err)
 	}
-	carol, err := s.Create(ctx, "carol@b.com", "password1234", RoleViewer, false)
+	carol, err := s.Create(ctx, "carol@b.com", "password1234", RoleUser, false)
 	if err != nil {
 		t.Fatalf("create carol: %v", err)
 	}

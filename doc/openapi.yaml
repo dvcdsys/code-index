@@ -87,6 +87,12 @@ tags:
       modify any workspace. PR1 ships CRUD only; repository attachment,
       webhooks, and the two-stage search endpoint land in subsequent
       releases of the workspaces feature branch.
+  - name: groups
+    description: |
+      View-groups: admin-managed sets of users. External projects and
+      workspaces are shared to a group, granting its members read/search
+      access. Group CRUD and membership are admin-only; GET /groups is
+      member-scoped for regular users so the share picker can populate.
   - name: github-tokens
     description: |
       GitHub Personal Access Tokens used by the workspaces feature for
@@ -1258,6 +1264,389 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/groups:
+    get:
+      operationId: listGroups
+      tags: [groups]
+      summary: List view-groups
+      description: |
+        Admins see every group; a regular user sees only the groups they
+        belong to (so the dashboard's "share to group" picker can populate).
+      responses:
+        "200":
+          description: Group list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createGroup
+      tags: [groups]
+      summary: Create a view-group (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGroupRequest"
+      responses:
+        "201":
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/groups/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+    get:
+      operationId: getGroup
+      tags: [groups]
+      summary: Get a view-group (admin only)
+      responses:
+        "200":
+          description: Group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateGroup
+      tags: [groups]
+      summary: Update a view-group (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGroupRequest"
+      responses:
+        "200":
+          description: Updated group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+    delete:
+      operationId: deleteGroup
+      tags: [groups]
+      summary: Delete a view-group (admin only)
+      description: |
+        Cascades to memberships and project/workspace shares referencing
+        the group.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/groups/{id}/members:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+    get:
+      operationId: listGroupMembers
+      tags: [groups]
+      summary: List members of a view-group (admin only)
+      responses:
+        "200":
+          description: Member list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupMemberListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: addGroupMember
+      tags: [groups]
+      summary: Add a user to a view-group (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddGroupMemberRequest"
+      responses:
+        "204":
+          description: Member added (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/groups/{id}/members/{userId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: User ID to remove.
+    delete:
+      operationId: removeGroupMember
+      tags: [groups]
+      summary: Remove a user from a view-group (admin only)
+      responses:
+        "204":
+          description: Member removed (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/projects/{hash}/shares:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Project path hash.
+    get:
+      operationId: listProjectShares
+      tags: [groups]
+      summary: List the view-groups an external project is shared to (admin only)
+      responses:
+        "200":
+          description: Group ids the project is shared to
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupIdListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: shareProjectToGroup
+      tags: [groups]
+      summary: Share an external project to a view-group (admin only)
+      description: |
+        Only EXTERNAL projects (with a git_repos peer) may be shared — sharing
+        a personal/local project returns 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareToGroupRequest"
+      responses:
+        "204":
+          description: Shared (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/projects/{hash}/shares/{groupId}:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Project path hash.
+      - name: groupId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+    delete:
+      operationId: unshareProjectFromGroup
+      tags: [groups]
+      summary: Revoke a project↔group share (admin only)
+      responses:
+        "204":
+          description: Unshared (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/projects/{hash}/owner:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Project path hash.
+    put:
+      operationId: reassignProjectOwner
+      tags: [projects]
+      summary: Reassign the owner of a local project (admin only)
+      description: |
+        Only LOCAL projects (no git_repos peer) can be reassigned — external
+        projects are ownerless by design and return 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReassignOwnerRequest"
+      responses:
+        "200":
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/workspaces/{id}/shares:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Workspace ID.
+    get:
+      operationId: listWorkspaceShares
+      tags: [workspaces]
+      summary: List the view-groups a workspace is shared to
+      responses:
+        "200":
+          description: Group ids the workspace is shared to
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupIdListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    post:
+      operationId: shareWorkspaceToGroup
+      tags: [workspaces]
+      summary: Share a workspace to a view-group
+      description: |
+        The workspace owner may share to a group they belong to; an admin may
+        share to any group. Visibility only — each project inside the workspace
+        is still access-checked per viewer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareToGroupRequest"
+      responses:
+        "204":
+          description: Shared (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}/shares/{groupId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Workspace ID.
+      - name: groupId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+    delete:
+      operationId: unshareWorkspaceFromGroup
+      tags: [workspaces]
+      summary: Revoke a workspace↔group share (owner or admin)
+      responses:
+        "204":
+          description: Unshared (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
   /api/v1/git-repos:
     post:
       operationId: addGitRepo
@@ -2396,7 +2785,7 @@ components:
           format: email
         role:
           type: string
-          enum: [admin, viewer]
+          enum: [admin, user]
         must_change_password:
           type: boolean
         created_at:
@@ -2468,7 +2857,7 @@ components:
 
     MeResponse:
       type: object
-      required: [user, auth_method]
+      required: [user, auth_method, groups]
       properties:
         user:
           $ref: "#/components/schemas/User"
@@ -2478,6 +2867,15 @@ components:
           description: |
             Tells the dashboard whether to surface "logout" (session) or
             hide it (api_key access — there's nothing to log out of).
+        groups:
+          type: array
+          description: |
+            View-groups the caller belongs to. Lets the dashboard scope the
+            "share to group" picker without a second round-trip. Empty for a
+            user in no groups; admins still only list their own memberships
+            here (the full group list comes from GET /groups).
+          items:
+            $ref: "#/components/schemas/Group"
 
     ChangePasswordRequest:
       type: object
@@ -2506,17 +2904,17 @@ components:
             The admin shares this out-of-band.
         role:
           type: string
-          enum: [admin, viewer]
+          enum: [admin, user]
 
     UpdateUserRequest:
       type: object
       properties:
         role:
           type: string
-          enum: [admin, viewer]
+          enum: [admin, user]
           description: |
             New role for the user. Refused for the last enabled admin
-            when set to `viewer`.
+            when set to `user`.
         disabled:
           type: boolean
           description: |
@@ -2953,6 +3351,28 @@ components:
             Embedding model identifier active when this project was last
             (re)indexed. NULL on rows that pre-date drift tracking — the
             dashboard treats NULL as "Unknown" rather than as drift.
+        owner_user_id:
+          type: string
+          nullable: true
+          description: |
+            User who owns this personal (locally indexed) project. NULL means
+            ownerless — the canonical state for EXTERNAL projects (those with a
+            git_repos peer), which are admin-administered and reachable only via
+            a view-group share.
+        display_path:
+          type: string
+          description: |
+            Human-readable path. The real filesystem path for local projects,
+            the github path for external ones. host_path is the identity key
+            (namespaced per machine for locals) — clients should show this.
+        machine_id:
+          type: string
+          nullable: true
+          description: Per-machine UUID a local project was indexed on. NULL for external/legacy.
+        machine_label:
+          type: string
+          nullable: true
+          description: os.Hostname() of the indexing machine — display only.
         sqlite_path:
           type: string
           nullable: true
@@ -2990,6 +3410,17 @@ components:
       properties:
         host_path:
           type: string
+          description: The real filesystem path being registered (becomes display_path).
+        machine_id:
+          type: string
+          description: |
+            Per-machine UUID supplied by the CLI (from ~/.cix/machine_id). When
+            present the project is LOCAL and its identity key is namespaced
+            local:{machine_id}:{host_path} so the same path on different
+            machines/users does not collide. Omit for external repos.
+        machine_label:
+          type: string
+          description: os.Hostname() of the indexing machine — display only.
 
     UpdateProjectRequest:
       type: object
@@ -3537,6 +3968,13 @@ components:
         updated_at:
           type: string
           format: date-time
+        owner_user_id:
+          type: string
+          nullable: true
+          description: |
+            User who created the workspace. NULL only when orphaned by a user
+            deletion. Visible to the owner, members of any view-group it is
+            shared to, and admins.
 
     WorkspaceListResponse:
       type: object
@@ -3572,6 +4010,112 @@ components:
           minLength: 1
         description:
           type: string
+
+    Group:
+      type: object
+      required: [id, name, description, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          description: Free-form description. Empty string when absent.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    GroupMember:
+      type: object
+      required: [user_id, email, role, added_at]
+      properties:
+        user_id:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, user]
+        added_at:
+          type: string
+          format: date-time
+
+    GroupListResponse:
+      type: object
+      required: [groups, total]
+      properties:
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/Group"
+        total:
+          type: integer
+
+    GroupMemberListResponse:
+      type: object
+      required: [members, total]
+      properties:
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupMember"
+        total:
+          type: integer
+
+    CreateGroupRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+
+    UpdateGroupRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+
+    AddGroupMemberRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+
+    ShareToGroupRequest:
+      type: object
+      required: [group_id]
+      properties:
+        group_id:
+          type: string
+
+    GroupIdListResponse:
+      type: object
+      required: [group_ids]
+      properties:
+        group_ids:
+          type: array
+          items:
+            type: string
+
+    ReassignOwnerRequest:
+      type: object
+      required: [owner_user_id]
+      properties:
+        owner_user_id:
+          type: string
+          description: New owner; must be an existing, enabled user.
 
     GithubToken:
       type: object

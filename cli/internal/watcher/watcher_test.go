@@ -1,9 +1,7 @@
 package watcher
 
 import (
-	"crypto/sha1"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -19,10 +17,10 @@ import (
 	"github.com/rjeczalik/notify"
 )
 
-// projectHash mirrors client.encodeProjectPath.
+// projectHash mirrors the client's project URL hash — delegated to the real
+// implementation so per-machine namespacing matches.
 func projectHash(path string) string {
-	h := sha1.Sum([]byte(path))
-	return fmt.Sprintf("%x", h)[:16]
+	return client.EncodeProjectPath(path)
 }
 
 // mockEventInfo implements notify.EventInfo for testing.

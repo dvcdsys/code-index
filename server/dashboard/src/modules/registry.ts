@@ -1,5 +1,6 @@
 import { ApiKeysModule } from './api-keys';
 import { GithubIntegrationModule } from './github-integration';
+import { GroupsModule } from './groups';
 import { HomeModule } from './home';
 import { ManagedTunnelsModule } from './managed-tunnels';
 import { ProjectsModule } from './projects';
@@ -27,6 +28,7 @@ export const MODULES: Module[] = [
   GithubIntegrationModule,
   ManagedTunnelsModule,
   UsersModule,
+  GroupsModule,
   SettingsModule,
   ServerModule,
 ].sort((a, b) => (a.weight ?? 100) - (b.weight ?? 100));

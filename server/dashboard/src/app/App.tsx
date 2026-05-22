@@ -53,7 +53,7 @@ export default function App() {
   // mounted, so a deep link to it 404s back to /.
   const visible = MODULES.filter((m) => {
     if (!m.requiredRole) return true;
-    if (m.requiredRole === 'viewer') return true;
+    if (m.requiredRole === 'user') return true;
     return user.role === 'admin';
   });
 

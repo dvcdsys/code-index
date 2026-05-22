@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { AlertCircle, ChevronLeft, Trash2 } from 'lucide-react';
 import { ApiError, api } from '@/api/client';
+import { useAuth } from '@/auth/useAuth';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
 import { Skeleton } from '@/ui/skeleton';
 import { AddExistingProjectDialog } from './components/AddExistingProjectDialog';
 import { AddRepoDialog } from './components/AddRepoDialog';
 import { WorkspaceProjectRow } from './components/WorkspaceProjectRow';
+import { WorkspaceShareCard } from './components/WorkspaceShareCard';
 import { WorkspaceSearchDialog } from './components/WorkspaceSearchDialog';
 import { isInFlight } from './types';
 import type {
@@ -22,6 +24,7 @@ const POLL_MS = 3000;
 export function WorkspaceDetailPage() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [projects, setProjects] = useState<WorkspaceProject[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -213,6 +216,10 @@ export function WorkspaceDetailPage() {
           </div>
         )}
       </section>
+
+      {user && (user.role === 'admin' || workspace.owner_user_id === user.id) ? (
+        <WorkspaceShareCard workspaceId={workspace.id} />
+      ) : null}
     </div>
   );
 }

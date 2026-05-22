@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/access"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
@@ -145,7 +146,23 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "host_path is required")
 		return
 	}
-	p, err := projects.Create(r.Context(), s.Deps.DB, projects.CreateRequest{HostPath: body.HostPath})
+	// A project created here is a personal/local project owned by the caller.
+	// External projects are created ownerless via AddGitRepo instead.
+	ownerID, _ := s.callerIdentity(r)
+	machineID := ""
+	if body.MachineId != nil {
+		machineID = *body.MachineId
+	}
+	machineLabel := ""
+	if body.MachineLabel != nil {
+		machineLabel = *body.MachineLabel
+	}
+	p, err := projects.Create(r.Context(), s.Deps.DB, projects.CreateRequest{
+		HostPath:     body.HostPath,
+		OwnerUserID:  ownerID,
+		MachineID:    machineID,
+		MachineLabel: machineLabel,
+	})
 	if err != nil {
 		if errors.Is(err, projects.ErrConflict) || errors.Is(err, projects.ErrOverlap) {
 			writeError(w, http.StatusConflict, err.Error())
@@ -157,12 +174,33 @@ func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, projectToOpenAPI(p))
 }
 
-// ListProjects — GET /api/v1/projects.
+// ListProjects — GET /api/v1/projects. Filtered by access: admins see every
+// project; a regular user sees the projects they own plus external projects
+// shared to a view-group they belong to.
 func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 	list, err := projects.List(r.Context(), s.Deps.DB)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	userID, isAdmin := s.callerIdentity(r)
+	if !isAdmin {
+		allowed, err := access.AccessibleProjectHostPaths(r.Context(), s.Deps.DB, userID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "access check failed")
+			return
+		}
+		allowedSet := make(map[string]struct{}, len(allowed))
+		for _, hp := range allowed {
+			allowedSet[hp] = struct{}{}
+		}
+		filtered := list[:0]
+		for _, p := range list {
+			if _, ok := allowedSet[p.HostPath]; ok {
+				filtered = append(filtered, p)
+			}
+		}
+		list = filtered
 	}
 	out := make([]openapi.Project, 0, len(list))
 	for i := range list {
@@ -176,7 +214,7 @@ func (s *Server) ListProjects(w http.ResponseWriter, r *http.Request) {
 
 // GetProject — GET /api/v1/projects/{path}.
 func (s *Server) GetProject(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectAccess(w, r)
 	if p == nil {
 		return
 	}
@@ -246,10 +284,7 @@ func dirSizeBytes(dir string) (int64, bool) {
 // changes can shrink the indexing surface (exclude_patterns, max_file_size)
 // and viewers should not be able to silently de-index a project.
 func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	if _, ok := s.mustBeAdmin(w, r); !ok {
-		return
-	}
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return
 	}
@@ -278,10 +313,7 @@ func (s *Server) UpdateProject(w http.ResponseWriter, r *http.Request, path open
 // project also wipes its symbols/refs/embeddings and is destructive enough
 // that it must not be reachable from a viewer-scoped session or API key.
 func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	if _, ok := s.mustBeAdmin(w, r); !ok {
-		return
-	}
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return
 	}
@@ -298,7 +330,7 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path open
 
 // SearchSymbols — POST /api/v1/projects/{path}/search/symbols.
 func (s *Server) SearchSymbols(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectAccess(w, r)
 	if p == nil {
 		return
 	}
@@ -340,7 +372,7 @@ func (s *Server) SearchSymbols(w http.ResponseWriter, r *http.Request, path open
 
 // SearchDefinitions — POST /api/v1/projects/{path}/search/definitions.
 func (s *Server) SearchDefinitions(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectAccess(w, r)
 	if p == nil {
 		return
 	}
@@ -383,7 +415,7 @@ func (s *Server) SearchDefinitions(w http.ResponseWriter, r *http.Request, path 
 
 // SearchReferences — POST /api/v1/projects/{path}/search/references.
 func (s *Server) SearchReferences(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectAccess(w, r)
 	if p == nil {
 		return
 	}
@@ -424,7 +456,7 @@ func (s *Server) SearchReferences(w http.ResponseWriter, r *http.Request, path o
 
 // SearchFiles — POST /api/v1/projects/{path}/search/files.
 func (s *Server) SearchFiles(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectAccess(w, r)
 	if p == nil {
 		return
 	}
@@ -483,7 +515,7 @@ func (s *Server) SearchFiles(w http.ResponseWriter, r *http.Request, path openap
 
 // GetProjectSummary — GET /api/v1/projects/{path}/summary.
 func (s *Server) GetProjectSummary(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectAccess(w, r)
 	if p == nil {
 		return
 	}
@@ -583,7 +615,7 @@ func (s *Server) GetProjectSummary(w http.ResponseWriter, r *http.Request, path 
 
 // SemanticSearch — POST /api/v1/projects/{path}/search.
 func (s *Server) SemanticSearch(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectAccess(w, r)
 	if p == nil {
 		return
 	}
@@ -742,7 +774,7 @@ func fileGroupsToOpenAPI(in []fileGroupResult) []openapi.FileGroupResult {
 
 // IndexBegin — POST /api/v1/projects/{path}/index/begin.
 func (s *Server) IndexBegin(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return
 	}
@@ -783,7 +815,7 @@ func (s *Server) IndexBegin(w http.ResponseWriter, r *http.Request, path openapi
 // Honours `Accept: application/x-ndjson` to switch into the streaming
 // variant; otherwise returns the legacy single-JSON summary.
 func (s *Server) IndexFiles(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash, params openapi.IndexFilesParams) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return
 	}
@@ -848,7 +880,7 @@ func (s *Server) IndexFiles(w http.ResponseWriter, r *http.Request, path openapi
 
 // IndexFinish — POST /api/v1/projects/{path}/index/finish.
 func (s *Server) IndexFinish(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return
 	}
@@ -893,7 +925,7 @@ func (s *Server) IndexFinish(w http.ResponseWriter, r *http.Request, path openap
 // theoretical DoS we'd be preventing. If you need owner-scoped semantics
 // later, key off projects.indexing_run.started_by_user_id.
 func (s *Server) IndexCancel(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return
 	}
@@ -911,7 +943,7 @@ func (s *Server) IndexCancel(w http.ResponseWriter, r *http.Request, path openap
 
 // IndexStatus — GET /api/v1/projects/{path}/index/status.
 func (s *Server) IndexStatus(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.lookupProject(w, r, path)
+	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return
 	}
@@ -963,16 +995,8 @@ func (s *Server) IndexStatus(w http.ResponseWriter, r *http.Request, path openap
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers — type conversion + legacy lookup wrapper
+// Internal helpers — type conversion
 // ---------------------------------------------------------------------------
-
-// lookupProject resolves the {path} URL parameter. Wraps resolveProjectFromHash
-// so generated method signatures stay clean.
-func (s *Server) lookupProject(w http.ResponseWriter, r *http.Request, _ openapi.ProjectHash) *projects.Project {
-	// Use the helper that already exists in search.go — it pulls the
-	// {path} chi URL param from r and writes a 404 on miss.
-	return resolveProjectFromHash(w, r, s.Deps)
-}
 
 // projectToOpenAPI converts the internal projects.Project (string dates,
 // flat Settings/Stats) into the generated openapi.Project (time.Time dates,
@@ -1019,6 +1043,16 @@ func projectToOpenAPI(p *projects.Project) openapi.Project {
 	if p.IndexedWithModel != nil {
 		v := *p.IndexedWithModel
 		out.IndexedWithModel = &v
+	}
+	dp := p.DisplayPath
+	out.DisplayPath = &dp
+	if p.MachineID != nil {
+		v := *p.MachineID
+		out.MachineId = &v
+	}
+	if p.MachineLabel != nil {
+		v := *p.MachineLabel
+		out.MachineLabel = &v
 	}
 	return out
 }

@@ -14,6 +14,8 @@ import { DeleteProjectDialog } from './components/DeleteProjectDialog';
 import { ForceStopButton } from './components/ForceStopButton';
 import { IndexingProgressCard } from './components/IndexingProgressCard';
 import { ProjectInfoCard } from './components/ProjectInfoCard';
+import { ProjectShareCard } from './components/ProjectShareCard';
+import { ReassignOwnerDialog } from './components/ReassignOwnerDialog';
 import { ReindexProjectButton } from './components/ReindexProjectButton';
 import { SyncProjectButton } from './components/SyncProjectButton';
 import { SyncSettingsCard } from './components/SyncSettingsCard';
@@ -60,6 +62,7 @@ export function ProjectDetailPage() {
   const s = summary.data;
   const drift = !!p.indexed_with_model && !!currentModel && p.indexed_with_model !== currentModel;
   const isExternal = p.host_path.startsWith('github.com/');
+  const displayPath = p.display_path ?? p.host_path;
 
   return (
     <div className="space-y-8">
@@ -84,8 +87,11 @@ export function ProjectDetailPage() {
           ))}
         </div>
         <h1 className="break-all font-mono text-2xl font-semibold leading-tight">
-          {p.host_path}
+          {displayPath}
         </h1>
+        {p.machine_label ? (
+          <div className="text-xs text-muted-foreground">on {p.machine_label}</div>
+        ) : null}
         <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
           <span>Hash: <code className="rounded bg-muted px-1 py-0.5 text-xs">{p.path_hash}</code></span>
           <span>Created {formatRelative(p.created_at)}</span>
@@ -104,15 +110,18 @@ export function ProjectDetailPage() {
           </Button>
           {isExternal ? (
             <>
-              <SyncProjectButton hash={p.path_hash} hostPath={p.host_path} />
-              <ReindexProjectButton hash={p.path_hash} hostPath={p.host_path} />
+              <SyncProjectButton hash={p.path_hash} hostPath={displayPath} />
+              <ReindexProjectButton hash={p.path_hash} hostPath={displayPath} />
               {p.status === 'indexing' ? (
-                <ForceStopButton hash={p.path_hash} hostPath={p.host_path} />
+                <ForceStopButton hash={p.path_hash} hostPath={displayPath} />
               ) : null}
             </>
           ) : null}
+          {isAdmin && !isExternal ? (
+            <ReassignOwnerDialog hash={p.path_hash} currentOwnerId={p.owner_user_id} />
+          ) : null}
           {isAdmin ? (
-            <DeleteProjectDialog hash={p.path_hash} hostPath={p.host_path} redirectAfter />
+            <DeleteProjectDialog hash={p.path_hash} hostPath={displayPath} redirectAfter />
           ) : null}
         </div>
       </header>
@@ -146,7 +155,7 @@ export function ProjectDetailPage() {
             </div>
             <div className="text-xs">
               Reindex from your terminal:{' '}
-              <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {p.host_path}</code>
+              <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {displayPath}</code>
             </div>
           </AlertDescription>
         </Alert>
@@ -162,6 +171,8 @@ export function ProjectDetailPage() {
       <ProjectInfoCard project={p} />
 
       {isExternal ? <SyncSettingsCard hash={p.path_hash} isAdmin={isAdmin} /> : null}
+
+      {isExternal && isAdmin ? <ProjectShareCard hash={p.path_hash} /> : null}
 
       <section>
         <h2 className="mb-3 text-sm font-medium text-muted-foreground">Workspaces</h2>

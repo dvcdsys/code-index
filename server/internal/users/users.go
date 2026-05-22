@@ -19,8 +19,8 @@ import (
 // Roles. Kept open-coded (string constants) rather than a typed enum so
 // SQL queries and HTTP handlers can compare without import gymnastics.
 const (
-	RoleAdmin  = "admin"
-	RoleViewer = "viewer"
+	RoleAdmin = "admin"
+	RoleUser  = "user"
 )
 
 // BcryptCost is the work factor for password hashing. 12 is the current
@@ -400,7 +400,7 @@ func scanUserRow(r rowScanner) (User, error) {
 
 func normalizeEmail(s string) string { return strings.TrimSpace(strings.ToLower(s)) }
 
-func validRole(r string) bool { return r == RoleAdmin || r == RoleViewer }
+func validRole(r string) bool { return r == RoleAdmin || r == RoleUser }
 
 // isUniqueViolation matches modernc.org/sqlite's UNIQUE-constraint error
 // without taking a hard import dependency on its error type. The driver

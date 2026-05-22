@@ -62,6 +62,9 @@ func (s *Server) githubTokensUnavailable(w http.ResponseWriter) bool {
 
 // ListGithubTokens — GET /api/v1/github-tokens.
 func (s *Server) ListGithubTokens(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.githubTokensUnavailable(w) {
 		return
 	}
@@ -92,6 +95,9 @@ func (s *Server) ListGithubTokens(w http.ResponseWriter, r *http.Request) {
 // actually advertises. The Scopes field on the request stays for
 // backwards compatibility with older clients but is ignored.
 func (s *Server) CreateGithubToken(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.githubTokensUnavailable(w) {
 		return
 	}
@@ -142,6 +148,9 @@ func (s *Server) CreateGithubToken(w http.ResponseWriter, r *http.Request) {
 // repository — useful when /user/repos misses SAML-protected org
 // repos that only surface under /orgs/{login}/repos.
 func (s *Server) ListTokenAccounts(w http.ResponseWriter, r *http.Request, id string) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.githubTokensUnavailable(w) {
 		return
 	}
@@ -200,6 +209,9 @@ func (s *Server) ListTokenRepos(
 	id string,
 	params openapi.ListTokenReposParams,
 ) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.githubTokensUnavailable(w) {
 		return
 	}
@@ -292,6 +304,9 @@ func ptrStr(s string) *string {
 
 // DeleteGithubToken — DELETE /api/v1/github-tokens/{id}.
 func (s *Server) DeleteGithubToken(w http.ResponseWriter, r *http.Request, id string) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.githubTokensUnavailable(w) {
 		return
 	}

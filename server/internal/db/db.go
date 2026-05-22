@@ -62,6 +62,8 @@ var registeredMigrations = []migration{
 	{7, "git_repos_indexed_sha", func(db *sql.DB, _ OpenOptions) error { return migrateGitReposIndexedSHA(db) }},
 	{8, "tunnel_config", func(db *sql.DB, _ OpenOptions) error { return migrateTunnelConfig(db) }},
 	{9, "git_repos_polling", func(db *sql.DB, _ OpenOptions) error { return migrateGitReposPolling(db) }},
+	{10, "auth_groups_ownership", func(db *sql.DB, _ OpenOptions) error { return migrateAuthGroupsOwnership(db) }},
+	{11, "project_machine_identity", func(db *sql.DB, _ OpenOptions) error { return migrateProjectMachineIdentity(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -310,6 +312,165 @@ func migrateGitReposPolling(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_git_repos_due ON git_repos(polling_enabled, next_poll_at)`,
 	); err != nil {
 		return fmt.Errorf("create idx_git_repos_due: %w", err)
+	}
+	return nil
+}
+
+// columnExists reports whether table has a column named col. Returns false
+// (no error) when the table itself does not exist.
+func columnExists(db *sql.DB, table, col string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, fmt.Errorf("table_info %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// migrateProjectMachineIdentity adds display_path / machine_id / machine_label
+// to projects so local-project identity can be namespaced per machine
+// (host_path becomes "local:{machine_id}:{path}" for projects created after
+// this change; the CLI computes the matching path_hash). Existing rows keep
+// their host_path as-is and get display_path backfilled from it so the
+// dashboard has something to show — they remain reachable until re-init.
+// Idempotent via columnExists.
+func migrateProjectMachineIdentity(db *sql.DB) error {
+	adds := []struct{ col, ddl string }{
+		{"display_path", `ALTER TABLE projects ADD COLUMN display_path TEXT`},
+		{"machine_id", `ALTER TABLE projects ADD COLUMN machine_id TEXT`},
+		{"machine_label", `ALTER TABLE projects ADD COLUMN machine_label TEXT`},
+	}
+	for _, a := range adds {
+		have, err := columnExists(db, "projects", a.col)
+		if err != nil {
+			return err
+		}
+		if have {
+			continue
+		}
+		if _, err := db.Exec(a.ddl); err != nil {
+			return fmt.Errorf("add projects.%s: %w", a.col, err)
+		}
+	}
+	// Backfill display_path = host_path for any row missing it (existing
+	// projects predate the column; their host_path is still the real path).
+	if _, err := db.Exec(
+		`UPDATE projects SET display_path = host_path WHERE display_path IS NULL`,
+	); err != nil {
+		return fmt.Errorf("backfill display_path: %w", err)
+	}
+	return nil
+}
+
+// migrateAuthGroupsOwnership upgrades pre-auth-model databases to the
+// owner + view-group sharing model:
+//
+//   - adds projects.owner_user_id and workspaces.owner_user_id (NULL on
+//     existing rows);
+//   - creates view_groups / view_group_members / project_group_shares /
+//     workspace_group_shares (matching schema.go; CREATE TABLE IF NOT EXISTS
+//     so a fresh DB that already has them is a no-op);
+//   - one-time data backfill: every existing user becomes admin (pre-migration
+//     everyone had full access, so this preserves it — the operator demotes
+//     afterwards); existing LOCAL projects (no git_repos row) and ALL existing
+//     workspaces are assigned to the first active admin; existing EXTERNAL
+//     projects intentionally stay ownerless (NULL).
+//
+// Idempotent: column adds are guarded by columnExists, table creates use
+// IF NOT EXISTS. The data backfill is naturally a no-op on a fresh DB (no
+// users/projects yet — bootstrap runs after Open) and runs exactly once on an
+// upgraded DB because schema_migrations records version 10.
+func migrateAuthGroupsOwnership(db *sql.DB) error {
+	// 1. owner columns (ALTER ADD COLUMN with a NULL-default REFERENCES clause
+	// is permitted by SQLite).
+	if have, err := columnExists(db, "projects", "owner_user_id"); err != nil {
+		return err
+	} else if !have {
+		if _, err := db.Exec(
+			`ALTER TABLE projects ADD COLUMN owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL`,
+		); err != nil {
+			return fmt.Errorf("add projects.owner_user_id: %w", err)
+		}
+	}
+	if have, err := columnExists(db, "workspaces", "owner_user_id"); err != nil {
+		return err
+	} else if !have {
+		if _, err := db.Exec(
+			`ALTER TABLE workspaces ADD COLUMN owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL`,
+		); err != nil {
+			return fmt.Errorf("add workspaces.owner_user_id: %w", err)
+		}
+	}
+
+	// 2. view-group + sharing tables (mirror schema.go).
+	for _, ddl := range []string{
+		`CREATE TABLE IF NOT EXISTS view_groups (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS view_group_members (
+            group_id TEXT NOT NULL, user_id TEXT NOT NULL, added_at TEXT NOT NULL,
+            PRIMARY KEY (group_id, user_id),
+            FOREIGN KEY (group_id) REFERENCES view_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)`,
+		`CREATE INDEX IF NOT EXISTS idx_view_group_members_user ON view_group_members(user_id)`,
+		`CREATE TABLE IF NOT EXISTS project_group_shares (
+            project_path TEXT NOT NULL, group_id TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY (project_path, group_id),
+            FOREIGN KEY (project_path) REFERENCES projects(host_path) ON DELETE CASCADE,
+            FOREIGN KEY (group_id) REFERENCES view_groups(id) ON DELETE CASCADE)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_shares_group ON project_group_shares(group_id)`,
+		`CREATE TABLE IF NOT EXISTS workspace_group_shares (
+            workspace_id TEXT NOT NULL, group_id TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, group_id),
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+            FOREIGN KEY (group_id) REFERENCES view_groups(id) ON DELETE CASCADE)`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_shares_group ON workspace_group_shares(group_id)`,
+	} {
+		if _, err := db.Exec(ddl); err != nil {
+			return fmt.Errorf("create auth-model table/index: %w", err)
+		}
+	}
+
+	// 3. one-time data backfill.
+	if _, err := db.Exec(`UPDATE users SET role = 'admin'`); err != nil {
+		return fmt.Errorf("promote existing users to admin: %w", err)
+	}
+	var firstAdmin sql.NullString
+	if err := db.QueryRow(
+		`SELECT id FROM users WHERE role = 'admin' AND disabled_at IS NULL ORDER BY created_at ASC LIMIT 1`,
+	).Scan(&firstAdmin); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("select first active admin: %w", err)
+	}
+	if firstAdmin.Valid && firstAdmin.String != "" {
+		// Local projects (no git_repos peer) → first admin; external stay NULL.
+		if _, err := db.Exec(
+			`UPDATE projects SET owner_user_id = ?
+			 WHERE owner_user_id IS NULL
+			   AND host_path NOT IN (SELECT project_path FROM git_repos)`,
+			firstAdmin.String,
+		); err != nil {
+			return fmt.Errorf("backfill local project owners: %w", err)
+		}
+		if _, err := db.Exec(
+			`UPDATE workspaces SET owner_user_id = ? WHERE owner_user_id IS NULL`,
+			firstAdmin.String,
+		); err != nil {
+			return fmt.Errorf("backfill workspace owners: %w", err)
+		}
 	}
 	return nil
 }

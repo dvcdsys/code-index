@@ -22,12 +22,12 @@ const DESCRIPTIONS: Record<string, string> = {
 
 export default function HomePage() {
   const { user } = useAuth();
-  const role = user?.role ?? 'viewer';
+  const role = user?.role ?? 'user';
   const { data: status } = useServerStatus();
 
   const cards = MODULES.filter((m) => m.id !== 'home').filter((m) => {
     if (!m.requiredRole) return true;
-    if (m.requiredRole === 'viewer') return true;
+    if (m.requiredRole === 'user') return true;
     return role === 'admin';
   });
 

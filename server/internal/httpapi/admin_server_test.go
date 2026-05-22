@@ -38,7 +38,7 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	if err != nil {
 		t.Fatalf("seed admin: %v", err)
 	}
-	viewer, err := usrSvc.Create(context.Background(), "viewer@example.com", "secret-password", users.RoleViewer, false)
+	viewer, err := usrSvc.Create(context.Background(), "viewer@example.com", "secret-password", users.RoleUser, false)
 	if err != nil {
 		t.Fatalf("seed viewer: %v", err)
 	}

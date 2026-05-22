@@ -15,6 +15,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
+	"github.com/dvcdsys/code-index/server/internal/groups"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
@@ -63,6 +64,10 @@ type Deps struct {
 	Users    *users.Service
 	Sessions *sessions.Service
 	APIKeys  *apikeys.Service
+	// Groups backs the view-group auth model (admin-managed sets of users
+	// that external projects + workspaces are shared to). Required in
+	// production; nil + AuthDisabled is tolerated by tests.
+	Groups *groups.Service
 	// EmbeddingSvc is the in-process embeddings service. May be nil when the
 	// server is started with CIX_EMBEDDINGS_ENABLED=false (e.g. in router
 	// tests). Phase 5 uses it for semantic search.

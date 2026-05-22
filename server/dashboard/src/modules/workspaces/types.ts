@@ -9,6 +9,7 @@ export type Workspace = {
   description: string;
   created_at: string;
   updated_at: string;
+  owner_user_id?: string | null;
 };
 
 export type WorkspaceListResponse = {

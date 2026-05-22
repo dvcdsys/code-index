@@ -257,3 +257,49 @@ func TestHashPath_MatchesPython(t *testing.T) {
 	}
 }
 
+
+// TestCreate_MachineNamespacingAvoidsCollision verifies that the same
+// filesystem path indexed from two different machines becomes two distinct
+// projects (different identity key + hash), while the same machine+path
+// collides — and that display_path holds the real path either way.
+func TestCreate_MachineNamespacingAvoidsCollision(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDB(t)
+
+	const realPath = "/Users/dev/myapp"
+
+	p1, err := Create(ctx, d, CreateRequest{HostPath: realPath, MachineID: "machineA", MachineLabel: "laptop-a"})
+	if err != nil {
+		t.Fatalf("create on machineA: %v", err)
+	}
+	p2, err := Create(ctx, d, CreateRequest{HostPath: realPath, MachineID: "machineB", MachineLabel: "laptop-b"})
+	if err != nil {
+		t.Fatalf("create same path on machineB: %v", err)
+	}
+
+	if p1.HostPath == p2.HostPath {
+		t.Errorf("identity keys collided: %q", p1.HostPath)
+	}
+	if HashPath(p1.HostPath) == HashPath(p2.HostPath) {
+		t.Error("path_hashes collided across machines")
+	}
+	if p1.DisplayPath != realPath || p2.DisplayPath != realPath {
+		t.Errorf("display_path = %q / %q, want %q", p1.DisplayPath, p2.DisplayPath, realPath)
+	}
+	if p1.MachineID == nil || *p1.MachineID != "machineA" {
+		t.Errorf("p1 machine_id = %v, want machineA", p1.MachineID)
+	}
+	if p1.MachineLabel == nil || *p1.MachineLabel != "laptop-a" {
+		t.Errorf("p1 machine_label = %v, want laptop-a", p1.MachineLabel)
+	}
+
+	// Same machine + same path → conflict.
+	if _, err := Create(ctx, d, CreateRequest{HostPath: realPath, MachineID: "machineA"}); !errors.Is(err, ErrConflict) {
+		t.Errorf("same machine+path err = %v, want ErrConflict", err)
+	}
+
+	// The namespaced key must equal what the CLI computes.
+	if got, want := p1.HostPath, LocalProjectKey("machineA", realPath); got != want {
+		t.Errorf("identity key = %q, want %q", got, want)
+	}
+}

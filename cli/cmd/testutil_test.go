@@ -2,20 +2,20 @@ package cmd
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"github.com/anthropics/code-index/cli/internal/client"
 )
 
-// projectHash returns the same SHA1 prefix that the client uses for URL routing.
+// projectHash returns the same project URL hash the client uses for routing —
+// delegated to the real implementation so the per-machine namespacing matches.
 func projectHash(path string) string {
-	h := sha1.Sum([]byte(path))
-	return fmt.Sprintf("%x", h)[:16]
+	return client.EncodeProjectPath(path)
 }
 
 // mockServer starts a test HTTP server and registers cleanup.

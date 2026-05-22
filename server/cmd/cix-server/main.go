@@ -23,6 +23,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/githubapi"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
+	"github.com/dvcdsys/code-index/server/internal/groups"
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/httpapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
@@ -220,6 +221,7 @@ func run() error {
 	usrSvc := users.New(database)
 	sessSvc := sessions.New(database)
 	akSvc := apikeys.New(database)
+	grpSvc := groups.New(database)
 
 	if !cfg.AuthDisabled {
 		if err := bootstrapAuth(context.Background(), cfg, logger, usrSvc, akSvc); err != nil {
@@ -399,6 +401,7 @@ func run() error {
 		Logger:            logger,
 		AuthDisabled:      cfg.AuthDisabled,
 		Users:             usrSvc,
+		Groups:            grpSvc,
 		Sessions:          sessSvc,
 		APIKeys:           akSvc,
 		EmbeddingSvc:      embedSvc,

@@ -23,7 +23,27 @@ CREATE TABLE IF NOT EXISTS projects (
     -- project was last indexed. NULL on legacy rows (pre-PR-E) until next
     -- reindex. Compared against the live runtime model to surface a "stale
     -- model" badge on the dashboard project list.
-    indexed_with_model TEXT
+    indexed_with_model TEXT,
+    -- owner_user_id is the user who owns this (personal, locally indexed)
+    -- project. NULL means ownerless: that is the canonical state for EXTERNAL
+    -- projects (those with a git_repos row), which are admin-administered and
+    -- reachable only via a view-group share. Personal projects are private to
+    -- their owner; admins see everything. Set on CreateProject; NULL on
+    -- AddGitRepo. FK SET NULL so deleting a user orphans (does not delete) the
+    -- project for an admin to reassign.
+    owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    -- host_path (PK) is the project IDENTITY, not necessarily the literal
+    -- filesystem path. For LOCAL projects it is namespaced as
+    -- "local:{machine_id}:{display_path}" so the same path on different
+    -- machines (different users) never collides — the CLI computes path_hash
+    -- from the same key. For EXTERNAL projects host_path == display_path ==
+    -- the github.com/owner/repo@branch string. display_path is the
+    -- human-readable path shown in the dashboard; machine_id is the per-home
+    -- UUID the CLI sends (NULL for external); machine_label is os.Hostname()
+    -- for display only.
+    display_path TEXT,
+    machine_id TEXT,
+    machine_label TEXT
 );
 
 -- NOTE: CREATE INDEX on path_hash is intentionally NOT here. Pre-m7 databases
@@ -97,7 +117,7 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL COLLATE NOCASE,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'viewer',
+    role TEXT NOT NULL DEFAULT 'user',
     must_change_password INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -153,14 +173,20 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
 -- Workspaces group indexed projects (rows in the projects table,
 -- optionally with their git_repos peer) for cross-project semantic
 -- search. Membership lives in workspace_projects; clone + webhook
--- metadata lives in git_repos. Server-wide shared: every authenticated
--- user can see and modify any workspace (per the chosen visibility model).
+-- metadata lives in git_repos.
+--
+-- owner_user_id is the user who created the workspace; visible to the owner,
+-- to members of any view-group it is shared to (workspace_group_shares), and
+-- to admins. A workspace is decoupled from its projects: access is always
+-- evaluated per project, so a project a viewer cannot see is simply hidden
+-- from the workspace listing / search.
 CREATE TABLE IF NOT EXISTS workspaces (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
     description TEXT,
     created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL
 );
 
 -- github_tokens stores GitHub Personal Access Tokens encrypted at rest with
@@ -247,6 +273,52 @@ CREATE TABLE IF NOT EXISTS workspace_projects (
 );
 CREATE INDEX IF NOT EXISTS idx_workspace_projects_project
     ON workspace_projects(project_path);
+
+-- view_groups + sharing (auth model). A view-group is an admin-managed set of
+-- users; external projects and workspaces are shared TO a group, granting its
+-- members read/search access. Group CRUD and membership are admin-only;
+-- workspace owners may share their own workspaces to groups they belong to.
+CREATE TABLE IF NOT EXISTS view_groups (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS view_group_members (
+    group_id  TEXT NOT NULL,
+    user_id   TEXT NOT NULL,
+    added_at  TEXT NOT NULL,
+    PRIMARY KEY (group_id, user_id),
+    FOREIGN KEY (group_id) REFERENCES view_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_view_group_members_user ON view_group_members(user_id);
+
+-- project_group_shares: an EXTERNAL project (git_repos peer, owner_user_id NULL)
+-- shared to a view-group. Members of group_id get read/search on project_path.
+CREATE TABLE IF NOT EXISTS project_group_shares (
+    project_path TEXT NOT NULL,
+    group_id     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (project_path, group_id),
+    FOREIGN KEY (project_path) REFERENCES projects(host_path) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES view_groups(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_project_shares_group ON project_group_shares(group_id);
+
+-- workspace_group_shares: a workspace shared to a view-group. Visibility only;
+-- the per-project access check still gates which projects a member actually sees.
+CREATE TABLE IF NOT EXISTS workspace_group_shares (
+    workspace_id TEXT NOT NULL,
+    group_id     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, group_id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES view_groups(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_shares_group ON workspace_group_shares(group_id);
 
 -- jobs is the persistent worker queue. Survives process restarts; one
 -- worker pool drains it. dedupe_key is the partial-unique mechanism that
@@ -384,6 +456,10 @@ var ExpectedTables = []string{
 	"github_tokens",
 	"git_repos",
 	"workspace_projects",
+	"view_groups",
+	"view_group_members",
+	"project_group_shares",
+	"workspace_group_shares",
 	"jobs",
 	"call_edges",
 	"chunks_meta",

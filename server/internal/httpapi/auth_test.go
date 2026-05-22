@@ -294,7 +294,7 @@ func TestCreateUser_AdminOnly(t *testing.T) {
 	cookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
 
 	body, _ := json.Marshal(map[string]string{
-		"email": "viewer@example.com", "initial_password": "viewerpass1", "role": "viewer",
+		"email": "viewer@example.com", "initial_password": "viewerpass1", "role": "user",
 	})
 	req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(body)), cookie)
 	req.Header.Set("Content-Type", "application/json")
@@ -307,7 +307,7 @@ func TestCreateUser_AdminOnly(t *testing.T) {
 	// Now try the same request as the viewer — expect 403.
 	viewerCookie := sessionCookie(loginRR(t, f.Router, "viewer@example.com", "viewerpass1"))
 	body, _ = json.Marshal(map[string]string{
-		"email": "another@example.com", "initial_password": "anotherpass1", "role": "viewer",
+		"email": "another@example.com", "initial_password": "anotherpass1", "role": "user",
 	})
 	req = withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(body)), viewerCookie)
 	req.Header.Set("Content-Type", "application/json")
@@ -371,7 +371,7 @@ func TestApiKey_CreateListRevokeFlow(t *testing.T) {
 func TestApiKey_ListForOwnerHidesOthers(t *testing.T) {
 	f := newAuthFixture(t)
 	// Seed a viewer + their own key directly via the underlying services.
-	v, err := f.Deps.Users.Create(context.Background(), "v@b.com", "viewerpass1", users.RoleViewer, false)
+	v, err := f.Deps.Users.Create(context.Background(), "v@b.com", "viewerpass1", users.RoleUser, false)
 	if err != nil {
 		t.Fatalf("seed viewer: %v", err)
 	}
@@ -401,81 +401,134 @@ func TestApiKey_ListForOwnerHidesOthers(t *testing.T) {
 // project are gated behind the admin role. POST /index/cancel is
 // intentionally NOT gated — see comment on IndexCancel for why — and is
 // covered separately by TestIndexCancel_AnyAuthenticatedUser.
-func TestProjectMutations_AdminOnly(t *testing.T) {
+// TestProjectMutations_OwnerOrAdmin pins the auth model for PATCH/DELETE on a
+// project: the owner or an admin may mutate it; a different regular user cannot
+// even see it (404, hiding existence). CreateProject sets owner = caller.
+func TestProjectMutations_OwnerOrAdmin(t *testing.T) {
 	f := newAuthFixture(t)
 	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
 
-	// Admin creates a project to act on. CreateProject is intentionally
-	// not admin-only — viewers can register their own projects.
-	createBody, _ := json.Marshal(map[string]string{"host_path": "/tmp/test-proj"})
-	req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewReader(createBody)), adminCookie)
+	// Seed a regular user (alice) and log in.
+	aliceBody, _ := json.Marshal(map[string]string{
+		"email": "alice@example.com", "initial_password": "alicepass1", "role": "user",
+	})
+	req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(aliceBody)), adminCookie)
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	f.Router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("admin create project status = %d (body=%s)", rr.Code, rr.Body.String())
+		t.Fatalf("seed alice status = %d (body=%s)", rr.Code, rr.Body.String())
 	}
-	var created struct{ PathHash string `json:"path_hash"` }
-	_ = json.Unmarshal(rr.Body.Bytes(), &created)
-	if created.PathHash == "" {
-		t.Fatalf("created project payload missing path_hash: %s", rr.Body.String())
+	aliceCookie := sessionCookie(loginRR(t, f.Router, "alice@example.com", "alicepass1"))
+
+	createProject := func(cookie, hostPath string) string {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"host_path": hostPath})
+		req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewReader(body)), cookie)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		f.Router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("create project %s status = %d (body=%s)", hostPath, rr.Code, rr.Body.String())
+		}
+		var created struct {
+			PathHash string `json:"path_hash"`
+		}
+		_ = json.Unmarshal(rr.Body.Bytes(), &created)
+		if created.PathHash == "" {
+			t.Fatalf("created project missing path_hash: %s", rr.Body.String())
+		}
+		return created.PathHash
 	}
 
-	// Seed a viewer + log in as them.
-	viewerBody, _ := json.Marshal(map[string]string{
-		"email": "viewer@example.com", "initial_password": "viewerpass1", "role": "viewer",
+	do := func(cookie, method, path string, body []byte) int {
+		t.Helper()
+		req := withCookie(httptest.NewRequest(method, path, bytes.NewReader(body)), cookie)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		f.Router.ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	patchBody := mustJSON(t, map[string]any{
+		"settings": map[string]any{"exclude_patterns": []string{"vendor"}},
 	})
-	req = withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(viewerBody)), adminCookie)
+
+	adminProj := createProject(adminCookie, "/tmp/admin-proj")
+	aliceProj := createProject(aliceCookie, "/tmp/alice-proj")
+
+	t.Run("non-owner cannot patch (404 hides existence)", func(t *testing.T) {
+		if code := do(aliceCookie, http.MethodPatch, "/api/v1/projects/"+adminProj, patchBody); code != http.StatusNotFound {
+			t.Errorf("alice PATCH admin's project = %d, want 404", code)
+		}
+	})
+	t.Run("non-owner cannot delete (404 hides existence)", func(t *testing.T) {
+		if code := do(aliceCookie, http.MethodDelete, "/api/v1/projects/"+adminProj, nil); code != http.StatusNotFound {
+			t.Errorf("alice DELETE admin's project = %d, want 404", code)
+		}
+	})
+	t.Run("owner can patch own project", func(t *testing.T) {
+		if code := do(aliceCookie, http.MethodPatch, "/api/v1/projects/"+aliceProj, patchBody); code != http.StatusOK {
+			t.Errorf("alice PATCH own project = %d, want 200", code)
+		}
+	})
+	t.Run("admin can patch another user's project", func(t *testing.T) {
+		if code := do(adminCookie, http.MethodPatch, "/api/v1/projects/"+aliceProj, patchBody); code != http.StatusOK {
+			t.Errorf("admin PATCH alice's project = %d, want 200", code)
+		}
+	})
+	t.Run("owner can delete own project", func(t *testing.T) {
+		ownDel := createProject(aliceCookie, "/tmp/alice-proj-2")
+		if code := do(aliceCookie, http.MethodDelete, "/api/v1/projects/"+ownDel, nil); code != http.StatusNoContent {
+			t.Errorf("alice DELETE own project = %d, want 204", code)
+		}
+	})
+	t.Run("admin can delete another user's project", func(t *testing.T) {
+		if code := do(adminCookie, http.MethodDelete, "/api/v1/projects/"+aliceProj, nil); code != http.StatusNoContent {
+			t.Errorf("admin DELETE alice's project = %d, want 204", code)
+		}
+	})
+}
+
+// TestExternalAndTokenEndpoints_AdminOnly locks the review's top findings:
+// external-project administration and GitHub-token management are admin-only,
+// so a regular user is rejected with 403 (the admin gate runs before any
+// service-availability check, so this holds regardless of wiring).
+func TestExternalAndTokenEndpoints_AdminOnly(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	userBody, _ := json.Marshal(map[string]string{
+		"email": "bob@example.com", "initial_password": "bobpass1234", "role": "user",
+	})
+	req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(userBody)), adminCookie)
 	req.Header.Set("Content-Type", "application/json")
-	rr = httptest.NewRecorder()
+	rr := httptest.NewRecorder()
 	f.Router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusCreated {
-		t.Fatalf("seed viewer status = %d (body=%s)", rr.Code, rr.Body.String())
+		t.Fatalf("seed user status = %d (body=%s)", rr.Code, rr.Body.String())
 	}
-	viewerCookie := sessionCookie(loginRR(t, f.Router, "viewer@example.com", "viewerpass1"))
+	userCookie := sessionCookie(loginRR(t, f.Router, "bob@example.com", "bobpass1234"))
 
-	// Each gated endpoint must 403 for the viewer, then succeed for the
-	// admin. PATCH first (mutates settings), DELETE last (destructive).
 	cases := []struct {
-		name        string
-		method      string
-		path        string
-		body        []byte
-		adminStatus int
+		name, method, path string
 	}{
-		{
-			name:   "patch settings",
-			method: http.MethodPatch,
-			path:   "/api/v1/projects/" + created.PathHash,
-			body: mustJSON(t, map[string]any{
-				"settings": map[string]any{"exclude_patterns": []string{"vendor"}},
-			}),
-			adminStatus: http.StatusOK,
-		},
-		{
-			name:        "delete project",
-			method:      http.MethodDelete,
-			path:        "/api/v1/projects/" + created.PathHash,
-			adminStatus: http.StatusNoContent,
-		},
+		{"add git-repo", http.MethodPost, "/api/v1/git-repos"},
+		{"list github-tokens", http.MethodGet, "/api/v1/github-tokens"},
+		{"create github-token", http.MethodPost, "/api/v1/github-tokens"},
+		{"get project git-repo", http.MethodGet, "/api/v1/projects/deadbeefdeadbeef/git-repo"},
+		{"reindex project", http.MethodPost, "/api/v1/projects/deadbeefdeadbeef/reindex"},
+		{"force-stop project", http.MethodPost, "/api/v1/projects/deadbeefdeadbeef/force-stop"},
+		{"webhook-info", http.MethodGet, "/api/v1/projects/deadbeefdeadbeef/webhook-info"},
 	}
 	for _, c := range cases {
-		t.Run(c.name+"/viewer-forbidden", func(t *testing.T) {
-			req := withCookie(httptest.NewRequest(c.method, c.path, bytes.NewReader(c.body)), viewerCookie)
+		t.Run(c.name, func(t *testing.T) {
+			req := withCookie(httptest.NewRequest(c.method, c.path, bytes.NewReader([]byte("{}"))), userCookie)
 			req.Header.Set("Content-Type", "application/json")
 			rr := httptest.NewRecorder()
 			f.Router.ServeHTTP(rr, req)
 			if rr.Code != http.StatusForbidden {
-				t.Errorf("viewer %s %s status = %d, want 403", c.method, c.path, rr.Code)
-			}
-		})
-		t.Run(c.name+"/admin-allowed", func(t *testing.T) {
-			req := withCookie(httptest.NewRequest(c.method, c.path, bytes.NewReader(c.body)), adminCookie)
-			req.Header.Set("Content-Type", "application/json")
-			rr := httptest.NewRecorder()
-			f.Router.ServeHTTP(rr, req)
-			if rr.Code != c.adminStatus {
-				t.Errorf("admin %s %s status = %d, want %d (body=%s)", c.method, c.path, rr.Code, c.adminStatus, rr.Body.String())
+				t.Errorf("user %s %s = %d, want 403", c.method, c.path, rr.Code)
 			}
 		})
 	}
@@ -500,7 +553,7 @@ func TestIndexCancel_AnyAuthenticatedUser(t *testing.T) {
 
 	// Seed a viewer + a project they can cancel against.
 	viewerBody, _ := json.Marshal(map[string]string{
-		"email": "viewer@example.com", "initial_password": "viewerpass1", "role": "viewer",
+		"email": "viewer@example.com", "initial_password": "viewerpass1", "role": "user",
 	})
 	req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(viewerBody)), adminCookie)
 	req.Header.Set("Content-Type", "application/json")
@@ -539,7 +592,7 @@ func TestListUsers_IncludesStats(t *testing.T) {
 	cookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
 
 	// Seed a viewer + give them an api-key so the row is non-trivial.
-	v, err := f.Deps.Users.Create(context.Background(), "v@b.com", "viewerpass1", users.RoleViewer, false)
+	v, err := f.Deps.Users.Create(context.Background(), "v@b.com", "viewerpass1", users.RoleUser, false)
 	if err != nil {
 		t.Fatalf("seed viewer: %v", err)
 	}
