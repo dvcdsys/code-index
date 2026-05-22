@@ -7,9 +7,17 @@
 
 import type { components } from './generated';
 
-export type Role = 'admin' | 'viewer';
+export type Role = 'admin' | 'user';
 
 export type User = components['schemas']['User'];
+
+export type Group = components['schemas']['Group'];
+export type GroupMember = components['schemas']['GroupMember'];
+export type GroupListResponse = components['schemas']['GroupListResponse'];
+export type GroupMemberListResponse = components['schemas']['GroupMemberListResponse'];
+export type CreateGroupRequest = components['schemas']['CreateGroupRequest'];
+export type UpdateGroupRequest = components['schemas']['UpdateGroupRequest'];
+export type GroupIdListResponse = components['schemas']['GroupIdListResponse'];
 export type UserWithStats = components['schemas']['UserWithStats'];
 export type Session = components['schemas']['Session'];
 export type ApiKey = components['schemas']['ApiKey'];

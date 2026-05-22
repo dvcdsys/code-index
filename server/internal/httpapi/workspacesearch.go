@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"errors"
 	"math"
 	"net/http"
 	"runtime"
@@ -12,9 +11,9 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/dvcdsys/code-index/server/internal/access"
 	"github.com/dvcdsys/code-index/server/internal/chunksfts"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
-	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
 // Tuning constants for the hybrid workspace search.
@@ -144,12 +143,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 			"embeddings or vectorstore not configured — workspace search requires both")
 		return
 	}
-	if _, err := s.Deps.Workspaces.GetByID(r.Context(), id); err != nil {
-		if errors.Is(err, workspaces.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "workspace not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "could not load workspace")
+	if _, ok := s.requireWorkspaceVisible(w, r, id); !ok {
 		return
 	}
 
@@ -208,6 +202,29 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "iterate workspace projects: "+err.Error())
 		return
 	}
+
+	// Per-project access filter: a regular user only searches the projects in
+	// this workspace they can actually see (their own + shared external).
+	// Admins search everything. Decoupled model — hidden projects just drop out.
+	if userID, isAdmin := s.callerIdentity(r); !isAdmin {
+		hosts, aerr := access.AccessibleProjectHostPaths(r.Context(), s.Deps.DB, userID)
+		if aerr != nil {
+			writeError(w, http.StatusInternalServerError, "access check failed")
+			return
+		}
+		allowed := make(map[string]struct{}, len(hosts))
+		for _, hp := range hosts {
+			allowed[hp] = struct{}{}
+		}
+		filtered := members[:0]
+		for _, m := range members {
+			if _, ok := allowed[m.ProjectPath]; ok {
+				filtered = append(filtered, m)
+			}
+		}
+		members = filtered
+	}
+
 	if len(members) == 0 {
 		writeJSON(w, http.StatusOK, workspaceSearchResponse(
 			"empty",

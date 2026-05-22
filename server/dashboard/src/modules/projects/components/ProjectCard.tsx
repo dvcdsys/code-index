@@ -45,10 +45,13 @@ export function ProjectCard({ project }: { project: Project }) {
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <div className="truncate text-base font-medium leading-tight">
-                {basename(project.host_path)}
+                {basename(project.display_path ?? project.host_path)}
               </div>
-              <div className="mt-0.5 truncate text-xs text-muted-foreground" title={project.host_path}>
-                {project.host_path}
+              <div
+                className="mt-0.5 truncate text-xs text-muted-foreground"
+                title={project.display_path ?? project.host_path}
+              >
+                {project.display_path ?? project.host_path}
               </div>
             </div>
             <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
@@ -100,7 +103,7 @@ export function ProjectCard({ project }: { project: Project }) {
             >
               <SyncProjectButton
                 hash={project.path_hash}
-                hostPath={project.host_path}
+                hostPath={project.display_path ?? project.host_path}
                 variant="outline"
                 size="sm"
                 className="h-7 px-2.5 text-xs"

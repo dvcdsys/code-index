@@ -31,13 +31,13 @@ import { useCreateUser } from '../hooks';
 export function InviteUserDialog() {
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState<Role>('viewer');
+  const [role, setRole] = useState<Role>('user');
   const [pw, setPw] = useState('');
   const create = useCreateUser();
 
   function reset() {
     setEmail('');
-    setRole('viewer');
+    setRole('user');
     setPw('');
     create.reset();
   }
@@ -105,7 +105,7 @@ export function InviteUserDialog() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="viewer">Viewer (read-only)</SelectItem>
+                <SelectItem value="user">User</SelectItem>
                 <SelectItem value="admin">Admin (full access)</SelectItem>
               </SelectContent>
             </Select>

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/access"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
@@ -52,6 +53,25 @@ func (s *Server) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not list workspaces")
 		return
 	}
+	userID, isAdmin := s.callerIdentity(r)
+	if !isAdmin {
+		visible, err := access.VisibleWorkspaceIDs(r.Context(), s.Deps.DB, userID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "access check failed")
+			return
+		}
+		visibleSet := make(map[string]struct{}, len(visible))
+		for _, id := range visible {
+			visibleSet[id] = struct{}{}
+		}
+		filtered := list[:0]
+		for _, ws := range list {
+			if _, ok := visibleSet[ws.ID]; ok {
+				filtered = append(filtered, ws)
+			}
+		}
+		list = filtered
+	}
 	out := make([]workspacePayload, 0, len(list))
 	for _, ws := range list {
 		out = append(out, workspaceToPayload(ws))
@@ -76,7 +96,8 @@ func (s *Server) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	if body.Description != nil {
 		description = *body.Description
 	}
-	ws, err := s.Deps.Workspaces.Create(r.Context(), body.Name, description)
+	ownerID, _ := s.callerIdentity(r)
+	ws, err := s.Deps.Workspaces.CreateOwned(r.Context(), body.Name, description, ownerID)
 	if err != nil {
 		switch {
 		case errors.Is(err, workspaces.ErrNameEmpty):
@@ -96,13 +117,8 @@ func (s *Server) GetWorkspace(w http.ResponseWriter, r *http.Request, id string)
 	if s.workspacesUnavailable(w) {
 		return
 	}
-	ws, err := s.Deps.Workspaces.GetByID(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, workspaces.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "workspace not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "could not load workspace")
+	ws, ok := s.requireWorkspaceVisible(w, r, id)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, workspaceToPayload(ws))
@@ -111,6 +127,9 @@ func (s *Server) GetWorkspace(w http.ResponseWriter, r *http.Request, id string)
 // UpdateWorkspace — PATCH /api/v1/workspaces/{id}.
 func (s *Server) UpdateWorkspace(w http.ResponseWriter, r *http.Request, id string) {
 	if s.workspacesUnavailable(w) {
+		return
+	}
+	if _, ok := s.requireWorkspaceOwnership(w, r, id); !ok {
 		return
 	}
 	var body openapi.UpdateWorkspaceRequest
@@ -138,6 +157,9 @@ func (s *Server) UpdateWorkspace(w http.ResponseWriter, r *http.Request, id stri
 // DeleteWorkspace — DELETE /api/v1/workspaces/{id}.
 func (s *Server) DeleteWorkspace(w http.ResponseWriter, r *http.Request, id string) {
 	if s.workspacesUnavailable(w) {
+		return
+	}
+	if _, ok := s.requireWorkspaceOwnership(w, r, id); !ok {
 		return
 	}
 	if err := s.Deps.Workspaces.Delete(r.Context(), id); err != nil {

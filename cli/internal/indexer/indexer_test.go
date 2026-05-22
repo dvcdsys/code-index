@@ -2,11 +2,9 @@ package indexer
 
 import (
 	"context"
-	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,10 +16,10 @@ import (
 	"github.com/anthropics/code-index/cli/internal/client"
 )
 
-// projectHash mirrors the client's URL-encoding logic (SHA1, first 16 hex chars).
+// projectHash mirrors the client's project URL hash — delegated to the real
+// implementation so per-machine namespacing matches.
 func projectHash(path string) string {
-	h := sha1.Sum([]byte(path))
-	return fmt.Sprintf("%x", h)[:16]
+	return client.EncodeProjectPath(path)
 }
 
 // sha256hex computes the hex-encoded SHA-256 of b, matching discovery.hashFile.

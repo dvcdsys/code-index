@@ -5,10 +5,10 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/dvcdsys/code-index/server/internal/access"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/workspaceprojects"
-	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
 // workspaceProjectsUnavailable returns 503 when any required service
@@ -22,26 +22,15 @@ func (s *Server) workspaceProjectsUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// requireWorkspace loads the parent workspace and returns 404 if missing.
-func (s *Server) requireWorkspace(w http.ResponseWriter, r *http.Request, workspaceID string) bool {
-	_, err := s.Deps.Workspaces.GetByID(r.Context(), workspaceID)
-	if err != nil {
-		if errors.Is(err, workspaces.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "workspace not found")
-		} else {
-			writeError(w, http.StatusInternalServerError, "could not load workspace")
-		}
-		return false
-	}
-	return true
-}
-
-// ListWorkspaceProjects — GET /api/v1/workspaces/{id}/projects.
+// ListWorkspaceProjects — GET /api/v1/workspaces/{id}/projects. Visible to
+// owner/group-members/admin; per the decoupled model, projects the caller
+// cannot access are dropped from the listing rather than blocking the whole
+// workspace.
 func (s *Server) ListWorkspaceProjects(w http.ResponseWriter, r *http.Request, id string) {
 	if s.workspaceProjectsUnavailable(w) {
 		return
 	}
-	if !s.requireWorkspace(w, r, id) {
+	if _, ok := s.requireWorkspaceVisible(w, r, id); !ok {
 		return
 	}
 	memberships, err := s.Deps.WorkspaceProjects.ListByWorkspace(r.Context(), id)
@@ -49,8 +38,26 @@ func (s *Server) ListWorkspaceProjects(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusInternalServerError, "could not list workspace projects: "+err.Error())
 		return
 	}
+	userID, isAdmin := s.callerIdentity(r)
+	var allowed map[string]struct{}
+	if !isAdmin {
+		hosts, aerr := access.AccessibleProjectHostPaths(r.Context(), s.Deps.DB, userID)
+		if aerr != nil {
+			writeError(w, http.StatusInternalServerError, "access check failed")
+			return
+		}
+		allowed = make(map[string]struct{}, len(hosts))
+		for _, hp := range hosts {
+			allowed[hp] = struct{}{}
+		}
+	}
 	out := make([]map[string]any, 0, len(memberships))
 	for _, m := range memberships {
+		if !isAdmin {
+			if _, ok := allowed[m.ProjectPath]; !ok {
+				continue // hidden from this caller
+			}
+		}
 		proj, perr := projects.Get(r.Context(), s.Deps.DB, m.ProjectPath)
 		if perr != nil {
 			// The FK should prevent dangling rows, but if the project
@@ -79,7 +86,7 @@ func (s *Server) LinkProjectToWorkspace(w http.ResponseWriter, r *http.Request, 
 	if s.workspaceProjectsUnavailable(w) {
 		return
 	}
-	if !s.requireWorkspace(w, r, id) {
+	if _, ok := s.requireWorkspaceOwnership(w, r, id); !ok {
 		return
 	}
 	var body openapi.LinkProjectRequest
@@ -94,6 +101,11 @@ func (s *Server) LinkProjectToWorkspace(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "could not load project: "+perr.Error())
+		return
+	}
+	// The caller may only link projects they can access (hide others as 404).
+	if !s.canAccessProject(r, proj) {
+		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
 	m, err := s.Deps.WorkspaceProjects.Link(r.Context(), id, proj.HostPath)
@@ -128,7 +140,7 @@ func (s *Server) UnlinkProjectFromWorkspace(w http.ResponseWriter, r *http.Reque
 	if s.workspaceProjectsUnavailable(w) {
 		return
 	}
-	if !s.requireWorkspace(w, r, id) {
+	if _, ok := s.requireWorkspaceOwnership(w, r, id); !ok {
 		return
 	}
 	proj, perr := projects.GetByHash(r.Context(), s.Deps.DB, string(hash))

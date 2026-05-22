@@ -96,6 +96,11 @@ func gitRepoToPayload(g gitrepos.GitRepo) gitRepoPayload {
 // and enqueues a clone_repo job. The resulting project belongs to no
 // workspace — the caller can attach it via POST /workspaces/{id}/projects.
 func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
+	// External projects are admin-administered and ownerless; only admins may
+	// add one (it clones a repo, may register a webhook, and uses a stored PAT).
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.gitReposUnavailable(w) {
 		return
 	}
@@ -252,6 +257,10 @@ func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
 
 // GetProjectGitRepo — GET /api/v1/projects/{hash}/git-repo.
 func (s *Server) GetProjectGitRepo(w http.ResponseWriter, r *http.Request, hash openapi.ProjectHash) {
+	// Exposes sync config for an external project — admin-only, like the PATCH.
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.gitReposUnavailable(w) {
 		return
 	}
@@ -418,6 +427,10 @@ func (s *Server) deregisterWebhookIfAny(ctx context.Context, g gitrepos.GitRepo)
 // suspected index drift — manual rebuild without losing tokens or
 // workspace memberships.
 func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash string, params openapi.ReindexProjectParams) {
+	// Reindex of an external repo is an admin operation (clone + index).
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.gitReposUnavailable(w) {
 		return
 	}
@@ -500,6 +513,10 @@ func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash str
 // and a force-stop landing in the brief clone/fetch window may not catch
 // an index job the clone goroutine enqueues a moment later — re-run if so.
 func (s *Server) ForceStopIndex(w http.ResponseWriter, r *http.Request, hash string) {
+	// Force-stopping an external repo's index run is an admin operation.
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	if s.gitReposUnavailable(w) {
 		return
 	}

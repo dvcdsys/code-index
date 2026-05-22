@@ -308,6 +308,129 @@ func TestOpenMigratesPreM9DB(t *testing.T) {
 	again.Close()
 }
 
+// TestOpenMigratesPreAuthModelDB simulates a pre-m10 database (no owner_user_id
+// columns, users with the old 'viewer' role, one local + one external project,
+// one workspace) and verifies the auth-model backfill: every user becomes
+// admin, local projects + workspaces are assigned to the first active admin,
+// and external projects (git_repos peer) stay ownerless.
+func TestOpenMigratesPreAuthModelDB(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "pre-m10.db")
+	seed, err := sql.Open(DriverName, "file:"+tmp)
+	if err != nil {
+		t.Fatalf("seed Open: %v", err)
+	}
+	mustExec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := seed.Exec(q, args...); err != nil {
+			t.Fatalf("seed exec %q: %v", q, err)
+		}
+	}
+	// Pre-m10 shapes: no owner_user_id anywhere; role defaults to 'viewer'.
+	mustExec(`CREATE TABLE users (
+		id TEXT PRIMARY KEY, email TEXT NOT NULL, password_hash TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'viewer', must_change_password INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL, disabled_at TEXT)`)
+	mustExec(`CREATE TABLE projects (
+		host_path TEXT PRIMARY KEY, container_path TEXT NOT NULL,
+		languages TEXT DEFAULT '[]', settings TEXT DEFAULT '{}', stats TEXT DEFAULT '{}',
+		status TEXT DEFAULT 'created', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+		last_indexed_at TEXT, path_hash TEXT)`)
+	mustExec(`CREATE TABLE workspaces (
+		id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT,
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
+	mustExec(`CREATE TABLE git_repos (
+		project_path TEXT PRIMARY KEY, github_url TEXT NOT NULL, branch TEXT NOT NULL,
+		token_id TEXT, webhook_secret TEXT NOT NULL, webhook_id INTEGER,
+		webhook_mode TEXT NOT NULL DEFAULT 'manual', auto_webhook INTEGER NOT NULL DEFAULT 0,
+		last_sha TEXT, indexed_sha TEXT, last_error TEXT,
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
+
+	// alice is older than bob → alice is the first active admin after backfill.
+	mustExec(`INSERT INTO users (id, email, password_hash, role, created_at, updated_at)
+		VALUES ('u_alice', 'alice@x.com', 'h', 'viewer', '2024-01-01', '2024-01-01')`)
+	mustExec(`INSERT INTO users (id, email, password_hash, role, created_at, updated_at)
+		VALUES ('u_bob', 'bob@x.com', 'h', 'viewer', '2024-06-01', '2024-06-01')`)
+	mustExec(`INSERT INTO projects (host_path, container_path, created_at, updated_at, path_hash)
+		VALUES ('/local/proj', '/local/proj', '2024-02-01', '2024-02-01', 'aaaa')`)
+	mustExec(`INSERT INTO projects (host_path, container_path, created_at, updated_at, path_hash)
+		VALUES ('github.com/x/y@main', 'github.com/x/y@main', '2024-02-01', '2024-02-01', 'bbbb')`)
+	mustExec(`INSERT INTO git_repos (project_path, github_url, branch, webhook_secret, created_at, updated_at)
+		VALUES ('github.com/x/y@main', 'https://github.com/x/y', 'main', 'sekret', '2024-02-01', '2024-02-01')`)
+	mustExec(`INSERT INTO workspaces (id, name, created_at, updated_at)
+		VALUES ('ws_1', 'team', '2024-03-01', '2024-03-01')`)
+	seed.Close()
+
+	database, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("Open migrates pre-m10 DB: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(tmp)
+
+	// 1. every user is now admin.
+	var nonAdmins int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM users WHERE role <> 'admin'`).Scan(&nonAdmins); err != nil {
+		t.Fatalf("count non-admins: %v", err)
+	}
+	if nonAdmins != 0 {
+		t.Errorf("non-admin users after migration = %d, want 0", nonAdmins)
+	}
+
+	// 2. local project owned by the first active admin (alice).
+	var localOwner sql.NullString
+	if err := database.QueryRow(
+		`SELECT owner_user_id FROM projects WHERE host_path = '/local/proj'`,
+	).Scan(&localOwner); err != nil {
+		t.Fatalf("select local owner: %v", err)
+	}
+	if !localOwner.Valid || localOwner.String != "u_alice" {
+		t.Errorf("local project owner = %v, want u_alice", localOwner)
+	}
+
+	// 3. external project stays ownerless.
+	var extOwner sql.NullString
+	if err := database.QueryRow(
+		`SELECT owner_user_id FROM projects WHERE host_path = 'github.com/x/y@main'`,
+	).Scan(&extOwner); err != nil {
+		t.Fatalf("select external owner: %v", err)
+	}
+	if extOwner.Valid {
+		t.Errorf("external project owner = %q, want NULL", extOwner.String)
+	}
+
+	// 4. workspace owned by the first active admin.
+	var wsOwner sql.NullString
+	if err := database.QueryRow(
+		`SELECT owner_user_id FROM workspaces WHERE id = 'ws_1'`,
+	).Scan(&wsOwner); err != nil {
+		t.Fatalf("select workspace owner: %v", err)
+	}
+	if !wsOwner.Valid || wsOwner.String != "u_alice" {
+		t.Errorf("workspace owner = %v, want u_alice", wsOwner)
+	}
+
+	// 5. new tables exist.
+	for _, tbl := range []string{"view_groups", "view_group_members", "project_group_shares", "workspace_group_shares"} {
+		var n int
+		if err := database.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, tbl,
+		).Scan(&n); err != nil {
+			t.Fatalf("check table %s: %v", tbl, err)
+		}
+		if n != 1 {
+			t.Errorf("table %s missing after migration", tbl)
+		}
+	}
+
+	// 6. second Open is idempotent.
+	database.Close()
+	again, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("second Open (idempotent): %v", err)
+	}
+	again.Close()
+}
+
 func TestSymbolsIndexExists(t *testing.T) {
 	database, err := Open(":memory:")
 	if err != nil {
@@ -1097,4 +1220,50 @@ func readMigrationLedger(t *testing.T, d *sql.DB) []migrationLedgerRow {
 		t.Fatalf("ledger rows.Err: %v", err)
 	}
 	return out
+}
+
+// TestOpenMigratesPreM11DB verifies the machine-identity migration adds
+// display_path/machine_id/machine_label and backfills display_path = host_path
+// for pre-existing rows.
+func TestOpenMigratesPreM11DB(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "pre-m11.db")
+	seed, err := sql.Open(DriverName, "file:"+tmp)
+	if err != nil {
+		t.Fatalf("seed Open: %v", err)
+	}
+	if _, err := seed.Exec(`CREATE TABLE projects (
+		host_path TEXT PRIMARY KEY, container_path TEXT NOT NULL,
+		languages TEXT DEFAULT '[]', settings TEXT DEFAULT '{}', stats TEXT DEFAULT '{}',
+		status TEXT DEFAULT 'created', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+		last_indexed_at TEXT, path_hash TEXT)`); err != nil {
+		t.Fatalf("seed projects: %v", err)
+	}
+	if _, err := seed.Exec(
+		`INSERT INTO projects (host_path, container_path, created_at, updated_at, path_hash)
+		 VALUES ('/Users/dev/legacy', '/Users/dev/legacy', '2024-01-01', '2024-01-01', 'cafef00dcafef00d')`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	seed.Close()
+
+	database, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("Open migrates pre-m11 DB: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(tmp)
+
+	var displayPath sql.NullString
+	var machineID sql.NullString
+	if err := database.QueryRow(
+		`SELECT display_path, machine_id FROM projects WHERE host_path = '/Users/dev/legacy'`,
+	).Scan(&displayPath, &machineID); err != nil {
+		t.Fatalf("select new columns: %v", err)
+	}
+	if !displayPath.Valid || displayPath.String != "/Users/dev/legacy" {
+		t.Errorf("display_path = %v, want /Users/dev/legacy", displayPath)
+	}
+	if machineID.Valid {
+		t.Errorf("legacy machine_id = %q, want NULL", machineID.String)
+	}
 }

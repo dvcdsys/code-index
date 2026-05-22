@@ -73,8 +73,14 @@ func (c *Client) GetProject(path string) (*Project, error) {
 
 // CreateProject creates a new project
 func (c *Client) CreateProject(path string) (*Project, error) {
+	// machine_id namespaces the project's identity so the same filesystem path
+	// on a different machine/user is a distinct project; machine_label is the
+	// hostname for display. The server derives path_hash from
+	// local:{machine_id}:{host_path} — matching encodeProjectPath.
 	body := map[string]string{
-		"host_path": path,
+		"host_path":     path,
+		"machine_id":    machineID(),
+		"machine_label": machineLabel(),
 	}
 
 	resp, err := c.do("POST", "/api/v1/projects", body)
