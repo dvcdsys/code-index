@@ -223,9 +223,18 @@ func (s *Server) GetMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}
+	groupPayloads := []groupPayload{}
+	if s.Deps.Groups != nil {
+		if gs, err := s.Deps.Groups.ListForUser(r.Context(), ac.User.ID); err == nil {
+			for _, g := range gs {
+				groupPayloads = append(groupPayloads, groupToPayload(g))
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":        userToPayload(ac.User),
 		"auth_method": ac.Method,
+		"groups":      groupPayloads,
 	})
 }
 

@@ -1,4 +1,4 @@
-import { AlertCircle, AlertTriangle, ArrowLeft, Search } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowLeft, Loader2, Search } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '@/api/client';
 import type { Project } from '@/api/types';
@@ -11,8 +11,15 @@ import { Skeleton } from '@/ui/skeleton';
 import { formatDateTime, formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
 import { DeleteProjectDialog } from './components/DeleteProjectDialog';
+import { ForceStopButton } from './components/ForceStopButton';
+import { IndexingProgressCard } from './components/IndexingProgressCard';
 import { ProjectInfoCard } from './components/ProjectInfoCard';
-import { useProject, useProjectSummary } from './hooks';
+import { ProjectShareCard } from './components/ProjectShareCard';
+import { ReassignOwnerDialog } from './components/ReassignOwnerDialog';
+import { ReindexProjectButton } from './components/ReindexProjectButton';
+import { SyncProjectButton } from './components/SyncProjectButton';
+import { SyncSettingsCard } from './components/SyncSettingsCard';
+import { useProject, useProjectSummary, useProjectWorkspaces } from './hooks';
 
 const STATUS_VARIANT: Record<Project['status'], 'default' | 'secondary' | 'destructive' | 'outline'> = {
   created: 'outline',
@@ -27,6 +34,7 @@ export function ProjectDetailPage() {
   const isAdmin = user?.role === 'admin';
   const project = useProject(id);
   const summary = useProjectSummary(id);
+  const workspaces = useProjectWorkspaces(id);
   const currentModel = useRuntimeModel();
 
   if (project.isLoading) return <DetailSkeleton />;
@@ -53,6 +61,8 @@ export function ProjectDetailPage() {
   const p = project.data;
   const s = summary.data;
   const drift = !!p.indexed_with_model && !!currentModel && p.indexed_with_model !== currentModel;
+  const isExternal = p.host_path.startsWith('github.com/');
+  const displayPath = p.display_path ?? p.host_path;
 
   return (
     <div className="space-y-8">
@@ -77,8 +87,11 @@ export function ProjectDetailPage() {
           ))}
         </div>
         <h1 className="break-all font-mono text-2xl font-semibold leading-tight">
-          {p.host_path}
+          {displayPath}
         </h1>
+        {p.machine_label ? (
+          <div className="text-xs text-muted-foreground">on {p.machine_label}</div>
+        ) : null}
         <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
           <span>Hash: <code className="rounded bg-muted px-1 py-0.5 text-xs">{p.path_hash}</code></span>
           <span>Created {formatRelative(p.created_at)}</span>
@@ -95,11 +108,38 @@ export function ProjectDetailPage() {
               Search in this project
             </Link>
           </Button>
+          {isExternal ? (
+            <>
+              <SyncProjectButton hash={p.path_hash} hostPath={displayPath} />
+              <ReindexProjectButton hash={p.path_hash} hostPath={displayPath} />
+              {p.status === 'indexing' ? (
+                <ForceStopButton hash={p.path_hash} hostPath={displayPath} />
+              ) : null}
+            </>
+          ) : null}
+          {isAdmin && !isExternal ? (
+            <ReassignOwnerDialog hash={p.path_hash} currentOwnerId={p.owner_user_id} />
+          ) : null}
           {isAdmin ? (
-            <DeleteProjectDialog hash={p.path_hash} hostPath={p.host_path} redirectAfter />
+            <DeleteProjectDialog hash={p.path_hash} hostPath={displayPath} redirectAfter />
           ) : null}
         </div>
       </header>
+
+      {p.status === 'indexing' ? (
+        isExternal ? (
+          <IndexingProgressCard hash={p.path_hash} />
+        ) : (
+          <Alert>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <AlertTitle>Indexing in progress</AlertTitle>
+            <AlertDescription>
+              This project is being indexed. Stats and search results will be incomplete
+              until it finishes — this page auto-refreshes when the run completes.
+            </AlertDescription>
+          </Alert>
+        )
+      ) : null}
 
       {drift ? (
         <Alert variant="destructive">
@@ -115,7 +155,7 @@ export function ProjectDetailPage() {
             </div>
             <div className="text-xs">
               Reindex from your terminal:{' '}
-              <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {p.host_path}</code>
+              <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {displayPath}</code>
             </div>
           </AlertDescription>
         </Alert>
@@ -129,6 +169,41 @@ export function ProjectDetailPage() {
       </section>
 
       <ProjectInfoCard project={p} />
+
+      {isExternal ? <SyncSettingsCard hash={p.path_hash} isAdmin={isAdmin} /> : null}
+
+      {isExternal && isAdmin ? <ProjectShareCard hash={p.path_hash} /> : null}
+
+      <section>
+        <h2 className="mb-3 text-sm font-medium text-muted-foreground">Workspaces</h2>
+        {workspaces.isLoading ? (
+          <Skeleton className="h-10 w-full max-w-md" />
+        ) : !workspaces.data || workspaces.data.workspaces.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Not part of any workspace yet.
+          </p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {workspaces.data.workspaces.map((w) => (
+              <Button
+                key={w.workspace_id}
+                asChild
+                variant="outline"
+                size="sm"
+                className="h-auto py-1.5"
+                title={`Linked into ${w.workspace_name} on ${formatDateTime(w.added_at)}`}
+              >
+                <Link to={`/workspaces/${w.workspace_id}`}>
+                  <span className="font-medium">{w.workspace_name}</span>
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    {formatRelative(w.added_at)}
+                  </span>
+                </Link>
+              </Button>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="grid gap-6 lg:grid-cols-2">
         <div>
@@ -185,15 +260,17 @@ export function ProjectDetailPage() {
         </div>
       </section>
 
-      <Alert>
-        <AlertTitle>Reindexing</AlertTitle>
-        <AlertDescription>
-          Indexing reads files from the local filesystem and is driven by the CLI. Run{' '}
-          <code className="rounded bg-muted px-1 py-0.5 text-xs">cix reindex</code> for a one-shot
-          rescan, or keep <code className="rounded bg-muted px-1 py-0.5 text-xs">cix watch</code>{' '}
-          running for automatic updates on file change.
-        </AlertDescription>
-      </Alert>
+      {!isExternal ? (
+        <Alert>
+          <AlertTitle>Reindexing</AlertTitle>
+          <AlertDescription>
+            Indexing reads files from the local filesystem and is driven by the CLI. Run{' '}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">cix reindex</code> for a one-shot
+            rescan, or keep <code className="rounded bg-muted px-1 py-0.5 text-xs">cix watch</code>{' '}
+            running for automatic updates on file change.
+          </AlertDescription>
+        </Alert>
+      ) : null}
     </div>
   );
 }

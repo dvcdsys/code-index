@@ -9,8 +9,10 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	apidb "github.com/dvcdsys/code-index/server/internal/db"
+	"github.com/dvcdsys/code-index/server/internal/groups"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
+	"github.com/dvcdsys/code-index/server/internal/workspaces"
 )
 
 // authTestFixture bundles a router plus the seeded admin user + a fresh
@@ -57,6 +59,8 @@ func newAuthFixture(t *testing.T) *authTestFixture {
 		Users:          usrSvc,
 		Sessions:       sessSvc,
 		APIKeys:        akSvc,
+		Groups:         groups.New(database),
+		Workspaces:     workspaces.New(database),
 	}
 	return &authTestFixture{Router: NewRouter(deps), Deps: deps, UserID: u.ID, FullKey: full}
 }

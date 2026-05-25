@@ -13,11 +13,11 @@ import { MODULES } from '@/modules/registry';
 // edits to this component are needed when a module is added.
 export function Sidebar() {
   const { user, logout } = useAuth();
-  const role = user?.role ?? 'viewer';
+  const role = user?.role ?? 'user';
 
   const visible = MODULES.filter((m) => {
     if (!m.requiredRole) return true;
-    if (m.requiredRole === 'viewer') return true;
+    if (m.requiredRole === 'user') return true;
     return role === 'admin';
   });
 

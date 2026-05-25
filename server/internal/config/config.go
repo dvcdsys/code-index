@@ -93,6 +93,86 @@ type Config struct {
 	VersionCheckEnabled  bool
 	VersionCheckInterval time.Duration
 	VersionCheckRepo     string
+
+	// SecretKey / SecretKeyFile control encryption-at-rest for the
+	// github_tokens table (PATs used by clone_repo to authenticate
+	// against private GitHub repos). Resolution order:
+	//   1. CIX_SECRET_KEY (env var, hex or base64 32-byte value)
+	//   2. CIX_SECRET_KEYFILE (env var, path to a 0600-perm key file)
+	//   3. <DataDir>/.secret_key (auto-generated on first run; only used
+	//      when workspaces are enabled and the operator hasn't explicitly
+	//      pointed at a key)
+	// PR1 keeps both fields here for documentation — the actual resolution
+	// happens in internal/secrets.Open() which reads the env vars directly.
+	SecretKey     string
+	SecretKeyFile string
+
+	// SecretsDataDir is the directory used as the auto-generated keyfile
+	// destination when neither CIX_SECRET_KEY nor CIX_SECRET_KEYFILE is
+	// set. Defaults to the SQLite parent directory so the generated key
+	// lives alongside the encrypted data — losing one almost certainly
+	// means losing both.
+	SecretsDataDir string
+
+	// WorkspacesDataDir is the base directory the worker pool clones GitHub
+	// repositories under (each clone lives at
+	// <WorkspacesDataDir>/repos/<path_hash>/). Defaults to
+	// <SQLite parent>/repos. Source: CIX_REPOS_DIR (preferred), or the
+	// legacy CIX_WORKSPACES_DATA_DIR alias. Point this at a dedicated volume
+	// when cloned repos are large.
+	WorkspacesDataDir string
+
+	// WorkerConcurrency controls how many jobs goroutines drain the
+	// queue at once. Clone+index is mostly IO; 2 is a sensible default
+	// for a self-hosted single-node deployment. Source:
+	// CIX_WORKER_CONCURRENCY (default 2).
+	WorkerConcurrency int
+
+	// PublicBaseURL is the externally-reachable URL of this server
+	// (e.g. "https://cix.example.com"). Used to construct webhook
+	// delivery URLs surfaced to operators on POST /workspaces/{id}/repos.
+	// Optional — when empty, handlers return path-only URLs and trust
+	// the operator to prepend their tunnel/proxy origin. Source:
+	// CIX_PUBLIC_URL.
+	PublicBaseURL string
+
+	// Managed Tunnels — DEPLOYMENT INFRA ONLY. The feature itself has no
+	// enable flag: whether a tunnel runs and how it's configured (mode,
+	// hostname, token) lives in the DB (tunnel_config) and is managed
+	// entirely from the dashboard. These env vars only describe where the
+	// cloudflared binary lives and its tuning knobs, which are deployment
+	// concerns the operator can't set from the UI.
+	CloudflareBinPath     string // CIX_TUNNEL_CLOUDFLARE_BIN_PATH; default "cloudflared" (PATH) — images set /cloudflared
+	CloudflareMetricsAddr string // CIX_TUNNEL_CLOUDFLARE_METRICS_ADDR; default 127.0.0.1:21848
+	CloudflareStartupSec  int    // CIX_TUNNEL_CLOUDFLARE_STARTUP_TIMEOUT; readiness ceiling, default 30
+	NgrokBinPath          string // CIX_TUNNEL_NGROK_BIN_PATH; default "ngrok" (PATH)
+	NgrokStartupSec       int    // CIX_TUNNEL_NGROK_STARTUP_TIMEOUT; readiness ceiling, default 30
+
+	// TunnelBinManaged enables installing/updating the provider binaries
+	// from the dashboard (the server downloads them into TunnelBinDir). The
+	// Docker images set this true — the bundled binaries can't be updated in
+	// place (read-only image layer), so a writable managed dir on the data
+	// volume lets operators update without rebuilding. Off by default for
+	// local runs, where binaries come from the system (brew/apt/etc).
+	// Source: CIX_TUNNEL_BIN_MANAGED.
+	TunnelBinManaged bool
+	// TunnelBinDir is the writable directory managed binaries are downloaded
+	// into. Default: <SQLite dir>/tunnel-bin. Source: CIX_TUNNEL_BIN_DIR.
+	TunnelBinDir string
+
+	// DefaultPollInterval is the cadence used for polling-enabled repos
+	// that don't set a per-repo interval. Cadence is measured from the end
+	// of the last index run. Source: CIX_DEFAULT_POLL_INTERVAL (default 5m).
+	DefaultPollInterval time.Duration
+
+	// MinPollInterval is the floor applied to every effective poll interval
+	// (per-repo or default), so an operator can't accidentally hammer
+	// GitHub. Source: CIX_MIN_POLL_INTERVAL (default 60s).
+	MinPollInterval time.Duration
+
+	// PollSchedulerTick is how often the shared poll scheduler scans for
+	// due repos. Source: CIX_POLL_SCHEDULER_TICK (default 30s).
+	PollSchedulerTick time.Duration
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -265,6 +345,65 @@ func Load() (*Config, error) {
 
 	c.VersionCheckRepo = getenv("CIX_VERSION_CHECK_REPO", "dvcdsys/code-index")
 
+
+	c.SecretKey = getenv("CIX_SECRET_KEY", "")
+	c.SecretKeyFile = getenv("CIX_SECRET_KEYFILE", "")
+	c.SecretsDataDir = getenv("CIX_SECRETS_DATA_DIR", filepath.Dir(c.SQLitePath))
+	// CIX_REPOS_DIR is the clearly-named source; CIX_WORKSPACES_DATA_DIR is the
+	// legacy alias kept for backward compatibility (this used to be a
+	// workspace-only concept). First non-empty wins, else the default.
+	c.WorkspacesDataDir = firstEnv(
+		[]string{"CIX_REPOS_DIR", "CIX_WORKSPACES_DATA_DIR"},
+		filepath.Join(filepath.Dir(c.SQLitePath), "repos"),
+	)
+
+	workerConc, err := getenvInt("CIX_WORKER_CONCURRENCY", 2)
+	if err != nil {
+		return nil, err
+	}
+	c.WorkerConcurrency = workerConc
+
+	c.PublicBaseURL = strings.TrimSpace(getenv("CIX_PUBLIC_URL", ""))
+
+	c.CloudflareBinPath = strings.TrimSpace(getenv("CIX_TUNNEL_CLOUDFLARE_BIN_PATH", "cloudflared"))
+	c.CloudflareMetricsAddr = strings.TrimSpace(getenv("CIX_TUNNEL_CLOUDFLARE_METRICS_ADDR", "127.0.0.1:21848"))
+	cfStartup, err := getenvInt("CIX_TUNNEL_CLOUDFLARE_STARTUP_TIMEOUT", 30)
+	if err != nil {
+		return nil, err
+	}
+	c.CloudflareStartupSec = cfStartup
+	c.NgrokBinPath = strings.TrimSpace(getenv("CIX_TUNNEL_NGROK_BIN_PATH", "ngrok"))
+	ngrokStartup, err := getenvInt("CIX_TUNNEL_NGROK_STARTUP_TIMEOUT", 30)
+	if err != nil {
+		return nil, err
+	}
+	c.NgrokStartupSec = ngrokStartup
+
+	binManaged, err := getenvBool("CIX_TUNNEL_BIN_MANAGED", false)
+	if err != nil {
+		return nil, err
+	}
+	c.TunnelBinManaged = binManaged
+	c.TunnelBinDir = strings.TrimSpace(getenv("CIX_TUNNEL_BIN_DIR", filepath.Join(filepath.Dir(c.SQLitePath), "tunnel-bin")))
+
+	defaultPoll, err := getenvDuration("CIX_DEFAULT_POLL_INTERVAL", 5*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	c.DefaultPollInterval = defaultPoll
+
+	minPoll, err := getenvDuration("CIX_MIN_POLL_INTERVAL", 60*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	c.MinPollInterval = minPoll
+
+	pollTick, err := getenvDuration("CIX_POLL_SCHEDULER_TICK", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	c.PollSchedulerTick = pollTick
+
 	return c, nil
 }
 
@@ -384,6 +523,18 @@ func defaultLlamaSocketPath() string {
 func getenv(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok {
 		return v
+	}
+	return def
+}
+
+// firstEnv returns the value of the first set (present, possibly empty) env var
+// in keys, or def when none are set. Used for vars with a preferred name plus a
+// legacy alias.
+func firstEnv(keys []string, def string) string {
+	for _, k := range keys {
+		if v, ok := os.LookupEnv(k); ok {
+			return v
+		}
 	}
 	return def
 }

@@ -1,0 +1,244 @@
+import { useEffect, useState } from 'react';
+import { AlertCircle, Github, Plus, Trash2 } from 'lucide-react';
+import { ApiError, api } from '@/api/client';
+import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
+import { Button } from '@/ui/button';
+import { Skeleton } from '@/ui/skeleton';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/ui/dialog';
+import { Input } from '@/ui/input';
+import { Label } from '@/ui/label';
+
+type GithubToken = {
+  id: string;
+  name: string;
+  scopes: string[];
+  created_at: string;
+  last_used_at?: string | null;
+};
+
+type GithubTokenListResponse = {
+  tokens: GithubToken[];
+  total: number;
+};
+
+// TokensTab manages encrypted-at-rest GitHub PATs used for cloning private
+// repos and registering webhooks. The plaintext value is sent on POST and
+// never returned — subsequent operations identify tokens by id.
+export default function TokensTab() {
+  const [list, setList] = useState<GithubToken[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [featureOff, setFeatureOff] = useState(false);
+
+  async function reload() {
+    try {
+      const resp = await api.get<GithubTokenListResponse>('/github-tokens');
+      setList(resp.tokens);
+      setError(null);
+      setFeatureOff(false);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 503) {
+        setFeatureOff(true);
+        setList([]);
+        return;
+      }
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  useEffect(() => {
+    void reload();
+  }, []);
+
+  if (featureOff) {
+    return (
+      <Alert>
+        <AlertCircle className="size-4" />
+        <AlertTitle>GitHub tokens service is not configured</AlertTitle>
+        <AlertDescription>
+          The server returned 503 — the encryption layer for github_tokens
+          failed to wire. Check the server logs (most common cause:{' '}
+          <code>CIX_SECRET_KEY</code> / <code>CIX_SECRET_KEYFILE</code>{' '}
+          resolution) and restart.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          Personal Access Tokens for cloning private repositories and
+          registering webhooks. Stored encrypted; the plaintext value is never
+          returned after creation.
+        </p>
+        <CreateTokenDialog onCreated={reload} />
+      </div>
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="size-4" />
+          <AlertTitle>Could not load tokens</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      {list === null ? (
+        <div className="space-y-2">
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+        </div>
+      ) : list.length === 0 ? (
+        <EmptyState />
+      ) : (
+        <ul className="divide-y rounded-md border">
+          {list.map((t) => (
+            <TokenRow key={t.id} token={t} onDeleted={reload} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div className="rounded-md border bg-muted/30 p-8 text-center">
+      <Github className="mx-auto mb-3 size-8 text-muted-foreground" />
+      <p className="text-sm font-medium">No GitHub tokens yet</p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Tokens are required when adding private repositories to a workspace.
+      </p>
+    </div>
+  );
+}
+
+function TokenRow({ token, onDeleted }: { token: GithubToken; onDeleted: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  async function handleDelete() {
+    if (!confirm(`Delete token "${token.name}"? This cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      await api.delete<void>(`/github-tokens/${token.id}`);
+      onDeleted();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className="min-w-0">
+        <div className="truncate font-medium">{token.name}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          scopes:{' '}
+          {token.scopes.length ? token.scopes.join(', ') : '(fine-grained or none)'}
+          {token.last_used_at && (
+            <> · last used {new Date(token.last_used_at).toLocaleString()}</>
+          )}
+        </div>
+      </div>
+      <Button variant="ghost" size="sm" disabled={busy} onClick={handleDelete}>
+        <Trash2 className="size-4" />
+      </Button>
+    </li>
+  );
+}
+
+function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [token, setToken] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Scopes are intentionally not asked for — the server validates the token
+  // against GET /user and reads the real X-OAuth-Scopes header, which is the
+  // only thing GitHub will actually enforce.
+  async function submit() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.post('/github-tokens', { name, token });
+      setName('');
+      setToken('');
+      setOpen(false);
+      onCreated();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button>
+          <Plus className="mr-1 size-4" />
+          Add token
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add GitHub token</DialogTitle>
+          <DialogDescription>
+            Stored encrypted-at-rest with AES-256-GCM. The plaintext value
+            never leaves this request — there is no way to retrieve it after
+            saving. Scopes are read from GitHub on save (no need to enter them
+            here). For auto webhook registration the token needs the{' '}
+            <code>admin:repo_hook</code> scope.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <Label htmlFor="tok-name">Name</Label>
+            <Input
+              id="tok-name"
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="personal"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="tok-value">Token value</Label>
+            <Input
+              id="tok-value"
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="ghp_... or github_pat_..."
+              className="font-mono"
+            />
+          </div>
+          {err && (
+            <Alert variant="destructive">
+              <AlertDescription>{err}</AlertDescription>
+            </Alert>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            onClick={submit}
+            disabled={busy || name.trim() === '' || token.trim() === ''}
+          >
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

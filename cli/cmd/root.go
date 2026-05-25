@@ -75,6 +75,29 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "API key (default from config)")
 }
 
+// resolveProjectByName performs an exact-match lookup of name against the
+// HostPath of every registered project. Unlike findProjectRoot it does not
+// run filepath.Abs or any prefix walk — the caller is asserting "use this
+// exact registered project, no magic". On miss the error lists every
+// registered HostPath so the user can copy/paste the right one.
+func resolveProjectByName(name string, apiClient *client.Client) (string, error) {
+	projects, err := apiClient.ListProjects()
+	if err != nil {
+		return "", fmt.Errorf("list projects: %w", err)
+	}
+	registered := make([]string, 0, len(projects))
+	for _, p := range projects {
+		if p.HostPath == name {
+			return p.HostPath, nil
+		}
+		registered = append(registered, p.HostPath)
+	}
+	if len(registered) == 0 {
+		return "", fmt.Errorf("project %q not found; no projects are registered (run `cix init` or attach a repo via the dashboard)", name)
+	}
+	return "", fmt.Errorf("project %q not found; registered projects:\n  - %s", name, strings.Join(registered, "\n  - "))
+}
+
 // findProjectRoot resolves a candidate path to a registered project root.
 //
 // If the candidate path exactly matches a registered project it is returned as-is.

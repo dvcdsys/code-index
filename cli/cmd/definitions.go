@@ -13,6 +13,7 @@ var (
 	defFile    string
 	defLimit   int
 	defProject string
+	defName    string
 )
 
 var definitionsCmd = &cobra.Command{
@@ -24,7 +25,8 @@ var definitionsCmd = &cobra.Command{
 Examples:
   cix definitions HandleRequest
   cix def AuthMiddleware --kind function
-  cix goto UserService --file ./internal/service.go`,
+  cix goto UserService --file ./internal/service.go
+  cix def HandleRequest --name github.com/MythicalGames/pf3-backend@main`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDefinitions,
 }
@@ -35,23 +37,37 @@ func init() {
 	definitionsCmd.Flags().StringVar(&defFile, "file", "", "Narrow to a specific file")
 	definitionsCmd.Flags().IntVarP(&defLimit, "limit", "l", 10, "Maximum results")
 	definitionsCmd.Flags().StringVarP(&defProject, "project", "p", "", "Project path (default: current directory)")
+	definitionsCmd.Flags().StringVarP(&defName, "name", "n", "", "Project ID (exact match against `cix list`). Mutually exclusive with -p.")
+	definitionsCmd.MarkFlagsMutuallyExclusive("project", "name")
 }
 
 func runDefinitions(cmd *cobra.Command, args []string) error {
 	symbol := args[0]
 
-	projectPath := defProject
-	if projectPath == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
-		}
-		projectPath = cwd
+	apiClient, err := getClient()
+	if err != nil {
+		return err
 	}
 
-	absPath, err := filepath.Abs(projectPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
+	var absPath string
+	if defName != "" {
+		absPath, err = resolveProjectByName(defName, apiClient)
+		if err != nil {
+			return err
+		}
+	} else {
+		projectPath := defProject
+		if projectPath == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+			projectPath = cwd
+		}
+		absPath, err = filepath.Abs(projectPath)
+		if err != nil {
+			return fmt.Errorf("resolve path: %w", err)
+		}
 	}
 
 	// Resolve file path to absolute
@@ -61,11 +77,6 @@ func runDefinitions(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("resolve file path: %w", err)
 		}
-	}
-
-	apiClient, err := getClient()
-	if err != nil {
-		return err
 	}
 
 	results, err := apiClient.SearchDefinitions(absPath, symbol, defKind, filePath, defLimit)

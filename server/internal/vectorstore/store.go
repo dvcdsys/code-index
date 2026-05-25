@@ -209,3 +209,4 @@ func (s *Store) Count(projectPath string) int {
 func round4(f float32) float32 {
 	return float32(math.Round(float64(f)*10000) / 10000)
 }
+

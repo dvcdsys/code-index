@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/dvcdsys/code-index/server/internal/chunksfts"
 )
 
 // ErrNotFound is returned when a project does not exist.
@@ -67,11 +69,42 @@ type Project struct {
 	// indexed under PR-E (or never indexed at all). The dashboard renders
 	// nil as a neutral "Unknown" badge, NOT as drift.
 	IndexedWithModel *string
+	// OwnerUserID is the user who owns this personal (locally indexed)
+	// project. nil = ownerless, the canonical state for EXTERNAL projects
+	// (those with a git_repos row). See the auth model in db/schema.go.
+	OwnerUserID *string
+	// DisplayPath is the human-readable path (the real filesystem path for
+	// local projects, the github path for external). HostPath is the identity
+	// key and may be namespaced; clients should display DisplayPath.
+	DisplayPath string
+	// MachineID / MachineLabel identify the machine a local project was
+	// indexed on. nil for external (and legacy) projects.
+	MachineID    *string
+	MachineLabel *string
 }
 
 // CreateRequest mirrors Python ProjectCreate.
 type CreateRequest struct {
+	// HostPath is the REAL filesystem path the caller is registering (for
+	// external repos, the github path). It becomes display_path; the stored
+	// identity key is derived from it (namespaced with MachineID for locals).
 	HostPath string
+	// OwnerUserID, when non-empty, is stored as the project's owner (personal
+	// project). Empty → NULL (ownerless), used by the external-repo path.
+	OwnerUserID string
+	// MachineID, when non-empty, marks this as a LOCAL project and namespaces
+	// the identity key as local:{MachineID}:{HostPath} so the same path on
+	// different machines/users does not collide. Empty → external (no
+	// namespacing). MachineLabel is os.Hostname() for display only.
+	MachineID    string
+	MachineLabel string
+}
+
+// LocalProjectKey returns the namespaced identity key for a local project.
+// MUST stay byte-identical to the CLI's key computation (cli client) so the
+// path_hash both sides derive matches. Format: "local:{machineID}:{path}".
+func LocalProjectKey(machineID, path string) string {
+	return "local:" + machineID + ":" + path
 }
 
 // UpdateRequest mirrors Python ProjectUpdate.
@@ -112,10 +145,19 @@ func hashPath(path string) string {
 // slashes) risks 404s on subsequent GET/PATCH calls that carry the original
 // path through their SHA1 hash.
 func Create(ctx context.Context, db *sql.DB, req CreateRequest) (*Project, error) {
-	hostPath := req.HostPath
+	displayPath := req.HostPath
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	if conflict, err := findOverlap(ctx, db, hostPath); err != nil {
+	// Identity key: namespaced per machine for local projects so the same
+	// filesystem path on different machines/users does not collide; the real
+	// path is kept as display_path. External projects (no MachineID) use the
+	// path as-is — it is already globally unique (github.com/owner/repo@branch).
+	key := displayPath
+	if req.MachineID != "" {
+		key = LocalProjectKey(req.MachineID, displayPath)
+	}
+
+	if conflict, err := findOverlap(ctx, db, key); err != nil {
 		return nil, fmt.Errorf("check overlap: %w", err)
 	} else if conflict != "" {
 		return nil, fmt.Errorf("%w: %s already registered", ErrOverlap, conflict)
@@ -132,18 +174,29 @@ func Create(ctx context.Context, db *sql.DB, req CreateRequest) (*Project, error
 		return nil, fmt.Errorf("marshal stats: %w", err)
 	}
 
+	var owner any
+	if req.OwnerUserID != "" {
+		owner = req.OwnerUserID
+	}
+	var machineID, machineLabel any
+	if req.MachineID != "" {
+		machineID = req.MachineID
+	}
+	if req.MachineLabel != "" {
+		machineLabel = req.MachineLabel
+	}
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO projects (host_path, container_path, languages, settings, stats, status, created_at, updated_at, path_hash)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		hostPath, hostPath, "[]", string(settingsJSON), string(statsJSON), "created", now, now, hashPath(hostPath),
+		`INSERT INTO projects (host_path, container_path, languages, settings, stats, status, created_at, updated_at, path_hash, owner_user_id, display_path, machine_id, machine_label)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		key, displayPath, "[]", string(settingsJSON), string(statsJSON), "created", now, now, hashPath(key), owner, displayPath, machineID, machineLabel,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
-			return nil, fmt.Errorf("%w: %s", ErrConflict, hostPath)
+			return nil, fmt.Errorf("%w: %s", ErrConflict, displayPath)
 		}
 		return nil, fmt.Errorf("insert project: %w", err)
 	}
-	return Get(ctx, db, hostPath)
+	return Get(ctx, db, key)
 }
 
 // findOverlap returns the host_path of the first existing project that is a
@@ -189,7 +242,7 @@ func findOverlap(ctx context.Context, db *sql.DB, candidate string) (string, err
 // Get retrieves a project by its host_path. Returns ErrNotFound if absent.
 func Get(ctx context.Context, db *sql.DB, hostPath string) (*Project, error) {
 	row := db.QueryRowContext(ctx,
-		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model
+		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label
 		 FROM projects WHERE host_path = ?`, hostPath,
 	)
 	return scanProject(hostPath, row)
@@ -217,7 +270,7 @@ func GetByHash(ctx context.Context, db *sql.DB, pathHash string) (*Project, erro
 // List returns all projects ordered by created_at descending.
 func List(ctx context.Context, db *sql.DB) ([]Project, error) {
 	rows, err := db.QueryContext(ctx,
-		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model
+		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label
 		 FROM projects ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -262,13 +315,41 @@ func Patch(ctx context.Context, db *sql.DB, hostPath string, req UpdateRequest) 
 	return Get(ctx, db, hostPath)
 }
 
+// SetStatus updates only the status (and updated_at) of a project. No-op if
+// the host_path doesn't match a row — callers that need 404 semantics should
+// check via Get first. Used by handlers and workers that need to flip a
+// project into "indexing"/"indexed"/"error" without round-tripping a full
+// Patch payload.
+func SetStatus(ctx context.Context, db *sql.DB, hostPath, status string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := db.ExecContext(ctx,
+		`UPDATE projects SET status = ?, updated_at = ? WHERE host_path = ?`,
+		status, now, hostPath)
+	return err
+}
+
 // Delete removes a project and its cascading records. Returns ErrNotFound if absent.
+//
+// chunks_meta and chunks_fts are not bound to projects via FK because
+// chunks_fts is a virtual table and cannot participate in foreign keys.
+// We wipe them in the same tx that drops the projects row so a failure
+// rolls back the partial state.
 func Delete(ctx context.Context, db *sql.DB, hostPath string) error {
 	if _, err := Get(ctx, db, hostPath); err != nil {
 		return err
 	}
-	_, err := db.ExecContext(ctx, `DELETE FROM projects WHERE host_path = ?`, hostPath)
-	return err
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after commit
+	if err := chunksfts.DeleteByProjectTx(ctx, tx, hostPath); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE host_path = ?`, hostPath); err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	return tx.Commit()
 }
 
 // ---------------------------------------------------------------------------
@@ -283,11 +364,16 @@ func scanProject(hostPath string, row *sql.Row) (*Project, error) {
 		createdAt, updatedAt    string
 		lastIndexedAt           *string
 		indexedWithModel        *string
+		ownerUserID             *string
+		displayPath             *string
+		machineID               *string
+		machineLabel            *string
 	)
 	err := row.Scan(
 		&hp, &containerPath,
 		&langsJSON, &settingsJSON, &statsJSON,
-		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel,
+		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel, &ownerUserID,
+		&displayPath, &machineID, &machineLabel,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, hostPath)
@@ -295,7 +381,7 @@ func scanProject(hostPath string, row *sql.Row) (*Project, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan project row: %w", err)
 	}
-	return buildProject(hp, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel)
+	return buildProject(hp, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel)
 }
 
 func scanProjectRow(rows *sql.Rows) (*Project, error) {
@@ -306,18 +392,23 @@ func scanProjectRow(rows *sql.Rows) (*Project, error) {
 		createdAt, updatedAt    string
 		lastIndexedAt           *string
 		indexedWithModel        *string
+		ownerUserID             *string
+		displayPath             *string
+		machineID               *string
+		machineLabel            *string
 	)
 	if err := rows.Scan(
 		&hostPath, &containerPath,
 		&langsJSON, &settingsJSON, &statsJSON,
-		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel,
+		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel, &ownerUserID,
+		&displayPath, &machineID, &machineLabel,
 	); err != nil {
 		return nil, fmt.Errorf("scan project: %w", err)
 	}
-	return buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel)
+	return buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel)
 }
 
-func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt string, lastIndexedAt, indexedWithModel *string) (*Project, error) {
+func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt string, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel *string) (*Project, error) {
 	var langs []string
 	if err := json.Unmarshal([]byte(langsJSON), &langs); err != nil {
 		langs = nil
@@ -333,6 +424,10 @@ func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, s
 		stats = Stats{}
 	}
 
+	dp := hostPath
+	if displayPath != nil && *displayPath != "" {
+		dp = *displayPath
+	}
 	return &Project{
 		HostPath:         hostPath,
 		ContainerPath:    containerPath,
@@ -344,5 +439,33 @@ func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, s
 		UpdatedAt:        updatedAt,
 		LastIndexedAt:    lastIndexedAt,
 		IndexedWithModel: indexedWithModel,
+		OwnerUserID:      ownerUserID,
+		DisplayPath:      dp,
+		MachineID:        machineID,
+		MachineLabel:     machineLabel,
 	}, nil
+}
+
+// SetOwner reassigns (or clears, when ownerUserID == "") a project's owner.
+// Used by the admin reassign-owner endpoint. Returns ErrNotFound if absent.
+func SetOwner(ctx context.Context, db *sql.DB, hostPath, ownerUserID string) error {
+	var owner any
+	if ownerUserID != "" {
+		owner = ownerUserID
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := db.ExecContext(ctx,
+		`UPDATE projects SET owner_user_id = ?, updated_at = ? WHERE host_path = ?`,
+		owner, now, hostPath)
+	if err != nil {
+		return fmt.Errorf("set project owner: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

@@ -5,6 +5,7 @@ import { Badge } from '@/ui/badge';
 import { Card, CardContent } from '@/ui/card';
 import { formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
+import { SyncProjectButton } from './SyncProjectButton';
 
 function basename(p: string): string {
   const parts = p.replace(/\/+$/, '').split('/');
@@ -27,6 +28,9 @@ export function ProjectCard({ project }: { project: Project }) {
     !!project.indexed_with_model &&
     !!currentModel &&
     project.indexed_with_model !== currentModel;
+  // Sync only makes sense for GitHub-cloned projects — the server can pull +
+  // incrementally index those. Local projects are driven by the CLI.
+  const isExternal = project.host_path.startsWith('github.com/');
 
   return (
     <Link to={`/projects/${project.path_hash}`} className="group">
@@ -41,10 +45,13 @@ export function ProjectCard({ project }: { project: Project }) {
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <div className="truncate text-base font-medium leading-tight">
-                {basename(project.host_path)}
+                {basename(project.display_path ?? project.host_path)}
               </div>
-              <div className="mt-0.5 truncate text-xs text-muted-foreground" title={project.host_path}>
-                {project.host_path}
+              <div
+                className="mt-0.5 truncate text-xs text-muted-foreground"
+                title={project.display_path ?? project.host_path}
+              >
+                {project.display_path ?? project.host_path}
               </div>
             </div>
             <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
@@ -83,6 +90,26 @@ export function ProjectCard({ project }: { project: Project }) {
                 : 'Never indexed'}
             </span>
           </div>
+          {isExternal ? (
+            // Dedicated action area for GitHub-synced projects. The card is a
+            // <Link>, so intercept the click here to run the mutation instead
+            // of navigating to the detail page.
+            <div
+              className="flex justify-end border-t pt-3"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+            >
+              <SyncProjectButton
+                hash={project.path_hash}
+                hostPath={project.display_path ?? project.host_path}
+                variant="outline"
+                size="sm"
+                className="h-7 px-2.5 text-xs"
+              />
+            </div>
+          ) : null}
         </CardContent>
       </Card>
     </Link>

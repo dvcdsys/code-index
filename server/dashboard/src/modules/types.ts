@@ -18,7 +18,7 @@ export interface Module {
   path: string;
   /** Top-level page rendered for this module. Owns its own internal routes. */
   element: ComponentType;
-  /** Minimum role required to *see* this module in the sidebar. Default: viewer. */
+  /** Minimum role required to *see* this module in the sidebar. Default: user. */
   requiredRole?: Role;
   /** Sort order in the sidebar — lower comes first. Default: 100. */
   weight?: number;

@@ -32,6 +32,50 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestReposDirPrecedence(t *testing.T) {
+	const sqlite = "/srv/cix/sqlite/projects.db"
+	defaultDir := "/srv/cix/sqlite/repos"
+
+	t.Run("default", func(t *testing.T) {
+		unsetAll(t)
+		t.Setenv("CIX_SQLITE_PATH", sqlite)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.WorkspacesDataDir != defaultDir {
+			t.Errorf("default = %q, want %q", c.WorkspacesDataDir, defaultDir)
+		}
+	})
+
+	t.Run("legacy alias", func(t *testing.T) {
+		unsetAll(t)
+		t.Setenv("CIX_SQLITE_PATH", sqlite)
+		t.Setenv("CIX_WORKSPACES_DATA_DIR", "/legacy/repos")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.WorkspacesDataDir != "/legacy/repos" {
+			t.Errorf("legacy alias = %q, want /legacy/repos", c.WorkspacesDataDir)
+		}
+	})
+
+	t.Run("CIX_REPOS_DIR wins over legacy", func(t *testing.T) {
+		unsetAll(t)
+		t.Setenv("CIX_SQLITE_PATH", sqlite)
+		t.Setenv("CIX_WORKSPACES_DATA_DIR", "/legacy/repos")
+		t.Setenv("CIX_REPOS_DIR", "/mnt/big-volume/repos")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.WorkspacesDataDir != "/mnt/big-volume/repos" {
+			t.Errorf("CIX_REPOS_DIR = %q, want /mnt/big-volume/repos", c.WorkspacesDataDir)
+		}
+	})
+}
+
 func TestLoadOverrides(t *testing.T) {
 	unsetAll(t)
 	// The unsetAll above wipes env before Setenv registers restore callbacks.
@@ -225,6 +269,8 @@ func unsetAll(t *testing.T) {
 		// Bootstrap — wipe so the Load tests don't accidentally inherit
 		// a developer's local bootstrap-admin shell vars.
 		"CIX_BOOTSTRAP_ADMIN_EMAIL", "CIX_BOOTSTRAP_ADMIN_PASSWORD",
+		// Repo clone dir + its legacy alias.
+		"CIX_REPOS_DIR", "CIX_WORKSPACES_DATA_DIR",
 	} {
 		t.Setenv(k, "sentinel")
 		osUnsetenv(k)

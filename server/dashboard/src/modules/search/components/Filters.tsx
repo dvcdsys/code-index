@@ -42,7 +42,7 @@ export function ProjectPicker({
           ) : (
             projects.map((p) => (
               <SelectItem key={p.path_hash} value={p.path_hash}>
-                {p.host_path}
+                {p.display_path ?? p.host_path}
               </SelectItem>
             ))
           )}

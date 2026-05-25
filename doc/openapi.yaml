@@ -80,6 +80,31 @@ tags:
     description: Admin-only user management
   - name: api-keys
     description: Issue and revoke owner-scoped API keys for CLI/SDK use
+  - name: workspaces
+    description: |
+      Workspaces group GitHub repositories for cross-project semantic search.
+      Server-wide shared — every authenticated user can list, create, and
+      modify any workspace. PR1 ships CRUD only; repository attachment,
+      webhooks, and the two-stage search endpoint land in subsequent
+      releases of the workspaces feature branch.
+  - name: groups
+    description: |
+      View-groups: admin-managed sets of users. External projects and
+      workspaces are shared to a group, granting its members read/search
+      access. Group CRUD and membership are admin-only; GET /groups is
+      member-scoped for regular users so the share picker can populate.
+  - name: github-tokens
+    description: |
+      GitHub Personal Access Tokens used by the workspaces feature for
+      cloning private repos and (optionally) registering webhooks. Stored
+      encrypted-at-rest via AES-GCM; the plaintext is surfaced exactly
+      once on POST and never returned thereafter.
+  - name: tunnels
+    description: |
+      Managed Tunnels — a server-orchestrated outbound tunnel that gives
+      the server a public URL while it sits behind NAT. Cloudflare Tunnel
+      ships now; ngrok is reserved. The live tunnel URL is the preferred
+      origin for GitHub webhook delivery URLs.
 
 paths:
   /health:
@@ -707,6 +732,35 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/projects/{path}/workspaces:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    get:
+      operationId: listProjectWorkspaces
+      tags: [projects]
+      summary: List workspaces that contain this project
+      description: |
+        Returns every workspace that has this project attached, owned or
+        linked. The project page uses this to show "Workspaces" chips
+        the user can click to jump to the workspace detail page.
+
+        Empty list when the project isn't part of any workspace yet —
+        either it was indexed directly via /projects without ever being
+        linked, or all its memberships have been detached.
+      responses:
+        "200":
+          description: Memberships
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectWorkspaceList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/projects/{path}/search:
     parameters:
       - $ref: "#/components/parameters/ProjectHash"
@@ -722,9 +776,12 @@ paths:
         then merged into per-file groups and ranked by best match score.
 
         `min_score` semantics:
-          - omitted → server default `0.4` (calibrated for CodeRankEmbed-Q8)
+          - omitted → server default `0.2` (light relevance floor that
+            doesn't silently drop abstract natural-language queries
+            whose best chunks score in [0.25, 0.35])
           - explicit `0` → return everything above HNSW floor
-          - explicit positive → that floor
+          - explicit positive → that floor (use `0.4+` for strict
+            code-symbol searches calibrated for CodeRankEmbed-Q8)
 
         `query_time_ms` is rounded to 1 decimal place.
       requestBody:
@@ -1090,6 +1147,1543 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/workspaces:
+    get:
+      operationId: listWorkspaces
+      tags: [workspaces]
+      summary: List all workspaces
+      description: |
+        Returns every workspace in the system, newest first. Server-wide
+        shared visibility — the caller sees workspaces created by any user.
+      responses:
+        "200":
+          description: Workspace list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    post:
+      operationId: createWorkspace
+      tags: [workspaces]
+      summary: Create a new workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkspaceRequest"
+      responses:
+        "201":
+          description: Workspace created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workspace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Workspace ID (ULID-like string returned by createWorkspace).
+    get:
+      operationId: getWorkspace
+      tags: [workspaces]
+      summary: Get a single workspace
+      responses:
+        "200":
+          description: Workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workspace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    patch:
+      operationId: updateWorkspace
+      tags: [workspaces]
+      summary: Update workspace metadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWorkspaceRequest"
+      responses:
+        "200":
+          description: Updated workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workspace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    delete:
+      operationId: deleteWorkspace
+      tags: [workspaces]
+      summary: Delete a workspace
+      description: |
+        Removes the workspace row. workspace_projects memberships
+        referencing this workspace are removed via ON DELETE CASCADE;
+        the underlying projects, git_repos peers, and on-disk clones
+        are preserved (delete those explicitly via /projects/{path}
+        when desired).
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/groups:
+    get:
+      operationId: listGroups
+      tags: [groups]
+      summary: List view-groups
+      description: |
+        Admins see every group; a regular user sees only the groups they
+        belong to (so the dashboard's "share to group" picker can populate).
+      responses:
+        "200":
+          description: Group list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createGroup
+      tags: [groups]
+      summary: Create a view-group (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGroupRequest"
+      responses:
+        "201":
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/groups/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+    get:
+      operationId: getGroup
+      tags: [groups]
+      summary: Get a view-group (admin only)
+      responses:
+        "200":
+          description: Group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateGroup
+      tags: [groups]
+      summary: Update a view-group (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGroupRequest"
+      responses:
+        "200":
+          description: Updated group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+    delete:
+      operationId: deleteGroup
+      tags: [groups]
+      summary: Delete a view-group (admin only)
+      description: |
+        Cascades to memberships and project/workspace shares referencing
+        the group.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/groups/{id}/members:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+    get:
+      operationId: listGroupMembers
+      tags: [groups]
+      summary: List members of a view-group (admin only)
+      responses:
+        "200":
+          description: Member list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupMemberListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: addGroupMember
+      tags: [groups]
+      summary: Add a user to a view-group (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddGroupMemberRequest"
+      responses:
+        "204":
+          description: Member added (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/groups/{id}/members/{userId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: User ID to remove.
+    delete:
+      operationId: removeGroupMember
+      tags: [groups]
+      summary: Remove a user from a view-group (admin only)
+      responses:
+        "204":
+          description: Member removed (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/projects/{hash}/shares:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Project path hash.
+    get:
+      operationId: listProjectShares
+      tags: [groups]
+      summary: List the view-groups an external project is shared to (admin only)
+      responses:
+        "200":
+          description: Group ids the project is shared to
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupIdListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: shareProjectToGroup
+      tags: [groups]
+      summary: Share an external project to a view-group (admin only)
+      description: |
+        Only EXTERNAL projects (with a git_repos peer) may be shared — sharing
+        a personal/local project returns 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareToGroupRequest"
+      responses:
+        "204":
+          description: Shared (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/projects/{hash}/shares/{groupId}:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Project path hash.
+      - name: groupId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+    delete:
+      operationId: unshareProjectFromGroup
+      tags: [groups]
+      summary: Revoke a project↔group share (admin only)
+      responses:
+        "204":
+          description: Unshared (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/projects/{hash}/owner:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Project path hash.
+    put:
+      operationId: reassignProjectOwner
+      tags: [projects]
+      summary: Reassign the owner of a local project (admin only)
+      description: |
+        Only LOCAL projects (no git_repos peer) can be reassigned — external
+        projects are ownerless by design and return 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReassignOwnerRequest"
+      responses:
+        "200":
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /api/v1/workspaces/{id}/shares:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Workspace ID.
+    get:
+      operationId: listWorkspaceShares
+      tags: [workspaces]
+      summary: List the view-groups a workspace is shared to
+      responses:
+        "200":
+          description: Group ids the workspace is shared to
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupIdListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    post:
+      operationId: shareWorkspaceToGroup
+      tags: [workspaces]
+      summary: Share a workspace to a view-group
+      description: |
+        The workspace owner may share to a group they belong to; an admin may
+        share to any group. Visibility only — each project inside the workspace
+        is still access-checked per viewer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareToGroupRequest"
+      responses:
+        "204":
+          description: Shared (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}/shares/{groupId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Workspace ID.
+      - name: groupId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: View-group ID.
+    delete:
+      operationId: unshareWorkspaceFromGroup
+      tags: [workspaces]
+      summary: Revoke a workspace↔group share (owner or admin)
+      responses:
+        "204":
+          description: Unshared (idempotent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/git-repos:
+    post:
+      operationId: addGitRepo
+      tags: [projects]
+      summary: Clone + index a GitHub repository as a standalone project
+      description: |
+        Inserts a projects row (status=pending), a matching git_repos
+        row, and enqueues a `clone_repo` background job that is chained
+        to an `index_repo` job on success. The resulting project lives
+        in `/api/v1/projects` and is initially attached to no
+        workspaces — link it into specific workspaces via
+        `/api/v1/workspaces/{id}/projects` if desired.
+
+        `token_id` is required for private repos; `webhook_mode`
+        defaults to `manual`. The response carries a one-shot
+        `webhook_url` + `webhook_secret` so the operator can register
+        the webhook in GitHub by hand (`auto` mode does it for them).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddGitRepoRequest"
+      responses:
+        "201":
+          description: Project created + clone enqueued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitRepoCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}/projects:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Workspace ID.
+    get:
+      operationId: listWorkspaceProjects
+      tags: [workspaces]
+      summary: List projects currently linked to a workspace
+      responses:
+        "200":
+          description: Workspace project list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceProjectListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    post:
+      operationId: linkProjectToWorkspace
+      tags: [workspaces]
+      summary: Link an existing project into this workspace
+      description: |
+        Inserts a (workspace_id, project_path) row into
+        `workspace_projects`. The project must already exist and be in
+        `status='indexed'`. Duplicates return 409. The project itself
+        is untouched — workspaces are pure membership collections.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LinkProjectRequest"
+      responses:
+        "201":
+          description: Linked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceProjectMembership"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}/projects/{hash}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Project's path_hash.
+    delete:
+      operationId: unlinkProjectFromWorkspace
+      tags: [workspaces]
+      summary: Remove a project from this workspace (does not delete the project)
+      description: |
+        Drops the (workspace_id, project_path) row. The project itself,
+        its clone on disk, its indexed content, and its memberships in
+        other workspaces are all untouched.
+      responses:
+        "204":
+          description: Unlinked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/workspaces/{id}/search:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: workspaceSearch
+      tags: [workspaces]
+      summary: Hybrid BM25+dense search across all repos in a workspace
+      description: |
+        Embeds the query, then fans out two parallel sub-queries per
+        project: dense (chromem cosine) and sparse (SQLite FTS5 BM25
+        over chunks_fts). Per-project the two ranked lists are fused
+        via Reciprocal Rank Fusion (k=60).
+
+        Across projects an α-blended candidacy score (`α × bm25_norm
+        + (1-α) × dense_norm` with α=0.5, both signals min-max
+        normalized per query) plus a relative threshold
+        (`candidacy ≥ best × 0.4`) drops projects that share no
+        semantic and no lexical overlap with the query. Pure-dense
+        fan-out returned the N nearest vectors regardless of
+        absolute distance, so workspaces routinely surfaced
+        irrelevant repos at noise-level cosine similarity; the BM25
+        gate fixes that by requiring at least one of the two
+        signals to be a meaningful fraction of the best.
+
+        The chunks list is then built by round-robin interleaving:
+        rank-1 from every surviving project before any rank-2, etc.,
+        capped per-project so one dominant repo can't take every
+        slot. Always live — no background rebuild job, no debounce.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: top_projects
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+        - name: top_chunks
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+        - name: min_score
+          in: query
+          required: false
+          description: |
+            Floor on raw cosine similarity. Chunks below this are
+            dropped before aggregation. Default 0.4 — symmetric with
+            per-project search default so an unfiltered workspace
+            query doesn't return cross-repo noise that a single-repo
+            query would have rejected. Pass 0 explicitly for
+            intentional cross-project sweeps that need long-tail
+            recall (e.g. "authentication and authorization" across a
+            mixed-domain workspace).
+          schema:
+            type: number
+            format: float
+            minimum: 0
+            maximum: 1
+            default: 0.4
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceSearchResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/projects/{hash}/git-repo:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getProjectGitRepo
+      tags: [projects]
+      summary: Read the git_repos metadata for an external project
+      description: |
+        Returns clone + webhook metadata. 404 when the project is local
+        (has no git_repos row). The webhook_secret is included so the
+        operator can paste it into GitHub Settings → Webhooks.
+      responses:
+        "200":
+          description: git_repos row
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitRepo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    patch:
+      operationId: updateProjectGitRepoSync
+      tags: [projects]
+      summary: Reconfigure how an external project is kept in sync
+      description: |
+        Switches the project's sync method directly from the project page:
+
+        - `webhook` — GitHub push webhooks trigger reindex. Sets
+          webhook_mode='auto' and attempts to auto-register the hook
+          (needs CIX_PUBLIC_URL / a live tunnel and a PAT with
+          admin:repo_hook). If registration fails, the server falls back to
+          polling and says so in `note`.
+        - `polling` — the shared scheduler fetches on an interval
+          (`poll_interval_seconds`, optional). Sets webhook_mode='disabled'.
+        - `manual` — no automatic sync; reindex on demand. Sets
+          webhook_mode='disabled', polling off.
+
+        Switching away from `webhook` best-effort de-registers any hook the
+        server previously created. 404 when the project is local.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGitRepoSyncRequest"
+      responses:
+        "200":
+          description: Updated sync configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateGitRepoSyncResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Invalid sync_method
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/projects/{hash}/webhook-info:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getProjectWebhookInfo
+      tags: [projects]
+      summary: Webhook URL + secret for manual GitHub setup
+      description: |
+        Returns the publicly-reachable webhook URL and the HMAC secret
+        for an external (GitHub-cloned) project. Only projects with a
+        `git_repos` peer participate in webhook delivery — local-path
+        projects have no clone lifecycle and no webhook.
+
+        The handler returns 404 in two distinct cases, indistinguishable
+        on the wire: (a) the `path_hash` doesn't resolve to any project
+        at all, and (b) the project exists but is local. Callers that
+        need to disambiguate must query `GET /projects/{hash}` first to
+        confirm existence, then treat a subsequent webhook-info 404 as
+        "local project, no webhook to configure".
+      responses:
+        "200":
+          description: Webhook coordinates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookInfoResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            Either the project does not exist, OR the project exists but
+            is local (no `git_repos` row, no webhook to surface).
+            Disambiguate by checking `GET /projects/{hash}` first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/projects/{hash}/reindex:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: reindexProject
+      tags: [projects]
+      summary: Manually re-trigger the clone + index pipeline
+      description: |
+        Enqueues a fresh `clone_repo` job for the matching git_repos
+        row. 422 when the project is local (no clone pipeline — local
+        projects reindex via the CLI). Dedupe collapses repeated
+        triggers into the existing in-flight job.
+
+        Normally the clone job decides incremental vs full automatically
+        (incremental when an `indexed_sha` is recorded and tree.Diff
+        succeeds; full on first-index, partial-failure recovery,
+        or embedding-model change). Pass `full=true` to force a full
+        reindex — useful when index drift is suspected. The endpoint
+        clears `git_repos.indexed_sha` synchronously so the next
+        clone+index pass starts from a clean slate.
+      parameters:
+        - name: full
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            When true, clears `indexed_sha` for this repo before
+            enqueueing so the next index_repo run does a full reindex
+            (re-embeds every file, wipes prior chunks/symbols/refs/
+            file_hashes). Use to recover from suspected drift.
+      responses:
+        "202":
+          description: Reindex enqueued (or already running — dedupe)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReindexEnqueuedResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/projects/{hash}/force-stop:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: forceStopIndex
+      tags: [projects]
+      summary: Force-stop an in-flight index for an external project
+      description: |
+        Hard-aborts the clone + index pipeline for an external
+        (GitHub-cloned) project. 422 when the project is local — local
+        projects index via the CLI and have no server-side pipeline to
+        stop (use the CLI's own cancel/Ctrl-C).
+
+        Two effects, both best-effort:
+          1. Pending/running `clone_repo` + `index_repo` jobs for this
+             repo are deleted from the queue so the pipeline cannot
+             retry or resume.
+          2. The active in-process index session (if any) is cancelled,
+             which unblocks the next `cix index/begin` and flips the
+             project status back to a terminal state.
+
+        Already-committed chunks/symbols are NOT rolled back (matches
+        the CLI's cancel semantics) — a subsequent sync/reindex
+        overwrites them.
+      responses:
+        "202":
+          description: Force-stop processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForceStopResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/webhooks/github/{hash}:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Project's path_hash (16 hex chars).
+    post:
+      operationId: receiveGithubWebhook
+      tags: [projects]
+      summary: Receive a GitHub webhook delivery (public, HMAC-authenticated)
+      description: |
+        Public endpoint — auth is bypassed. The `X-Hub-Signature-256`
+        header must be HMAC-SHA256 of the request body keyed by the
+        project's `git_repos.webhook_secret`. Mismatched signatures
+        return 401; an unknown `hash` returns 404. On a valid `push`
+        for the tracked branch the server enqueues a `clone_repo` job
+        (dedupe collapses burst deliveries).
+
+        GitHub `ping` deliveries return 200 with no side effects so
+        the setup confirmation flow works.
+      security: []
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: false
+          schema:
+            type: string
+          description: HMAC-SHA256 over the body, hex-encoded with sha256= prefix.
+        - name: X-GitHub-Event
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "202":
+          description: Delivery accepted (enqueued or already in flight)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookAccepted"
+        "200":
+          description: Ping or no-op delivery
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookAccepted"
+        "401":
+          description: HMAC signature mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown project hash
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/jobs:
+    get:
+      operationId: listJobs
+      tags: [workspaces]
+      summary: List background jobs (status / type filter)
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, running, completed, failed]
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: Job list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/github-tokens:
+    get:
+      operationId: listGithubTokens
+      tags: [github-tokens]
+      summary: List stored GitHub PATs (metadata only)
+      description: |
+        Returns metadata for every stored token — name, scopes, timestamps.
+        Plaintext values are NEVER returned by this endpoint; the only time
+        plaintext is surfaced is the response to POST /api/v1/github-tokens.
+      responses:
+        "200":
+          description: Token list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubTokenListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    post:
+      operationId: createGithubToken
+      tags: [github-tokens]
+      summary: Store a new GitHub PAT (encrypted-at-rest)
+      description: |
+        Accepts a plaintext token in the request body. The server encrypts
+        it with AES-GCM via internal/secrets and persists only the
+        ciphertext. The response carries metadata only — the plaintext is
+        already in the caller's hands. Scope validation against the GitHub
+        API is deferred to a later release; PR1 stores the supplied scopes
+        verbatim if any.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGithubTokenRequest"
+      responses:
+        "201":
+          description: Token stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/github-tokens/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: deleteGithubToken
+      tags: [github-tokens]
+      summary: Delete a stored GitHub PAT
+      description: |
+        Permanently removes the encrypted blob. Subsequent workspaces
+        operations that reference this token id will fail. The
+        git_repos.token_id FK uses ON DELETE SET NULL, so existing
+        rows survive token revocation but their re-clone / webhook
+        flows that need GitHub auth will fail until a token is
+        re-attached.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/github-tokens/{id}/accounts:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listTokenAccounts
+      tags: [github-tokens]
+      summary: List the GitHub accounts visible to a stored PAT
+      description: |
+        Returns the PAT owner's personal account plus every organisation
+        the PAT can see. The dashboard renders this as the first step of
+        the add-repo flow so the operator can drill into a specific
+        account before picking a repository — useful when /user/repos
+        doesn't surface every org repo (e.g. SAML-protected orgs only
+        appear under /orgs/{login}/repos).
+
+        The PAT plaintext never leaves the server; the dashboard only
+        addresses the token by id.
+      responses:
+        "200":
+          description: A list of accounts (1 user + 0..N orgs)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts, total]
+                properties:
+                  accounts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/GithubAccount"
+                  total:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: GitHub rejected the token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Could not reach GitHub
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/github-tokens/{id}/repos:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listTokenRepos
+      tags: [github-tokens]
+      summary: List GitHub repositories visible to a stored PAT
+      description: |
+        Returns the repos the PAT can see, ordered by most recently
+        pushed. Used by the dashboard's add-repo flow to populate the
+        repo picker.
+
+        When `account` is omitted the response is the affiliations-
+        aggregated view (GET /user/repos) — every repo the PAT can
+        see as owner, collaborator, or organization member. When
+        `account` is set the server hits `/users/{login}/repos` for
+        a user account or `/orgs/{login}/repos` for an org, depending
+        on `account_type`. Use the account-scoped call when /user/repos
+        misses an org repo (typical for SAML-protected orgs).
+
+        The PAT plaintext never leaves the server; the dashboard only
+        addresses the token by id. Up to 500 repos are returned (5 pages
+        of 100). Larger affiliations should rely on client-side text
+        filtering or pick a more specific account.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: Optional case-insensitive substring filter on full_name.
+          schema:
+            type: string
+        - name: account
+          in: query
+          required: false
+          description: |
+            Optional account login to scope the listing to. When set,
+            `account_type` must also be set.
+          schema:
+            type: string
+        - name: account_type
+          in: query
+          required: false
+          description: |
+            Required when `account` is set; ignored otherwise.
+          schema:
+            type: string
+            enum: [user, org]
+      responses:
+        "200":
+          description: A list of repositories
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [repos, total]
+                properties:
+                  repos:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/GithubRepo"
+                  total:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: GitHub rejected the token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Could not reach GitHub
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/tunnels:
+    get:
+      operationId: listTunnels
+      tags: [tunnels]
+      summary: List tunnel providers and their status
+      description: |
+        Returns one entry per known provider (cloudflare, ngrok). The
+        active provider carries live status; others are reported as
+        unavailable / "coming soon".
+      responses:
+        "200":
+          description: Provider catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelCatalog"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/config:
+    get:
+      operationId: getTunnelConfig
+      tags: [tunnels]
+      summary: Get the dashboard-managed tunnel configuration
+      description: |
+        Returns the persisted tunnel config (enable/mode/hostname). The
+        connector token is never returned — `token_set` reports whether one
+        is stored.
+      responses:
+        "200":
+          description: Current config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+    put:
+      operationId: updateTunnelConfig
+      tags: [tunnels]
+      summary: Update tunnel configuration and apply it
+      description: |
+        Persists the config and immediately applies it: enabling starts the
+        tunnel, disabling stops it, changing mode/hostname/token restarts it.
+        Omit `token` to keep the existing one; send an empty string to clear.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TunnelConfigUpdate"
+      responses:
+        "200":
+          description: Applied; returns the resulting status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelStatus"
+        "400":
+          description: Invalid configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/tunnels/binaries:
+    get:
+      operationId: listTunnelBinaries
+      tags: [tunnels]
+      summary: Agent-binary status per provider
+      description: |
+        Reports whether each provider's agent binary (cloudflared, ngrok) is
+        present on this server, its path/version, and whether the server can
+        install/update it from the UI (managed mode — set by the Docker
+        images). When not installed and not managed, the dashboard shows
+        manual install instructions (local runs only).
+      responses:
+        "200":
+          description: Per-provider binary status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelBinaryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/binaries/{provider}/install:
+    post:
+      operationId: installTunnelBinary
+      tags: [tunnels]
+      summary: Download/install a provider's agent binary (managed mode)
+      description: |
+        Downloads the latest stable agent binary into the managed directory.
+        Only available when binary management is enabled
+        (CIX_TUNNEL_BIN_MANAGED=true); otherwise returns 409.
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [cloudflare, ngrok]
+      responses:
+        "200":
+          description: Installed; returns the new binary status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelBinaryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Binary management is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Download/install failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tunnels/binaries/{provider}/update:
+    post:
+      operationId: updateTunnelBinary
+      tags: [tunnels]
+      summary: Update a provider's agent binary to the latest (managed mode)
+      description: |
+        Re-downloads the latest stable agent binary, replacing the managed
+        copy. Restart the tunnel afterwards to run the new version. Only
+        available when CIX_TUNNEL_BIN_MANAGED=true.
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [cloudflare, ngrok]
+      responses:
+        "200":
+          description: Updated; returns the new binary status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelBinaryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Binary management is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Download/update failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tunnels/status:
+    get:
+      operationId: getTunnelStatus
+      tags: [tunnels]
+      summary: Active tunnel status snapshot
+      responses:
+        "200":
+          description: Active provider status (or disabled placeholder)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/tunnels/test:
+    post:
+      operationId: testTunnel
+      tags: [tunnels]
+      summary: End-to-end connectivity test through the tunnel
+      description: |
+        Issues a GET to the tunnel's public URL + `/health`; the request
+        egresses to the provider edge and routes back through the tunnel
+        to this server — a true round-trip, not just a liveness check.
+      responses:
+        "200":
+          description: Test result (ok=false when unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelTestResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: No active tunnel
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tunnels/restart:
+    post:
+      operationId: restartTunnel
+      tags: [tunnels]
+      summary: Restart the active tunnel subprocess
+      responses:
+        "200":
+          description: Restarted; returns the new status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: No active tunnel
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Restart failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/github/webhooks/reconcile:
+    post:
+      operationId: reconcileWebhooks
+      tags: [tunnels]
+      summary: Re-register all webhook_mode=auto repos against the current public URL
+      description: |
+        Re-points every `webhook_mode=auto` repository's GitHub webhook at
+        the current public base URL (the live tunnel URL when present, else
+        CIX_PUBLIC_URL). Idempotent. Runs automatically on boot and on
+        tunnel URL changes; this endpoint triggers it manually.
+      responses:
+        "200":
+          description: Reconcile outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookReconcileResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
+  /api/v1/github/webhooks/origin:
+    get:
+      operationId: getWebhookOrigin
+      tags: [tunnels]
+      summary: Effective public origin for GitHub webhook delivery
+      description: |
+        Reports the public origin that webhook delivery URLs are built
+        against, and where it comes from: a live managed tunnel, the
+        operator-set CIX_PUBLIC_URL (i.e. the server is made public by
+        infrastructure — reverse proxy, ingress, static IP), or none.
+
+        A managed tunnel is OPTIONAL: when CIX_PUBLIC_URL is set, webhooks
+        work without any tunnel. The dashboard uses this to avoid presenting
+        "no tunnel" as a problem when the origin is provided by infra.
+      responses:
+        "200":
+          description: Effective webhook delivery origin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookOrigin"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1153,6 +2747,16 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    WorkspacesDisabled:
+      description: |
+        Required service is not configured on this server (commonly an
+        encryption-key boot failure preventing github_tokens from
+        wiring, or a partial-test Deps in non-production contexts).
+        Check the server logs and restart.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
 
   schemas:
     Error:
@@ -1181,7 +2785,7 @@ components:
           format: email
         role:
           type: string
-          enum: [admin, viewer]
+          enum: [admin, user]
         must_change_password:
           type: boolean
         created_at:
@@ -1253,7 +2857,7 @@ components:
 
     MeResponse:
       type: object
-      required: [user, auth_method]
+      required: [user, auth_method, groups]
       properties:
         user:
           $ref: "#/components/schemas/User"
@@ -1263,6 +2867,15 @@ components:
           description: |
             Tells the dashboard whether to surface "logout" (session) or
             hide it (api_key access — there's nothing to log out of).
+        groups:
+          type: array
+          description: |
+            View-groups the caller belongs to. Lets the dashboard scope the
+            "share to group" picker without a second round-trip. Empty for a
+            user in no groups; admins still only list their own memberships
+            here (the full group list comes from GET /groups).
+          items:
+            $ref: "#/components/schemas/Group"
 
     ChangePasswordRequest:
       type: object
@@ -1291,17 +2904,17 @@ components:
             The admin shares this out-of-band.
         role:
           type: string
-          enum: [admin, viewer]
+          enum: [admin, user]
 
     UpdateUserRequest:
       type: object
       properties:
         role:
           type: string
-          enum: [admin, viewer]
+          enum: [admin, user]
           description: |
             New role for the user. Refused for the last enabled admin
-            when set to `viewer`.
+            when set to `user`.
         disabled:
           type: boolean
           description: |
@@ -1700,6 +3313,11 @@ components:
         - created_at
         - updated_at
         - last_indexed_at
+        # owner_user_id is required-but-nullable so external (ownerless)
+        # projects serialize as `"owner_user_id": null` rather than the
+        # field being absent. Lets TS clients use `string | null` instead
+        # of `string | undefined`.
+        - owner_user_id
       properties:
         path_hash:
           type: string
@@ -1738,6 +3356,28 @@ components:
             Embedding model identifier active when this project was last
             (re)indexed. NULL on rows that pre-date drift tracking — the
             dashboard treats NULL as "Unknown" rather than as drift.
+        owner_user_id:
+          type: string
+          nullable: true
+          description: |
+            User who owns this personal (locally indexed) project. NULL means
+            ownerless — the canonical state for EXTERNAL projects (those with a
+            git_repos peer), which are admin-administered and reachable only via
+            a view-group share.
+        display_path:
+          type: string
+          description: |
+            Human-readable path. The real filesystem path for local projects,
+            the github path for external ones. host_path is the identity key
+            (namespaced per machine for locals) — clients should show this.
+        machine_id:
+          type: string
+          nullable: true
+          description: Per-machine UUID a local project was indexed on. NULL for external/legacy.
+        machine_label:
+          type: string
+          nullable: true
+          description: os.Hostname() of the indexing machine — display only.
         sqlite_path:
           type: string
           nullable: true
@@ -1775,6 +3415,17 @@ components:
       properties:
         host_path:
           type: string
+          description: The real filesystem path being registered (becomes display_path).
+        machine_id:
+          type: string
+          description: |
+            Per-machine UUID supplied by the CLI (from ~/.cix/machine_id). When
+            present the project is LOCAL and its identity key is namespaced
+            local:{machine_id}:{host_path} so the same path on different
+            machines/users does not collide. Omit for external repos.
+        machine_label:
+          type: string
+          description: os.Hostname() of the indexing machine — display only.
 
     UpdateProjectRequest:
       type: object
@@ -2041,8 +3692,10 @@ components:
           type: number
           format: float
           description: |
-            Minimum cosine similarity. Omit for server default (0.4 for
-            CodeRankEmbed-Q8). Send `0` explicitly to disable the floor.
+            Minimum cosine similarity. Omit for server default (0.2 —
+            light floor that keeps abstract NL queries non-empty). Send
+            `0` to disable; pass `0.4+` for strict code-symbol searches
+            calibrated for CodeRankEmbed-Q8.
 
     NestedHit:
       type: object
@@ -2232,6 +3885,14 @@ components:
           format: double
         run_id:
           type: string
+        current_files:
+          type: array
+          items:
+            type: string
+          description: |
+            Most recent files being indexed, newest first; up to 3. Lets a UI
+            show live forward motion during a run. Empty on the
+            historical-fallback variant.
 
     IndexProgressResponse:
       type: object
@@ -2292,3 +3953,967 @@ components:
           type: integer
         files_processed_total:
           type: integer
+
+    Workspace:
+      type: object
+      # owner_user_id is required-but-nullable for the same reason as on
+      # Project — clients can rely on the field being present and use
+      # `string | null` instead of optional.
+      required: [id, name, description, created_at, updated_at, owner_user_id]
+      properties:
+        id:
+          type: string
+          description: ULID-like opaque identifier.
+        name:
+          type: string
+          description: Unique workspace name.
+        description:
+          type: string
+          description: Free-form description. Empty string when absent.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        owner_user_id:
+          type: string
+          nullable: true
+          description: |
+            User who created the workspace. NULL only when orphaned by a user
+            deletion. Visible to the owner, members of any view-group it is
+            shared to, and admins.
+
+    WorkspaceListResponse:
+      type: object
+      required: [workspaces, total]
+      properties:
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/Workspace"
+        total:
+          type: integer
+
+    CreateWorkspaceRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+          description: Optional free-form description.
+
+    UpdateWorkspaceRequest:
+      type: object
+      description: |
+        Both fields are optional — omitting a field leaves the existing
+        value unchanged. Passing an empty string for `description` clears
+        it. `name` must be non-empty when provided.
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+
+    Group:
+      type: object
+      required: [id, name, description, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          description: Free-form description. Empty string when absent.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    GroupMember:
+      type: object
+      required: [user_id, email, role, added_at]
+      properties:
+        user_id:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, user]
+        added_at:
+          type: string
+          format: date-time
+
+    GroupListResponse:
+      type: object
+      required: [groups, total]
+      properties:
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/Group"
+        total:
+          type: integer
+
+    GroupMemberListResponse:
+      type: object
+      required: [members, total]
+      properties:
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupMember"
+        total:
+          type: integer
+
+    CreateGroupRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+
+    UpdateGroupRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+
+    AddGroupMemberRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+
+    ShareToGroupRequest:
+      type: object
+      required: [group_id]
+      properties:
+        group_id:
+          type: string
+
+    GroupIdListResponse:
+      type: object
+      required: [group_ids]
+      properties:
+        group_ids:
+          type: array
+          items:
+            type: string
+
+    ReassignOwnerRequest:
+      type: object
+      required: [owner_user_id]
+      properties:
+        owner_user_id:
+          type: string
+          description: New owner; must be an existing, enabled user.
+
+    GithubToken:
+      type: object
+      required: [id, name, scopes, created_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+          description: |
+            Best-effort scope list. PR1 stores whatever the client supplies;
+            later releases populate this by calling GitHub's /user endpoint
+            with the plaintext token.
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    GithubTokenListResponse:
+      type: object
+      required: [tokens, total]
+      properties:
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/GithubToken"
+        total:
+          type: integer
+
+    CreateGithubTokenRequest:
+      type: object
+      required: [name, token]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Human-friendly label shown in the dashboard.
+        token:
+          type: string
+          minLength: 1
+          description: |
+            The plaintext PAT. The server encrypts it with AES-GCM before
+            persisting; this is the only request body that ever carries
+            the plaintext value.
+        scopes:
+          type: array
+          items:
+            type: string
+          deprecated: true
+          description: |
+            Ignored. The server now derives real scopes from GitHub's
+            X-OAuth-Scopes response header by calling GET /user with the
+            supplied token, so user-supplied scope hints are no longer
+            consulted. Kept for backwards compatibility with older
+            clients that still send it.
+
+    GitRepo:
+      type: object
+      required:
+        - project_path
+        - path_hash
+        - github_url
+        - branch
+        - auto_webhook
+        - webhook_mode
+        - created_at
+        - updated_at
+      description: |
+        Clone + webhook metadata for an external (git-cloned) project.
+        Exactly 1:1 with the matching projects row; local projects have
+        no GitRepo row.
+      properties:
+        project_path:
+          type: string
+          description: |
+            Matches projects.host_path — canonical
+            "github.com/owner/repo@branch" string.
+        path_hash:
+          type: string
+          description: 16-hex SHA1 prefix of project_path, used in URLs.
+        github_url:
+          type: string
+        branch:
+          type: string
+        token_id:
+          type: string
+          nullable: true
+        auto_webhook:
+          type: boolean
+          description: Legacy alias for `webhook_mode == "auto"`.
+        webhook_mode:
+          type: string
+          enum: [manual, auto, disabled]
+        last_sha:
+          type: string
+          nullable: true
+        last_error:
+          type: string
+          nullable: true
+        polling_enabled:
+          type: boolean
+          description: |
+            When true, the shared poll scheduler fetches this repo on an
+            interval (the alternative to webhooks for non-admin repos).
+            Mutually exclusive with webhook_mode != 'disabled'.
+        poll_interval_seconds:
+          type: integer
+          nullable: true
+          description: |
+            Per-repo poll cadence in seconds. Null → server default
+            (CIX_DEFAULT_POLL_INTERVAL). Always clamped up to the floor
+            (CIX_MIN_POLL_INTERVAL).
+        next_poll_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Absolute time this repo is next due for a poll. Null when
+            polling is disabled. Measured from the end of the last index run.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AddGitRepoRequest:
+      type: object
+      required: [github_url, branch]
+      properties:
+        github_url:
+          type: string
+          description: https://github.com/owner/repo URL.
+        branch:
+          type: string
+          minLength: 1
+        token_id:
+          type: string
+          description: Optional id of a stored GitHub PAT (required for private repos).
+        webhook_mode:
+          type: string
+          enum: [manual, auto, disabled]
+          default: manual
+        polling_enabled:
+          type: boolean
+          description: |
+            Enable polling sync. Requires webhook_mode='disabled'
+            (webhook XOR polling); otherwise the request is rejected 422.
+        poll_interval_seconds:
+          type: integer
+          description: Optional per-repo poll cadence in seconds (0/omitted → server default).
+
+    UpdateGitRepoSyncRequest:
+      type: object
+      required: [sync_method]
+      properties:
+        sync_method:
+          type: string
+          enum: [webhook, polling, manual]
+          description: |
+            How the project should be kept in sync. `webhook` → push-driven
+            (auto-register, fall back to polling on failure); `polling` →
+            server fetches on an interval; `manual` → reindex on demand only.
+        poll_interval_seconds:
+          type: integer
+          description: |
+            Per-repo poll cadence in seconds (0/omitted → server default).
+            Only meaningful when sync_method is `polling` (also used as the
+            interval if `webhook` falls back to polling).
+
+    UpdateGitRepoSyncResult:
+      type: object
+      required: [git_repo]
+      properties:
+        git_repo:
+          $ref: "#/components/schemas/GitRepo"
+        note:
+          type: string
+          description: |
+            Human-readable note about the outcome — e.g. that webhook
+            auto-registration failed and the server fell back to polling.
+
+    GithubRepo:
+      type: object
+      required: [full_name, default_branch, private, html_url]
+      description: A repository visible to a stored PAT.
+      properties:
+        full_name:
+          type: string
+          description: "owner/name"
+        default_branch:
+          type: string
+          description: |
+            The repo's default branch; the dashboard pre-fills the branch
+            input with this when the user picks a repo from the list.
+        private:
+          type: boolean
+        html_url:
+          type: string
+        description:
+          type: string
+
+    GithubAccount:
+      type: object
+      required: [login, type]
+      description: |
+        A GitHub account the PAT can see. The user owning the PAT is
+        returned first, followed by every org accessible via /user/orgs.
+        The dashboard's add-repo flow shows these in a Select before
+        the repository picker so the operator can drill into a specific
+        org instead of relying on the affiliations-aggregated view.
+      properties:
+        login:
+          type: string
+          description: GitHub login (user name or org slug).
+        type:
+          type: string
+          enum: [user, org]
+          description: |
+            "user" for the PAT owner; "org" for organisations.
+        avatar_url:
+          type: string
+
+    GitRepoCreated:
+      type: object
+      required: [project, git_repo, webhook_url, webhook_secret]
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+        git_repo:
+          $ref: "#/components/schemas/GitRepo"
+        webhook_url:
+          type: string
+          description: |
+            Publicly-reachable POST endpoint to register in GitHub when
+            doing webhook setup manually.
+        webhook_secret:
+          type: string
+          description: |
+            HMAC secret. **Returned once on create + once via
+            /projects/{hash}/webhook-info.**
+        auto_registered:
+          type: boolean
+          description: |
+            True when webhook_mode was 'auto' AND the server
+            successfully registered the hook with GitHub.
+        auto_register_note:
+          type: string
+          description: Human-readable reason when auto_registered is false.
+
+    WorkspaceProjectMembership:
+      type: object
+      required: [workspace_id, project_path, added_at]
+      properties:
+        workspace_id:
+          type: string
+        project_path:
+          type: string
+        added_at:
+          type: string
+          format: date-time
+
+    WorkspaceProject:
+      type: object
+      required: [project, added_at]
+      description: |
+        A project listed under a workspace, decorated with the membership
+        timestamp. The embedded Project carries the full project info
+        (status, languages, last_indexed_at) so the dashboard doesn't
+        need a second roundtrip.
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+        added_at:
+          type: string
+          format: date-time
+
+    WorkspaceProjectListResponse:
+      type: object
+      required: [projects, total]
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceProject"
+        total:
+          type: integer
+
+    LinkProjectRequest:
+      type: object
+      required: [project_hash]
+      properties:
+        project_hash:
+          type: string
+          minLength: 16
+          maxLength: 16
+          description: |
+            The 16-hex `path_hash` of an indexed project. The server
+            resolves it to host_path and inserts the (workspace_id,
+            project_path) row. The project must be in status='indexed'.
+
+    ProjectWorkspaceList:
+      type: object
+      required: [workspaces]
+      properties:
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectWorkspaceEntry"
+
+    ProjectWorkspaceEntry:
+      type: object
+      required: [workspace_id, workspace_name, added_at]
+      properties:
+        workspace_id:
+          type: string
+        workspace_name:
+          type: string
+        added_at:
+          type: string
+          format: date-time
+
+    ReindexEnqueuedResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [enqueued, already_running]
+        mode:
+          type: string
+          enum: [full, incremental]
+          description: |
+            Which reindex flavour the server will run. `full` is set
+            when the request used `?full=true` (the server cleared
+            `indexed_sha` before enqueueing); otherwise `incremental`
+            and the clone-job's mode-determination picks the real
+            mode (still may resolve to full at runtime for first-index,
+            model-change, or partial-failure cases).
+        project:
+          $ref: "#/components/schemas/Project"
+
+    ForceStopResponse:
+      type: object
+      required: [cancelled, jobs_cleared]
+      properties:
+        cancelled:
+          type: boolean
+          description: |
+            True when an active in-process index session was found and
+            cancelled. False when nothing was indexing (the job-queue
+            cleanup still ran — see `jobs_cleared`).
+        jobs_cleared:
+          type: integer
+          description: |
+            Count of pending/running clone_repo + index_repo jobs that
+            were deleted from the queue for this repo.
+        project:
+          $ref: "#/components/schemas/Project"
+
+    Job:
+      type: object
+      required:
+        - id
+        - type
+        - status
+        - attempts
+        - max_attempts
+        - scheduled_at
+        - created_at
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        dedupe_key:
+          type: string
+          nullable: true
+        payload:
+          type: object
+          additionalProperties: true
+          description: |
+            Raw JSON payload — shape depends on `type`. Render as-is in
+            the dashboard; don't assume structure.
+        attempts:
+          type: integer
+          minimum: 0
+        max_attempts:
+          type: integer
+          minimum: 0
+        last_error:
+          type: string
+          nullable: true
+        scheduled_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    JobListResponse:
+      type: object
+      required: [jobs, total]
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        total:
+          type: integer
+
+    WebhookInfoResponse:
+      type: object
+      required: [webhook_url, webhook_secret, auto_registered]
+      properties:
+        webhook_url:
+          type: string
+          description: |
+            Full URL to paste into GitHub's webhook config. Empty path-only
+            value when CIX_PUBLIC_URL is unset — prepend your tunnel origin.
+        webhook_secret:
+          type: string
+          description: HMAC secret. Treat as sensitive — rotates on repo recreate.
+        auto_registered:
+          type: boolean
+          description: |
+            True when the server successfully auto-registered the webhook
+            against the GitHub API (auto_webhook=true on create + PAT had
+            admin:repo_hook). When false, the operator must register manually.
+
+    WebhookAccepted:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [enqueued, already_running, ignored, ping]
+        repo_id:
+          type: string
+
+    TunnelStatus:
+      type: object
+      required: [provider, state, available]
+      properties:
+        provider:
+          type: string
+          enum: [cloudflare, ngrok]
+        state:
+          type: string
+          enum: [disabled, connecting, live, failed]
+        mode:
+          type: string
+          description: '"named" or "quick" for cloudflare; omitted otherwise.'
+        public_url:
+          type: string
+          description: Public base URL (no trailing slash) when live.
+        pid:
+          type: integer
+        uptime_sec:
+          type: integer
+          format: int64
+        last_error:
+          type: string
+        available:
+          type: boolean
+          description: False for providers that are not yet implemented.
+        note:
+          type: string
+
+    TunnelCatalog:
+      type: object
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/TunnelStatus"
+
+    TunnelBinary:
+      type: object
+      required: [provider, installed, managed]
+      properties:
+        provider:
+          type: string
+          enum: [cloudflare, ngrok]
+        installed:
+          type: boolean
+        managed:
+          type: boolean
+          description: Whether the server can install/update this binary from the UI.
+        path:
+          type: string
+        version:
+          type: string
+
+    TunnelBinaryList:
+      type: object
+      required: [binaries]
+      properties:
+        binaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/TunnelBinary"
+
+    TunnelConfig:
+      type: object
+      required: [enabled, provider, mode, hostname, token_set]
+      properties:
+        enabled:
+          type: boolean
+        provider:
+          type: string
+          enum: [cloudflare, ngrok]
+        mode:
+          type: string
+          enum: [named, quick]
+        hostname:
+          type: string
+          description: Named-tunnel public hostname (named mode only).
+        token_set:
+          type: boolean
+          description: Whether a connector token is stored (never returned).
+        updated_at:
+          type: string
+        updated_by:
+          type: string
+
+    TunnelConfigUpdate:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        provider:
+          type: string
+          enum: [cloudflare, ngrok]
+        mode:
+          type: string
+          enum: [named, quick]
+        hostname:
+          type: string
+        token:
+          type: string
+          description: |
+            Cloudflare named-tunnel connector token. Omit to keep the
+            existing token; send "" to clear it.
+
+    TunnelTestResult:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        public_url:
+          type: string
+        status_code:
+          type: integer
+        latency_ms:
+          type: integer
+          format: int64
+        detail:
+          type: string
+
+    WebhookReconcileOutcome:
+      type: object
+      required: [project_path, action]
+      properties:
+        project_path:
+          type: string
+        action:
+          type: string
+          enum: [updated, created, skipped, failed]
+        note:
+          type: string
+
+    WebhookReconcileResult:
+      type: object
+      required: [base_url, total, created, updated, skipped, failed]
+      properties:
+        base_url:
+          type: string
+        total:
+          type: integer
+        created:
+          type: integer
+        updated:
+          type: integer
+        skipped:
+          type: integer
+        failed:
+          type: integer
+        outcomes:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebhookReconcileOutcome"
+
+    WebhookOrigin:
+      type: object
+      required: [origin, source]
+      properties:
+        origin:
+          type: string
+          description: |
+            The public base URL webhook delivery URLs are built against
+            (no trailing slash). Empty when source is "none".
+        source:
+          type: string
+          enum: [tunnel, public_url, none]
+          description: |
+            Where `origin` comes from. `tunnel` — a live managed tunnel.
+            `public_url` — the operator-set CIX_PUBLIC_URL (infrastructure
+            provides public reachability; a tunnel is not needed). `none` —
+            no public origin is configured, so webhooks can't be delivered.
+
+    WorkspaceSearchResponse:
+      type: object
+      required: [status, projects, chunks]
+      properties:
+        status:
+          type: string
+          enum: [ok, empty, partial_failure]
+          description: |
+            `ok` — results follow. `empty` — workspace queried fine but
+            nothing cleared the `min_score` floor. `partial_failure` —
+            no chunks returned but at least one repo errored out during
+            the fan-out (see `failed_repos`).
+        projects:
+          type: array
+          description: |
+            Top projects ranked by `project_score`. Surfaces which repos
+            in the workspace the query is most relevant to, independent
+            of which individual chunks rank highest globally.
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchProject"
+        chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchChunk"
+        pending_repos:
+          type: array
+          description: |
+            Repos that belong to the workspace but weren't queryable
+            yet — clone or index hasn't completed (or the last attempt
+            failed). Their matches will appear once they reach
+            `status=indexed`. Empty if every repo is ready.
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchPendingRepo"
+        failed_repos:
+          type: array
+          description: |
+            Repos whose per-project vector search returned an error
+            during this request (e.g. corrupt collection on disk). The
+            rest of the workspace is still aggregated; surface this so
+            the operator knows the result set is incomplete.
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchFailedRepo"
+        stale_fts_repos:
+          type: array
+          description: |
+            Repos that were indexed before the BM25 mirror
+            (`chunks_fts`) was added: they're queryable via dense
+            search but the sparse half of the hybrid is empty, which
+            collapses the algorithm to pure-dense fan-out for these
+            entries. Trigger a reindex on each to backfill the FTS
+            side. Empty once every workspace repo has been reindexed
+            under the new schema.
+          items:
+            $ref: "#/components/schemas/WorkspaceSearchStaleFTSRepo"
+
+    WorkspaceSearchPendingRepo:
+      type: object
+      required: [project_path, status]
+      properties:
+        project_path:
+          type: string
+        status:
+          type: string
+          enum: [pending, cloning, indexing, failed]
+          description: |
+            Current per-project status. Anything other than `indexed`
+            means the project hasn't contributed to this response.
+
+    WorkspaceSearchFailedRepo:
+      type: object
+      required: [project_path, reason]
+      properties:
+        project_path:
+          type: string
+        reason:
+          type: string
+          description: |
+            Short category for the failure — `vectorstore_error`,
+            `timeout`, etc. Intentionally not the raw error message so
+            internal details don't leak; check the server logs by
+            `workspace_id` for the full error.
+
+    WorkspaceSearchStaleFTSRepo:
+      type: object
+      required: [project_path]
+      properties:
+        project_path:
+          type: string
+
+    WorkspaceSearchProject:
+      type: object
+      required: [project_path, label, project_score, num_hits, bm25_score, dense_score]
+      properties:
+        project_path:
+          type: string
+        label:
+          type: string
+          description: |
+            Short human-readable label derived from the project_path's
+            last segment (e.g. "owner/repo@main" → "repo@main").
+        project_score:
+          type: number
+          format: float
+          description: |
+            Hybrid candidacy in [0,1] — the α-blend of per-query
+            min-max normalized BM25 and dense signals (α=0.5) the
+            project-relevance gate ranks by. The "Top projects"
+            panel sorts by this value.
+        num_hits:
+          type: integer
+          description: |
+            Chunks from this project that survived the per-project
+            chunk cap and made it into the global chunks list.
+        bm25_score:
+          type: number
+          format: float
+          description: |
+            Mean of the top-N raw BM25 scores in this project (sign
+            flipped from SQLite's bm25() so positive = better).
+            Surfaced so the dashboard can show "this repo surfaced
+            on literal token overlap" vs. "pure semantic similarity".
+        dense_score:
+          type: number
+          format: float
+          description: |
+            Mean of the top-N raw cosine similarities in this
+            project. Together with `bm25_score`, the two raw signals
+            that feed into `project_score`.
+
+    WorkspaceSearchChunk:
+      type: object
+      required:
+        - project_path
+        - file_path
+        - start_line
+        - end_line
+        - score
+        - content
+      properties:
+        project_path:
+          type: string
+        file_path:
+          type: string
+        start_line:
+          type: integer
+        end_line:
+          type: integer
+        symbol_name:
+          type: string
+        language:
+          type: string
+        score:
+          type: number
+          format: float
+          description: |
+            Raw cosine similarity between the query and this chunk —
+            the value chunks are sorted by. No per-project boost is
+            applied (a previous revision multiplied this by
+            project_score, which let one repo dominate every result
+            for short queries like product-name acronyms).
+        content:
+          type: string

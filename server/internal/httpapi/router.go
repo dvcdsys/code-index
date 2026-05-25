@@ -13,13 +13,21 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/gitrepos"
+	"github.com/dvcdsys/code-index/server/internal/githubtokens"
+	"github.com/dvcdsys/code-index/server/internal/groups"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
+	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
+	"github.com/dvcdsys/code-index/server/internal/tunnels"
 	"github.com/dvcdsys/code-index/server/internal/users"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 	"github.com/dvcdsys/code-index/server/internal/versioncheck"
+	"github.com/dvcdsys/code-index/server/internal/workspaceprojects"
+	"github.com/dvcdsys/code-index/server/internal/workspaces"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -56,6 +64,10 @@ type Deps struct {
 	Users    *users.Service
 	Sessions *sessions.Service
 	APIKeys  *apikeys.Service
+	// Groups backs the view-group auth model (admin-managed sets of users
+	// that external projects + workspaces are shared to). Required in
+	// production; nil + AuthDisabled is tolerated by tests.
+	Groups *groups.Service
 	// EmbeddingSvc is the in-process embeddings service. May be nil when the
 	// server is started with CIX_EMBEDDINGS_ENABLED=false (e.g. in router
 	// tests). Phase 5 uses it for semantic search.
@@ -72,6 +84,45 @@ type Deps struct {
 	// VersionCheck polls GitHub for newer server releases. Nil = feature
 	// off; GetStatus then omits the version-check fields entirely.
 	VersionCheck *versioncheck.Service
+
+	// Workspaces + GithubTokens services. Both are always wired by
+	// main; handlers fall back to 503 only if a service is nil (e.g.
+	// secrets boot returned nil for GithubTokens because the
+	// encryption key path failed). Test setups that don't need these
+	// pass nil and the handlers respond consistently.
+	Workspaces   *workspaces.Service
+	GithubTokens *githubtokens.Service
+	// GitRepos owns clone + webhook metadata for external projects;
+	// WorkspaceProjects owns the workspace ↔ project junction. Jobs is
+	// the persistent background queue.
+	GitRepos          *gitrepos.Service
+	WorkspaceProjects *workspaceprojects.Service
+	Jobs              *jobs.Service
+	// PublicBaseURL is the operator-set externally-reachable URL of the
+	// server. Used to build the webhook URL surfaced when adding a repo
+	// — when empty, handlers return the path-only form and rely on the
+	// operator to prepend their tunnel origin manually. Source:
+	// CIX_PUBLIC_URL.
+	PublicBaseURL string
+	// GithubAPIBaseURL overrides the GitHub REST API base for the
+	// per-request client constructed inside token / webhook handlers.
+	// Empty in production (the client defaults to https://api.github.com).
+	// Tests set this to an httptest server so they can assert the
+	// scopes / validation flow without hitting the real API.
+	GithubAPIBaseURL string
+
+	// Tunnel manages the optional managed-tunnel provider (Cloudflare).
+	// Nil when CIX_TUNNEL_ENABLED=false — tunnel handlers then report a
+	// disabled status and buildWebhookURL falls back to PublicBaseURL.
+	// When live, its public URL takes precedence over PublicBaseURL for
+	// webhook delivery URLs.
+	Tunnel *tunnels.Manager
+	// WebhookReconciler re-registers webhook_mode=auto repos against the
+	// current public base URL. Nil in tests / when tunnels are off.
+	WebhookReconciler *tunnels.Reconciler
+	// TunnelConfig persists the dashboard-managed tunnel settings. Nil in
+	// tests; the config handlers return 503 when absent.
+	TunnelConfig *tunnelcfg.Service
 }
 
 // NewRouter builds the chi router with middleware and the generated
@@ -85,6 +136,12 @@ type Deps struct {
 // middleware. The generated chi-server mounts under a sub-router so the gate
 // stays in one place.
 func NewRouter(d Deps) http.Handler {
+	// Ensure handlers can call d.Logger.* without nil-checking everywhere.
+	// Tests routinely leave Logger zero — fall back to the global slog
+	// default which writes to stderr.
+	if d.Logger == nil {
+		d.Logger = slog.Default()
+	}
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)

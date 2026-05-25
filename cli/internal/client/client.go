@@ -2,11 +2,17 @@ package client
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -84,11 +90,62 @@ func (c *Client) do(method, path string, body interface{}) (*http.Response, erro
 	return resp, nil
 }
 
-// encodeProjectPath returns SHA1 hash (first 16 hex chars) of the project path.
-// This avoids all URL encoding issues with slashes in paths.
+// encodeProjectPath returns the project's URL hash (first 16 hex chars of
+// SHA1 of the identity key). Local projects are namespaced per machine —
+// "local:{machine_id}:{path}" — so the same filesystem path on different
+// machines/users maps to different projects. MUST stay byte-identical to the
+// server's projects.LocalProjectKey + hashPath (server/internal/projects).
 func encodeProjectPath(path string) string {
-	h := sha1.Sum([]byte(path))
+	key := "local:" + machineID() + ":" + path
+	h := sha1.Sum([]byte(key))
 	return fmt.Sprintf("%x", h)[:16]
+}
+
+// EncodeProjectPath is the exported project URL hash, for tests and tooling
+// that need to mirror the client's addressing exactly.
+func EncodeProjectPath(path string) string { return encodeProjectPath(path) }
+
+var (
+	machineIDOnce sync.Once
+	machineIDVal  string
+)
+
+// machineID returns a stable per-machine (per-home) identifier, persisted at
+// ~/.cix/machine_id. Generated on first use. Used to namespace local project
+// identity so different developers' machines never collide on the same path.
+func machineID() string {
+	machineIDOnce.Do(func() { machineIDVal = loadOrCreateMachineID() })
+	return machineIDVal
+}
+
+func loadOrCreateMachineID() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "unknown-machine"
+	}
+	path := filepath.Join(home, ".cix", "machine_id")
+	if b, rerr := os.ReadFile(path); rerr == nil {
+		if id := strings.TrimSpace(string(b)); id != "" {
+			return id
+		}
+	}
+	buf := make([]byte, 16)
+	if _, gerr := rand.Read(buf); gerr != nil {
+		return "unknown-machine"
+	}
+	id := hex.EncodeToString(buf)
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	_ = os.WriteFile(path, []byte(id+"\n"), 0o600)
+	return id
+}
+
+// machineLabel returns the OS hostname for display purposes (sent to the
+// server as machine_label). Best-effort; empty when unavailable.
+func machineLabel() string {
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return ""
 }
 
 // parseResponse reads and unmarshals JSON response

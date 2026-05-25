@@ -24,7 +24,7 @@ func newFixture(t *testing.T) fixture {
 	}
 	t.Cleanup(func() { _ = d.Close() })
 	usrSvc := users.New(d)
-	u, err := usrSvc.Create(context.Background(), "a@b.com", "password1234", users.RoleViewer, false)
+	u, err := usrSvc.Create(context.Background(), "a@b.com", "password1234", users.RoleUser, false)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}

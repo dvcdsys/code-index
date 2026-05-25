@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createContext, useCallback, useMemo, type ReactNode } from 'react';
 import { ApiError, api } from '@/api/client';
-import type { BootstrapStatusResponse, LoginRequest, LoginResponse, MeResponse, User } from '@/api/types';
+import type { BootstrapStatusResponse, Group, LoginRequest, LoginResponse, MeResponse, User } from '@/api/types';
 
 // Shape exposed to components — kept narrow on purpose. Use `useAuth` to
 // consume; `AuthProvider` is the only place that touches the underlying
@@ -13,6 +13,8 @@ export interface AuthContextValue {
   needsBootstrap: boolean;
   /** Currently authenticated user, or null when logged out. */
   user: User | null;
+  /** View-groups the current user belongs to (drives the share picker). */
+  groups: Group[];
   /** When true, the user must change their password before reaching the app. */
   mustChangePassword: boolean;
   /** Performs the login flow + warms /me. Throws ApiError on failure. */
@@ -98,6 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loading: bootstrap.isLoading || (bootstrap.data?.needs_bootstrap === false && me.isLoading),
       needsBootstrap: bootstrap.data?.needs_bootstrap ?? false,
       user: me.data?.user ?? null,
+      groups: me.data?.groups ?? [],
       mustChangePassword: me.data?.user?.must_change_password ?? false,
       login,
       logout,

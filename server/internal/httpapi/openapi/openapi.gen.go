@@ -26,10 +26,31 @@ const (
 	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
 )
 
+// Defines values for AddGitRepoRequestWebhookMode.
+const (
+	AddGitRepoRequestWebhookModeAuto     AddGitRepoRequestWebhookMode = "auto"
+	AddGitRepoRequestWebhookModeDisabled AddGitRepoRequestWebhookMode = "disabled"
+	AddGitRepoRequestWebhookModeManual   AddGitRepoRequestWebhookMode = "manual"
+)
+
+// Valid indicates whether the value is a known member of the AddGitRepoRequestWebhookMode enum.
+func (e AddGitRepoRequestWebhookMode) Valid() bool {
+	switch e {
+	case AddGitRepoRequestWebhookModeAuto:
+		return true
+	case AddGitRepoRequestWebhookModeDisabled:
+		return true
+	case AddGitRepoRequestWebhookModeManual:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CreateUserRequestRole.
 const (
-	CreateUserRequestRoleAdmin  CreateUserRequestRole = "admin"
-	CreateUserRequestRoleViewer CreateUserRequestRole = "viewer"
+	CreateUserRequestRoleAdmin CreateUserRequestRole = "admin"
+	CreateUserRequestRoleUser  CreateUserRequestRole = "user"
 )
 
 // Valid indicates whether the value is a known member of the CreateUserRequestRole enum.
@@ -37,7 +58,64 @@ func (e CreateUserRequestRole) Valid() bool {
 	switch e {
 	case CreateUserRequestRoleAdmin:
 		return true
-	case CreateUserRequestRoleViewer:
+	case CreateUserRequestRoleUser:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitRepoWebhookMode.
+const (
+	GitRepoWebhookModeAuto     GitRepoWebhookMode = "auto"
+	GitRepoWebhookModeDisabled GitRepoWebhookMode = "disabled"
+	GitRepoWebhookModeManual   GitRepoWebhookMode = "manual"
+)
+
+// Valid indicates whether the value is a known member of the GitRepoWebhookMode enum.
+func (e GitRepoWebhookMode) Valid() bool {
+	switch e {
+	case GitRepoWebhookModeAuto:
+		return true
+	case GitRepoWebhookModeDisabled:
+		return true
+	case GitRepoWebhookModeManual:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GithubAccountType.
+const (
+	GithubAccountTypeOrg  GithubAccountType = "org"
+	GithubAccountTypeUser GithubAccountType = "user"
+)
+
+// Valid indicates whether the value is a known member of the GithubAccountType enum.
+func (e GithubAccountType) Valid() bool {
+	switch e {
+	case GithubAccountTypeOrg:
+		return true
+	case GithubAccountTypeUser:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GroupMemberRole.
+const (
+	GroupMemberRoleAdmin GroupMemberRole = "admin"
+	GroupMemberRoleUser  GroupMemberRole = "user"
+)
+
+// Valid indicates whether the value is a known member of the GroupMemberRole enum.
+func (e GroupMemberRole) Valid() bool {
+	switch e {
+	case GroupMemberRoleAdmin:
+		return true
+	case GroupMemberRoleUser:
 		return true
 	default:
 		return false
@@ -161,6 +239,30 @@ func (e IndexProgressResponseStatus) Valid() bool {
 	}
 }
 
+// Defines values for JobStatus.
+const (
+	JobStatusCompleted JobStatus = "completed"
+	JobStatusFailed    JobStatus = "failed"
+	JobStatusPending   JobStatus = "pending"
+	JobStatusRunning   JobStatus = "running"
+)
+
+// Valid indicates whether the value is a known member of the JobStatus enum.
+func (e JobStatus) Valid() bool {
+	switch e {
+	case JobStatusCompleted:
+		return true
+	case JobStatusFailed:
+		return true
+	case JobStatusPending:
+		return true
+	case JobStatusRunning:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for MeResponseAuthMethod.
 const (
 	MeResponseAuthMethodApiKey  MeResponseAuthMethod = "api_key"
@@ -212,6 +314,42 @@ const (
 func (e ReferenceItemChunkType) Valid() bool {
 	switch e {
 	case Reference:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReindexEnqueuedResponseMode.
+const (
+	Full        ReindexEnqueuedResponseMode = "full"
+	Incremental ReindexEnqueuedResponseMode = "incremental"
+)
+
+// Valid indicates whether the value is a known member of the ReindexEnqueuedResponseMode enum.
+func (e ReindexEnqueuedResponseMode) Valid() bool {
+	switch e {
+	case Full:
+		return true
+	case Incremental:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReindexEnqueuedResponseStatus.
+const (
+	ReindexEnqueuedResponseStatusAlreadyRunning ReindexEnqueuedResponseStatus = "already_running"
+	ReindexEnqueuedResponseStatusEnqueued       ReindexEnqueuedResponseStatus = "enqueued"
+)
+
+// Valid indicates whether the value is a known member of the ReindexEnqueuedResponseStatus enum.
+func (e ReindexEnqueuedResponseStatus) Valid() bool {
+	switch e {
+	case ReindexEnqueuedResponseStatusAlreadyRunning:
+		return true
+	case ReindexEnqueuedResponseStatusEnqueued:
 		return true
 	default:
 		return false
@@ -281,10 +419,163 @@ func (e StatusResponseStatus) Valid() bool {
 	}
 }
 
+// Defines values for TunnelBinaryProvider.
+const (
+	TunnelBinaryProviderCloudflare TunnelBinaryProvider = "cloudflare"
+	TunnelBinaryProviderNgrok      TunnelBinaryProvider = "ngrok"
+)
+
+// Valid indicates whether the value is a known member of the TunnelBinaryProvider enum.
+func (e TunnelBinaryProvider) Valid() bool {
+	switch e {
+	case TunnelBinaryProviderCloudflare:
+		return true
+	case TunnelBinaryProviderNgrok:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TunnelConfigMode.
+const (
+	TunnelConfigModeNamed TunnelConfigMode = "named"
+	TunnelConfigModeQuick TunnelConfigMode = "quick"
+)
+
+// Valid indicates whether the value is a known member of the TunnelConfigMode enum.
+func (e TunnelConfigMode) Valid() bool {
+	switch e {
+	case TunnelConfigModeNamed:
+		return true
+	case TunnelConfigModeQuick:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TunnelConfigProvider.
+const (
+	TunnelConfigProviderCloudflare TunnelConfigProvider = "cloudflare"
+	TunnelConfigProviderNgrok      TunnelConfigProvider = "ngrok"
+)
+
+// Valid indicates whether the value is a known member of the TunnelConfigProvider enum.
+func (e TunnelConfigProvider) Valid() bool {
+	switch e {
+	case TunnelConfigProviderCloudflare:
+		return true
+	case TunnelConfigProviderNgrok:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TunnelConfigUpdateMode.
+const (
+	TunnelConfigUpdateModeNamed TunnelConfigUpdateMode = "named"
+	TunnelConfigUpdateModeQuick TunnelConfigUpdateMode = "quick"
+)
+
+// Valid indicates whether the value is a known member of the TunnelConfigUpdateMode enum.
+func (e TunnelConfigUpdateMode) Valid() bool {
+	switch e {
+	case TunnelConfigUpdateModeNamed:
+		return true
+	case TunnelConfigUpdateModeQuick:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TunnelConfigUpdateProvider.
+const (
+	TunnelConfigUpdateProviderCloudflare TunnelConfigUpdateProvider = "cloudflare"
+	TunnelConfigUpdateProviderNgrok      TunnelConfigUpdateProvider = "ngrok"
+)
+
+// Valid indicates whether the value is a known member of the TunnelConfigUpdateProvider enum.
+func (e TunnelConfigUpdateProvider) Valid() bool {
+	switch e {
+	case TunnelConfigUpdateProviderCloudflare:
+		return true
+	case TunnelConfigUpdateProviderNgrok:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TunnelStatusProvider.
+const (
+	TunnelStatusProviderCloudflare TunnelStatusProvider = "cloudflare"
+	TunnelStatusProviderNgrok      TunnelStatusProvider = "ngrok"
+)
+
+// Valid indicates whether the value is a known member of the TunnelStatusProvider enum.
+func (e TunnelStatusProvider) Valid() bool {
+	switch e {
+	case TunnelStatusProviderCloudflare:
+		return true
+	case TunnelStatusProviderNgrok:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TunnelStatusState.
+const (
+	TunnelStatusStateConnecting TunnelStatusState = "connecting"
+	TunnelStatusStateDisabled   TunnelStatusState = "disabled"
+	TunnelStatusStateFailed     TunnelStatusState = "failed"
+	TunnelStatusStateLive       TunnelStatusState = "live"
+)
+
+// Valid indicates whether the value is a known member of the TunnelStatusState enum.
+func (e TunnelStatusState) Valid() bool {
+	switch e {
+	case TunnelStatusStateConnecting:
+		return true
+	case TunnelStatusStateDisabled:
+		return true
+	case TunnelStatusStateFailed:
+		return true
+	case TunnelStatusStateLive:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UpdateGitRepoSyncRequestSyncMethod.
+const (
+	Manual  UpdateGitRepoSyncRequestSyncMethod = "manual"
+	Polling UpdateGitRepoSyncRequestSyncMethod = "polling"
+	Webhook UpdateGitRepoSyncRequestSyncMethod = "webhook"
+)
+
+// Valid indicates whether the value is a known member of the UpdateGitRepoSyncRequestSyncMethod enum.
+func (e UpdateGitRepoSyncRequestSyncMethod) Valid() bool {
+	switch e {
+	case Manual:
+		return true
+	case Polling:
+		return true
+	case Webhook:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UpdateUserRequestRole.
 const (
-	UpdateUserRequestRoleAdmin  UpdateUserRequestRole = "admin"
-	UpdateUserRequestRoleViewer UpdateUserRequestRole = "viewer"
+	UpdateUserRequestRoleAdmin UpdateUserRequestRole = "admin"
+	UpdateUserRequestRoleUser  UpdateUserRequestRole = "user"
 )
 
 // Valid indicates whether the value is a known member of the UpdateUserRequestRole enum.
@@ -292,7 +583,7 @@ func (e UpdateUserRequestRole) Valid() bool {
 	switch e {
 	case UpdateUserRequestRoleAdmin:
 		return true
-	case UpdateUserRequestRoleViewer:
+	case UpdateUserRequestRoleUser:
 		return true
 	default:
 		return false
@@ -301,8 +592,8 @@ func (e UpdateUserRequestRole) Valid() bool {
 
 // Defines values for UserRole.
 const (
-	UserRoleAdmin  UserRole = "admin"
-	UserRoleViewer UserRole = "viewer"
+	UserRoleAdmin UserRole = "admin"
+	UserRoleUser  UserRole = "user"
 )
 
 // Valid indicates whether the value is a known member of the UserRole enum.
@@ -310,7 +601,7 @@ func (e UserRole) Valid() bool {
 	switch e {
 	case UserRoleAdmin:
 		return true
-	case UserRoleViewer:
+	case UserRoleUser:
 		return true
 	default:
 		return false
@@ -319,8 +610,8 @@ func (e UserRole) Valid() bool {
 
 // Defines values for UserWithStatsRole.
 const (
-	UserWithStatsRoleAdmin  UserWithStatsRole = "admin"
-	UserWithStatsRoleViewer UserWithStatsRole = "viewer"
+	UserWithStatsRoleAdmin UserWithStatsRole = "admin"
+	UserWithStatsRoleUser  UserWithStatsRole = "user"
 )
 
 // Valid indicates whether the value is a known member of the UserWithStatsRole enum.
@@ -328,7 +619,121 @@ func (e UserWithStatsRole) Valid() bool {
 	switch e {
 	case UserWithStatsRoleAdmin:
 		return true
-	case UserWithStatsRoleViewer:
+	case UserWithStatsRoleUser:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for WebhookAcceptedStatus.
+const (
+	WebhookAcceptedStatusAlreadyRunning WebhookAcceptedStatus = "already_running"
+	WebhookAcceptedStatusEnqueued       WebhookAcceptedStatus = "enqueued"
+	WebhookAcceptedStatusIgnored        WebhookAcceptedStatus = "ignored"
+	WebhookAcceptedStatusPing           WebhookAcceptedStatus = "ping"
+)
+
+// Valid indicates whether the value is a known member of the WebhookAcceptedStatus enum.
+func (e WebhookAcceptedStatus) Valid() bool {
+	switch e {
+	case WebhookAcceptedStatusAlreadyRunning:
+		return true
+	case WebhookAcceptedStatusEnqueued:
+		return true
+	case WebhookAcceptedStatusIgnored:
+		return true
+	case WebhookAcceptedStatusPing:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for WebhookOriginSource.
+const (
+	None      WebhookOriginSource = "none"
+	PublicUrl WebhookOriginSource = "public_url"
+	Tunnel    WebhookOriginSource = "tunnel"
+)
+
+// Valid indicates whether the value is a known member of the WebhookOriginSource enum.
+func (e WebhookOriginSource) Valid() bool {
+	switch e {
+	case None:
+		return true
+	case PublicUrl:
+		return true
+	case Tunnel:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for WebhookReconcileOutcomeAction.
+const (
+	WebhookReconcileOutcomeActionCreated WebhookReconcileOutcomeAction = "created"
+	WebhookReconcileOutcomeActionFailed  WebhookReconcileOutcomeAction = "failed"
+	WebhookReconcileOutcomeActionSkipped WebhookReconcileOutcomeAction = "skipped"
+	WebhookReconcileOutcomeActionUpdated WebhookReconcileOutcomeAction = "updated"
+)
+
+// Valid indicates whether the value is a known member of the WebhookReconcileOutcomeAction enum.
+func (e WebhookReconcileOutcomeAction) Valid() bool {
+	switch e {
+	case WebhookReconcileOutcomeActionCreated:
+		return true
+	case WebhookReconcileOutcomeActionFailed:
+		return true
+	case WebhookReconcileOutcomeActionSkipped:
+		return true
+	case WebhookReconcileOutcomeActionUpdated:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for WorkspaceSearchPendingRepoStatus.
+const (
+	WorkspaceSearchPendingRepoStatusCloning  WorkspaceSearchPendingRepoStatus = "cloning"
+	WorkspaceSearchPendingRepoStatusFailed   WorkspaceSearchPendingRepoStatus = "failed"
+	WorkspaceSearchPendingRepoStatusIndexing WorkspaceSearchPendingRepoStatus = "indexing"
+	WorkspaceSearchPendingRepoStatusPending  WorkspaceSearchPendingRepoStatus = "pending"
+)
+
+// Valid indicates whether the value is a known member of the WorkspaceSearchPendingRepoStatus enum.
+func (e WorkspaceSearchPendingRepoStatus) Valid() bool {
+	switch e {
+	case WorkspaceSearchPendingRepoStatusCloning:
+		return true
+	case WorkspaceSearchPendingRepoStatusFailed:
+		return true
+	case WorkspaceSearchPendingRepoStatusIndexing:
+		return true
+	case WorkspaceSearchPendingRepoStatusPending:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for WorkspaceSearchResponseStatus.
+const (
+	Empty          WorkspaceSearchResponseStatus = "empty"
+	Ok             WorkspaceSearchResponseStatus = "ok"
+	PartialFailure WorkspaceSearchResponseStatus = "partial_failure"
+)
+
+// Valid indicates whether the value is a known member of the WorkspaceSearchResponseStatus enum.
+func (e WorkspaceSearchResponseStatus) Valid() bool {
+	switch e {
+	case Empty:
+		return true
+	case Ok:
+		return true
+	case PartialFailure:
 		return true
 	default:
 		return false
@@ -344,6 +749,48 @@ const (
 func (e ListApiKeysParamsOwner) Valid() bool {
 	switch e {
 	case All:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListTokenReposParamsAccountType.
+const (
+	ListTokenReposParamsAccountTypeOrg  ListTokenReposParamsAccountType = "org"
+	ListTokenReposParamsAccountTypeUser ListTokenReposParamsAccountType = "user"
+)
+
+// Valid indicates whether the value is a known member of the ListTokenReposParamsAccountType enum.
+func (e ListTokenReposParamsAccountType) Valid() bool {
+	switch e {
+	case ListTokenReposParamsAccountTypeOrg:
+		return true
+	case ListTokenReposParamsAccountTypeUser:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListJobsParamsStatus.
+const (
+	Completed ListJobsParamsStatus = "completed"
+	Failed    ListJobsParamsStatus = "failed"
+	Pending   ListJobsParamsStatus = "pending"
+	Running   ListJobsParamsStatus = "running"
+)
+
+// Valid indicates whether the value is a known member of the ListJobsParamsStatus enum.
+func (e ListJobsParamsStatus) Valid() bool {
+	switch e {
+	case Completed:
+		return true
+	case Failed:
+		return true
+	case Pending:
+		return true
+	case Running:
 		return true
 	default:
 		return false
@@ -366,6 +813,69 @@ func (e IndexFilesParamsAccept) Valid() bool {
 	default:
 		return false
 	}
+}
+
+// Defines values for InstallTunnelBinaryParamsProvider.
+const (
+	InstallTunnelBinaryParamsProviderCloudflare InstallTunnelBinaryParamsProvider = "cloudflare"
+	InstallTunnelBinaryParamsProviderNgrok      InstallTunnelBinaryParamsProvider = "ngrok"
+)
+
+// Valid indicates whether the value is a known member of the InstallTunnelBinaryParamsProvider enum.
+func (e InstallTunnelBinaryParamsProvider) Valid() bool {
+	switch e {
+	case InstallTunnelBinaryParamsProviderCloudflare:
+		return true
+	case InstallTunnelBinaryParamsProviderNgrok:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UpdateTunnelBinaryParamsProvider.
+const (
+	UpdateTunnelBinaryParamsProviderCloudflare UpdateTunnelBinaryParamsProvider = "cloudflare"
+	UpdateTunnelBinaryParamsProviderNgrok      UpdateTunnelBinaryParamsProvider = "ngrok"
+)
+
+// Valid indicates whether the value is a known member of the UpdateTunnelBinaryParamsProvider enum.
+func (e UpdateTunnelBinaryParamsProvider) Valid() bool {
+	switch e {
+	case UpdateTunnelBinaryParamsProviderCloudflare:
+		return true
+	case UpdateTunnelBinaryParamsProviderNgrok:
+		return true
+	default:
+		return false
+	}
+}
+
+// AddGitRepoRequest defines model for AddGitRepoRequest.
+type AddGitRepoRequest struct {
+	Branch string `json:"branch"`
+
+	// GithubUrl https://github.com/owner/repo URL.
+	GithubUrl string `json:"github_url"`
+
+	// PollIntervalSeconds Optional per-repo poll cadence in seconds (0/omitted → server default).
+	PollIntervalSeconds *int `json:"poll_interval_seconds,omitempty"`
+
+	// PollingEnabled Enable polling sync. Requires webhook_mode='disabled'
+	// (webhook XOR polling); otherwise the request is rejected 422.
+	PollingEnabled *bool `json:"polling_enabled,omitempty"`
+
+	// TokenId Optional id of a stored GitHub PAT (required for private repos).
+	TokenId     *string                       `json:"token_id,omitempty"`
+	WebhookMode *AddGitRepoRequestWebhookMode `json:"webhook_mode,omitempty"`
+}
+
+// AddGitRepoRequestWebhookMode defines model for AddGitRepoRequest.WebhookMode.
+type AddGitRepoRequestWebhookMode string
+
+// AddGroupMemberRequest defines model for AddGroupMemberRequest.
+type AddGroupMemberRequest struct {
+	UserId string `json:"user_id"`
 }
 
 // ApiKey defines model for ApiKey.
@@ -422,9 +932,44 @@ type CreateApiKeyRequest struct {
 	Name string `json:"name"`
 }
 
+// CreateGithubTokenRequest defines model for CreateGithubTokenRequest.
+type CreateGithubTokenRequest struct {
+	// Name Human-friendly label shown in the dashboard.
+	Name string `json:"name"`
+
+	// Scopes Ignored. The server now derives real scopes from GitHub's
+	// X-OAuth-Scopes response header by calling GET /user with the
+	// supplied token, so user-supplied scope hints are no longer
+	// consulted. Kept for backwards compatibility with older
+	// clients that still send it.
+	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
+	Scopes *[]string `json:"scopes,omitempty"`
+
+	// Token The plaintext PAT. The server encrypts it with AES-GCM before
+	// persisting; this is the only request body that ever carries
+	// the plaintext value.
+	Token string `json:"token"`
+}
+
+// CreateGroupRequest defines model for CreateGroupRequest.
+type CreateGroupRequest struct {
+	Description *string `json:"description,omitempty"`
+	Name        string  `json:"name"`
+}
+
 // CreateProjectRequest defines model for CreateProjectRequest.
 type CreateProjectRequest struct {
+	// HostPath The real filesystem path being registered (becomes display_path).
 	HostPath string `json:"host_path"`
+
+	// MachineId Per-machine UUID supplied by the CLI (from ~/.cix/machine_id). When
+	// present the project is LOCAL and its identity key is namespaced
+	// local:{machine_id}:{host_path} so the same path on different
+	// machines/users does not collide. Omit for external repos.
+	MachineId *string `json:"machine_id,omitempty"`
+
+	// MachineLabel os.Hostname() of the indexing machine — display only.
+	MachineLabel *string `json:"machine_label,omitempty"`
 }
 
 // CreateUserRequest defines model for CreateUserRequest.
@@ -439,6 +984,13 @@ type CreateUserRequest struct {
 
 // CreateUserRequestRole defines model for CreateUserRequest.Role.
 type CreateUserRequestRole string
+
+// CreateWorkspaceRequest defines model for CreateWorkspaceRequest.
+type CreateWorkspaceRequest struct {
+	// Description Optional free-form description.
+	Description *string `json:"description,omitempty"`
+	Name        string  `json:"name"`
+}
 
 // DefinitionItem defines model for DefinitionItem.
 type DefinitionItem struct {
@@ -530,6 +1082,172 @@ type FileSearchResponse struct {
 	Total   int              `json:"total"`
 }
 
+// ForceStopResponse defines model for ForceStopResponse.
+type ForceStopResponse struct {
+	// Cancelled True when an active in-process index session was found and
+	// cancelled. False when nothing was indexing (the job-queue
+	// cleanup still ran — see `jobs_cleared`).
+	Cancelled bool `json:"cancelled"`
+
+	// JobsCleared Count of pending/running clone_repo + index_repo jobs that
+	// were deleted from the queue for this repo.
+	JobsCleared int      `json:"jobs_cleared"`
+	Project     *Project `json:"project,omitempty"`
+}
+
+// GitRepo Clone + webhook metadata for an external (git-cloned) project.
+// Exactly 1:1 with the matching projects row; local projects have
+// no GitRepo row.
+type GitRepo struct {
+	// AutoWebhook Legacy alias for `webhook_mode == "auto"`.
+	AutoWebhook bool      `json:"auto_webhook"`
+	Branch      string    `json:"branch"`
+	CreatedAt   time.Time `json:"created_at"`
+	GithubUrl   string    `json:"github_url"`
+	LastError   *string   `json:"last_error,omitempty"`
+	LastSha     *string   `json:"last_sha,omitempty"`
+
+	// NextPollAt Absolute time this repo is next due for a poll. Null when
+	// polling is disabled. Measured from the end of the last index run.
+	NextPollAt *time.Time `json:"next_poll_at,omitempty"`
+
+	// PathHash 16-hex SHA1 prefix of project_path, used in URLs.
+	PathHash string `json:"path_hash"`
+
+	// PollIntervalSeconds Per-repo poll cadence in seconds. Null → server default
+	// (CIX_DEFAULT_POLL_INTERVAL). Always clamped up to the floor
+	// (CIX_MIN_POLL_INTERVAL).
+	PollIntervalSeconds *int `json:"poll_interval_seconds,omitempty"`
+
+	// PollingEnabled When true, the shared poll scheduler fetches this repo on an
+	// interval (the alternative to webhooks for non-admin repos).
+	// Mutually exclusive with webhook_mode != 'disabled'.
+	PollingEnabled *bool `json:"polling_enabled,omitempty"`
+
+	// ProjectPath Matches projects.host_path — canonical
+	// "github.com/owner/repo@branch" string.
+	ProjectPath string             `json:"project_path"`
+	TokenId     *string            `json:"token_id,omitempty"`
+	UpdatedAt   time.Time          `json:"updated_at"`
+	WebhookMode GitRepoWebhookMode `json:"webhook_mode"`
+}
+
+// GitRepoWebhookMode defines model for GitRepo.WebhookMode.
+type GitRepoWebhookMode string
+
+// GitRepoCreated defines model for GitRepoCreated.
+type GitRepoCreated struct {
+	// AutoRegisterNote Human-readable reason when auto_registered is false.
+	AutoRegisterNote *string `json:"auto_register_note,omitempty"`
+
+	// AutoRegistered True when webhook_mode was 'auto' AND the server
+	// successfully registered the hook with GitHub.
+	AutoRegistered *bool `json:"auto_registered,omitempty"`
+
+	// GitRepo Clone + webhook metadata for an external (git-cloned) project.
+	// Exactly 1:1 with the matching projects row; local projects have
+	// no GitRepo row.
+	GitRepo GitRepo `json:"git_repo"`
+	Project Project `json:"project"`
+
+	// WebhookSecret HMAC secret. **Returned once on create + once via
+	// /projects/{hash}/webhook-info.**
+	WebhookSecret string `json:"webhook_secret"`
+
+	// WebhookUrl Publicly-reachable POST endpoint to register in GitHub when
+	// doing webhook setup manually.
+	WebhookUrl string `json:"webhook_url"`
+}
+
+// GithubAccount A GitHub account the PAT can see. The user owning the PAT is
+// returned first, followed by every org accessible via /user/orgs.
+// The dashboard's add-repo flow shows these in a Select before
+// the repository picker so the operator can drill into a specific
+// org instead of relying on the affiliations-aggregated view.
+type GithubAccount struct {
+	AvatarUrl *string `json:"avatar_url,omitempty"`
+
+	// Login GitHub login (user name or org slug).
+	Login string `json:"login"`
+
+	// Type "user" for the PAT owner; "org" for organisations.
+	Type GithubAccountType `json:"type"`
+}
+
+// GithubAccountType "user" for the PAT owner; "org" for organisations.
+type GithubAccountType string
+
+// GithubRepo A repository visible to a stored PAT.
+type GithubRepo struct {
+	// DefaultBranch The repo's default branch; the dashboard pre-fills the branch
+	// input with this when the user picks a repo from the list.
+	DefaultBranch string  `json:"default_branch"`
+	Description   *string `json:"description,omitempty"`
+
+	// FullName owner/name
+	FullName string `json:"full_name"`
+	HtmlUrl  string `json:"html_url"`
+	Private  bool   `json:"private"`
+}
+
+// GithubToken defines model for GithubToken.
+type GithubToken struct {
+	CreatedAt  time.Time  `json:"created_at"`
+	Id         string     `json:"id"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	Name       string     `json:"name"`
+
+	// Scopes Best-effort scope list. PR1 stores whatever the client supplies;
+	// later releases populate this by calling GitHub's /user endpoint
+	// with the plaintext token.
+	Scopes []string `json:"scopes"`
+}
+
+// GithubTokenListResponse defines model for GithubTokenListResponse.
+type GithubTokenListResponse struct {
+	Tokens []GithubToken `json:"tokens"`
+	Total  int           `json:"total"`
+}
+
+// Group defines model for Group.
+type Group struct {
+	CreatedAt time.Time `json:"created_at"`
+
+	// Description Free-form description. Empty string when absent.
+	Description string    `json:"description"`
+	Id          string    `json:"id"`
+	Name        string    `json:"name"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// GroupIdListResponse defines model for GroupIdListResponse.
+type GroupIdListResponse struct {
+	GroupIds []string `json:"group_ids"`
+}
+
+// GroupListResponse defines model for GroupListResponse.
+type GroupListResponse struct {
+	Groups []Group `json:"groups"`
+	Total  int     `json:"total"`
+}
+
+// GroupMember defines model for GroupMember.
+type GroupMember struct {
+	AddedAt time.Time           `json:"added_at"`
+	Email   openapi_types.Email `json:"email"`
+	Role    GroupMemberRole     `json:"role"`
+	UserId  string              `json:"user_id"`
+}
+
+// GroupMemberRole defines model for GroupMember.Role.
+type GroupMemberRole string
+
+// GroupMemberListResponse defines model for GroupMemberListResponse.
+type GroupMemberListResponse struct {
+	Members []GroupMember `json:"members"`
+	Total   int           `json:"total"`
+}
+
 // HealthResponse defines model for HealthResponse.
 type HealthResponse struct {
 	// Reason Set only when `status` is `unhealthy`.
@@ -616,7 +1334,12 @@ type IndexProgressEventEvent string
 // the historical-fallback variant only carries `files_processed`,
 // `files_total`, and `chunks_created`.
 type IndexProgressInfo struct {
-	ChunksCreated   *int                    `json:"chunks_created,omitempty"`
+	ChunksCreated *int `json:"chunks_created,omitempty"`
+
+	// CurrentFiles Most recent files being indexed, newest first; up to 3. Lets a UI
+	// show live forward motion during a run. Empty on the
+	// historical-fallback variant.
+	CurrentFiles    *[]string               `json:"current_files,omitempty"`
 	ElapsedSeconds  *float64                `json:"elapsed_seconds,omitempty"`
 	FilesDiscovered *int                    `json:"files_discovered,omitempty"`
 	FilesProcessed  *int                    `json:"files_processed,omitempty"`
@@ -646,6 +1369,42 @@ type IndexProgressResponse struct {
 // `completed`/`cancelled`/`failed`/`running` — last-run status from `index_runs`.
 type IndexProgressResponseStatus string
 
+// Job defines model for Job.
+type Job struct {
+	Attempts    int        `json:"attempts"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	DedupeKey   *string    `json:"dedupe_key,omitempty"`
+	Id          string     `json:"id"`
+	LastError   *string    `json:"last_error,omitempty"`
+	MaxAttempts int        `json:"max_attempts"`
+
+	// Payload Raw JSON payload — shape depends on `type`. Render as-is in
+	// the dashboard; don't assume structure.
+	Payload     *map[string]interface{} `json:"payload,omitempty"`
+	ScheduledAt time.Time               `json:"scheduled_at"`
+	StartedAt   *time.Time              `json:"started_at,omitempty"`
+	Status      JobStatus               `json:"status"`
+	Type        string                  `json:"type"`
+}
+
+// JobStatus defines model for Job.Status.
+type JobStatus string
+
+// JobListResponse defines model for JobListResponse.
+type JobListResponse struct {
+	Jobs  []Job `json:"jobs"`
+	Total int   `json:"total"`
+}
+
+// LinkProjectRequest defines model for LinkProjectRequest.
+type LinkProjectRequest struct {
+	// ProjectHash The 16-hex `path_hash` of an indexed project. The server
+	// resolves it to host_path and inserts the (workspace_id,
+	// project_path) row. The project must be in status='indexed'.
+	ProjectHash string `json:"project_hash"`
+}
+
 // LoginRequest defines model for LoginRequest.
 type LoginRequest struct {
 	Email    openapi_types.Email `json:"email"`
@@ -662,7 +1421,13 @@ type MeResponse struct {
 	// AuthMethod Tells the dashboard whether to surface "logout" (session) or
 	// hide it (api_key access — there's nothing to log out of).
 	AuthMethod MeResponseAuthMethod `json:"auth_method"`
-	User       User                 `json:"user"`
+
+	// Groups View-groups the caller belongs to. Lets the dashboard scope the
+	// "share to group" picker without a second round-trip. Empty for a
+	// user in no groups; admins still only list their own memberships
+	// here (the full group list comes from GET /groups).
+	Groups []Group `json:"groups"`
+	User   User    `json:"user"`
 }
 
 // MeResponseAuthMethod Tells the dashboard whether to surface "logout" (session) or
@@ -705,6 +1470,11 @@ type Project struct {
 	ContainerPath string    `json:"container_path"`
 	CreatedAt     time.Time `json:"created_at"`
 
+	// DisplayPath Human-readable path. The real filesystem path for local projects,
+	// the github path for external ones. host_path is the identity key
+	// (namespaced per machine for locals) — clients should show this.
+	DisplayPath *string `json:"display_path,omitempty"`
+
 	// HostPath Absolute filesystem path on the operator's machine.
 	HostPath string `json:"host_path"`
 
@@ -714,6 +1484,18 @@ type Project struct {
 	IndexedWithModel *string    `json:"indexed_with_model,omitempty"`
 	Languages        []string   `json:"languages"`
 	LastIndexedAt    *time.Time `json:"last_indexed_at"`
+
+	// MachineId Per-machine UUID a local project was indexed on. NULL for external/legacy.
+	MachineId *string `json:"machine_id,omitempty"`
+
+	// MachineLabel os.Hostname() of the indexing machine — display only.
+	MachineLabel *string `json:"machine_label,omitempty"`
+
+	// OwnerUserId User who owns this personal (locally indexed) project. NULL means
+	// ownerless — the canonical state for EXTERNAL projects (those with a
+	// git_repos peer), which are admin-administered and reachable only via
+	// a view-group share.
+	OwnerUserId *string `json:"owner_user_id"`
 
 	// PathHash First 16 hex chars of SHA1(host_path) — stable URL identifier.
 	PathHash string          `json:"path_hash"`
@@ -765,6 +1547,24 @@ type ProjectSummary struct {
 	TotalSymbols   int           `json:"total_symbols"`
 }
 
+// ProjectWorkspaceEntry defines model for ProjectWorkspaceEntry.
+type ProjectWorkspaceEntry struct {
+	AddedAt       time.Time `json:"added_at"`
+	WorkspaceId   string    `json:"workspace_id"`
+	WorkspaceName string    `json:"workspace_name"`
+}
+
+// ProjectWorkspaceList defines model for ProjectWorkspaceList.
+type ProjectWorkspaceList struct {
+	Workspaces []ProjectWorkspaceEntry `json:"workspaces"`
+}
+
+// ReassignOwnerRequest defines model for ReassignOwnerRequest.
+type ReassignOwnerRequest struct {
+	// OwnerUserId New owner; must be an existing, enabled user.
+	OwnerUserId string `json:"owner_user_id"`
+}
+
 // ReferenceItem defines model for ReferenceItem.
 type ReferenceItem struct {
 	ChunkType ReferenceItemChunkType `json:"chunk_type"`
@@ -795,6 +1595,30 @@ type ReferenceResponse struct {
 	Results []ReferenceItem `json:"results"`
 	Total   int             `json:"total"`
 }
+
+// ReindexEnqueuedResponse defines model for ReindexEnqueuedResponse.
+type ReindexEnqueuedResponse struct {
+	// Mode Which reindex flavour the server will run. `full` is set
+	// when the request used `?full=true` (the server cleared
+	// `indexed_sha` before enqueueing); otherwise `incremental`
+	// and the clone-job's mode-determination picks the real
+	// mode (still may resolve to full at runtime for first-index,
+	// model-change, or partial-failure cases).
+	Mode    *ReindexEnqueuedResponseMode  `json:"mode,omitempty"`
+	Project *Project                      `json:"project,omitempty"`
+	Status  ReindexEnqueuedResponseStatus `json:"status"`
+}
+
+// ReindexEnqueuedResponseMode Which reindex flavour the server will run. `full` is set
+// when the request used `?full=true` (the server cleared
+// `indexed_sha` before enqueueing); otherwise `incremental`
+// and the clone-job's mode-determination picks the real
+// mode (still may resolve to full at runtime for first-index,
+// model-change, or partial-failure cases).
+type ReindexEnqueuedResponseMode string
+
+// ReindexEnqueuedResponseStatus defines model for ReindexEnqueuedResponse.Status.
+type ReindexEnqueuedResponseStatus string
 
 // RestartAccepted defines model for RestartAccepted.
 type RestartAccepted struct {
@@ -864,8 +1688,10 @@ type SemanticSearchRequest struct {
 	// Limit Maximum number of FILE groups (not chunks) to return.
 	Limit *int `json:"limit,omitempty"`
 
-	// MinScore Minimum cosine similarity. Omit for server default (0.4 for
-	// CodeRankEmbed-Q8). Send `0` explicitly to disable the floor.
+	// MinScore Minimum cosine similarity. Omit for server default (0.2 —
+	// light floor that keeps abstract NL queries non-empty). Send
+	// `0` to disable; pass `0.4+` for strict code-symbol searches
+	// calibrated for CodeRankEmbed-Q8.
 	MinScore *float32 `json:"min_score,omitempty"`
 
 	// Paths Whitelist — keep only results whose path matches any prefix or substring.
@@ -898,6 +1724,11 @@ type Session struct {
 type SessionListResponse struct {
 	Sessions []Session `json:"sessions"`
 	Total    int       `json:"total"`
+}
+
+// ShareToGroupRequest defines model for ShareToGroupRequest.
+type ShareToGroupRequest struct {
+	GroupId string `json:"group_id"`
 }
 
 // SidecarStatus defines model for SidecarStatus.
@@ -992,6 +1823,138 @@ type SymbolSearchResponse struct {
 	Total   int                `json:"total"`
 }
 
+// TunnelBinary defines model for TunnelBinary.
+type TunnelBinary struct {
+	Installed bool `json:"installed"`
+
+	// Managed Whether the server can install/update this binary from the UI.
+	Managed  bool                 `json:"managed"`
+	Path     *string              `json:"path,omitempty"`
+	Provider TunnelBinaryProvider `json:"provider"`
+	Version  *string              `json:"version,omitempty"`
+}
+
+// TunnelBinaryProvider defines model for TunnelBinary.Provider.
+type TunnelBinaryProvider string
+
+// TunnelBinaryList defines model for TunnelBinaryList.
+type TunnelBinaryList struct {
+	Binaries []TunnelBinary `json:"binaries"`
+}
+
+// TunnelCatalog defines model for TunnelCatalog.
+type TunnelCatalog struct {
+	Providers []TunnelStatus `json:"providers"`
+}
+
+// TunnelConfig defines model for TunnelConfig.
+type TunnelConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// Hostname Named-tunnel public hostname (named mode only).
+	Hostname string               `json:"hostname"`
+	Mode     TunnelConfigMode     `json:"mode"`
+	Provider TunnelConfigProvider `json:"provider"`
+
+	// TokenSet Whether a connector token is stored (never returned).
+	TokenSet  bool    `json:"token_set"`
+	UpdatedAt *string `json:"updated_at,omitempty"`
+	UpdatedBy *string `json:"updated_by,omitempty"`
+}
+
+// TunnelConfigMode defines model for TunnelConfig.Mode.
+type TunnelConfigMode string
+
+// TunnelConfigProvider defines model for TunnelConfig.Provider.
+type TunnelConfigProvider string
+
+// TunnelConfigUpdate defines model for TunnelConfigUpdate.
+type TunnelConfigUpdate struct {
+	Enabled  *bool                       `json:"enabled,omitempty"`
+	Hostname *string                     `json:"hostname,omitempty"`
+	Mode     *TunnelConfigUpdateMode     `json:"mode,omitempty"`
+	Provider *TunnelConfigUpdateProvider `json:"provider,omitempty"`
+
+	// Token Cloudflare named-tunnel connector token. Omit to keep the
+	// existing token; send "" to clear it.
+	Token *string `json:"token,omitempty"`
+}
+
+// TunnelConfigUpdateMode defines model for TunnelConfigUpdate.Mode.
+type TunnelConfigUpdateMode string
+
+// TunnelConfigUpdateProvider defines model for TunnelConfigUpdate.Provider.
+type TunnelConfigUpdateProvider string
+
+// TunnelStatus defines model for TunnelStatus.
+type TunnelStatus struct {
+	// Available False for providers that are not yet implemented.
+	Available bool    `json:"available"`
+	LastError *string `json:"last_error,omitempty"`
+
+	// Mode "named" or "quick" for cloudflare; omitted otherwise.
+	Mode     *string              `json:"mode,omitempty"`
+	Note     *string              `json:"note,omitempty"`
+	Pid      *int                 `json:"pid,omitempty"`
+	Provider TunnelStatusProvider `json:"provider"`
+
+	// PublicUrl Public base URL (no trailing slash) when live.
+	PublicUrl *string           `json:"public_url,omitempty"`
+	State     TunnelStatusState `json:"state"`
+	UptimeSec *int64            `json:"uptime_sec,omitempty"`
+}
+
+// TunnelStatusProvider defines model for TunnelStatus.Provider.
+type TunnelStatusProvider string
+
+// TunnelStatusState defines model for TunnelStatus.State.
+type TunnelStatusState string
+
+// TunnelTestResult defines model for TunnelTestResult.
+type TunnelTestResult struct {
+	Detail     *string `json:"detail,omitempty"`
+	LatencyMs  *int64  `json:"latency_ms,omitempty"`
+	Ok         bool    `json:"ok"`
+	PublicUrl  *string `json:"public_url,omitempty"`
+	StatusCode *int    `json:"status_code,omitempty"`
+}
+
+// UpdateGitRepoSyncRequest defines model for UpdateGitRepoSyncRequest.
+type UpdateGitRepoSyncRequest struct {
+	// PollIntervalSeconds Per-repo poll cadence in seconds (0/omitted → server default).
+	// Only meaningful when sync_method is `polling` (also used as the
+	// interval if `webhook` falls back to polling).
+	PollIntervalSeconds *int `json:"poll_interval_seconds,omitempty"`
+
+	// SyncMethod How the project should be kept in sync. `webhook` → push-driven
+	// (auto-register, fall back to polling on failure); `polling` →
+	// server fetches on an interval; `manual` → reindex on demand only.
+	SyncMethod UpdateGitRepoSyncRequestSyncMethod `json:"sync_method"`
+}
+
+// UpdateGitRepoSyncRequestSyncMethod How the project should be kept in sync. `webhook` → push-driven
+// (auto-register, fall back to polling on failure); `polling` →
+// server fetches on an interval; `manual` → reindex on demand only.
+type UpdateGitRepoSyncRequestSyncMethod string
+
+// UpdateGitRepoSyncResult defines model for UpdateGitRepoSyncResult.
+type UpdateGitRepoSyncResult struct {
+	// GitRepo Clone + webhook metadata for an external (git-cloned) project.
+	// Exactly 1:1 with the matching projects row; local projects have
+	// no GitRepo row.
+	GitRepo GitRepo `json:"git_repo"`
+
+	// Note Human-readable note about the outcome — e.g. that webhook
+	// auto-registration failed and the server fell back to polling.
+	Note *string `json:"note,omitempty"`
+}
+
+// UpdateGroupRequest defines model for UpdateGroupRequest.
+type UpdateGroupRequest struct {
+	Description *string `json:"description,omitempty"`
+	Name        *string `json:"name,omitempty"`
+}
+
 // UpdateProjectRequest defines model for UpdateProjectRequest.
 type UpdateProjectRequest struct {
 	Settings *ProjectSettings `json:"settings,omitempty"`
@@ -1004,13 +1967,21 @@ type UpdateUserRequest struct {
 	Disabled *bool `json:"disabled,omitempty"`
 
 	// Role New role for the user. Refused for the last enabled admin
-	// when set to `viewer`.
+	// when set to `user`.
 	Role *UpdateUserRequestRole `json:"role,omitempty"`
 }
 
 // UpdateUserRequestRole New role for the user. Refused for the last enabled admin
-// when set to `viewer`.
+// when set to `user`.
 type UpdateUserRequestRole string
+
+// UpdateWorkspaceRequest Both fields are optional — omitting a field leaves the existing
+// value unchanged. Passing an empty string for `description` clears
+// it. `name` must be non-empty when provided.
+type UpdateWorkspaceRequest struct {
+	Description *string `json:"description,omitempty"`
+	Name        *string `json:"name,omitempty"`
+}
 
 // User defines model for User.
 type User struct {
@@ -1075,6 +2046,237 @@ type VersionCheckStatus struct {
 	Error *string `json:"error,omitempty"`
 }
 
+// WebhookAccepted defines model for WebhookAccepted.
+type WebhookAccepted struct {
+	RepoId *string               `json:"repo_id,omitempty"`
+	Status WebhookAcceptedStatus `json:"status"`
+}
+
+// WebhookAcceptedStatus defines model for WebhookAccepted.Status.
+type WebhookAcceptedStatus string
+
+// WebhookInfoResponse defines model for WebhookInfoResponse.
+type WebhookInfoResponse struct {
+	// AutoRegistered True when the server successfully auto-registered the webhook
+	// against the GitHub API (auto_webhook=true on create + PAT had
+	// admin:repo_hook). When false, the operator must register manually.
+	AutoRegistered bool `json:"auto_registered"`
+
+	// WebhookSecret HMAC secret. Treat as sensitive — rotates on repo recreate.
+	WebhookSecret string `json:"webhook_secret"`
+
+	// WebhookUrl Full URL to paste into GitHub's webhook config. Empty path-only
+	// value when CIX_PUBLIC_URL is unset — prepend your tunnel origin.
+	WebhookUrl string `json:"webhook_url"`
+}
+
+// WebhookOrigin defines model for WebhookOrigin.
+type WebhookOrigin struct {
+	// Origin The public base URL webhook delivery URLs are built against
+	// (no trailing slash). Empty when source is "none".
+	Origin string `json:"origin"`
+
+	// Source Where `origin` comes from. `tunnel` — a live managed tunnel.
+	// `public_url` — the operator-set CIX_PUBLIC_URL (infrastructure
+	// provides public reachability; a tunnel is not needed). `none` —
+	// no public origin is configured, so webhooks can't be delivered.
+	Source WebhookOriginSource `json:"source"`
+}
+
+// WebhookOriginSource Where `origin` comes from. `tunnel` — a live managed tunnel.
+// `public_url` — the operator-set CIX_PUBLIC_URL (infrastructure
+// provides public reachability; a tunnel is not needed). `none` —
+// no public origin is configured, so webhooks can't be delivered.
+type WebhookOriginSource string
+
+// WebhookReconcileOutcome defines model for WebhookReconcileOutcome.
+type WebhookReconcileOutcome struct {
+	Action      WebhookReconcileOutcomeAction `json:"action"`
+	Note        *string                       `json:"note,omitempty"`
+	ProjectPath string                        `json:"project_path"`
+}
+
+// WebhookReconcileOutcomeAction defines model for WebhookReconcileOutcome.Action.
+type WebhookReconcileOutcomeAction string
+
+// WebhookReconcileResult defines model for WebhookReconcileResult.
+type WebhookReconcileResult struct {
+	BaseUrl  string                     `json:"base_url"`
+	Created  int                        `json:"created"`
+	Failed   int                        `json:"failed"`
+	Outcomes *[]WebhookReconcileOutcome `json:"outcomes,omitempty"`
+	Skipped  int                        `json:"skipped"`
+	Total    int                        `json:"total"`
+	Updated  int                        `json:"updated"`
+}
+
+// Workspace defines model for Workspace.
+type Workspace struct {
+	CreatedAt time.Time `json:"created_at"`
+
+	// Description Free-form description. Empty string when absent.
+	Description string `json:"description"`
+
+	// Id ULID-like opaque identifier.
+	Id string `json:"id"`
+
+	// Name Unique workspace name.
+	Name string `json:"name"`
+
+	// OwnerUserId User who created the workspace. NULL only when orphaned by a user
+	// deletion. Visible to the owner, members of any view-group it is
+	// shared to, and admins.
+	OwnerUserId *string   `json:"owner_user_id"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// WorkspaceListResponse defines model for WorkspaceListResponse.
+type WorkspaceListResponse struct {
+	Total      int         `json:"total"`
+	Workspaces []Workspace `json:"workspaces"`
+}
+
+// WorkspaceProject A project listed under a workspace, decorated with the membership
+// timestamp. The embedded Project carries the full project info
+// (status, languages, last_indexed_at) so the dashboard doesn't
+// need a second roundtrip.
+type WorkspaceProject struct {
+	AddedAt time.Time `json:"added_at"`
+	Project Project   `json:"project"`
+}
+
+// WorkspaceProjectListResponse defines model for WorkspaceProjectListResponse.
+type WorkspaceProjectListResponse struct {
+	Projects []WorkspaceProject `json:"projects"`
+	Total    int                `json:"total"`
+}
+
+// WorkspaceProjectMembership defines model for WorkspaceProjectMembership.
+type WorkspaceProjectMembership struct {
+	AddedAt     time.Time `json:"added_at"`
+	ProjectPath string    `json:"project_path"`
+	WorkspaceId string    `json:"workspace_id"`
+}
+
+// WorkspaceSearchChunk defines model for WorkspaceSearchChunk.
+type WorkspaceSearchChunk struct {
+	Content     string  `json:"content"`
+	EndLine     int     `json:"end_line"`
+	FilePath    string  `json:"file_path"`
+	Language    *string `json:"language,omitempty"`
+	ProjectPath string  `json:"project_path"`
+
+	// Score Raw cosine similarity between the query and this chunk —
+	// the value chunks are sorted by. No per-project boost is
+	// applied (a previous revision multiplied this by
+	// project_score, which let one repo dominate every result
+	// for short queries like product-name acronyms).
+	Score      float32 `json:"score"`
+	StartLine  int     `json:"start_line"`
+	SymbolName *string `json:"symbol_name,omitempty"`
+}
+
+// WorkspaceSearchFailedRepo defines model for WorkspaceSearchFailedRepo.
+type WorkspaceSearchFailedRepo struct {
+	ProjectPath string `json:"project_path"`
+
+	// Reason Short category for the failure — `vectorstore_error`,
+	// `timeout`, etc. Intentionally not the raw error message so
+	// internal details don't leak; check the server logs by
+	// `workspace_id` for the full error.
+	Reason string `json:"reason"`
+}
+
+// WorkspaceSearchPendingRepo defines model for WorkspaceSearchPendingRepo.
+type WorkspaceSearchPendingRepo struct {
+	ProjectPath string `json:"project_path"`
+
+	// Status Current per-project status. Anything other than `indexed`
+	// means the project hasn't contributed to this response.
+	Status WorkspaceSearchPendingRepoStatus `json:"status"`
+}
+
+// WorkspaceSearchPendingRepoStatus Current per-project status. Anything other than `indexed`
+// means the project hasn't contributed to this response.
+type WorkspaceSearchPendingRepoStatus string
+
+// WorkspaceSearchProject defines model for WorkspaceSearchProject.
+type WorkspaceSearchProject struct {
+	// Bm25Score Mean of the top-N raw BM25 scores in this project (sign
+	// flipped from SQLite's bm25() so positive = better).
+	// Surfaced so the dashboard can show "this repo surfaced
+	// on literal token overlap" vs. "pure semantic similarity".
+	Bm25Score float32 `json:"bm25_score"`
+
+	// DenseScore Mean of the top-N raw cosine similarities in this
+	// project. Together with `bm25_score`, the two raw signals
+	// that feed into `project_score`.
+	DenseScore float32 `json:"dense_score"`
+
+	// Label Short human-readable label derived from the project_path's
+	// last segment (e.g. "owner/repo@main" → "repo@main").
+	Label string `json:"label"`
+
+	// NumHits Chunks from this project that survived the per-project
+	// chunk cap and made it into the global chunks list.
+	NumHits     int    `json:"num_hits"`
+	ProjectPath string `json:"project_path"`
+
+	// ProjectScore Hybrid candidacy in [0,1] — the α-blend of per-query
+	// min-max normalized BM25 and dense signals (α=0.5) the
+	// project-relevance gate ranks by. The "Top projects"
+	// panel sorts by this value.
+	ProjectScore float32 `json:"project_score"`
+}
+
+// WorkspaceSearchResponse defines model for WorkspaceSearchResponse.
+type WorkspaceSearchResponse struct {
+	Chunks []WorkspaceSearchChunk `json:"chunks"`
+
+	// FailedRepos Repos whose per-project vector search returned an error
+	// during this request (e.g. corrupt collection on disk). The
+	// rest of the workspace is still aggregated; surface this so
+	// the operator knows the result set is incomplete.
+	FailedRepos *[]WorkspaceSearchFailedRepo `json:"failed_repos,omitempty"`
+
+	// PendingRepos Repos that belong to the workspace but weren't queryable
+	// yet — clone or index hasn't completed (or the last attempt
+	// failed). Their matches will appear once they reach
+	// `status=indexed`. Empty if every repo is ready.
+	PendingRepos *[]WorkspaceSearchPendingRepo `json:"pending_repos,omitempty"`
+
+	// Projects Top projects ranked by `project_score`. Surfaces which repos
+	// in the workspace the query is most relevant to, independent
+	// of which individual chunks rank highest globally.
+	Projects []WorkspaceSearchProject `json:"projects"`
+
+	// StaleFtsRepos Repos that were indexed before the BM25 mirror
+	// (`chunks_fts`) was added: they're queryable via dense
+	// search but the sparse half of the hybrid is empty, which
+	// collapses the algorithm to pure-dense fan-out for these
+	// entries. Trigger a reindex on each to backfill the FTS
+	// side. Empty once every workspace repo has been reindexed
+	// under the new schema.
+	StaleFtsRepos *[]WorkspaceSearchStaleFTSRepo `json:"stale_fts_repos,omitempty"`
+
+	// Status `ok` — results follow. `empty` — workspace queried fine but
+	// nothing cleared the `min_score` floor. `partial_failure` —
+	// no chunks returned but at least one repo errored out during
+	// the fan-out (see `failed_repos`).
+	Status WorkspaceSearchResponseStatus `json:"status"`
+}
+
+// WorkspaceSearchResponseStatus `ok` — results follow. `empty` — workspace queried fine but
+// nothing cleared the `min_score` floor. `partial_failure` —
+// no chunks returned but at least one repo errored out during
+// the fan-out (see `failed_repos`).
+type WorkspaceSearchResponseStatus string
+
+// WorkspaceSearchStaleFTSRepo defines model for WorkspaceSearchStaleFTSRepo.
+type WorkspaceSearchStaleFTSRepo struct {
+	ProjectPath string `json:"project_path"`
+}
+
 // ProjectHash defines model for ProjectHash.
 type ProjectHash = string
 
@@ -1099,6 +2301,9 @@ type Unauthorized = Error
 // Unprocessable defines model for Unprocessable.
 type Unprocessable = Error
 
+// WorkspacesDisabled defines model for WorkspacesDisabled.
+type WorkspacesDisabled = Error
+
 // bearerAuthContextKey is the context key for bearerAuth security scheme
 type bearerAuthContextKey string
 
@@ -1112,6 +2317,41 @@ type ListApiKeysParams struct {
 // ListApiKeysParamsOwner defines parameters for ListApiKeys.
 type ListApiKeysParamsOwner string
 
+// ListTokenReposParams defines parameters for ListTokenRepos.
+type ListTokenReposParams struct {
+	// Q Optional case-insensitive substring filter on full_name.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+
+	// Account Optional account login to scope the listing to. When set,
+	// `account_type` must also be set.
+	Account *string `form:"account,omitempty" json:"account,omitempty"`
+
+	// AccountType Required when `account` is set; ignored otherwise.
+	AccountType *ListTokenReposParamsAccountType `form:"account_type,omitempty" json:"account_type,omitempty"`
+}
+
+// ListTokenReposParamsAccountType defines parameters for ListTokenRepos.
+type ListTokenReposParamsAccountType string
+
+// ListJobsParams defines parameters for ListJobs.
+type ListJobsParams struct {
+	Status *ListJobsParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	Type   *string               `form:"type,omitempty" json:"type,omitempty"`
+	Limit  *int                  `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListJobsParamsStatus defines parameters for ListJobs.
+type ListJobsParamsStatus string
+
+// ReindexProjectParams defines parameters for ReindexProject.
+type ReindexProjectParams struct {
+	// Full When true, clears `indexed_sha` for this repo before
+	// enqueueing so the next index_repo run does a full reindex
+	// (re-embeds every file, wipes prior chunks/symbols/refs/
+	// file_hashes). Use to recover from suspected drift.
+	Full *bool `form:"full,omitempty" json:"full,omitempty"`
+}
+
 // IndexFilesParams defines parameters for IndexFiles.
 type IndexFilesParams struct {
 	// Accept `application/x-ndjson` switches to a streamed response
@@ -1121,6 +2361,39 @@ type IndexFilesParams struct {
 
 // IndexFilesParamsAccept defines parameters for IndexFiles.
 type IndexFilesParamsAccept string
+
+// InstallTunnelBinaryParamsProvider defines parameters for InstallTunnelBinary.
+type InstallTunnelBinaryParamsProvider string
+
+// UpdateTunnelBinaryParamsProvider defines parameters for UpdateTunnelBinary.
+type UpdateTunnelBinaryParamsProvider string
+
+// ReceiveGithubWebhookJSONBody defines parameters for ReceiveGithubWebhook.
+type ReceiveGithubWebhookJSONBody map[string]interface{}
+
+// ReceiveGithubWebhookParams defines parameters for ReceiveGithubWebhook.
+type ReceiveGithubWebhookParams struct {
+	// XHubSignature256 HMAC-SHA256 over the body, hex-encoded with sha256= prefix.
+	XHubSignature256 *string `json:"X-Hub-Signature-256,omitempty"`
+	XGitHubEvent     *string `json:"X-GitHub-Event,omitempty"`
+}
+
+// WorkspaceSearchParams defines parameters for WorkspaceSearch.
+type WorkspaceSearchParams struct {
+	Q           string `form:"q" json:"q"`
+	TopProjects *int   `form:"top_projects,omitempty" json:"top_projects,omitempty"`
+	TopChunks   *int   `form:"top_chunks,omitempty" json:"top_chunks,omitempty"`
+
+	// MinScore Floor on raw cosine similarity. Chunks below this are
+	// dropped before aggregation. Default 0.4 — symmetric with
+	// per-project search default so an unfiltered workspace
+	// query doesn't return cross-repo noise that a single-repo
+	// query would have rejected. Pass 0 explicitly for
+	// intentional cross-project sweeps that need long-tail
+	// recall (e.g. "authentication and authorization" across a
+	// mixed-domain workspace).
+	MinScore *float32 `form:"min_score,omitempty" json:"min_score,omitempty"`
+}
 
 // PutRuntimeConfigJSONRequestBody defines body for PutRuntimeConfig for application/json ContentType.
 type PutRuntimeConfigJSONRequestBody = RuntimeConfigUpdate
@@ -1140,8 +2413,32 @@ type ChangePasswordJSONRequestBody = ChangePasswordRequest
 // LoginJSONRequestBody defines body for Login for application/json ContentType.
 type LoginJSONRequestBody = LoginRequest
 
+// AddGitRepoJSONRequestBody defines body for AddGitRepo for application/json ContentType.
+type AddGitRepoJSONRequestBody = AddGitRepoRequest
+
+// CreateGithubTokenJSONRequestBody defines body for CreateGithubToken for application/json ContentType.
+type CreateGithubTokenJSONRequestBody = CreateGithubTokenRequest
+
+// CreateGroupJSONRequestBody defines body for CreateGroup for application/json ContentType.
+type CreateGroupJSONRequestBody = CreateGroupRequest
+
+// UpdateGroupJSONRequestBody defines body for UpdateGroup for application/json ContentType.
+type UpdateGroupJSONRequestBody = UpdateGroupRequest
+
+// AddGroupMemberJSONRequestBody defines body for AddGroupMember for application/json ContentType.
+type AddGroupMemberJSONRequestBody = AddGroupMemberRequest
+
 // CreateProjectJSONRequestBody defines body for CreateProject for application/json ContentType.
 type CreateProjectJSONRequestBody = CreateProjectRequest
+
+// UpdateProjectGitRepoSyncJSONRequestBody defines body for UpdateProjectGitRepoSync for application/json ContentType.
+type UpdateProjectGitRepoSyncJSONRequestBody = UpdateGitRepoSyncRequest
+
+// ReassignProjectOwnerJSONRequestBody defines body for ReassignProjectOwner for application/json ContentType.
+type ReassignProjectOwnerJSONRequestBody = ReassignOwnerRequest
+
+// ShareProjectToGroupJSONRequestBody defines body for ShareProjectToGroup for application/json ContentType.
+type ShareProjectToGroupJSONRequestBody = ShareToGroupRequest
 
 // UpdateProjectJSONRequestBody defines body for UpdateProject for application/json ContentType.
 type UpdateProjectJSONRequestBody = UpdateProjectRequest
@@ -1169,6 +2466,24 @@ type SearchReferencesJSONRequestBody = ReferenceRequest
 
 // SearchSymbolsJSONRequestBody defines body for SearchSymbols for application/json ContentType.
 type SearchSymbolsJSONRequestBody = SymbolSearchRequest
+
+// UpdateTunnelConfigJSONRequestBody defines body for UpdateTunnelConfig for application/json ContentType.
+type UpdateTunnelConfigJSONRequestBody = TunnelConfigUpdate
+
+// ReceiveGithubWebhookJSONRequestBody defines body for ReceiveGithubWebhook for application/json ContentType.
+type ReceiveGithubWebhookJSONRequestBody ReceiveGithubWebhookJSONBody
+
+// CreateWorkspaceJSONRequestBody defines body for CreateWorkspace for application/json ContentType.
+type CreateWorkspaceJSONRequestBody = CreateWorkspaceRequest
+
+// UpdateWorkspaceJSONRequestBody defines body for UpdateWorkspace for application/json ContentType.
+type UpdateWorkspaceJSONRequestBody = UpdateWorkspaceRequest
+
+// LinkProjectToWorkspaceJSONRequestBody defines body for LinkProjectToWorkspace for application/json ContentType.
+type LinkProjectToWorkspaceJSONRequestBody = LinkProjectRequest
+
+// ShareWorkspaceToGroupJSONRequestBody defines body for ShareWorkspaceToGroup for application/json ContentType.
+type ShareWorkspaceToGroupJSONRequestBody = ShareToGroupRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -1229,12 +2544,90 @@ type ServerInterface interface {
 	// End one of my sessions (sign out a single device)
 	// (DELETE /api/v1/auth/sessions/{id})
 	DeleteMySession(w http.ResponseWriter, r *http.Request, id string)
+	// Clone + index a GitHub repository as a standalone project
+	// (POST /api/v1/git-repos)
+	AddGitRepo(w http.ResponseWriter, r *http.Request)
+	// List stored GitHub PATs (metadata only)
+	// (GET /api/v1/github-tokens)
+	ListGithubTokens(w http.ResponseWriter, r *http.Request)
+	// Store a new GitHub PAT (encrypted-at-rest)
+	// (POST /api/v1/github-tokens)
+	CreateGithubToken(w http.ResponseWriter, r *http.Request)
+	// Delete a stored GitHub PAT
+	// (DELETE /api/v1/github-tokens/{id})
+	DeleteGithubToken(w http.ResponseWriter, r *http.Request, id string)
+	// List the GitHub accounts visible to a stored PAT
+	// (GET /api/v1/github-tokens/{id}/accounts)
+	ListTokenAccounts(w http.ResponseWriter, r *http.Request, id string)
+	// List GitHub repositories visible to a stored PAT
+	// (GET /api/v1/github-tokens/{id}/repos)
+	ListTokenRepos(w http.ResponseWriter, r *http.Request, id string, params ListTokenReposParams)
+	// Effective public origin for GitHub webhook delivery
+	// (GET /api/v1/github/webhooks/origin)
+	GetWebhookOrigin(w http.ResponseWriter, r *http.Request)
+	// Re-register all webhook_mode=auto repos against the current public URL
+	// (POST /api/v1/github/webhooks/reconcile)
+	ReconcileWebhooks(w http.ResponseWriter, r *http.Request)
+	// List view-groups
+	// (GET /api/v1/groups)
+	ListGroups(w http.ResponseWriter, r *http.Request)
+	// Create a view-group (admin only)
+	// (POST /api/v1/groups)
+	CreateGroup(w http.ResponseWriter, r *http.Request)
+	// Delete a view-group (admin only)
+	// (DELETE /api/v1/groups/{id})
+	DeleteGroup(w http.ResponseWriter, r *http.Request, id string)
+	// Get a view-group (admin only)
+	// (GET /api/v1/groups/{id})
+	GetGroup(w http.ResponseWriter, r *http.Request, id string)
+	// Update a view-group (admin only)
+	// (PATCH /api/v1/groups/{id})
+	UpdateGroup(w http.ResponseWriter, r *http.Request, id string)
+	// List members of a view-group (admin only)
+	// (GET /api/v1/groups/{id}/members)
+	ListGroupMembers(w http.ResponseWriter, r *http.Request, id string)
+	// Add a user to a view-group (admin only)
+	// (POST /api/v1/groups/{id}/members)
+	AddGroupMember(w http.ResponseWriter, r *http.Request, id string)
+	// Remove a user from a view-group (admin only)
+	// (DELETE /api/v1/groups/{id}/members/{userId})
+	RemoveGroupMember(w http.ResponseWriter, r *http.Request, id string, userId string)
+	// List background jobs (status / type filter)
+	// (GET /api/v1/jobs)
+	ListJobs(w http.ResponseWriter, r *http.Request, params ListJobsParams)
 	// List all registered projects
 	// (GET /api/v1/projects)
 	ListProjects(w http.ResponseWriter, r *http.Request)
 	// Register a new project
 	// (POST /api/v1/projects)
 	CreateProject(w http.ResponseWriter, r *http.Request)
+	// Force-stop an in-flight index for an external project
+	// (POST /api/v1/projects/{hash}/force-stop)
+	ForceStopIndex(w http.ResponseWriter, r *http.Request, hash string)
+	// Read the git_repos metadata for an external project
+	// (GET /api/v1/projects/{hash}/git-repo)
+	GetProjectGitRepo(w http.ResponseWriter, r *http.Request, hash string)
+	// Reconfigure how an external project is kept in sync
+	// (PATCH /api/v1/projects/{hash}/git-repo)
+	UpdateProjectGitRepoSync(w http.ResponseWriter, r *http.Request, hash string)
+	// Reassign the owner of a local project (admin only)
+	// (PUT /api/v1/projects/{hash}/owner)
+	ReassignProjectOwner(w http.ResponseWriter, r *http.Request, hash string)
+	// Manually re-trigger the clone + index pipeline
+	// (POST /api/v1/projects/{hash}/reindex)
+	ReindexProject(w http.ResponseWriter, r *http.Request, hash string, params ReindexProjectParams)
+	// List the view-groups an external project is shared to (admin only)
+	// (GET /api/v1/projects/{hash}/shares)
+	ListProjectShares(w http.ResponseWriter, r *http.Request, hash string)
+	// Share an external project to a view-group (admin only)
+	// (POST /api/v1/projects/{hash}/shares)
+	ShareProjectToGroup(w http.ResponseWriter, r *http.Request, hash string)
+	// Revoke a project↔group share (admin only)
+	// (DELETE /api/v1/projects/{hash}/shares/{groupId})
+	UnshareProjectFromGroup(w http.ResponseWriter, r *http.Request, hash string, groupId string)
+	// Webhook URL + secret for manual GitHub setup
+	// (GET /api/v1/projects/{hash}/webhook-info)
+	GetProjectWebhookInfo(w http.ResponseWriter, r *http.Request, hash string)
 	// Delete a project and all its indexed data (admin only)
 	// (DELETE /api/v1/projects/{path})
 	DeleteProject(w http.ResponseWriter, r *http.Request, path ProjectHash)
@@ -1277,9 +2670,78 @@ type ServerInterface interface {
 	// Project overview (top dirs, recent symbols, totals)
 	// (GET /api/v1/projects/{path}/summary)
 	GetProjectSummary(w http.ResponseWriter, r *http.Request, path ProjectHash)
+	// List workspaces that contain this project
+	// (GET /api/v1/projects/{path}/workspaces)
+	ListProjectWorkspaces(w http.ResponseWriter, r *http.Request, path ProjectHash)
 	// Server / sidecar status (authenticated)
 	// (GET /api/v1/status)
 	GetStatus(w http.ResponseWriter, r *http.Request)
+	// List tunnel providers and their status
+	// (GET /api/v1/tunnels)
+	ListTunnels(w http.ResponseWriter, r *http.Request)
+	// Agent-binary status per provider
+	// (GET /api/v1/tunnels/binaries)
+	ListTunnelBinaries(w http.ResponseWriter, r *http.Request)
+	// Download/install a provider's agent binary (managed mode)
+	// (POST /api/v1/tunnels/binaries/{provider}/install)
+	InstallTunnelBinary(w http.ResponseWriter, r *http.Request, provider InstallTunnelBinaryParamsProvider)
+	// Update a provider's agent binary to the latest (managed mode)
+	// (POST /api/v1/tunnels/binaries/{provider}/update)
+	UpdateTunnelBinary(w http.ResponseWriter, r *http.Request, provider UpdateTunnelBinaryParamsProvider)
+	// Get the dashboard-managed tunnel configuration
+	// (GET /api/v1/tunnels/config)
+	GetTunnelConfig(w http.ResponseWriter, r *http.Request)
+	// Update tunnel configuration and apply it
+	// (PUT /api/v1/tunnels/config)
+	UpdateTunnelConfig(w http.ResponseWriter, r *http.Request)
+	// Restart the active tunnel subprocess
+	// (POST /api/v1/tunnels/restart)
+	RestartTunnel(w http.ResponseWriter, r *http.Request)
+	// Active tunnel status snapshot
+	// (GET /api/v1/tunnels/status)
+	GetTunnelStatus(w http.ResponseWriter, r *http.Request)
+	// End-to-end connectivity test through the tunnel
+	// (POST /api/v1/tunnels/test)
+	TestTunnel(w http.ResponseWriter, r *http.Request)
+	// Receive a GitHub webhook delivery (public, HMAC-authenticated)
+	// (POST /api/v1/webhooks/github/{hash})
+	ReceiveGithubWebhook(w http.ResponseWriter, r *http.Request, hash string, params ReceiveGithubWebhookParams)
+	// List all workspaces
+	// (GET /api/v1/workspaces)
+	ListWorkspaces(w http.ResponseWriter, r *http.Request)
+	// Create a new workspace
+	// (POST /api/v1/workspaces)
+	CreateWorkspace(w http.ResponseWriter, r *http.Request)
+	// Delete a workspace
+	// (DELETE /api/v1/workspaces/{id})
+	DeleteWorkspace(w http.ResponseWriter, r *http.Request, id string)
+	// Get a single workspace
+	// (GET /api/v1/workspaces/{id})
+	GetWorkspace(w http.ResponseWriter, r *http.Request, id string)
+	// Update workspace metadata
+	// (PATCH /api/v1/workspaces/{id})
+	UpdateWorkspace(w http.ResponseWriter, r *http.Request, id string)
+	// List projects currently linked to a workspace
+	// (GET /api/v1/workspaces/{id}/projects)
+	ListWorkspaceProjects(w http.ResponseWriter, r *http.Request, id string)
+	// Link an existing project into this workspace
+	// (POST /api/v1/workspaces/{id}/projects)
+	LinkProjectToWorkspace(w http.ResponseWriter, r *http.Request, id string)
+	// Remove a project from this workspace (does not delete the project)
+	// (DELETE /api/v1/workspaces/{id}/projects/{hash})
+	UnlinkProjectFromWorkspace(w http.ResponseWriter, r *http.Request, id string, hash string)
+	// Hybrid BM25+dense search across all repos in a workspace
+	// (GET /api/v1/workspaces/{id}/search)
+	WorkspaceSearch(w http.ResponseWriter, r *http.Request, id string, params WorkspaceSearchParams)
+	// List the view-groups a workspace is shared to
+	// (GET /api/v1/workspaces/{id}/shares)
+	ListWorkspaceShares(w http.ResponseWriter, r *http.Request, id string)
+	// Share a workspace to a view-group
+	// (POST /api/v1/workspaces/{id}/shares)
+	ShareWorkspaceToGroup(w http.ResponseWriter, r *http.Request, id string)
+	// Revoke a workspace↔group share (owner or admin)
+	// (DELETE /api/v1/workspaces/{id}/shares/{groupId})
+	UnshareWorkspaceFromGroup(w http.ResponseWriter, r *http.Request, id string, groupId string)
 	// Liveness probe (public)
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
@@ -1403,6 +2865,108 @@ func (_ Unimplemented) DeleteMySession(w http.ResponseWriter, r *http.Request, i
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// Clone + index a GitHub repository as a standalone project
+// (POST /api/v1/git-repos)
+func (_ Unimplemented) AddGitRepo(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List stored GitHub PATs (metadata only)
+// (GET /api/v1/github-tokens)
+func (_ Unimplemented) ListGithubTokens(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Store a new GitHub PAT (encrypted-at-rest)
+// (POST /api/v1/github-tokens)
+func (_ Unimplemented) CreateGithubToken(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Delete a stored GitHub PAT
+// (DELETE /api/v1/github-tokens/{id})
+func (_ Unimplemented) DeleteGithubToken(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List the GitHub accounts visible to a stored PAT
+// (GET /api/v1/github-tokens/{id}/accounts)
+func (_ Unimplemented) ListTokenAccounts(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List GitHub repositories visible to a stored PAT
+// (GET /api/v1/github-tokens/{id}/repos)
+func (_ Unimplemented) ListTokenRepos(w http.ResponseWriter, r *http.Request, id string, params ListTokenReposParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Effective public origin for GitHub webhook delivery
+// (GET /api/v1/github/webhooks/origin)
+func (_ Unimplemented) GetWebhookOrigin(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Re-register all webhook_mode=auto repos against the current public URL
+// (POST /api/v1/github/webhooks/reconcile)
+func (_ Unimplemented) ReconcileWebhooks(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List view-groups
+// (GET /api/v1/groups)
+func (_ Unimplemented) ListGroups(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Create a view-group (admin only)
+// (POST /api/v1/groups)
+func (_ Unimplemented) CreateGroup(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Delete a view-group (admin only)
+// (DELETE /api/v1/groups/{id})
+func (_ Unimplemented) DeleteGroup(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Get a view-group (admin only)
+// (GET /api/v1/groups/{id})
+func (_ Unimplemented) GetGroup(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Update a view-group (admin only)
+// (PATCH /api/v1/groups/{id})
+func (_ Unimplemented) UpdateGroup(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List members of a view-group (admin only)
+// (GET /api/v1/groups/{id}/members)
+func (_ Unimplemented) ListGroupMembers(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Add a user to a view-group (admin only)
+// (POST /api/v1/groups/{id}/members)
+func (_ Unimplemented) AddGroupMember(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Remove a user from a view-group (admin only)
+// (DELETE /api/v1/groups/{id}/members/{userId})
+func (_ Unimplemented) RemoveGroupMember(w http.ResponseWriter, r *http.Request, id string, userId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List background jobs (status / type filter)
+// (GET /api/v1/jobs)
+func (_ Unimplemented) ListJobs(w http.ResponseWriter, r *http.Request, params ListJobsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // List all registered projects
 // (GET /api/v1/projects)
 func (_ Unimplemented) ListProjects(w http.ResponseWriter, r *http.Request) {
@@ -1412,6 +2976,60 @@ func (_ Unimplemented) ListProjects(w http.ResponseWriter, r *http.Request) {
 // Register a new project
 // (POST /api/v1/projects)
 func (_ Unimplemented) CreateProject(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Force-stop an in-flight index for an external project
+// (POST /api/v1/projects/{hash}/force-stop)
+func (_ Unimplemented) ForceStopIndex(w http.ResponseWriter, r *http.Request, hash string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Read the git_repos metadata for an external project
+// (GET /api/v1/projects/{hash}/git-repo)
+func (_ Unimplemented) GetProjectGitRepo(w http.ResponseWriter, r *http.Request, hash string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Reconfigure how an external project is kept in sync
+// (PATCH /api/v1/projects/{hash}/git-repo)
+func (_ Unimplemented) UpdateProjectGitRepoSync(w http.ResponseWriter, r *http.Request, hash string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Reassign the owner of a local project (admin only)
+// (PUT /api/v1/projects/{hash}/owner)
+func (_ Unimplemented) ReassignProjectOwner(w http.ResponseWriter, r *http.Request, hash string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Manually re-trigger the clone + index pipeline
+// (POST /api/v1/projects/{hash}/reindex)
+func (_ Unimplemented) ReindexProject(w http.ResponseWriter, r *http.Request, hash string, params ReindexProjectParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List the view-groups an external project is shared to (admin only)
+// (GET /api/v1/projects/{hash}/shares)
+func (_ Unimplemented) ListProjectShares(w http.ResponseWriter, r *http.Request, hash string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Share an external project to a view-group (admin only)
+// (POST /api/v1/projects/{hash}/shares)
+func (_ Unimplemented) ShareProjectToGroup(w http.ResponseWriter, r *http.Request, hash string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Revoke a project↔group share (admin only)
+// (DELETE /api/v1/projects/{hash}/shares/{groupId})
+func (_ Unimplemented) UnshareProjectFromGroup(w http.ResponseWriter, r *http.Request, hash string, groupId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Webhook URL + secret for manual GitHub setup
+// (GET /api/v1/projects/{hash}/webhook-info)
+func (_ Unimplemented) GetProjectWebhookInfo(w http.ResponseWriter, r *http.Request, hash string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1499,9 +3117,147 @@ func (_ Unimplemented) GetProjectSummary(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// List workspaces that contain this project
+// (GET /api/v1/projects/{path}/workspaces)
+func (_ Unimplemented) ListProjectWorkspaces(w http.ResponseWriter, r *http.Request, path ProjectHash) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // Server / sidecar status (authenticated)
 // (GET /api/v1/status)
 func (_ Unimplemented) GetStatus(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List tunnel providers and their status
+// (GET /api/v1/tunnels)
+func (_ Unimplemented) ListTunnels(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Agent-binary status per provider
+// (GET /api/v1/tunnels/binaries)
+func (_ Unimplemented) ListTunnelBinaries(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Download/install a provider's agent binary (managed mode)
+// (POST /api/v1/tunnels/binaries/{provider}/install)
+func (_ Unimplemented) InstallTunnelBinary(w http.ResponseWriter, r *http.Request, provider InstallTunnelBinaryParamsProvider) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Update a provider's agent binary to the latest (managed mode)
+// (POST /api/v1/tunnels/binaries/{provider}/update)
+func (_ Unimplemented) UpdateTunnelBinary(w http.ResponseWriter, r *http.Request, provider UpdateTunnelBinaryParamsProvider) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Get the dashboard-managed tunnel configuration
+// (GET /api/v1/tunnels/config)
+func (_ Unimplemented) GetTunnelConfig(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Update tunnel configuration and apply it
+// (PUT /api/v1/tunnels/config)
+func (_ Unimplemented) UpdateTunnelConfig(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Restart the active tunnel subprocess
+// (POST /api/v1/tunnels/restart)
+func (_ Unimplemented) RestartTunnel(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Active tunnel status snapshot
+// (GET /api/v1/tunnels/status)
+func (_ Unimplemented) GetTunnelStatus(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// End-to-end connectivity test through the tunnel
+// (POST /api/v1/tunnels/test)
+func (_ Unimplemented) TestTunnel(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Receive a GitHub webhook delivery (public, HMAC-authenticated)
+// (POST /api/v1/webhooks/github/{hash})
+func (_ Unimplemented) ReceiveGithubWebhook(w http.ResponseWriter, r *http.Request, hash string, params ReceiveGithubWebhookParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List all workspaces
+// (GET /api/v1/workspaces)
+func (_ Unimplemented) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Create a new workspace
+// (POST /api/v1/workspaces)
+func (_ Unimplemented) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Delete a workspace
+// (DELETE /api/v1/workspaces/{id})
+func (_ Unimplemented) DeleteWorkspace(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Get a single workspace
+// (GET /api/v1/workspaces/{id})
+func (_ Unimplemented) GetWorkspace(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Update workspace metadata
+// (PATCH /api/v1/workspaces/{id})
+func (_ Unimplemented) UpdateWorkspace(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List projects currently linked to a workspace
+// (GET /api/v1/workspaces/{id}/projects)
+func (_ Unimplemented) ListWorkspaceProjects(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Link an existing project into this workspace
+// (POST /api/v1/workspaces/{id}/projects)
+func (_ Unimplemented) LinkProjectToWorkspace(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Remove a project from this workspace (does not delete the project)
+// (DELETE /api/v1/workspaces/{id}/projects/{hash})
+func (_ Unimplemented) UnlinkProjectFromWorkspace(w http.ResponseWriter, r *http.Request, id string, hash string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Hybrid BM25+dense search across all repos in a workspace
+// (GET /api/v1/workspaces/{id}/search)
+func (_ Unimplemented) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id string, params WorkspaceSearchParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List the view-groups a workspace is shared to
+// (GET /api/v1/workspaces/{id}/shares)
+func (_ Unimplemented) ListWorkspaceShares(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Share a workspace to a view-group
+// (POST /api/v1/workspaces/{id}/shares)
+func (_ Unimplemented) ShareWorkspaceToGroup(w http.ResponseWriter, r *http.Request, id string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Revoke a workspace↔group share (owner or admin)
+// (DELETE /api/v1/workspaces/{id}/shares/{groupId})
+func (_ Unimplemented) UnshareWorkspaceFromGroup(w http.ResponseWriter, r *http.Request, id string, groupId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1955,6 +3711,550 @@ func (siw *ServerInterfaceWrapper) DeleteMySession(w http.ResponseWriter, r *htt
 	handler.ServeHTTP(w, r)
 }
 
+// AddGitRepo operation middleware
+func (siw *ServerInterfaceWrapper) AddGitRepo(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AddGitRepo(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListGithubTokens operation middleware
+func (siw *ServerInterfaceWrapper) ListGithubTokens(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListGithubTokens(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateGithubToken operation middleware
+func (siw *ServerInterfaceWrapper) CreateGithubToken(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateGithubToken(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteGithubToken operation middleware
+func (siw *ServerInterfaceWrapper) DeleteGithubToken(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteGithubToken(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListTokenAccounts operation middleware
+func (siw *ServerInterfaceWrapper) ListTokenAccounts(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListTokenAccounts(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListTokenRepos operation middleware
+func (siw *ServerInterfaceWrapper) ListTokenRepos(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListTokenReposParams
+
+	// ------------- Optional query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "account" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "account", r.URL.Query(), &params.Account, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "account"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "account_type" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "account_type", r.URL.Query(), &params.AccountType, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "account_type"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account_type", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListTokenRepos(w, r, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetWebhookOrigin operation middleware
+func (siw *ServerInterfaceWrapper) GetWebhookOrigin(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetWebhookOrigin(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ReconcileWebhooks operation middleware
+func (siw *ServerInterfaceWrapper) ReconcileWebhooks(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ReconcileWebhooks(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListGroups operation middleware
+func (siw *ServerInterfaceWrapper) ListGroups(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListGroups(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateGroup operation middleware
+func (siw *ServerInterfaceWrapper) CreateGroup(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateGroup(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteGroup operation middleware
+func (siw *ServerInterfaceWrapper) DeleteGroup(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteGroup(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetGroup operation middleware
+func (siw *ServerInterfaceWrapper) GetGroup(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetGroup(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateGroup operation middleware
+func (siw *ServerInterfaceWrapper) UpdateGroup(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateGroup(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListGroupMembers operation middleware
+func (siw *ServerInterfaceWrapper) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListGroupMembers(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AddGroupMember operation middleware
+func (siw *ServerInterfaceWrapper) AddGroupMember(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AddGroupMember(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RemoveGroupMember operation middleware
+func (siw *ServerInterfaceWrapper) RemoveGroupMember(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "userId" -------------
+	var userId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "userId", chi.URLParam(r, "userId"), &userId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "userId", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RemoveGroupMember(w, r, id, userId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListJobs operation middleware
+func (siw *ServerInterfaceWrapper) ListJobs(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListJobsParams
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "type" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "type", r.URL.Query(), &params.Type, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "type"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "type", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListJobs(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListProjects operation middleware
 func (siw *ServerInterfaceWrapper) ListProjects(w http.ResponseWriter, r *http.Request) {
 
@@ -1986,6 +4286,319 @@ func (siw *ServerInterfaceWrapper) CreateProject(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CreateProject(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ForceStopIndex operation middleware
+func (siw *ServerInterfaceWrapper) ForceStopIndex(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ForceStopIndex(w, r, hash)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetProjectGitRepo operation middleware
+func (siw *ServerInterfaceWrapper) GetProjectGitRepo(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetProjectGitRepo(w, r, hash)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateProjectGitRepoSync operation middleware
+func (siw *ServerInterfaceWrapper) UpdateProjectGitRepoSync(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateProjectGitRepoSync(w, r, hash)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ReassignProjectOwner operation middleware
+func (siw *ServerInterfaceWrapper) ReassignProjectOwner(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ReassignProjectOwner(w, r, hash)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ReindexProject operation middleware
+func (siw *ServerInterfaceWrapper) ReindexProject(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ReindexProjectParams
+
+	// ------------- Optional query parameter "full" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "full", r.URL.Query(), &params.Full, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "full"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "full", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ReindexProject(w, r, hash, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListProjectShares operation middleware
+func (siw *ServerInterfaceWrapper) ListProjectShares(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListProjectShares(w, r, hash)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ShareProjectToGroup operation middleware
+func (siw *ServerInterfaceWrapper) ShareProjectToGroup(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ShareProjectToGroup(w, r, hash)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UnshareProjectFromGroup operation middleware
+func (siw *ServerInterfaceWrapper) UnshareProjectFromGroup(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "groupId" -------------
+	var groupId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "groupId", chi.URLParam(r, "groupId"), &groupId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "groupId", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UnshareProjectFromGroup(w, r, hash, groupId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetProjectWebhookInfo operation middleware
+func (siw *ServerInterfaceWrapper) GetProjectWebhookInfo(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetProjectWebhookInfo(w, r, hash)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2467,6 +5080,38 @@ func (siw *ServerInterfaceWrapper) GetProjectSummary(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
+// ListProjectWorkspaces operation middleware
+func (siw *ServerInterfaceWrapper) ListProjectWorkspaces(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "path" -------------
+	var path ProjectHash
+
+	err = runtime.BindStyledParameterWithOptions("simple", "path", chi.URLParam(r, "path"), &path, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "path", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListProjectWorkspaces(w, r, path)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetStatus operation middleware
 func (siw *ServerInterfaceWrapper) GetStatus(w http.ResponseWriter, r *http.Request) {
 
@@ -2478,6 +5123,712 @@ func (siw *ServerInterfaceWrapper) GetStatus(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetStatus(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListTunnels operation middleware
+func (siw *ServerInterfaceWrapper) ListTunnels(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListTunnels(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListTunnelBinaries operation middleware
+func (siw *ServerInterfaceWrapper) ListTunnelBinaries(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListTunnelBinaries(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// InstallTunnelBinary operation middleware
+func (siw *ServerInterfaceWrapper) InstallTunnelBinary(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "provider" -------------
+	var provider InstallTunnelBinaryParamsProvider
+
+	err = runtime.BindStyledParameterWithOptions("simple", "provider", chi.URLParam(r, "provider"), &provider, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "provider", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.InstallTunnelBinary(w, r, provider)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateTunnelBinary operation middleware
+func (siw *ServerInterfaceWrapper) UpdateTunnelBinary(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "provider" -------------
+	var provider UpdateTunnelBinaryParamsProvider
+
+	err = runtime.BindStyledParameterWithOptions("simple", "provider", chi.URLParam(r, "provider"), &provider, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "provider", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateTunnelBinary(w, r, provider)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetTunnelConfig operation middleware
+func (siw *ServerInterfaceWrapper) GetTunnelConfig(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetTunnelConfig(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateTunnelConfig operation middleware
+func (siw *ServerInterfaceWrapper) UpdateTunnelConfig(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateTunnelConfig(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RestartTunnel operation middleware
+func (siw *ServerInterfaceWrapper) RestartTunnel(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RestartTunnel(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetTunnelStatus operation middleware
+func (siw *ServerInterfaceWrapper) GetTunnelStatus(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetTunnelStatus(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// TestTunnel operation middleware
+func (siw *ServerInterfaceWrapper) TestTunnel(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.TestTunnel(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ReceiveGithubWebhook operation middleware
+func (siw *ServerInterfaceWrapper) ReceiveGithubWebhook(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ReceiveGithubWebhookParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Hub-Signature-256" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Hub-Signature-256")]; found {
+		var XHubSignature256 string
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Hub-Signature-256", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Hub-Signature-256", valueList[0], &XHubSignature256, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Hub-Signature-256", Err: err})
+			return
+		}
+
+		params.XHubSignature256 = &XHubSignature256
+
+	}
+
+	// ------------- Optional header parameter "X-GitHub-Event" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-GitHub-Event")]; found {
+		var XGitHubEvent string
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-GitHub-Event", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-GitHub-Event", valueList[0], &XGitHubEvent, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-GitHub-Event", Err: err})
+			return
+		}
+
+		params.XGitHubEvent = &XGitHubEvent
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ReceiveGithubWebhook(w, r, hash, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListWorkspaces operation middleware
+func (siw *ServerInterfaceWrapper) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListWorkspaces(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateWorkspace operation middleware
+func (siw *ServerInterfaceWrapper) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateWorkspace(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteWorkspace operation middleware
+func (siw *ServerInterfaceWrapper) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteWorkspace(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetWorkspace operation middleware
+func (siw *ServerInterfaceWrapper) GetWorkspace(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetWorkspace(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateWorkspace operation middleware
+func (siw *ServerInterfaceWrapper) UpdateWorkspace(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateWorkspace(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListWorkspaceProjects operation middleware
+func (siw *ServerInterfaceWrapper) ListWorkspaceProjects(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListWorkspaceProjects(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// LinkProjectToWorkspace operation middleware
+func (siw *ServerInterfaceWrapper) LinkProjectToWorkspace(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.LinkProjectToWorkspace(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UnlinkProjectFromWorkspace operation middleware
+func (siw *ServerInterfaceWrapper) UnlinkProjectFromWorkspace(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "hash" -------------
+	var hash string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "hash", chi.URLParam(r, "hash"), &hash, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "hash", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UnlinkProjectFromWorkspace(w, r, id, hash)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// WorkspaceSearch operation middleware
+func (siw *ServerInterfaceWrapper) WorkspaceSearch(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params WorkspaceSearchParams
+
+	// ------------- Required query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "top_projects" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "top_projects", r.URL.Query(), &params.TopProjects, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "top_projects"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "top_projects", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "top_chunks" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "top_chunks", r.URL.Query(), &params.TopChunks, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "top_chunks"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "top_chunks", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "min_score" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "min_score", r.URL.Query(), &params.MinScore, runtime.BindQueryParameterOptions{Type: "number", Format: "float"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "min_score"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "min_score", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.WorkspaceSearch(w, r, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListWorkspaceShares operation middleware
+func (siw *ServerInterfaceWrapper) ListWorkspaceShares(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListWorkspaceShares(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ShareWorkspaceToGroup operation middleware
+func (siw *ServerInterfaceWrapper) ShareWorkspaceToGroup(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ShareWorkspaceToGroup(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UnshareWorkspaceFromGroup operation middleware
+func (siw *ServerInterfaceWrapper) UnshareWorkspaceFromGroup(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "groupId" -------------
+	var groupId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "groupId", chi.URLParam(r, "groupId"), &groupId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "groupId", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UnshareWorkspaceFromGroup(w, r, id, groupId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2672,10 +6023,88 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Delete(options.BaseURL+"/api/v1/auth/sessions/{id}", wrapper.DeleteMySession)
 	})
 	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/git-repos", wrapper.AddGitRepo)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/github-tokens", wrapper.ListGithubTokens)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/github-tokens", wrapper.CreateGithubToken)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/v1/github-tokens/{id}", wrapper.DeleteGithubToken)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/github-tokens/{id}/accounts", wrapper.ListTokenAccounts)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/github-tokens/{id}/repos", wrapper.ListTokenRepos)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/github/webhooks/origin", wrapper.GetWebhookOrigin)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/github/webhooks/reconcile", wrapper.ReconcileWebhooks)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/groups", wrapper.ListGroups)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/groups", wrapper.CreateGroup)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/v1/groups/{id}", wrapper.DeleteGroup)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/groups/{id}", wrapper.GetGroup)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/api/v1/groups/{id}", wrapper.UpdateGroup)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/groups/{id}/members", wrapper.ListGroupMembers)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/groups/{id}/members", wrapper.AddGroupMember)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/v1/groups/{id}/members/{userId}", wrapper.RemoveGroupMember)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/jobs", wrapper.ListJobs)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/projects", wrapper.ListProjects)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/projects", wrapper.CreateProject)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/projects/{hash}/force-stop", wrapper.ForceStopIndex)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/projects/{hash}/git-repo", wrapper.GetProjectGitRepo)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/api/v1/projects/{hash}/git-repo", wrapper.UpdateProjectGitRepoSync)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/v1/projects/{hash}/owner", wrapper.ReassignProjectOwner)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/projects/{hash}/reindex", wrapper.ReindexProject)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/projects/{hash}/shares", wrapper.ListProjectShares)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/projects/{hash}/shares", wrapper.ShareProjectToGroup)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/v1/projects/{hash}/shares/{groupId}", wrapper.UnshareProjectFromGroup)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/projects/{hash}/webhook-info", wrapper.GetProjectWebhookInfo)
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/api/v1/projects/{path}", wrapper.DeleteProject)
@@ -2720,7 +6149,76 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/api/v1/projects/{path}/summary", wrapper.GetProjectSummary)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/projects/{path}/workspaces", wrapper.ListProjectWorkspaces)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/status", wrapper.GetStatus)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/tunnels", wrapper.ListTunnels)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/tunnels/binaries", wrapper.ListTunnelBinaries)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/tunnels/binaries/{provider}/install", wrapper.InstallTunnelBinary)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/tunnels/binaries/{provider}/update", wrapper.UpdateTunnelBinary)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/tunnels/config", wrapper.GetTunnelConfig)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/v1/tunnels/config", wrapper.UpdateTunnelConfig)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/tunnels/restart", wrapper.RestartTunnel)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/tunnels/status", wrapper.GetTunnelStatus)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/tunnels/test", wrapper.TestTunnel)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/webhooks/github/{hash}", wrapper.ReceiveGithubWebhook)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/workspaces", wrapper.ListWorkspaces)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/workspaces", wrapper.CreateWorkspace)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/v1/workspaces/{id}", wrapper.DeleteWorkspace)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/workspaces/{id}", wrapper.GetWorkspace)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/api/v1/workspaces/{id}", wrapper.UpdateWorkspace)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/workspaces/{id}/projects", wrapper.ListWorkspaceProjects)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/workspaces/{id}/projects", wrapper.LinkProjectToWorkspace)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/v1/workspaces/{id}/projects/{hash}", wrapper.UnlinkProjectFromWorkspace)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/workspaces/{id}/search", wrapper.WorkspaceSearch)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/workspaces/{id}/shares", wrapper.ListWorkspaceShares)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/workspaces/{id}/shares", wrapper.ShareWorkspaceToGroup)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/v1/workspaces/{id}/shares/{groupId}", wrapper.UnshareWorkspaceFromGroup)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/health", wrapper.GetHealth)
@@ -2734,206 +6232,455 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,
