@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/access"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
-	"github.com/dvcdsys/code-index/server/internal/projects"
 )
 
 // projectWorkspaceEntryPayload is the wire shape for one membership.
@@ -24,16 +24,34 @@ type projectWorkspaceEntryPayload struct {
 // list when the project is in no workspace (true for freshly-added
 // standalone projects). The workspaces feature flag is NOT consulted —
 // returning an empty list is fine even when the flag is off.
-func (s *Server) ListProjectWorkspaces(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	hash := string(path)
-	proj, err := projects.GetByHash(r.Context(), s.Deps.DB, hash)
-	if err != nil {
-		if errors.Is(err, projects.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "project not found")
+//
+// Access: gated by requireProjectAccess (admin / owner / shared via group).
+// Non-admin callers additionally see only workspaces they themselves can
+// see — without that filter a non-owner who could reach the project (e.g.
+// via a group share) would also learn the names and IDs of *every* other
+// workspace it's linked into, including private ones. Admin sees all.
+func (s *Server) ListProjectWorkspaces(w http.ResponseWriter, r *http.Request, _ openapi.ProjectHash) {
+	proj := s.requireProjectAccess(w, r)
+	if proj == nil {
+		return
+	}
+
+	// Pre-compute the visible-workspace set for non-admin callers so the
+	// result excludes workspaces the user has no business knowing about.
+	// Done BEFORE the main query — SQLite ":memory:" backends in tests have
+	// a single-connection pool, and overlapping QueryContext calls deadlock.
+	userID, isAdmin := s.callerIdentity(r)
+	var visible map[string]struct{}
+	if !isAdmin {
+		ids, vErr := access.VisibleWorkspaceIDs(r.Context(), s.Deps.DB, userID)
+		if vErr != nil {
+			writeError(w, http.StatusInternalServerError, "access check failed")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load project")
-		return
+		visible = make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			visible[id] = struct{}{}
+		}
 	}
 
 	rows, err := s.Deps.DB.QueryContext(r.Context(), `
@@ -57,6 +75,11 @@ func (s *Server) ListProjectWorkspaces(w http.ResponseWriter, r *http.Request, p
 		if scanErr := rows.Scan(&e.WorkspaceID, &e.WorkspaceName, &addedAt); scanErr != nil {
 			writeError(w, http.StatusInternalServerError, "could not read row: "+scanErr.Error())
 			return
+		}
+		if !isAdmin {
+			if _, ok := visible[e.WorkspaceID]; !ok {
+				continue
+			}
 		}
 		e.AddedAt, _ = time.Parse(time.RFC3339Nano, addedAt)
 		entries = append(entries, e)
