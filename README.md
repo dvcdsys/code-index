@@ -48,6 +48,9 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 - **`cix` CLI** — drop-in `cix search`/`cix symbols`/`cix files`/`cix workspace …` commands for terminal + agent use.
 - **File watcher** — `cix watch` keeps the index fresh as you edit, no manual reindex.
 - **Workspaces** — group multiple repositories into a named workspace; cix clones them server-side via a stored GitHub PAT, indexes them with the same pipeline, and runs hybrid BM25 + dense search across the union. GitHub webhooks auto-reindex on `push`. See [`workspaces.md`](workspaces.md) and [`doc/WORKSPACES.md`](doc/WORKSPACES.md).
+- **Ownership + view-group sharing** — every project and workspace has an owner; admins manage *view-groups* and grant per-resource shares. Private by default; external (GitHub-cloned) projects are admin-administered. CLI / dashboard surfaces only what the caller is allowed to see.
+- **Managed Tunnels** — server-orchestrated Cloudflare Tunnel or ngrok provides a public origin for GitHub webhook ingress from behind NAT. Configured + monitored from the dashboard's Managed Tunnels page; the agent binary auto-installs on demand.
+- **Git polling sync** — repos where the user isn't an admin and can't install a webhook can opt into polling instead. Cadence is per-repo, measured from the end of the last index run.
 - **Claude Code plugin** (v0.2.0+) — install once and `cix` becomes the agent's default reflex for code search. Bundles two skills (`cix`, `cix-workspace`) and a fan-out sub-agent. See [Agent integration](#agent-integration).
 - **OpenAPI as source of truth** — Go server interface + TypeScript dashboard types are generated from `doc/openapi.yaml`. Swagger UI at `/docs`.
 
@@ -198,9 +201,11 @@ The dashboard ships embedded in the server binary at `/dashboard`. No extra serv
 | **Projects** | everyone | List indexed projects with stats (file count, languages, symbols, vector count, sqlite/chroma sizes), per-project **Reindex** button + live indexing indicator, copy reindex commands. Cards turn red with a **Stale model** badge when the runtime embedding model differs from the model the project was indexed with (see [Drift indicator](#drift-indicator)). |
 | **Workspaces** | everyone | Group multiple repositories into a named workspace and search them as one corpus. The in-dashboard add-repo flow streams clone + index progress live; pick the org/account first, then the repo. Status tracking: `pending` → `cloning` → `indexing` → `indexed` / `failed`. Hybrid BM25 + dense search across the whole group. See [`workspaces.md`](workspaces.md). |
 | **Search** | everyone | Five modes: semantic, symbols, references, definitions, files. Same engine the CLI uses. |
-| **API Keys** | everyone | Mint long-lived `cix_*` keys (256-bit entropy, GitHub-class), copy them once, revoke at any time. |
-| **GitHub Tokens** | everyone | Store personal access tokens used by workspaces. Tokens are AES-256-GCM encrypted at rest; the plaintext is returned once on creation and never again. Scopes are **derived from GitHub** at storage time (not user-declared), so the dashboard shows the PAT's true capabilities. |
-| **Users** | admin | Invite teammates, set role (admin / viewer), reset password (forces change on next login), disable account. |
+| **API Keys** | everyone | Mint long-lived `cix_*` keys (256-bit entropy, GitHub-class), copy them once, revoke at any time. Keys inherit the issuing user's role. |
+| **GitHub Tokens** | admin | Store personal access tokens used by external (cloned) projects + workspaces. Tokens are AES-256-GCM encrypted at rest; the plaintext is returned once on creation and never again. Scopes are **derived from GitHub** at storage time (not user-declared), so the dashboard shows the PAT's true capabilities. |
+| **Users** | admin | Invite teammates, set role (admin / user), reset password (forces change on next login), disable account. |
+| **Groups** | admin | Manage *view-groups* — named user sets used to share projects and workspaces with specific people. Add/remove members, grant shares from the project or workspace detail page. |
+| **Managed Tunnels** | admin | Enable a Cloudflare Tunnel or ngrok tunnel to give the server a public origin for GitHub webhook ingress from behind NAT. Configure provider, mode (quick / named), and credentials; agent binary auto-installs on demand; live status + restart + round-trip test. |
 | **Settings** | everyone | Theme, default editor, change own password. |
 | **Server** | admin | Runtime config — embedding model, `n_ctx`, `n_gpu_layers`, `n_threads`, batch size, queue concurrency. **Save & Restart** drains in-flight embeddings, restarts the sidecar, polls until ready. Source pill on each field shows whether the live value comes from the DB override, env bootstrap, or the recommended fallback. |
 
@@ -210,6 +215,17 @@ Two paths share the same identity model:
 
 - **Cookie session** (browser) — `cix_session` HttpOnly cookie, 14-day rolling TTL, `sha256(token)` stored in DB. The raw token never leaves the browser.
 - **Bearer API key** (CLI / agents / CI) — `Authorization: Bearer cix_<43-char-base64url>` header. 256 bits of entropy, hex-`sha256`-stored, scoped to the issuing user's role.
+
+### Authorization model
+
+Two roles: **`admin`** and **`user`**. On top of roles, every resource has explicit visibility:
+
+- **Local projects** (indexed via `cix init` on a developer's machine) belong to the user who ran the init and are private to that user. Project identity is per-machine — the same path on two different machines never collides.
+- **External projects** (cloned by the server from GitHub) are *ownerless* and admin-administered. They become visible to others only through a **view-group share**.
+- **Workspaces** are owned by their creator; sharing works the same way as projects.
+- **View-groups** are admin-managed named user sets. Grant a group a share on a project or workspace from its detail page; every group member then sees it as if they owned it (read-only). Admins always see everything.
+
+Every endpoint enforces this model server-side — the dashboard hides controls the caller isn't allowed to use, and the CLI surfaces a 404 (not a 403) when probing a resource the caller has no business knowing exists.
 
 ### Drift indicator
 
@@ -223,7 +239,7 @@ Set `CIX_EMBEDDINGS_ENABLED=false` to bring the server up without the llama-serv
 
 The **Workspaces** page groups repositories into one named workspace and searches them as a single corpus — useful for tasks that span microservices, infra-as-code, API specs, and the like. Unlike `cix init` (which indexes the project you're `cd`'d into), workspaces track repositories that the server itself clones (or local projects that you link in).
 
-Workspaces are gated by `CIX_WORKSPACES_ENABLED=true`. See [`workspaces.md`](workspaces.md) for the user-facing workflow and [`doc/WORKSPACES.md`](doc/WORKSPACES.md) for operator setup (encryption keys, Cloudflare tunnel, webhook modes, REST API). The hybrid-search algorithm lives in [`doc/SEARCH_ALGORITHM.md`](doc/SEARCH_ALGORITHM.md); the webhook lifecycle in [`doc/WEBHOOKS.md`](doc/WEBHOOKS.md).
+See [`workspaces.md`](workspaces.md) for the user-facing workflow and [`doc/WORKSPACES.md`](doc/WORKSPACES.md) for operator setup (encryption keys, Cloudflare/ngrok tunnel, webhook + polling sync modes, REST API). The hybrid-search algorithm lives in [`doc/SEARCH_ALGORITHM.md`](doc/SEARCH_ALGORITHM.md); the webhook lifecycle in [`doc/WEBHOOKS.md`](doc/WEBHOOKS.md).
 
 ---
 
@@ -269,11 +285,13 @@ cix files <pattern> [--limit <n>]
 
 ```bash
 cix workspace list                                          # all workspaces
-cix workspace "<name>" show                                 # detail
+cix workspace "<name>"                                      # describe (default verb)
+cix workspace "<name>" describe                             # same, explicit
+cix workspace "<name>" repos                                # list repos in the workspace
 cix workspace "<name>" search "<query>" [--limit <n>]       # hybrid BM25 + dense
 ```
 
-The CLI uses a name-first grammar (PR8 / `5db28fd`) so an agent doesn't need to juggle workspace ids. See [`workspaces.md`](workspaces.md) for the agent contract.
+The CLI uses a name-first grammar so an agent doesn't need to juggle workspace ids. See [`workspaces.md`](workspaces.md) for the agent contract.
 
 ### File watcher
 
@@ -454,14 +472,19 @@ The most common environment variables:
 |---|---|---|
 | `CIX_API_KEY` | — | Bearer token for CLI/agents. Required. |
 | `CIX_PORT` | `21847` | Listen port. |
-| `CIX_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | — | Required on a fresh DB. |
+| `CIX_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | — | Required on a fresh DB; promotes a first admin and forces password change on first login. |
 | `CIX_EMBEDDING_MODEL` | `awhiteside/CodeRankEmbed-Q8_0-GGUF` | GGUF repo or absolute path. |
 | `CIX_N_GPU_LAYERS` | `-1` macOS / `0` else / `99` Docker CUDA | `99` = full offload, `0` = CPU. |
 | `CIX_EMBEDDINGS_ENABLED` | `true` | `false` boots without the llama sidecar. |
-| `CIX_WORKSPACES_ENABLED` | `false` | Enable the workspaces feature. |
 | `CIX_VERSION_CHECK_ENABLED` | `true` | `false` disables the GitHub release-poll banner. |
+| `CIX_SECRET_KEY` / `_KEYFILE` | auto-generated keyfile | AES-256-GCM key for `github_tokens` encryption at rest. Auto-generated under the SQLite parent dir if neither is set; **back this up** (regenerating it invalidates every stored PAT). |
+| `CIX_REPOS_DIR` | `<sqlite-dir>/repos` | Where workspace-cloned GitHub repos live. Legacy alias: `CIX_WORKSPACES_DATA_DIR`. |
+| `CIX_PUBLIC_URL` | — | Public origin used to build webhook URLs (e.g. `https://cix.example.com`). Trumped by a live Managed Tunnel when one is up. |
+| `CIX_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`. |
+| `CIX_DEFAULT_POLL_INTERVAL` | `5m` | Cadence for repos opted into polling sync (Go duration string). Floor `CIX_MIN_POLL_INTERVAL=60s`. |
+| `CIX_TUNNEL_BIN_MANAGED` | `false` | Allow the server to auto-install Cloudflare / ngrok agent binaries on demand. |
 
-The full env-var surface (auth, storage, sidecar tuning, secret-key resolution, workspace knobs, runtime overrides) lives in [`doc/CONFIG_REFERENCE.md`](doc/CONFIG_REFERENCE.md). Anything in the "Tuning" group is editable at runtime from **Dashboard → Server**.
+Workspaces are always available — no feature gate. The full env-var surface (auth, storage, sidecar tuning, secret-key resolution, tunnel + polling knobs, runtime overrides) lives in [`doc/CONFIG_REFERENCE.md`](doc/CONFIG_REFERENCE.md). Anything in the "Tuning" group is editable at runtime from **Dashboard → Server**.
 
 ---
 
