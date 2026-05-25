@@ -2,12 +2,15 @@ import { AlertCircle, FolderPlus } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Skeleton } from '@/ui/skeleton';
 import { ApiError } from '@/api/client';
+import { useAuth } from '@/auth/useAuth';
 import { AddRepoDialog } from '@/modules/workspaces/components/AddRepoDialog';
 import { ProjectCard } from './components/ProjectCard';
 import { useProjects } from './hooks';
 
 export function ProjectsListPage() {
   const { data, error, isLoading, refetch } = useProjects();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
 
   return (
     <div className="space-y-6">
@@ -23,8 +26,12 @@ export function ProjectsListPage() {
         {/* Add repo here clones + indexes a GitHub repository as a
             standalone project. The new project lives in /projects with
             no workspace attachment — link it into specific workspaces
-            from the workspace detail page if you want. */}
-        <AddRepoDialog onAdded={() => void refetch()} />
+            from the workspace detail page if you want.
+
+            External (GitHub-cloned) projects are admin-administered — only
+            admins can create them. Hide the trigger from regular users so
+            the UI doesn't dangle a button that would 403 on submit. */}
+        {isAdmin && <AddRepoDialog onAdded={() => void refetch()} />}
       </header>
 
       {isLoading ? (

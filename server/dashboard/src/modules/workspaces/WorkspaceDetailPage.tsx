@@ -154,8 +154,14 @@ export function WorkspaceDetailPage() {
           {/* Add repo here clones + indexes a new external project AND
               links it into this workspace in one step. The dialog
               accepts an optional workspaceID — when supplied, it
-              chains POST /git-repos with POST /workspaces/{id}/projects. */}
-          <AddRepoDialog workspaceID={workspace.id} onAdded={loadProjects} />
+              chains POST /git-repos with POST /workspaces/{id}/projects.
+
+              `/git-repos` is admin-only on the backend, so hide the trigger
+              from non-admin users. Regular users can still link existing
+              accessible projects through AddExistingProjectDialog below. */}
+          {user?.role === 'admin' && (
+            <AddRepoDialog workspaceID={workspace.id} onAdded={loadProjects} />
+          )}
           <AddExistingProjectDialog
             workspaceID={workspace.id}
             existingProjectPaths={(projects ?? []).map((p) => p.project.host_path)}
