@@ -20,6 +20,11 @@ type workspacePayload struct {
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// OwnerUserID identifies the workspace creator. NULL only when the
+	// owning user was deleted and the workspace was orphaned. The
+	// dashboard uses this to render "owner / shared" badges. Mirrors the
+	// owner_user_id property in the OpenAPI Workspace schema.
+	OwnerUserID *string `json:"owner_user_id"`
 }
 
 func workspaceToPayload(w workspaces.Workspace) workspacePayload {
@@ -29,6 +34,7 @@ func workspaceToPayload(w workspaces.Workspace) workspacePayload {
 		Description: w.Description,
 		CreatedAt:   w.CreatedAt,
 		UpdatedAt:   w.UpdatedAt,
+		OwnerUserID: w.OwnerUserID,
 	}
 }
 
