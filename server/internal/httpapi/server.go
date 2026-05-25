@@ -942,8 +942,15 @@ func (s *Server) IndexCancel(w http.ResponseWriter, r *http.Request, path openap
 }
 
 // IndexStatus — GET /api/v1/projects/{path}/index/status.
+//
+// Read access: admin / owner / group-member with a share. The endpoint is
+// a metadata read ("is indexing in progress, how many files done") that
+// must mirror the access surface of /search and /summary — otherwise a
+// group-shared user can search the indexed content but cannot tell whether
+// indexing is still running (the dashboard's "indexing…" badge would 403
+// for read-only users).
 func (s *Server) IndexStatus(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
-	p := s.requireProjectOwnership(w, r)
+	p := s.requireProjectAccess(w, r)
 	if p == nil {
 		return
 	}

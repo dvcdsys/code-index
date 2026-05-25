@@ -139,3 +139,88 @@ func TestListProjectWorkspaces_AccessAndVisibility(t *testing.T) {
 		t.Errorf("admin saw %d workspaces, want 2", len(resp.Workspaces))
 	}
 }
+
+// TestIndexStatus_GroupMemberHasReadAccess: prior to the fix the index
+// status endpoint used requireProjectOwnership — a user with READ access
+// to a project (via a group share) could /search the indexed content but
+// would get 403 on /index/status, blocking the dashboard from showing an
+// "indexing…" badge for read-only users. After the fix the gate is
+// requireProjectAccess, matching /search and /summary.
+func TestIndexStatus_GroupMemberHasReadAccess(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	aliceCookie := seedUser(t, f, adminCookie, "alice@example.com", "alicepass1")
+
+	_, body := doReq(t, f, adminCookie, http.MethodGet, "/api/v1/admin/users", nil)
+	var ul struct {
+		Users []struct {
+			ID    string `json:"id"`
+			Email string `json:"email"`
+		} `json:"users"`
+	}
+	_ = json.Unmarshal(body, &ul)
+	var aliceID string
+	for _, u := range ul.Users {
+		if u.Email == "alice@example.com" {
+			aliceID = u.ID
+		}
+	}
+
+	// External project (ownerless) — only path that lets us test the
+	// group-share branch. Shared to a group alice belongs to.
+	extPath := "github.com/acme/shared@main"
+	if _, err := projects.Create(t.Context(), f.Deps.DB, projects.CreateRequest{HostPath: extPath}); err != nil {
+		t.Fatalf("create external project: %v", err)
+	}
+	if _, err := f.Deps.DB.ExecContext(t.Context(),
+		`INSERT INTO git_repos (project_path, github_url, branch, webhook_secret, created_at, updated_at)
+		 VALUES (?, 'https://github.com/acme/shared', 'main', 's', '2024-01-01', '2024-01-01')`, extPath); err != nil {
+		t.Fatalf("insert git_repos: %v", err)
+	}
+	extHash := projects.HashPath(extPath)
+
+	// Group + share + membership.
+	_, gbody := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups", map[string]string{"name": "Eng"})
+	var g struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(gbody, &g)
+	doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups/"+g.ID+"/members", map[string]string{"user_id": aliceID})
+	if rr, b := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/shares", map[string]string{"group_id": g.ID}); rr.Code != http.StatusNoContent {
+		t.Fatalf("share project = %d (%s)", rr.Code, b)
+	}
+
+	// Foreign project alice has NO access to — must remain 404.
+	foreignPath := "github.com/acme/secret@main"
+	if _, err := projects.Create(t.Context(), f.Deps.DB, projects.CreateRequest{HostPath: foreignPath}); err != nil {
+		t.Fatalf("create foreign project: %v", err)
+	}
+	if _, err := f.Deps.DB.ExecContext(t.Context(),
+		`INSERT INTO git_repos (project_path, github_url, branch, webhook_secret, created_at, updated_at)
+		 VALUES (?, 'https://github.com/acme/secret', 'main', 's', '2024-01-01', '2024-01-01')`, foreignPath); err != nil {
+		t.Fatalf("insert foreign git_repos: %v", err)
+	}
+	foreignHash := projects.HashPath(foreignPath)
+
+	t.Run("alice reads /index/status on shared project", func(t *testing.T) {
+		rr, body := doReq(t, f, aliceCookie, http.MethodGet,
+			"/api/v1/projects/"+extHash+"/index/status", nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("alice GET /index/status on shared project = %d (%s), want 200 (was 403 before the fix)", rr.Code, body)
+		}
+	})
+
+	t.Run("alice gets 404 on foreign project /index/status", func(t *testing.T) {
+		rr, _ := doReq(t, f, aliceCookie, http.MethodGet,
+			"/api/v1/projects/"+foreignHash+"/index/status", nil)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("alice GET /index/status on foreign project = %d, want 404", rr.Code)
+		}
+	})
+
+	t.Run("admin always sees /index/status", func(t *testing.T) {
+		rr, _ := doReq(t, f, adminCookie, http.MethodGet,
+			"/api/v1/projects/"+extHash+"/index/status", nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("admin GET /index/status = %d, want 200", rr.Code)
+		}
+	})
+}
