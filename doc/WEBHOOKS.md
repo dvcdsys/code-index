@@ -21,15 +21,17 @@ Each `git_repos` row carries a `webhook_mode` enum:
 
 | Mode | When set | Behaviour |
 |---|---|---|
-| `off` | Default for repos added without a token, or when the operator opts out. | Server ignores incoming webhook deliveries (returns 200 `{"status":"ignored"}` after HMAC check) — there is no re-index trigger. |
-| `manual` | Default when a repo *has* a token but the operator unchecked "auto-register". | Server stores a secret + URL and shows them once on add-repo. Operator pastes them into GitHub by hand. |
+| `manual` | Default when a repo *has* a token but the operator unchecked "auto-register". Also the default when no mode is supplied to the API. | Server stores a secret + URL and shows them once on add-repo. Operator pastes them into GitHub by hand. |
 | `auto` | Set when the operator checks "Auto-register webhook" *and* the PAT carries `admin:repo_hook`. | Server calls GitHub's hooks API on the operator's behalf during add-repo, persists the hook id, and de-registers the hook on delete. |
+| `disabled` | Set when the operator opts out of webhooks (e.g. to use [polling](POLLING.md) instead). Auto-set when auto-register fails because the PAT lacks `admin:repo_hook` — the server falls back to polling and flips the mode to `disabled`. | Webhook deliveries to this repo's path 404 — there is no secret stored, so HMAC validation cannot run. Re-index is driven by polling, manual reindex, or local file-watch (where applicable). |
 
 `auto` is preferred — it makes onboarding a repo a one-form action.
 `manual` exists for operators whose PATs intentionally lack
 `admin:repo_hook` (audit, principle-of-least-privilege).
-`off` is for repos where the operator wants explicit-only re-index
-(e.g. via the dashboard's Reindex button).
+`disabled` is for repos where the operator wants polling (see
+[`POLLING.md`](POLLING.md)) or only explicit re-index from the
+dashboard's Reindex button. A repo syncs via webhook **or** polling,
+never both.
 
 ## 2. Delivery endpoint
 
@@ -177,7 +179,8 @@ re-runs once on completion.
 |---|---|---|
 | 401 from cix on every delivery | Secret in GitHub doesn't match what cix stored. | Click **Webhook info** in the dashboard, paste the canonical value into GitHub. |
 | 404 from cix | URL points at a stale `path_hash` (repo was deleted then re-added). | Run **Project → Reregister webhook**. |
-| 200 `{"status":"ignored"}` and no re-index | Push was to a non-tracked branch, or `webhook_mode=off`. | Confirm the workspace's tracked branch; flip mode to `manual`/`auto`. |
+| 200 `{"status":"ignored"}` and no re-index | Push was to a non-tracked branch. | Confirm the repo's tracked branch on the project page. |
+| 404 from cix on every delivery | `webhook_mode=disabled` (e.g. fell back to polling after auto-register failed). | Either switch to polling (already happening) or flip mode to `manual`/`auto` and re-register. |
 | Auto-register failed with "missing scope" | PAT lacks `admin:repo_hook`. | Either grant the scope or switch the repo to `manual` and register by hand. |
 | Audit logged `stale URL detected` on boot | `CIX_PUBLIC_URL` changed. | Run **Reregister webhook** on each affected project. |
 

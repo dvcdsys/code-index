@@ -132,14 +132,18 @@ reset never requires DB-level intervention.
 
 ## API key scoping
 
-API keys inherit the full permissions of their owning user. A viewer's
-key can do anything a viewer can; an admin's key can do anything an
-admin can. There is no read-only scoping, no per-project scoping, no
+API keys inherit the full permissions of their owning user. A
+non-admin user's key can do anything that user can (read their own
+projects + projects/workspaces shared to a view-group they belong to,
+write to projects they own); an admin's key can do anything an admin
+can. There is no read-only scoping, no per-project scoping, no
 expiry.
 
-For automated callers (CI, scripts) that only need to read, create a
-dedicated viewer user and issue keys from that account. Rotate keys via
-`DELETE /api/v1/api-keys/{id}` rather than reusing them.
+Roles in the system today are `admin` and `user`. For automated
+callers (CI, scripts) that only need to read shared workspace search
+results, create a dedicated `user`-role account, add it to the
+relevant view-groups, and issue keys from that account. Rotate keys
+via `DELETE /api/v1/api-keys/{id}` rather than reusing them.
 
 ## What the server does NOT do
 
@@ -153,8 +157,13 @@ or accept the risk:
   is the assumption.
 - **WAF / IDS.** No IP allowlisting, no anomaly detection. Use your
   reverse proxy or a host-level firewall.
-- **Multi-tenant project ownership.** All authenticated users see all
-  projects. Destructive mutations (PATCH/DELETE) are admin-
-  only; create/list/search are open to any authenticated user. If you
-  need true tenant separation, run separate cix-server instances per
-  tenant.
+- **Multi-tenant tenant isolation.** cix-server has a single shared
+  user/role/group namespace (introduced in `e275c4a`, server v0.6.0).
+  Within it: local projects are owned by their creator and private to
+  the owner + admins; workspaces and external projects (admin-added
+  GitHub repos) are admin-administered and shared to view-groups
+  explicitly. Non-admins see only what they own or what is shared to a
+  group they belong to. This is single-tenant-with-row-level-ACL, not
+  true tenant separation — admins still see everything and pass
+  through every ACL. If you need hard tenant boundaries, run separate
+  cix-server instances per tenant.

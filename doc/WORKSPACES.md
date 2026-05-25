@@ -8,7 +8,8 @@ and troubleshoot the feature in production.
 For the user-facing workflow (when to reach for workspace search, the
 agent trust rules, query patterns), see [`../workspaces.md`](../workspaces.md).
 For the search algorithm, see [`SEARCH_ALGORITHM.md`](SEARCH_ALGORITHM.md).
-For the webhook lifecycle, see [`WEBHOOKS.md`](WEBHOOKS.md).
+For the webhook lifecycle, see [`WEBHOOKS.md`](WEBHOOKS.md). For the
+polling alternative (non-admin repos), see [`POLLING.md`](POLLING.md).
 
 > **No feature flag.** Workspaces + GitHub-repo support are part of
 > every release. The previous `CIX_WORKSPACES_ENABLED` gate was removed
@@ -51,7 +52,7 @@ and the table rename in `e433fee`.
    branch, optional token, and choose **Auto-register webhook** if
    your PAT carries `admin:repo_hook`. Otherwise check **I'll set it
    up myself** and copy the displayed URL + secret into GitHub.
-6. The server clones the repo into `<CIX_WORKSPACES_DATA_DIR>/<path_hash>/`
+6. The server clones the repo into `<CIX_REPOS_DIR>/<path_hash>/`
    and runs the existing indexer pipeline against it. Status transitions
    visible on the workspace detail page: `created → indexing → indexed`.
 
@@ -62,7 +63,8 @@ and the table rename in `e433fee`.
 | `CIX_SECRET_KEY` | (auto-generate) | 32-byte AES key encoding GitHub tokens. Hex or base64. |
 | `CIX_SECRET_KEYFILE` | unset | Alternative — path to a 0600-perm key file. |
 | `CIX_SECRETS_DATA_DIR` | `dirname(CIX_SQLITE_PATH)` | Where the auto-generated keyfile lives. |
-| `CIX_WORKSPACES_DATA_DIR` | `<sqlite parent>/repos` | Where cloned repos live. |
+| `CIX_REPOS_DIR` | `<sqlite parent>/repos` | Where cloned repos live. |
+| `CIX_WORKSPACES_DATA_DIR` | unset | Legacy alias for `CIX_REPOS_DIR`, honoured when the new name is unset. Prefer `CIX_REPOS_DIR`. |
 | `CIX_WORKER_CONCURRENCY` | `2` | Parallel job workers. Clone+index is mostly IO-bound. |
 | `CIX_PUBLIC_URL` | unset | Externally-reachable URL used to build webhook delivery URLs. |
 
@@ -81,6 +83,34 @@ Resolution order:
 For production, supply `CIX_SECRET_KEY` explicitly or mount a keyfile
 via `CIX_SECRET_KEYFILE`. The auto-generated keyfile is a single-host
 convenience for dev.
+
+## Access model
+
+Workspaces and their attached repos live in cix's ownership +
+view-group access model (introduced in `e275c4a`, server v0.6.0). Two
+levels matter for workspace operators:
+
+- **Workspaces have an owner** (`owner_user_id`). The owner and any
+  admin can edit, share, attach repos, or delete. Other users see the
+  workspace only if it is **shared to a view-group** they belong to,
+  and then only read-only (search, list members).
+- **External projects** (those with a `git_repos` peer — i.e. every
+  workspace-attached repo) are **ownerless** and **admin-administered**.
+  Add-repo, delete-repo, rotating PATs, and reregistering webhooks are
+  admin-only. Non-admins can read a shared external project via a
+  view-group, but cannot administer it.
+
+To grant a teammate access to a workspace's search results:
+
+1. Admin creates a view-group under **Dashboard → Groups**.
+2. Adds the user as a member.
+3. Shares the workspace (and/or the external projects inside it) to
+   that group.
+
+Local projects registered with `cix init` keep the per-user ownership
+model and are private to their creator — they are not eligible for
+view-group sharing. See `docs/AUTH_REVIEW.md` (local-only) for the
+full access matrix.
 
 ## Webhooks
 
