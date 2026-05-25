@@ -5,8 +5,8 @@ doesn't drag the other through a rebuild + retest cycle.
 
 | Component | Tag pattern | Workflow | Artifact |
 |---|---|---|---|
-| Server (`cix-server`) | `server/v*` (e.g. `server/v0.5.1`) | [`release-server.yml`](../.github/workflows/release-server.yml) | Docker images on Docker Hub: `:latest`, `:<version>`, `:cu128`, `:<version>-cu128` |
-| CLI (`cix`) | `cli/v*` (e.g. `cli/v0.5.0`) | [`release-cli.yml`](../.github/workflows/release-cli.yml) | `cix-{darwin,linux}-{amd64,arm64}.tar.gz` on a GitHub Release |
+| Server (`cix-server`) | `server/v*` (e.g. `server/v0.6.0`) | [`release-server.yml`](../.github/workflows/release-server.yml) | Docker images on Docker Hub: `:latest`, `:<version>`, `:cu128`, `:<version>-cu128` |
+| CLI (`cix`) | `cli/v*` (e.g. `cli/v0.6.0`) | [`release-cli.yml`](../.github/workflows/release-cli.yml) | `cix-{darwin,linux}-{amd64,arm64}.tar.gz` on a GitHub Release |
 
 Bare `v*` tags are the historical pre-split CLI line — the installer
 still falls back to them when no `cli/v*` release exists, but no new
@@ -25,16 +25,16 @@ see [`UPDATES.md`](UPDATES.md#cli-install-channels).
 
 ## Cutting a CLI release
 
-1. Bump `cli/cmd/version.go` to `var version = "0.6.0"` (no leading `v`).
+1. Bump `cli/cmd/version.go` to `var Version = "0.7.0"` (no leading `v`).
 2. Tag and push:
 
    ```bash
-   git tag cli/v0.6.0
-   git push origin cli/v0.6.0
+   git tag cli/v0.7.0
+   git push origin cli/v0.7.0
    ```
 
 3. CI (`release-cli.yml`) builds binaries for macOS + Linux (amd64 +
-   arm64), uploads them to a GitHub Release named `cli/v0.6.0`, and
+   arm64), uploads them to a GitHub Release named `cli/v0.7.0`, and
    updates the `cli/latest` floating tag. The stable installer
    auto-picks them up on the next run.
 
@@ -42,7 +42,7 @@ Local cross-build (no release — useful to test the archive shape
 before tagging):
 
 ```bash
-cd cli && make release VERSION=v0.6.0
+cd cli && make release VERSION=v0.7.0
 ```
 
 Produces archives in `cli/dist/` plus `checksums.txt`. Supported
@@ -63,22 +63,22 @@ takes >30 min on CI, so this is more disciplined than the CLI path:
    (CUDA image is amd64-only).
 
 2. **Bump version**: edit `server/cmd/cix-server/version.go` to
-   `var version = "0.5.2"`.
+   `var version = "0.7.0"`.
 
 3. **Tag and push**:
 
    ```bash
-   git tag server/v0.5.2
-   git push origin server/v0.5.2
+   git tag server/v0.7.0
+   git push origin server/v0.7.0
    ```
 
 4. CI (`release-server.yml`) builds CPU multi-arch + CUDA `amd64`
    images with provenance + SBOM attestations, pushes them to Docker
-   Hub with both pinned (`:0.5.2`, `:0.5.2-cu128`) and floating
+   Hub with both pinned (`:0.7.0`, `:0.7.0-cu128`) and floating
    (`:latest`, `:cu128`) tags, and creates a GitHub Release.
 
 5. **Promote** in production (Portainer, your compose file, etc.) by
-   updating the image tag to `:0.5.2` / `:0.5.2-cu128` and
+   updating the image tag to `:0.7.0` / `:0.7.0-cu128` and
    redeploying.
 
 CI does not deploy to production. It stops at Docker Hub push by

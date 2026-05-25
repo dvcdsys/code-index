@@ -5,9 +5,10 @@
 | Tag | Architecture | Base | Size | Notes |
 |---|---|---|---|---|
 | `latest` | linux/amd64 + linux/arm64 | Go CPU (distroless/static) | ~100 MB | Use with `CIX_EMBEDDINGS_ENABLED=false` |
+| `<version>` (e.g. `0.6.0`) | linux/amd64 + linux/arm64 | same as `latest` | ~100 MB | Version-pinned CPU image. Immutable. |
 | `cu128` | linux/amd64 | distroless/cc-debian13 + CUDA libs | ~1.0 GB | RTX 3090 prod; embeddings via llama-server |
-| `develop-cu128` | linux/amd64 | same as cu128 | ~1.0 GB | Floating pre-release; force-updated on every merge to `develop` that touches `server/`. Not for production. |
-| `go-cu128` | linux/amd64 | same as cu128 | ~1.0 GB | Dev alias — retire after v0.3.0 ships |
+| `<version>-cu128` (e.g. `0.6.0-cu128`) | linux/amd64 | same as `cu128` | ~1.0 GB | Version-pinned CUDA image. Immutable. |
+| `develop-cu128` | linux/amd64 | same as `cu128` | ~1.0 GB | Floating pre-release; force-updated on every merge to `develop` that touches `server/`. Not for production. |
 | `0.2-python-legacy` | linux/amd64 | Python FastAPI | ~5 GB | Frozen; rollback only |
 
 ## Develop channels
@@ -30,25 +31,32 @@ for the develop-channel workflow.
 
 | Tag | Retired | Reason |
 |---|---|---|
-| `latest-cu130` | 2026-04-24 | Replaced by cu128 (3-stage build, -55% size) |
-| `go-cu126` | 2026-04-24 | Replaced by go-cu128 (CUDA 12.8) |
+| `latest-cu130` | 2026-04-24 | Replaced by `cu128` (3-stage build, -55% size) |
+| `go-cu126` | 2026-04-24 | Replaced by `go-cu128` (CUDA 12.8) |
+| `go-cu128` | 2026-05-XX (server/v0.4.0+) | Migration-era dev alias; superseded by `cu128`. Last digest still resolvable on Docker Hub. |
 
 ## Tag Policy
 
-- Tags are immutable once documented here.
-- Stable aliases (`latest`, `cu128`) are updated on each server/v* release.
-- Dev aliases (`go-cu128`) are removed 30 days after the stable alias is published.
-- `:0.2-python-legacy` is preserved on Docker Hub indefinitely per deprecation policy.
+- Versioned tags (`<version>`, `<version>-cu128`) are immutable once
+  published.
+- Stable aliases (`latest`, `cu128`) are updated on each `server/v*`
+  release.
+- `develop-cu128` is force-updated on every merge to `develop` that
+  touches `server/`. Not for production.
+- `:0.2-python-legacy` is preserved on Docker Hub indefinitely per
+  deprecation policy.
 
-## Versioned Tags (post v0.3.0)
+## Versioned tag pattern
 
-Pattern: `:v<major>.<minor>.<patch>` (CPU) and `:v<major>.<minor>.<patch>-cu128` (CUDA).
+`:<major>.<minor>.<patch>` (CPU) and `:<major>.<minor>.<patch>-cu128`
+(CUDA). No leading `v` on Docker tags (the leading `v` belongs to git
+tags only — `server/v0.6.0` → Docker `:0.6.0` + `:0.6.0-cu128`).
 
 See `doc/DEPRECATION_POLICY.md` for the full lifecycle policy.
 
 ## v0.3.x — distroless CUDA runtime (2026-04-24)
 
-The CUDA image (`:cu128` / `:go-cu128`) now uses
+The CUDA image (`:cu128`) was migrated to
 `gcr.io/distroless/cc-debian13:nonroot` (Debian 13 trixie, glibc 2.41,
 gcc 14 libstdc++) as the runtime base instead of
 `nvidia/cuda:12.8.1-base-ubuntu24.04`. CUDA shared libraries
@@ -65,7 +73,7 @@ Distroless has no `/etc/passwd` entry for 1001, but Linux uses the
 numeric uid for all permission checks and Go binaries do not call
 `getpwuid()`.
 
-**CVE delta** (Docker Scout, 2026-04-24, vs previous `:go-cu128` digest
+**CVE delta** (Docker Scout, 2026-04-24, vs previous Ubuntu-based CUDA digest
 `03e6970e5de6`):
 - Before: 0C / 4H / 12M / 3L (19 total) across 8 packages
 - After: target 0C / 0H / ≤3M / 0L — Group A (Go stdlib, 9 CVEs) cleared
