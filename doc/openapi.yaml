@@ -3313,6 +3313,11 @@ components:
         - created_at
         - updated_at
         - last_indexed_at
+        # owner_user_id is required-but-nullable so external (ownerless)
+        # projects serialize as `"owner_user_id": null` rather than the
+        # field being absent. Lets TS clients use `string | null` instead
+        # of `string | undefined`.
+        - owner_user_id
       properties:
         path_hash:
           type: string
@@ -3951,7 +3956,10 @@ components:
 
     Workspace:
       type: object
-      required: [id, name, description, created_at, updated_at]
+      # owner_user_id is required-but-nullable for the same reason as on
+      # Project — clients can rely on the field being present and use
+      # `string | null` instead of optional.
+      required: [id, name, description, created_at, updated_at, owner_user_id]
       properties:
         id:
           type: string
