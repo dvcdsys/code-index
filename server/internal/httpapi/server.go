@@ -1054,6 +1054,15 @@ func projectToOpenAPI(p *projects.Project) openapi.Project {
 		v := *p.MachineLabel
 		out.MachineLabel = &v
 	}
+	// Expose the owner so the dashboard can render "owned by X" / "external"
+	// badges. NULL means ownerless (the canonical state for external GitHub
+	// projects); a populated value identifies the personal owner of a local
+	// project. The column is already populated correctly in SQLite — only
+	// the wire serializer was missing this mapping.
+	if p.OwnerUserID != nil {
+		v := *p.OwnerUserID
+		out.OwnerUserId = &v
+	}
 	return out
 }
 
