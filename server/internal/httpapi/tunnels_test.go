@@ -70,3 +70,30 @@ func TestGetWebhookOrigin_None(t *testing.T) {
 		t.Errorf("origin = %q, want empty", resp.Origin)
 	}
 }
+
+// TestTunnelReadEndpoints_NonAdminForbidden: tunnel state is admin
+// infrastructure (provider catalog, active public_url, uptime, last_error,
+// effective webhook origin). A regular user with a valid session must get
+// 403 on each of these GETs — every mutating tunnel handler already
+// requires admin, and the read handlers were missed in the original
+// implementation.
+func TestTunnelReadEndpoints_NonAdminForbidden(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	userCookie := seedUser(t, f, adminCookie, "bob@example.com", "bobpass1234")
+
+	for _, path := range []string{
+		"/api/v1/tunnels",
+		"/api/v1/tunnels/status",
+		"/api/v1/github/webhooks/origin",
+	} {
+		rr, _ := doReq(t, f, userCookie, http.MethodGet, path, nil)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("user GET %s = %d, want 403", path, rr.Code)
+		}
+		rr, _ = doReq(t, f, adminCookie, http.MethodGet, path, nil)
+		if rr.Code != http.StatusOK {
+			t.Errorf("admin GET %s = %d, want 200", path, rr.Code)
+		}
+	}
+}

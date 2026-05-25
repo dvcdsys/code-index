@@ -161,7 +161,13 @@ func (s *Server) installTunnelBinary(w http.ResponseWriter, r *http.Request, pro
 }
 
 // ListTunnels — GET /api/v1/tunnels. Provider catalog + active status.
-func (s *Server) ListTunnels(w http.ResponseWriter, _ *http.Request) {
+// Admin-only — tunnel state is operator infrastructure, not user-visible
+// data. Other tunnel handlers (config/binaries/restart/test) already gate
+// on mustBeAdmin; this one used to be unguarded.
+func (s *Server) ListTunnels(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	cat := disabledCatalog()
 	if s.Deps.Tunnel != nil {
 		cat = s.Deps.Tunnel.Catalog()
@@ -170,7 +176,13 @@ func (s *Server) ListTunnels(w http.ResponseWriter, _ *http.Request) {
 }
 
 // GetTunnelStatus — GET /api/v1/tunnels/status. Active provider snapshot.
-func (s *Server) GetTunnelStatus(w http.ResponseWriter, _ *http.Request) {
+// Admin-only — the snapshot includes the public_url, uptime, and last_error
+// for the active tunnel, all of which are operator-tier infrastructure
+// detail.
+func (s *Server) GetTunnelStatus(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	st := disabledTunnelStatus()
 	if s.Deps.Tunnel != nil {
 		st = s.Deps.Tunnel.Status()
@@ -184,7 +196,15 @@ func (s *Server) GetTunnelStatus(w http.ResponseWriter, _ *http.Request) {
 // publicBaseURL). The `source` field lets the dashboard distinguish "origin
 // provided by infrastructure via CIX_PUBLIC_URL" (fine — a tunnel is
 // optional) from "no origin at all" (the only real problem).
-func (s *Server) GetWebhookOrigin(w http.ResponseWriter, _ *http.Request) {
+//
+// Admin-only — the origin URL is admin infrastructure detail, and the only
+// caller (the Webhooks tab in the dashboard) is admin-gated client-side
+// anyway. Adding the backend gate so non-admin tokens can't enumerate it
+// directly.
+func (s *Server) GetWebhookOrigin(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
 	origin, source := "", openapi.None
 	if s.Deps.Tunnel != nil {
 		if u := s.Deps.Tunnel.URL(); u != "" {
