@@ -117,6 +117,57 @@ func TestIDFingerprintIncludesAll(t *testing.T) {
 	}
 }
 
+// TestEmbedDocumentsSplitsOversizeBatch covers the transparent
+// per-provider split: Voyage's voyage-code-* models cap at 128
+// inputs/request, so a 200-item EmbedDocuments call must produce
+// TWO POSTs (128 + 72) and return all 200 vectors in input order.
+func TestEmbedDocumentsSplitsOversizeBatch(t *testing.T) {
+	posts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		// Echo back as many embeddings as the request contained so
+		// the caller's input ↔ vector mapping is verifiable.
+		raw, _ := io.ReadAll(r.Body)
+		var req embedRequest
+		_ = json.Unmarshal(raw, &req)
+		if len(req.Input) > 128 {
+			t.Errorf("POST #%d carried %d inputs, expected <= 128", posts, len(req.Input))
+		}
+		items := make([]map[string]any, len(req.Input))
+		for i := range req.Input {
+			items[i] = map[string]any{"index": i, "embedding": []float32{float32(i)}}
+		}
+		body, _ := json.Marshal(map[string]any{
+			"data":  items,
+			"model": req.Model,
+			"usage": map[string]int{"total_tokens": 1},
+		})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-code-3",
+		OutputDimension: 0, OutputDtype: DtypeFloat,
+	}, fixedSecrets("K", "v"), nil)
+
+	texts := make([]string, 200)
+	for i := range texts {
+		texts[i] = "chunk"
+	}
+	vecs, err := p.EmbedDocuments(context.Background(), texts)
+	if err != nil {
+		t.Fatalf("EmbedDocuments: %v", err)
+	}
+	if got := len(vecs); got != 200 {
+		t.Fatalf("got %d vectors, want 200", got)
+	}
+	if posts != 2 {
+		t.Errorf("expected 2 POSTs (128 + 72), got %d", posts)
+	}
+}
+
 func TestUsageDecodesWithoutPromptTokens(t *testing.T) {
 	// Voyage's usage object lacks prompt_tokens — make sure decode doesn't error.
 	srv, _ := stubServer(t, http.StatusOK, `{

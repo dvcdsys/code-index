@@ -136,6 +136,50 @@ func TestIDFingerprint(t *testing.T) {
 	}
 }
 
+// TestEmbedDocumentsSplitsOversizeBatch covers the transparent
+// per-provider split: OpenAI proper accepts up to 2048 inputs per
+// /v1/embeddings POST. A 3000-item EmbedDocuments call must produce
+// TWO POSTs (2048 + 952) and return all 3000 vectors in input order.
+func TestEmbedDocumentsSplitsOversizeBatch(t *testing.T) {
+	posts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		raw, _ := io.ReadAll(r.Body)
+		var req embedRequest
+		_ = json.Unmarshal(raw, &req)
+		if len(req.Input) > 2048 {
+			t.Errorf("POST #%d carried %d inputs, expected <= 2048", posts, len(req.Input))
+		}
+		items := make([]map[string]any, len(req.Input))
+		for i := range req.Input {
+			items[i] = map[string]any{"index": i, "embedding": []float32{float32(i)}}
+		}
+		body, _ := json.Marshal(map[string]any{"data": items})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{
+		BaseURL: srv.URL, Model: "text-embedding-3-small", APIKeyEnv: "K",
+	}, fixedSecrets("K", "v"), nil)
+
+	texts := make([]string, 3000)
+	for i := range texts {
+		texts[i] = "chunk"
+	}
+	vecs, err := p.EmbedDocuments(context.Background(), texts)
+	if err != nil {
+		t.Fatalf("EmbedDocuments: %v", err)
+	}
+	if got := len(vecs); got != 3000 {
+		t.Fatalf("got %d vectors, want 3000", got)
+	}
+	if posts != 2 {
+		t.Errorf("expected 2 POSTs (2048 + 952), got %d", posts)
+	}
+}
+
 func TestEmbedDocumentsSendsDimensions(t *testing.T) {
 	srv, gotBody := stubServer(t, http.StatusOK, `{
 		"data": [{"index": 0, "embedding": [0.1]}]

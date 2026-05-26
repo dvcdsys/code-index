@@ -28,6 +28,14 @@ type Config struct {
 	Dimensions int    `json:"dimensions,omitempty"`
 }
 
+// maxBatchSize caps how many inputs we send in a single
+// /v1/embeddings POST. OpenAI proper accepts up to 2048 inputs
+// per request for text-embedding-3-*; self-hosted clones (vLLM,
+// TEI, LocalAI) may be tighter but rarely lower than that. The
+// split is transparent to callers — same queue slot, sequential
+// sub-batches.
+const maxBatchSize = 2048
+
 // Provider is the openai-compatible HTTP client wrapped behind the
 // provider.Provider interface.
 type Provider struct {
@@ -132,7 +140,22 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	return p.embed(ctx, texts)
+	if len(texts) <= maxBatchSize {
+		return p.embed(ctx, texts)
+	}
+	out := make([][]float32, 0, len(texts))
+	for i := 0; i < len(texts); i += maxBatchSize {
+		end := i + maxBatchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		part, err := p.embed(ctx, texts[i:end])
+		if err != nil {
+			return nil, fmt.Errorf("openai: sub-batch [%d:%d]: %w", i, end, err)
+		}
+		out = append(out, part...)
+	}
+	return out, nil
 }
 
 // TokenizeAndEmbed falls back to EmbedDocuments — generic openai-style

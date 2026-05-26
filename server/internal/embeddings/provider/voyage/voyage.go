@@ -42,6 +42,16 @@ const (
 	DtypeInt8  = "int8"
 )
 
+// maxBatchSize caps how many inputs we send in a single
+// /v1/embeddings POST. Voyage's per-request limits depend on the
+// model — voyage-code-3 and voyage-code-2 cap at 128; voyage-3*
+// models accept up to 1000. We pick the conservative floor so a
+// single constant works across all supported models. EmbedDocuments
+// transparently splits oversize inputs into sequential sub-batches
+// under the same queue slot so the caller never sees 422 Request
+// Too Large from a large file's chunks.
+const maxBatchSize = 128
+
 // Config is the persisted shape of the voyage provider's config blob.
 type Config struct {
 	BaseURL         string `json:"base_url,omitempty"`
@@ -150,7 +160,25 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	return p.embed(ctx, texts, "document")
+	if len(texts) <= maxBatchSize {
+		return p.embed(ctx, texts, "document")
+	}
+	// Oversize input — split into sequential sub-batches. The Service
+	// queue holds a single slot for the whole call, so concurrency
+	// semantics are preserved (no extra slots consumed).
+	out := make([][]float32, 0, len(texts))
+	for i := 0; i < len(texts); i += maxBatchSize {
+		end := i + maxBatchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		part, err := p.embed(ctx, texts[i:end], "document")
+		if err != nil {
+			return nil, fmt.Errorf("voyage: sub-batch [%d:%d]: %w", i, end, err)
+		}
+		out = append(out, part...)
+	}
+	return out, nil
 }
 
 func (p *Provider) TokenizeAndEmbed(ctx context.Context, texts []string) ([][]float32, error) {
