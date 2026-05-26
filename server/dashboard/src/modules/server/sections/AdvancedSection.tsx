@@ -40,9 +40,10 @@ export function AdvancedSection({
       <CardHeader>
         <CardTitle>Throughput</CardTitle>
         <CardDescription>
-          Concurrency caps how many <code>/v1/embeddings</code> POSTs the
-          server runs in parallel against the active provider — applies to
-          every backend. Llama batch is sidecar-only.
+          The indexer sends all chunks of one file in a single batched POST
+          (<code>{'{"input": [chunk1, chunk2, ...]}'}</code>). Concurrency
+          here caps how many such batched POSTs run in parallel — applies
+          to every backend. Llama batch (below) is sidecar-only.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -71,11 +72,16 @@ export function AdvancedSection({
                 className="max-w-xs"
               />
               <p className="text-xs text-muted-foreground">
-                Maximum in-flight embed requests across the whole server.
-                1 = strictly sequential. OpenAI and Voyage both accept
-                concurrent requests, but their account-level rate limits
-                still apply — start low (e.g. 2) and raise it if you
-                don't see 429s. Recommended:{' '}
+                Maximum batched <code>/v1/embeddings</code> POSTs in flight
+                across the whole server (each POST already carries one
+                file's chunks as a batch). 1 = strictly sequential. OpenAI
+                and Voyage both accept concurrent requests, but their
+                account-level rate limits still apply — start low (e.g. 2)
+                and raise it if you don't see 429s. Voyage per-request
+                batch limits (<code>voyage-code-3</code> = 128 inputs,
+                <code>voyage-3*</code> = 1000) are not split automatically
+                yet — keep files under that limit or expect 422s.
+                Recommended:{' '}
                 <code>{rec?.max_embedding_concurrency ?? 1}</code>.
               </p>
             </div>
