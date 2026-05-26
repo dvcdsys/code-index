@@ -6,11 +6,18 @@ import type { RuntimeConfig, RuntimeConfigUpdate } from '@/api/types';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
 import { Skeleton } from '@/ui/skeleton';
-import { useRestartSidecar, useRuntimeConfig, useSidecarStatus, useUpdateRuntimeConfig } from './hooks';
+import {
+  useActiveProvider,
+  useRestartSidecar,
+  useRuntimeConfig,
+  useSidecarStatus,
+  useUpdateRuntimeConfig,
+} from './hooks';
 import { EmbeddingModelSection } from './sections/EmbeddingModelSection';
 import { RuntimeParamsSection } from './sections/RuntimeParamsSection';
 import { SidecarSection } from './sections/SidecarSection';
 import { AdvancedSection } from './sections/AdvancedSection';
+import { EmbeddingProviderSection } from './sections/EmbeddingProviderSection';
 import { SaveAndRestartDialog } from './components/SaveAndRestartDialog';
 
 interface Draft {
@@ -62,6 +69,7 @@ export default function ServerPage() {
   const status = useSidecarStatus();
   const update = useUpdateRuntimeConfig();
   const restart = useRestartSidecar();
+  const activeProvider = useActiveProvider();
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -158,23 +166,36 @@ export default function ServerPage() {
         </Alert>
       ) : null}
 
-      <EmbeddingModelSection
-        config={cfg.data}
-        draftModel={draft.embedding_model}
-        onDraftChange={(v) => setDraft({ ...draft, embedding_model: v })}
-      />
+      <EmbeddingProviderSection />
 
-      <RuntimeParamsSection
-        config={cfg.data}
-        draftCtx={draft.llama_ctx_size}
-        draftGpuLayers={draft.llama_n_gpu_layers}
-        draftThreads={draft.llama_n_threads}
-        onDraftCtx={(n) => setDraft({ ...draft, llama_ctx_size: n })}
-        onDraftGpuLayers={(n) => setDraft({ ...draft, llama_n_gpu_layers: n })}
-        onDraftThreads={(n) => setDraft({ ...draft, llama_n_threads: n })}
-      />
+      {/*
+        Ollama-specific tuning + sidecar status — rendered only when the
+        active provider is ollama. For openai/voyage these sections do
+        not apply: there's no GGUF, no llama-server child to restart,
+        no GPU layers / threads. The provider form above is the only
+        edit surface in that case.
+      */}
+      {activeProvider.data?.kind === 'ollama' ? (
+        <>
+          <EmbeddingModelSection
+            config={cfg.data}
+            draftModel={draft.embedding_model}
+            onDraftChange={(v) => setDraft({ ...draft, embedding_model: v })}
+          />
 
-      <SidecarSection />
+          <RuntimeParamsSection
+            config={cfg.data}
+            draftCtx={draft.llama_ctx_size}
+            draftGpuLayers={draft.llama_n_gpu_layers}
+            draftThreads={draft.llama_n_threads}
+            onDraftCtx={(n) => setDraft({ ...draft, llama_ctx_size: n })}
+            onDraftGpuLayers={(n) => setDraft({ ...draft, llama_n_gpu_layers: n })}
+            onDraftThreads={(n) => setDraft({ ...draft, llama_n_threads: n })}
+          />
+
+          <SidecarSection />
+        </>
+      ) : null}
 
       <AdvancedSection
         config={cfg.data}

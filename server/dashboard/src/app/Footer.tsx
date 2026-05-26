@@ -5,31 +5,51 @@ import { cn } from '@/lib/cn';
 
 // Footer spans the full width below the sidebar + main pane. Reads
 // from the shared /status query (polled every 30 s) — server version
-// on the left, llama sidecar liveness dot on the right. The "llama"
-// label links to /server (admin-only page); viewers see plain text
-// since the route isn't mounted for them.
+// on the left, embedding-provider indicator on the right.
+//
+// The label is the active provider kind ("ollama" / "openai" /
+// "voyage") and the dot logic depends on whether the provider
+// manages an in-process child:
+//   ollama (manages_process=true): green when /health alive, red
+//     otherwise — real liveness signal.
+//   openai / voyage (manages_process=false): permanently green.
+//     We don't ping remote APIs on every footer poll; failures
+//     surface at search/embed time with diagnostics.
+//
+// The provider name links to /server (admin-only page); viewers see
+// plain text since the route isn't mounted for them.
 export function Footer() {
   const { data, isLoading } = useServerStatus();
   const { user } = useAuth();
   const version = data?.server_version ?? 'dev';
+  const providerKind = data?.embedding_provider ?? '';
+  const managesProcess = data?.embedding_provider_manages_process === true;
   const alive = data?.model_loaded === true;
   const isAdmin = user?.role === 'admin';
 
   const dotClass = isLoading
     ? 'bg-muted-foreground/40'
-    : alive
-      ? 'bg-emerald-500'
-      : 'bg-red-500';
+    : managesProcess
+      ? alive
+        ? 'bg-emerald-500'
+        : 'bg-red-500'
+      : 'bg-emerald-500';
   const dotTitle = isLoading
-    ? 'Checking sidecar status…'
-    : alive
-      ? 'Sidecar is alive'
-      : 'Sidecar is not responding';
+    ? 'Checking embedding provider status…'
+    : managesProcess
+      ? alive
+        ? 'Ollama sidecar is alive'
+        : 'Ollama sidecar is not responding'
+      : providerKind
+        ? `${providerKind} backend (no managed process)`
+        : 'Embedding backend';
+
+  const label = providerKind || 'embeddings';
 
   const indicator = (
     <>
       <span className={cn('h-2 w-2 rounded-full', dotClass)} aria-hidden />
-      <span>llama</span>
+      <span>{label}</span>
     </>
   );
 
