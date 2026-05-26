@@ -45,6 +45,25 @@ services:
       # touches the source again. Subsequent boots find the file in cache
       # and ignore the env. See volumes block below for an example bind.
       - CIX_BOOTSTRAP_GGUF_PATH=${CIX_BOOTSTRAP_GGUF_PATH:-}
+      # ── Pluggable embedding providers (added in migration 12) ──
+      # The active provider is selected from the dashboard
+      # (/dashboard/server → Embedding provider). On first boot with an
+      # empty runtime_settings row, cix-server seeds the ollama provider
+      # using the CIX_EMBEDDING_MODEL + CIX_LLAMA_* vars above — so the
+      # default deployment is unchanged.
+      #
+      # To use a remote provider (OpenAI-compatible or Voyage AI) you
+      # MUST export the API-key env var below. The dashboard reads it on
+      # every embed call; cix-server NEVER persists API keys in the DB,
+      # only the env-var NAME a provider should look up. Switching
+      # providers triggers a full reindex per project on the next clone
+      # job (existing model-change pipeline).
+      #
+      # OpenAI-compatible (api.openai.com, vLLM, TEI, LocalAI, …):
+      # - CIX_OPENAI_API_KEY=${CIX_OPENAI_API_KEY:-}
+      #
+      # Voyage AI:
+      # - CIX_VOYAGE_API_KEY=${CIX_VOYAGE_API_KEY:-}
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       # Operator-managed bind for sqlite + chroma so backups and inspection
