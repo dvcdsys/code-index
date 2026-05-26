@@ -1,4 +1,4 @@
-package embeddings
+package ollama
 
 import (
 	"context"
@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 )
 
 // darwinSunPathMax is the platform limit for unix socket paths on macOS.
@@ -270,7 +272,7 @@ func (s *supervisor) spawn(ctx context.Context) error {
 		s.lastSpawnErr.Store(err.Error())
 		s.killGroup()
 		<-s.waiterDone
-		return fmt.Errorf("%w: %v", ErrNotReady, err)
+		return fmt.Errorf("%w: %v", provider.ErrNotReady, err)
 	}
 	close(s.readySignal)
 	s.lastSpawnErr.Store("") // clear any stale error from a prior failed start
@@ -573,7 +575,7 @@ func (s *supervisor) Status() SupervisorStatus {
 // Ready blocks until the current child is ready or ctx expires.
 func (s *supervisor) Ready(ctx context.Context) error {
 	if s.dead.Load() {
-		return ErrSupervisor
+		return provider.ErrUnrecoverable
 	}
 	s.mu.RLock()
 	ch := s.readySignal

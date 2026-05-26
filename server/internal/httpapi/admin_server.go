@@ -263,15 +263,15 @@ func (s *Server) GetSidecarStatus(w http.ResponseWriter, r *http.Request) {
 
 	body := map[string]any{
 		"state":             st.State,
-		"ready":             st.Ready,
+		"ready":             st.State == "running",
 		"in_flight":         st.InFlight,
 		"restart_in_flight": restartInFlight.Load(),
 	}
 	if st.PID > 0 {
 		body["pid"] = st.PID
 	}
-	if st.Uptime > 0 {
-		body["uptime_seconds"] = int(st.Uptime.Seconds())
+	if st.UptimeSeconds > 0 {
+		body["uptime_seconds"] = st.UptimeSeconds
 	}
 	if st.Model != "" {
 		body["model"] = st.Model
