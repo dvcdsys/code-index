@@ -119,6 +119,14 @@ export function OpenAIProviderForm({ value, onChange, secretEnvs }: Props) {
           </AlertDescription>
         </Alert>
       ) : null}
+
+      <p className="text-xs text-muted-foreground">
+        Rate-limit handling: the server forwards the upstream HTTP status
+        as-is — there is no retry-with-backoff yet. If you hit 429s, lower
+        the concurrency in the Throughput card below or pick an account
+        tier with higher RPM. Self-hosted servers (vLLM, TEI, LocalAI)
+        typically don't rate-limit at all.
+      </p>
     </div>
   );
 }

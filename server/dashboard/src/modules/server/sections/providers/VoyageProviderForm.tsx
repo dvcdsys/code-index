@@ -1,4 +1,4 @@
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Info } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Input } from '@/ui/input';
 import { Label } from '@/ui/label';
@@ -45,6 +45,28 @@ export function VoyageProviderForm({ value, onChange, secretEnvs }: Props) {
 
   return (
     <div className="space-y-4">
+      <Alert>
+        <Info className="h-4 w-4" />
+        <AlertTitle>Rate limits</AlertTitle>
+        <AlertDescription>
+          Voyage's free tier is capped at <strong>3 requests/minute</strong> and
+          10K tokens/minute — usable for a smoke test, but the indexer will
+          burst past it on any real repo and start returning 429s. For real
+          usage{' '}
+          <a
+            href="https://dashboard.voyageai.com/"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="underline"
+          >
+            add a payment method
+          </a>{' '}
+          on the Voyage dashboard. On the free tier you can still index by
+          setting <strong>concurrency = 1</strong> in the Throughput card
+          below and accepting roughly 3 files/minute throughput.
+        </AlertDescription>
+      </Alert>
+
       <div className="space-y-1.5">
         <Label htmlFor="voyage-model">Model</Label>
         <select
