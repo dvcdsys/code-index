@@ -250,9 +250,15 @@ func run() error {
 
 	idx := indexer.New(database, vs, embedSvc, logger)
 	idx.SetEmbedIncludePath(cfg.EmbedIncludePath)
-	// PR-E — record the active embedding model on every indexed project so the
-	// dashboard can highlight stale vectors when the runtime model changes.
-	idx.SetEmbeddingModel(cfg.EmbeddingModel)
+	// Record the active embedding model on every indexed project so the
+	// dashboard can highlight stale vectors when the runtime provider /
+	// model changes. Wire it as a live lookup so a runtime provider
+	// switch (PUT /admin/embedding-providers/active) is reflected in the
+	// next FinishIndexing without a process restart — the indexer reads
+	// embedSvc.EmbeddingModel() at write time and that returns the active
+	// Provider.ID() ("ollama:<model>" / "voyage:..."), matching what the
+	// drift-detector and dashboard compare against.
+	idx.SetEmbeddingModelLookup(embedSvc.EmbeddingModel)
 	if cfg.EmbedIncludePath {
 		logger.Info("embedding format: path-aware preamble enabled (CIX_EMBED_INCLUDE_PATH=true) — full reindex required if upgrading")
 	}

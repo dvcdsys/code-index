@@ -210,6 +210,91 @@ func TestOpenMigratesPreEDB(t *testing.T) {
 	}
 }
 
+// TestMigrate_IndexedWithModelProviderPrefix covers the backfill that
+// the pluggable-provider PR adds: legacy rows whose indexed_with_model
+// is a bare model name ("awhiteside/CodeRankEmbed-Q8_0-GGUF") must
+// be rewritten to the prefixed form ("ollama:awhiteside/...") so the
+// drift-detector and dashboard see a match with the live Provider.ID().
+// Rows that already contain ":" (any prefixed form) must be left
+// untouched — important for idempotency and for DBs that were partially
+// upgraded before this migration shipped.
+func TestMigrate_IndexedWithModelProviderPrefix(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "indexed-prefix.db")
+
+	// Stage a minimal projects table at the migration-12 layout (i.e.
+	// indexed_with_model column already exists) so we exercise just
+	// the prefix backfill without crossing other migrations' concerns.
+	seed, err := sql.Open(DriverName, "file:"+tmp)
+	if err != nil {
+		t.Fatalf("seed Open: %v", err)
+	}
+	if _, err := seed.Exec(`CREATE TABLE projects (
+		host_path TEXT PRIMARY KEY,
+		container_path TEXT NOT NULL,
+		languages TEXT DEFAULT '[]',
+		settings TEXT DEFAULT '{}',
+		stats TEXT DEFAULT '{}',
+		status TEXT DEFAULT 'created',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		last_indexed_at TEXT,
+		path_hash TEXT,
+		indexed_with_model TEXT
+	)`); err != nil {
+		t.Fatalf("seed CREATE TABLE: %v", err)
+	}
+	rows := []struct {
+		host, model string
+	}{
+		{"/legacy/bare", "awhiteside/CodeRankEmbed-Q8_0-GGUF"},      // should get "ollama:" prefix
+		{"/already/prefixed", "ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF"}, // untouched
+		{"/already/voyage", "voyage:voyage-code-3:1024:float"},          // untouched
+	}
+	for _, r := range rows {
+		if _, err := seed.Exec(
+			`INSERT INTO projects (host_path, container_path, created_at, updated_at, path_hash, indexed_with_model)
+			 VALUES (?, ?, '2024-01-01', '2024-01-01', ?, ?)`,
+			r.host, r.host, r.host, r.model,
+		); err != nil {
+			t.Fatalf("seed INSERT %s: %v", r.host, err)
+		}
+	}
+	// Row with NULL model should also be left alone (legacy pre-PR-E projects).
+	if _, err := seed.Exec(
+		`INSERT INTO projects (host_path, container_path, created_at, updated_at, path_hash)
+		 VALUES ('/legacy/null', '/legacy/null', '2024-01-01', '2024-01-01', 'null')`,
+	); err != nil {
+		t.Fatalf("seed INSERT null: %v", err)
+	}
+	seed.Close()
+
+	database, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("Open migrates DB: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(tmp)
+
+	expectations := map[string]sql.NullString{
+		"/legacy/bare":      {String: "ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF", Valid: true},
+		"/already/prefixed": {String: "ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF", Valid: true},
+		"/already/voyage":   {String: "voyage:voyage-code-3:1024:float", Valid: true},
+		"/legacy/null":      {Valid: false},
+	}
+	for host, want := range expectations {
+		var got sql.NullString
+		if err := database.QueryRow(
+			`SELECT indexed_with_model FROM projects WHERE host_path = ?`, host,
+		).Scan(&got); err != nil {
+			t.Fatalf("select %s: %v", host, err)
+		}
+		if got.Valid != want.Valid || got.String != want.String {
+			t.Errorf("%s: indexed_with_model = %v (valid=%v), want %v (valid=%v)",
+				host, got.String, got.Valid, want.String, want.Valid)
+		}
+	}
+}
+
 // TestOpenMigratesPreM9DB simulates a pre-m9 database (git_repos without the
 // polling columns — i.e. pre git_repos_polling migration) and verifies Open
 // adds them + the scheduler index without crashing, and that an existing row

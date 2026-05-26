@@ -65,6 +65,7 @@ var registeredMigrations = []migration{
 	{10, "auth_groups_ownership", func(db *sql.DB, _ OpenOptions) error { return migrateAuthGroupsOwnership(db) }},
 	{11, "project_machine_identity", func(db *sql.DB, _ OpenOptions) error { return migrateProjectMachineIdentity(db) }},
 	{12, "embedding_provider", func(db *sql.DB, _ OpenOptions) error { return migrateEmbeddingProvider(db) }},
+	{13, "indexed_with_model_provider_prefix", func(db *sql.DB, _ OpenOptions) error { return migrateIndexedWithModelProviderPrefix(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -759,6 +760,38 @@ func migrateEmbeddingProvider(db *sql.DB) error {
 		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN embedding_provider_config TEXT`); err != nil {
 			return fmt.Errorf("add embedding_provider_config column: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateIndexedWithModelProviderPrefix backfills projects indexed
+// before the pluggable-provider refactor (migration 12). Pre-refactor
+// the indexer wrote a bare model name like
+// "awhiteside/CodeRankEmbed-Q8_0-GGUF"; post-refactor it writes the
+// fully-qualified Provider.ID() of the form "ollama:<model>". Without
+// this migration every legacy project would show a "stale model"
+// badge forever because the bare string never matches the live
+// "ollama:<model>" and a reindex would *still* write the new prefixed
+// form — leaving every UN-reindexed project flagged falsely.
+//
+// Heuristic: rows whose value contains no ":" predate the prefix
+// convention. Prepend "ollama:" — safe because pre-refactor there
+// was no other embedding backend; every legacy row was produced by
+// the in-process llama-server sidecar.
+//
+// Idempotent: rows already containing ":" are left alone, so
+// re-running this migration (or running it against a DB that was
+// already partially upgraded) is a no-op.
+func migrateIndexedWithModelProviderPrefix(db *sql.DB) error {
+	_, err := db.Exec(`
+		UPDATE projects
+		SET indexed_with_model = 'ollama:' || indexed_with_model
+		WHERE indexed_with_model IS NOT NULL
+		  AND indexed_with_model != ''
+		  AND instr(indexed_with_model, ':') = 0
+	`)
+	if err != nil {
+		return fmt.Errorf("backfill indexed_with_model prefix: %w", err)
 	}
 	return nil
 }

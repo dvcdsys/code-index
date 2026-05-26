@@ -115,6 +115,14 @@ type Service struct {
 	// SetEmbeddingModel from main; empty string keeps the column NULL so
 	// unit tests that skip the setter don't need to know about drift.
 	embeddingModel string
+
+	// embeddingModelLookup, when non-nil, takes precedence over the static
+	// embeddingModel string above. Used by main.go to bind the indexer
+	// to a live function (embeddings.Service.EmbeddingModel) so a provider
+	// switch made at runtime is reflected in the next FinishIndexing write
+	// without requiring a process restart. Tests typically use the static
+	// SetEmbeddingModel API and leave this nil.
+	embeddingModelLookup func() string
 }
 
 // New constructs a Service. All deps are required except logger (falls back to
@@ -151,17 +159,34 @@ func (s *Service) SetEmbedIncludePath(v bool) {
 // projects.indexed_with_model at FinishIndexing. Called from main once the
 // runtime config is resolved; empty string disables the write (the column
 // stays NULL — desired for tests that don't care about drift tracking).
+//
+// In production this is superseded by SetEmbeddingModelLookup, which binds
+// the indexer to a live function so provider switches at runtime take
+// effect without a process restart. The static setter remains for tests.
 func (s *Service) SetEmbeddingModel(model string) {
 	s.embeddingModel = model
 }
 
-// EmbeddingModel returns the identifier most recently passed to
-// SetEmbeddingModel. Used by callers (repojobs) that need to compare
-// the live model against projects.indexed_with_model to decide whether
-// an incremental reindex is safe (same model = vectors comparable) or
-// whether a full reindex is required (model change = embedding-space
-// drift, all vectors must be regenerated).
+// SetEmbeddingModelLookup binds the indexer to a live function returning
+// the current Provider.ID() — typically embeddings.Service.EmbeddingModel.
+// When set, this takes precedence over SetEmbeddingModel so a runtime
+// provider switch (admin PUT /admin/embedding-providers/active) flows into
+// the next FinishIndexing write without a process restart.
+func (s *Service) SetEmbeddingModelLookup(fn func() string) {
+	s.embeddingModelLookup = fn
+}
+
+// EmbeddingModel returns the current embedding-model fingerprint. Prefers
+// the live lookup when one is bound (production); falls back to the static
+// string set via SetEmbeddingModel (tests). Used by callers (repojobs) that
+// need to compare the live model against projects.indexed_with_model to
+// decide whether an incremental reindex is safe (same model = vectors
+// comparable) or whether a full reindex is required (model change =
+// embedding-space drift, all vectors must be regenerated).
 func (s *Service) EmbeddingModel() string {
+	if s.embeddingModelLookup != nil {
+		return s.embeddingModelLookup()
+	}
 	return s.embeddingModel
 }
 
@@ -757,13 +782,17 @@ func (s *Service) FinishIndexing(
 	// projects whose vectors were produced under a different model than the
 	// one currently loaded in the sidecar. NULLIF keeps the column NULL when
 	// SetEmbeddingModel was never called (tests / pre-PR-E codepaths).
+	// Reads through EmbeddingModel() so live provider switches (set via
+	// SetEmbeddingModelLookup) are honoured at write time — the value goes
+	// into the row in its prefixed form ("ollama:<model>" / "voyage:..."),
+	// matching the format the drift-detector and dashboard compare against.
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE projects
 		 SET stats = ?, languages = ?, status = 'indexed',
 		     last_indexed_at = ?, updated_at = ?,
 		     indexed_with_model = NULLIF(?, '')
 		 WHERE host_path = ?`,
-		statsJSON, langsJSON, now, now, s.embeddingModel, projectPath,
+		statsJSON, langsJSON, now, now, s.EmbeddingModel(), projectPath,
 	); err != nil {
 		return "", 0, 0, fmt.Errorf("update project stats: %w", err)
 	}
