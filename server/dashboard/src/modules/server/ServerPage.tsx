@@ -148,19 +148,17 @@ export default function ServerPage() {
           <h1 className="text-2xl font-semibold tracking-tight">Server</h1>
           <p className="text-sm text-muted-foreground">
             {showOllamaSections
-              ? 'Embedding provider + model, indexing parameters, sidecar lifecycle. Saved overrides land in the database and are reapplied on the next sidecar restart — env vars stay as bootstrap defaults.'
-              : 'Embedding provider selection. For remote providers (OpenAI-compatible, Voyage) all tuning lives inside the provider form below — there is no sidecar to restart and no GPU / batch knobs.'}
+              ? 'Embedding provider + model, indexing parameters, sidecar lifecycle, throughput. Saved overrides land in the database and are reapplied on the next sidecar restart — env vars stay as bootstrap defaults.'
+              : 'Embedding provider + concurrency. For remote providers (OpenAI-compatible, Voyage) the per-provider form above is the main edit surface; this page also exposes the server-wide concurrency cap that all providers honour.'}
           </p>
         </div>
-        {showOllamaSections ? (
-          <Button
-            onClick={() => setConfirmOpen(true)}
-            disabled={!dirty || isPending || disabled}
-          >
-            {isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
-            Save &amp; Restart
-          </Button>
-        ) : null}
+        <Button
+          onClick={() => setConfirmOpen(true)}
+          disabled={!dirty || isPending || disabled}
+        >
+          {isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
+          {showOllamaSections ? 'Save & Restart' : 'Save'}
+        </Button>
       </header>
 
       {disabled ? (
@@ -208,16 +206,24 @@ export default function ServerPage() {
           />
 
           <SidecarSection />
-
-          <AdvancedSection
-            config={cfg.data}
-            draftConcurrency={draft.max_embedding_concurrency}
-            draftBatch={draft.llama_batch_size}
-            onDraftConcurrency={(n) => setDraft({ ...draft, max_embedding_concurrency: n })}
-            onDraftBatch={(n) => setDraft({ ...draft, llama_batch_size: n })}
-          />
         </>
       ) : null}
+
+      {/*
+        Throughput / concurrency — always visible. The queue concurrency
+        is the Service-level cap on parallel /v1/embeddings POSTs and
+        applies to every provider (ollama, openai, voyage all accept
+        concurrent requests). The llama batch field inside the card
+        is gated on isOllama.
+      */}
+      <AdvancedSection
+        config={cfg.data}
+        draftConcurrency={draft.max_embedding_concurrency}
+        draftBatch={draft.llama_batch_size}
+        onDraftConcurrency={(n) => setDraft({ ...draft, max_embedding_concurrency: n })}
+        onDraftBatch={(n) => setDraft({ ...draft, llama_batch_size: n })}
+        isOllama={showOllamaSections}
+      />
 
       <SaveAndRestartDialog
         open={confirmOpen}

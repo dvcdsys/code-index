@@ -303,10 +303,22 @@ func (s *Service) EmbeddingModel() string {
 	return cur.ID()
 }
 
-// Restart preserves the legacy admin /sidecar/restart contract: drain
-// the queue, swap in a freshly-built provider with the supplied cfg,
-// Start it. Currently only supports the ollama provider; openai/voyage
-// callers use SwitchProvider directly.
+// Restart applies runtime-config changes to the live Service.
+//
+// Provider-aware:
+//   - When the active provider is ollama, this is the legacy
+//     "respawn the sidecar with new flags" path: drain queue, build
+//     a new ollama provider with cfg, stop the old child, start the
+//     new one.
+//   - When the active provider is HTTP-only (openai / voyage), there
+//     is no sidecar to respawn. The only runtime-config field that
+//     still applies is max_embedding_concurrency (the Service-level
+//     queue depth). We rebuild the queue if it changed and leave the
+//     provider untouched.
+//
+// SwitchProvider is the right call for swapping the active provider
+// itself; Restart only touches knobs that the runtime_config row
+// owns.
 func (s *Service) Restart(ctx context.Context, cfg *config.Config) error {
 	if s == nil || s.disabled {
 		return ErrDisabled
@@ -328,14 +340,36 @@ func (s *Service) Restart(ctx context.Context, cfg *config.Config) error {
 		s.queue = NewQueue(cfg.MaxEmbeddingConcurrency, time.Duration(cfg.EmbeddingQueueTimeout)*time.Second)
 	}
 
+	// Snapshot the live provider's kind under the read lock — we don't
+	// want to swap an ollama for a voyage just because the runtime-
+	// config form was submitted.
+	s.mu.RLock()
+	curKind := ""
+	if s.current != nil {
+		curKind = s.current.Kind()
+	}
+	s.mu.RUnlock()
+
+	if curKind != provider.KindOllama {
+		// HTTP-only provider: queue (re)built above is all there is to
+		// do. The cfg blob is persisted by the caller; we just stash
+		// the new *config.Config snapshot so subsequent /status / cfg
+		// reads return the live values.
+		s.mu.Lock()
+		s.cfg = cfg
+		s.mu.Unlock()
+		s.logger.Info("embeddings: restart applied to remote provider (queue only)",
+			"kind", curKind, "concurrency", cfg.MaxEmbeddingConcurrency,
+		)
+		return nil
+	}
+
+	// Ollama path: rebuild + respawn the sidecar with the supplied
+	// llama tuning fields.
 	newProv, err := buildOllamaFromConfig(cfg, s.logger)
 	if err != nil {
 		return fmt.Errorf("rebuild ollama provider: %w", err)
 	}
-
-	// Stop the old, start the new. On Start failure leave current==nil
-	// so subsequent calls fail fast with ErrSupervisor — the operator
-	// then re-Restart with corrected config.
 	s.mu.Lock()
 	old := s.current
 	s.current = nil
