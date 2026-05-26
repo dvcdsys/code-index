@@ -106,6 +106,11 @@ export function EmbeddingProviderSection() {
   }
 
   // Build the current draft config blob for the selected kind.
+  // For ollama we always send an empty object — the backend's
+  // SwitchEmbeddingProvider handler synthesizes a complete ollama
+  // config from runtime-cfg + env on receipt, because the
+  // ollama-specific tuning fields (GGUF model, ctx, GPU layers,
+  // sidecar paths) are not part of this card's form.
   const draftConfig: Record<string, unknown> = (() => {
     switch (draftKind) {
       case 'openai':
@@ -113,11 +118,7 @@ export function EmbeddingProviderSection() {
       case 'voyage':
         return { ...voyageDraft };
       case 'ollama':
-        // Ollama keeps using the existing per-field sections — for
-        // this composite section, switching TO ollama submits the
-        // already-persisted blob unchanged. The admin tunes ollama
-        // knobs via the sections below.
-        return (active.data?.kind === 'ollama' && active.data.config) || {};
+        return {};
     }
   })();
 
@@ -136,9 +137,12 @@ export function EmbeddingProviderSection() {
   })();
 
   const canSave = localValid && allEnvsSet && !switchMut.isPending && !test.isPending;
-  const dirty = draftKind !== active.data?.kind || (() => {
-    // Compare the JSON blob shallowly so we know whether anything
-    // changed in the per-kind form.
+  // Dirty when the kind has changed; for remote providers also dirty
+  // when the per-kind form differs from what's persisted. Ollama-
+  // is-ollama is never dirty (form has no editable fields here —
+  // those live in the sections below).
+  const kindChanged = draftKind !== active.data?.kind;
+  const dirty = kindChanged || (() => {
     if (draftKind === 'ollama') return false;
     const a = JSON.stringify(active.data?.config ?? {});
     const b = JSON.stringify(draftConfig);
@@ -147,7 +151,15 @@ export function EmbeddingProviderSection() {
 
   async function onSave() {
     try {
-      await test.mutateAsync(draftConfig);
+      // Skip the /test pre-check when switching to ollama — the
+      // backend builds the full config from runtime-cfg + env on
+      // receipt, so the client's empty {} can't be tested as-is
+      // (would fail factory validation: model is required).
+      // Ollama config correctness will be exercised by Start()
+      // inside SwitchProvider anyway.
+      if (draftKind !== 'ollama') {
+        await test.mutateAsync(draftConfig);
+      }
       await switchMut.mutateAsync({ kind: draftKind, config: draftConfig });
       toast.success(`Switched to ${draftKind}`, {
         description: 'Every project will get a Stale-model badge until reindex.',
@@ -248,28 +260,38 @@ export function EmbeddingProviderSection() {
         ) : null}
         {draftKind === 'ollama' ? (
           <div className="rounded-md border border-dashed bg-muted/30 p-3 text-xs text-muted-foreground">
-            Ollama tuning (model picker, ctx, GPU layers, sidecar status) is
-            configured in the sections below.
+            {kindChanged ? (
+              <>
+                Switching back to Ollama will restart the llama-server
+                sidecar with the current model + tuning from the runtime
+                config (see the sections below). After the switch, every
+                project will need to be reindexed (full reindex on the
+                next clone job).
+              </>
+            ) : (
+              <>
+                Ollama tuning (model picker, ctx, GPU layers, sidecar
+                status) is configured in the sections below.
+              </>
+            )}
           </div>
         ) : null}
 
-        {draftKind !== 'ollama' ? (
-          <div className="flex items-center gap-2 pt-2">
-            <Button onClick={onSave} disabled={!canSave || !dirty}>
-              {switchMut.isPending || test.isPending ? (
-                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-              ) : (
-                <Save className="mr-1 h-4 w-4" />
-              )}
-              Save &amp; switch
-            </Button>
-            {test.isSuccess && !switchMut.isPending ? (
-              <span className="flex items-center gap-1 text-xs text-emerald-700">
-                <CheckCircle2 className="h-3 w-3" /> Last test ok
-              </span>
-            ) : null}
-          </div>
-        ) : null}
+        <div className="flex items-center gap-2 pt-2">
+          <Button onClick={onSave} disabled={!canSave || !dirty}>
+            {switchMut.isPending || test.isPending ? (
+              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="mr-1 h-4 w-4" />
+            )}
+            {kindChanged ? `Save & switch to ${draftKind}` : 'Save & switch'}
+          </Button>
+          {test.isSuccess && !switchMut.isPending && draftKind !== 'ollama' ? (
+            <span className="flex items-center gap-1 text-xs text-emerald-700">
+              <CheckCircle2 className="h-3 w-3" /> Last test ok
+            </span>
+          ) : null}
+        </div>
       </CardContent>
     </Card>
   );

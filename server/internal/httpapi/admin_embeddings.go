@@ -162,7 +162,39 @@ func (s *Server) SwitchEmbeddingProvider(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "unknown provider kind: "+req.Kind)
 		return
 	}
-	if len(req.Config) == 0 {
+
+	// Special case for ollama: the per-kind form in the dashboard
+	// does NOT carry ollama tuning fields (those live in the
+	// runtime-config sections + env). When the admin switches back
+	// to ollama from a remote provider, the dashboard sends an empty
+	// blob; we synthesize the config here from the live runtime-cfg
+	// snapshot applied to the env-derived defaults so the next
+	// Start() has everything it needs (model, GGUF cache dir, llama
+	// bin dir, transport, …).
+	cfgBytes := req.Config
+	if req.Kind == provider.KindOllama && (len(cfgBytes) == 0 || string(cfgBytes) == "{}" || string(cfgBytes) == "null") {
+		envCfg := embedSvc.Config()
+		if envCfg == nil {
+			writeError(w, http.StatusInternalServerError, "ollama config: live cfg unavailable")
+			return
+		}
+		// Merge the latest runtime-cfg overrides on top of env so a
+		// recent PUT /admin/runtime-config (which doesn't auto-apply
+		// while a remote provider is active) takes effect on switch.
+		if s.Deps.RuntimeCfg != nil {
+			snap, snapErr := s.Deps.RuntimeCfg.Get(r.Context())
+			if snapErr == nil {
+				snap.ApplyTo(envCfg)
+			}
+		}
+		built, buildErr := embeddings.BuildOllamaConfigFromEnv(envCfg)
+		if buildErr != nil {
+			writeError(w, http.StatusInternalServerError, "build ollama config: "+buildErr.Error())
+			return
+		}
+		cfgBytes = built
+	}
+	if len(cfgBytes) == 0 {
 		writeError(w, http.StatusBadRequest, "config is required")
 		return
 	}
@@ -172,20 +204,20 @@ func (s *Server) SwitchEmbeddingProvider(w http.ResponseWriter, r *http.Request)
 	// container restart) reads the new row and tries again.
 	if err := s.Deps.EmbeddingsCfg.Save(r.Context(), embeddingscfg.Snapshot{
 		Kind:   req.Kind,
-		Config: req.Config,
+		Config: cfgBytes,
 	}, user.User.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "persist provider: "+err.Error())
 		return
 	}
 
-	if err := embedSvc.SwitchProvider(r.Context(), req.Kind, req.Config); err != nil {
+	if err := embedSvc.SwitchProvider(r.Context(), req.Kind, cfgBytes); err != nil {
 		writeError(w, http.StatusInternalServerError, "switch provider: "+err.Error())
 		return
 	}
 
 	writeJSON(w, http.StatusAccepted, activeProviderPayload{
 		Kind:   req.Kind,
-		Config: req.Config,
+		Config: cfgBytes,
 		ID:     embedSvc.EmbeddingModel(),
 	})
 }
