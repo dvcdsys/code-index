@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, CheckCircle2, Loader2, Save } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Info, Loader2, Save } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
@@ -176,6 +176,48 @@ export function EmbeddingProviderSection() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Cost & rate limits — read before picking</AlertTitle>
+          <AlertDescription>
+            <ul className="ml-4 mt-1 list-disc space-y-1 text-sm">
+              <li>
+                <strong>Ollama</strong> — free, runs the llama-server sidecar
+                locally on this machine's CPU/GPU. No external API, no rate
+                limits, no API keys.
+              </li>
+              <li>
+                <strong>OpenAI-compatible</strong> — pay-as-you-go on{' '}
+                <a
+                  href="https://platform.openai.com/account/billing"
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="underline"
+                >
+                  api.openai.com
+                </a>{' '}
+                (account billing required) or free against your own
+                self-hosted vLLM / TEI / LocalAI instance.
+              </li>
+              <li>
+                <strong>Voyage AI</strong> — paid plan strongly recommended.
+                The{' '}
+                <a
+                  href="https://dashboard.voyageai.com/"
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="underline"
+                >
+                  free tier
+                </a>{' '}
+                is capped at 3 RPM / 10K TPM — fine for a smoke test, not
+                usable for indexing a real repo. Add a payment method
+                before pointing the indexer at it.
+              </li>
+            </ul>
+          </AlertDescription>
+        </Alert>
+
         <div className="space-y-1.5">
           <Label htmlFor="provider-kind">Provider</Label>
           <select
@@ -184,9 +226,9 @@ export function EmbeddingProviderSection() {
             onChange={(e) => setDraftKind(e.target.value as EmbeddingProviderKind)}
             className="block w-full rounded-md border bg-background px-3 py-2 text-sm sm:max-w-xs"
           >
-            <option value="ollama">Ollama sidecar (local llama-server)</option>
-            <option value="openai">OpenAI-compatible (/v1/embeddings)</option>
-            <option value="voyage">Voyage AI</option>
+            <option value="ollama">Ollama sidecar (local llama-server, free)</option>
+            <option value="openai">OpenAI-compatible (/v1/embeddings, paid)</option>
+            <option value="voyage">Voyage AI (paid plan recommended)</option>
           </select>
         </div>
 
