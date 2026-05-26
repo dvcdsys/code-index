@@ -72,31 +72,47 @@ func (s *Server) GetStatus(w http.ResponseWriter, r *http.Request) {
 		_ = s.Deps.DB.QueryRowContext(r.Context(),
 			`SELECT COUNT(*) FROM index_runs WHERE status = 'running'`).Scan(&activeJobs)
 	}
+	// Provider-aware status. Footer uses these fields:
+	//   embedding_provider — active provider kind ("ollama"/"openai"/"voyage")
+	//   embedding_provider_manages_process — true only for ollama; the
+	//     footer renders a red/green dot based on liveness when true,
+	//     and a permanent green dot otherwise (HTTP-only providers
+	//     have no managed process to "die").
+	//   embedding_model — Provider.ID() of the live active provider
+	//   model_loaded — true when the active provider reports Ready;
+	//     for non-managed providers we don't ping per /status poll so
+	//     it stays true unless the env-key check inside Ready fails.
+	providerKind := ""
+	managesProcess := false
 	modelLoaded := false
-	if s.Deps.EmbeddingSvc != nil {
+	model := s.Deps.EmbeddingModel
+	if es, ok := s.Deps.EmbeddingSvc.(*embeddings.Service); ok && es != nil {
+		providerKind = es.CurrentKind()
+		if id := es.EmbeddingModel(); id != "" {
+			model = id
+		}
+		st := es.Status()
+		managesProcess = st.ManagesProcess
+		readyCtx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+		modelLoaded = es.Ready(readyCtx) == nil
+		cancel()
+	} else if s.Deps.EmbeddingSvc != nil {
+		// Test fakes that only satisfy EmbeddingsQuerier.
 		readyCtx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
 		modelLoaded = s.Deps.EmbeddingSvc.Ready(readyCtx) == nil
 		cancel()
 	}
-	// PR-E — embedding_model must reflect the LIVE config (after any
-	// dashboard runtime override + restart), not the boot-time value
-	// stamped into Deps. Fall back to Deps when the service is a fake or
-	// disabled, so test fixtures still get a stable string.
-	model := s.Deps.EmbeddingModel
-	if es, ok := s.Deps.EmbeddingSvc.(*embeddings.Service); ok && es != nil {
-		if cfg := es.Config(); cfg != nil && cfg.EmbeddingModel != "" {
-			model = cfg.EmbeddingModel
-		}
-	}
 	resp := map[string]any{
-		"status":               "ok",
-		"backend":              s.Deps.Backend,
-		"server_version":       s.Deps.ServerVersion,
-		"api_version":          s.Deps.APIVersion,
-		"model_loaded":         modelLoaded,
-		"embedding_model":      model,
-		"projects":             projectCount,
-		"active_indexing_jobs": activeJobs,
+		"status":                              "ok",
+		"backend":                             s.Deps.Backend,
+		"server_version":                      s.Deps.ServerVersion,
+		"api_version":                         s.Deps.APIVersion,
+		"model_loaded":                        modelLoaded,
+		"embedding_model":                     model,
+		"embedding_provider":                  providerKind,
+		"embedding_provider_manages_process":  managesProcess,
+		"projects":                            projectCount,
+		"active_indexing_jobs":                activeJobs,
 	}
 	// Version-check fields — folded in only when the service is wired.
 	// `update_available` is always present (false when unknown) so the

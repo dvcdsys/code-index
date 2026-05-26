@@ -48,10 +48,10 @@ type Service struct {
 	current provider.Provider
 }
 
-// New constructs a Service. If cfg.EmbeddingsEnabled is false it returns
-// a disabled Service. Otherwise it builds the configured provider
-// (ollama only for now — the persisted-provider machinery lands in a
-// later phase) and blocks until Start succeeds.
+// New constructs a Service from the env-derived config. The legacy
+// entry point: builds an ollama provider with the env-supplied
+// defaults and blocks until Start succeeds. main.go uses NewWithBoot
+// to layer the DB-persisted provider selection on top of this.
 //
 // ctx governs startup only; Stop has its own context.
 func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*Service, error) {
@@ -77,6 +77,104 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*Service
 		queue:   NewQueue(cfg.MaxEmbeddingConcurrency, time.Duration(cfg.EmbeddingQueueTimeout)*time.Second),
 		current: prov,
 	}, nil
+}
+
+// NewWithProvider constructs a Service around an already-built
+// Provider. Used by main.go's boot path: it reads the persisted
+// provider snapshot, calls provider.Build, then hands the result to
+// this constructor. The Provider must already be Start()-ed.
+func NewWithProvider(cfg *config.Config, prov provider.Provider, logger *slog.Logger) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !cfg.EmbeddingsEnabled {
+		return &Service{cfg: cfg, logger: logger, disabled: true}
+	}
+	return &Service{
+		cfg:     cfg,
+		logger:  logger,
+		queue:   NewQueue(cfg.MaxEmbeddingConcurrency, time.Duration(cfg.EmbeddingQueueTimeout)*time.Second),
+		current: prov,
+	}
+}
+
+// BuildOllamaConfigFromEnv produces the ollama provider config blob
+// derived from env (used by main.go to seed the persisted row on
+// first boot and by tests that want a "live env-default" snapshot).
+func BuildOllamaConfigFromEnv(cfg *config.Config) ([]byte, error) {
+	c := ollama.Config{
+		Model:         cfg.EmbeddingModel,
+		GGUFPath:      cfg.GGUFPath,
+		CacheDir:      cfg.GGUFCacheDir,
+		BootstrapPath: cfg.BootstrapGGUFPath,
+		BinDir:        cfg.LlamaBinDir,
+		SocketPath:    cfg.LlamaSocketPath,
+		Transport:     cfg.LlamaTransport,
+		CtxSize:       cfg.LlamaCtxSize,
+		NGpuLayers:    cfg.LlamaNGpuLayers,
+		NThreads:      cfg.LlamaNThreads,
+		BatchSize:     cfg.LlamaBatchSize,
+		StartupSec:    cfg.LlamaStartupSec,
+	}
+	return json.Marshal(c)
+}
+
+// EnvSecrets returns the production SecretLookup: os.LookupEnv. main.go
+// and the admin handlers pass it to provider.Build / Service.SwitchProvider.
+func EnvSecrets() provider.SecretLookup { return envSecrets }
+
+// SwitchProvider replaces the active provider. Steps:
+//  1. Build the new provider from kind + cfg.
+//  2. Start it (validates config / connectivity).
+//  3. Drain the queue (block new acquires, wait up to 30s).
+//  4. Swap current to new under the mutex.
+//  5. Stop the old provider on a separate goroutine so a slow SIGTERM
+//     does not hold the admin request.
+//
+// If step 2 fails, the old provider stays active and the error is
+// returned to the caller. If step 3 times out we proceed anyway,
+// favouring availability — in-flight calls finish on the old
+// provider and the new takes over for everything subsequent.
+func (s *Service) SwitchProvider(ctx context.Context, kind string, cfgBytes []byte) error {
+	if s == nil || s.disabled {
+		return ErrDisabled
+	}
+
+	newProv, err := provider.Build(ctx, kind, cfgBytes, envSecrets, s.logger)
+	if err != nil {
+		return fmt.Errorf("build %s provider: %w", kind, err)
+	}
+	if err := newProv.Start(ctx); err != nil {
+		return fmt.Errorf("start %s provider: %w", kind, err)
+	}
+
+	s.queue.BlockNew()
+	drainCtx, drainCancel := context.WithTimeout(ctx, 30*time.Second)
+	if derr := s.queue.WaitDrain(drainCtx); derr != nil {
+		s.logger.Warn("embeddings: drain timed out during switch; proceeding anyway",
+			"in_flight", s.queue.InFlight(), "err", derr,
+		)
+	}
+	drainCancel()
+	s.queue.Resume()
+
+	s.mu.Lock()
+	old := s.current
+	s.current = newProv
+	s.mu.Unlock()
+
+	if old != nil {
+		go func(p provider.Provider) {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := p.Stop(stopCtx); err != nil {
+				s.logger.Warn("embeddings: old provider Stop returned error",
+					"kind", p.Kind(), "err", err)
+			}
+		}(old)
+	}
+	s.logger.Info("embeddings: switched provider", "kind", kind, "id", newProv.ID())
+	return nil
 }
 
 // buildOllamaFromConfig assembles an ollama.Provider out of the env-

@@ -13,6 +13,7 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/groups"
@@ -81,6 +82,11 @@ type Deps struct {
 	// RuntimeCfg backs the dashboard's /admin/runtime-config endpoints. Nil
 	// in router-only tests; admin handlers return 503 when absent.
 	RuntimeCfg *runtimecfg.Service
+	// EmbeddingsCfg persists the pluggable-provider selection + config
+	// blob in runtime_settings. Read by the /embedding-providers admin
+	// handlers; nil in router-only tests (those handlers 503 when
+	// absent).
+	EmbeddingsCfg *embeddingscfg.Service
 	// VersionCheck polls GitHub for newer server releases. Nil = feature
 	// off; GetStatus then omits the version-check fields entirely.
 	VersionCheck *versioncheck.Service
@@ -183,6 +189,15 @@ func NewRouter(d Deps) http.Handler {
 	// All API operations — chi.HandlerFromMux walks the spec and registers
 	// one chi route per OpenAPI operation, dispatching to Server methods.
 	openapi.HandlerFromMux(srv, r)
+
+	// Embedding-provider admin endpoints — mounted directly because
+	// they are not yet in openapi.yaml. The handlers each gate on
+	// mustBeAdmin; nothing reaches them without an admin session /
+	// API key.
+	r.Get("/api/v1/admin/embedding-providers", srv.ListEmbeddingProviders)
+	r.Get("/api/v1/admin/embedding-providers/active", srv.GetActiveEmbeddingProvider)
+	r.Put("/api/v1/admin/embedding-providers/active", srv.SwitchEmbeddingProvider)
+	r.Post("/api/v1/admin/embedding-providers/{kind}/test", srv.TestEmbeddingProvider)
 
 	return r
 }

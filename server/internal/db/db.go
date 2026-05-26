@@ -64,6 +64,7 @@ var registeredMigrations = []migration{
 	{9, "git_repos_polling", func(db *sql.DB, _ OpenOptions) error { return migrateGitReposPolling(db) }},
 	{10, "auth_groups_ownership", func(db *sql.DB, _ OpenOptions) error { return migrateAuthGroupsOwnership(db) }},
 	{11, "project_machine_identity", func(db *sql.DB, _ OpenOptions) error { return migrateProjectMachineIdentity(db) }},
+	{12, "embedding_provider", func(db *sql.DB, _ OpenOptions) error { return migrateEmbeddingProvider(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -715,6 +716,48 @@ func migratePathHash(db *sql.DB) error {
 	for _, hp := range hostPaths {
 		if _, err := db.Exec(`UPDATE projects SET path_hash = ? WHERE host_path = ?`, HashHostPath(hp), hp); err != nil {
 			return fmt.Errorf("backfill path_hash: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateEmbeddingProvider adds the pluggable-provider columns to
+// runtime_settings:
+//   - embedding_provider TEXT — kind selector ("ollama"/"openai"/"voyage")
+//   - embedding_provider_config TEXT — provider-specific JSON blob
+//
+// Rows stay NULL until the admin first persists a non-default provider;
+// boot logic in main.go then falls through to the env-derived ollama
+// defaults exactly as before. Idempotent — checked via PRAGMA
+// table_info, ALTER only on absence.
+func migrateEmbeddingProvider(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(runtime_settings)`)
+	if err != nil {
+		return fmt.Errorf("table_info runtime_settings: %w", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if !have["embedding_provider"] {
+		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN embedding_provider TEXT`); err != nil {
+			return fmt.Errorf("add embedding_provider column: %w", err)
+		}
+	}
+	if !have["embedding_provider_config"] {
+		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN embedding_provider_config TEXT`); err != nil {
+			return fmt.Errorf("add embedding_provider_config column: %w", err)
 		}
 	}
 	return nil

@@ -1,0 +1,241 @@
+// admin_embeddings.go implements the pluggable-embedding-provider
+// admin surface:
+//
+//	GET  /api/v1/admin/embedding-providers          — registered kinds + schemas + env-key readiness
+//	GET  /api/v1/admin/embedding-providers/active   — currently active kind + persisted config
+//	PUT  /api/v1/admin/embedding-providers/active   — atomic switch (validate → persist → swap)
+//	POST /api/v1/admin/embedding-providers/{kind}/test — pre-save sanity check using submitted config
+//
+// All routes are admin-only (mustBeAdmin). The handlers below are
+// mounted directly onto the chi router in router.go — they are not
+// part of the OpenAPI-generated handler set so the openapi.yaml /
+// regenerated openapi.gen.go can be updated independently.
+package httpapi
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+
+	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
+	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
+	"github.com/go-chi/chi/v5"
+)
+
+// providerInfoPayload is the per-kind entry in GET /embedding-providers.
+type providerInfoPayload struct {
+	Kind       string              `json:"kind"`
+	Schema     json.RawMessage     `json:"schema"`
+	SecretEnvs []secretEnvPayload  `json:"secret_envs"`
+}
+
+// secretEnvPayload tells the dashboard which env-var names a provider
+// reads and whether they are currently set on the server. Used to
+// render the "set CIX_VOYAGE_API_KEY before saving" banner.
+type secretEnvPayload struct {
+	Name string `json:"name"`
+	Set  bool   `json:"set"`
+}
+
+// activeProviderPayload is the GET /embedding-providers/active body.
+// Config is the persisted JSON blob, returned verbatim — providers
+// store env-key NAMES rather than values, so this is safe to render
+// to admin clients.
+type activeProviderPayload struct {
+	Kind   string          `json:"kind"`
+	Config json.RawMessage `json:"config"`
+	// ID is Provider.ID() — surfaced so the UI can compare against
+	// each project's indexed_with_model and render the stale-model
+	// badge without going through /status.
+	ID string `json:"id"`
+}
+
+// switchProviderRequest is the PUT /embedding-providers/active body.
+type switchProviderRequest struct {
+	Kind   string          `json:"kind"`
+	Config json.RawMessage `json:"config"`
+}
+
+// testProviderResponse is what /test returns on success.
+type testProviderResponse struct {
+	OK        bool `json:"ok"`
+	Dimension int  `json:"dimension,omitempty"`
+}
+
+// ListEmbeddingProviders — GET /api/v1/admin/embedding-providers.
+func (s *Server) ListEmbeddingProviders(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
+	kinds := provider.Kinds()
+	out := make([]providerInfoPayload, 0, len(kinds))
+	for _, kind := range kinds {
+		f, ok := provider.Lookup(kind)
+		if !ok {
+			continue
+		}
+		envs := f.SecretEnvVars()
+		envPayload := make([]secretEnvPayload, 0, len(envs))
+		for _, name := range envs {
+			_, present := os.LookupEnv(name)
+			envPayload = append(envPayload, secretEnvPayload{Name: name, Set: present})
+		}
+		out = append(out, providerInfoPayload{
+			Kind:       kind,
+			Schema:     f.SchemaJSON(),
+			SecretEnvs: envPayload,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"providers": out})
+}
+
+// GetActiveEmbeddingProvider — GET /api/v1/admin/embedding-providers/active.
+func (s *Server) GetActiveEmbeddingProvider(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
+	embedSvc, ok := s.Deps.EmbeddingSvc.(*embeddings.Service)
+	if !ok || embedSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "embeddings service not available")
+		return
+	}
+	if s.Deps.EmbeddingsCfg == nil {
+		writeError(w, http.StatusServiceUnavailable, "embedding provider store not available")
+		return
+	}
+	snap, has, err := s.Deps.EmbeddingsCfg.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load active provider: "+err.Error())
+		return
+	}
+	if !has {
+		// No persisted row → fall back to the live provider's kind and
+		// the env-derived config. This handles fresh installs where
+		// the DB hasn't been seeded yet.
+		snap = embeddingscfg.Snapshot{Kind: embedSvc.CurrentKind()}
+	}
+	writeJSON(w, http.StatusOK, activeProviderPayload{
+		Kind:   snap.Kind,
+		Config: snap.Config,
+		ID:     embedSvc.EmbeddingModel(),
+	})
+}
+
+// SwitchEmbeddingProvider — PUT /api/v1/admin/embedding-providers/active.
+//
+// Atomic switch: validate the new config by building + Starting a
+// provider, persist on success, then swap the live Service over.
+// On any failure the existing provider stays untouched.
+func (s *Server) SwitchEmbeddingProvider(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.mustBeAdmin(w, r)
+	if !ok {
+		return
+	}
+	embedSvc, ok := s.Deps.EmbeddingSvc.(*embeddings.Service)
+	if !ok || embedSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "embeddings service not available")
+		return
+	}
+	if s.Deps.EmbeddingsCfg == nil {
+		writeError(w, http.StatusServiceUnavailable, "embedding provider store not available")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	var req switchProviderRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "decode body: "+err.Error())
+		return
+	}
+	if req.Kind == "" {
+		writeError(w, http.StatusBadRequest, "kind is required")
+		return
+	}
+	if _, ok := provider.Lookup(req.Kind); !ok {
+		writeError(w, http.StatusBadRequest, "unknown provider kind: "+req.Kind)
+		return
+	}
+	if len(req.Config) == 0 {
+		writeError(w, http.StatusBadRequest, "config is required")
+		return
+	}
+
+	// Persist BEFORE swap so the DB always leads the live state.
+	// If SwitchProvider then fails, the operator's next call (or
+	// container restart) reads the new row and tries again.
+	if err := s.Deps.EmbeddingsCfg.Save(r.Context(), embeddingscfg.Snapshot{
+		Kind:   req.Kind,
+		Config: req.Config,
+	}, user.User.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "persist provider: "+err.Error())
+		return
+	}
+
+	if err := embedSvc.SwitchProvider(r.Context(), req.Kind, req.Config); err != nil {
+		writeError(w, http.StatusInternalServerError, "switch provider: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, activeProviderPayload{
+		Kind:   req.Kind,
+		Config: req.Config,
+		ID:     embedSvc.EmbeddingModel(),
+	})
+}
+
+// TestEmbeddingProvider — POST /api/v1/admin/embedding-providers/{kind}/test.
+//
+// Builds a throw-away provider from the submitted config (without
+// persisting it), Starts it, then Stops it. Returns the detected
+// dimension and a success flag, or a typed error message the
+// dashboard can render verbatim.
+func (s *Server) TestEmbeddingProvider(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
+	kind := chi.URLParam(r, "kind")
+	if kind == "" {
+		writeError(w, http.StatusBadRequest, "kind is required")
+		return
+	}
+	if _, ok := provider.Lookup(kind); !ok {
+		writeError(w, http.StatusBadRequest, "unknown provider kind: "+kind)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	if len(body) == 0 {
+		writeError(w, http.StatusBadRequest, "config body is required")
+		return
+	}
+
+	prov, err := provider.Build(r.Context(), kind, body, embeddings.EnvSecrets(), s.Deps.Logger)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "build provider: "+err.Error())
+		return
+	}
+	if err := prov.Start(r.Context()); err != nil {
+		// Distinguish missing-key from other failures — the dashboard
+		// renders these differently (banner vs error toast).
+		if errors.Is(err, provider.ErrMissingAPIKey) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	dim := prov.Dimension()
+	_ = prov.Stop(r.Context())
+	writeJSON(w, http.StatusOK, testProviderResponse{OK: true, Dimension: dim})
+}

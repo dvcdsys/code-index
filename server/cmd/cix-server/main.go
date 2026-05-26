@@ -21,6 +21,8 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
+	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
 	"github.com/dvcdsys/code-index/server/internal/githubapi"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/groups"
@@ -169,7 +171,48 @@ func run() error {
 	// window for the HF download path on cold cache.
 	startupCtx, startupCancel := context.WithTimeout(context.Background(),
 		time.Duration(cfg.LlamaStartupSec)*time.Second+30*time.Second)
-	embedSvc, err := embeddings.New(startupCtx, cfg, logger)
+
+	// Bootstrap pluggable-provider selection. If the runtime_settings row
+	// has no embedding_provider yet (fresh install or pre-migration DB),
+	// seed it with the env-derived ollama config and use that for boot.
+	// Otherwise the persisted blob is authoritative — env vars (other
+	// than API-key envs that providers read live) are ignored.
+	embedCfgStore := embeddingscfg.New(database)
+	persistedProv, hasProv, err := embedCfgStore.Get(context.Background())
+	if err != nil {
+		startupCancel()
+		return fmt.Errorf("load embedding provider config: %w", err)
+	}
+	if !hasProv && cfg.EmbeddingsEnabled {
+		seed, serr := embeddings.BuildOllamaConfigFromEnv(cfg)
+		if serr != nil {
+			startupCancel()
+			return fmt.Errorf("seed embedding provider config: %w", serr)
+		}
+		if serr := embedCfgStore.Save(context.Background(),
+			embeddingscfg.Snapshot{Kind: "ollama", Config: seed}, ""); serr != nil {
+			logger.Warn("could not seed embedding provider config (continuing on env)", "err", serr)
+		}
+		persistedProv = embeddingscfg.Snapshot{Kind: "ollama", Config: seed}
+		hasProv = true
+	}
+
+	var embedSvc *embeddings.Service
+	if !cfg.EmbeddingsEnabled || !hasProv {
+		// Legacy / disabled path — fall back to env-only ollama wiring.
+		embedSvc, err = embeddings.New(startupCtx, cfg, logger)
+	} else {
+		prov, perr := provider.Build(startupCtx, persistedProv.Kind, persistedProv.Config, embeddings.EnvSecrets(), logger)
+		if perr != nil {
+			startupCancel()
+			return fmt.Errorf("build %s provider: %w", persistedProv.Kind, perr)
+		}
+		if perr := prov.Start(startupCtx); perr != nil {
+			startupCancel()
+			return fmt.Errorf("start %s provider: %w", persistedProv.Kind, perr)
+		}
+		embedSvc = embeddings.NewWithProvider(cfg, prov, logger)
+	}
 	startupCancel()
 	if err != nil {
 		return fmt.Errorf("embeddings: %w", err)
@@ -408,6 +451,7 @@ func run() error {
 		VectorStore:       vs,
 		Indexer:           idx,
 		RuntimeCfg:        rcfg,
+		EmbeddingsCfg:     embedCfgStore,
 		VersionCheck:      vcSvc,
 		Workspaces:        wsSvc,
 		GithubTokens:      ghSvc,
