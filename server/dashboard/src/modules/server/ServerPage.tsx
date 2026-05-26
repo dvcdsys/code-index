@@ -6,8 +6,8 @@ import type { RuntimeConfig, RuntimeConfigUpdate } from '@/api/types';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
 import { Skeleton } from '@/ui/skeleton';
+import { useServerStatus } from '@/lib/useServerStatus';
 import {
-  useActiveProvider,
   useRestartSidecar,
   useRuntimeConfig,
   useSidecarStatus,
@@ -69,7 +69,14 @@ export default function ServerPage() {
   const status = useSidecarStatus();
   const update = useUpdateRuntimeConfig();
   const restart = useRestartSidecar();
-  const activeProvider = useActiveProvider();
+  // /status is shared with the footer (already polled every 30s) and
+  // its embedding_provider field reflects the LIVE active provider —
+  // the right signal for "should we show ollama sections?". We default
+  // to true while it loads so the page doesn't flash empty between
+  // mount and the first /status response.
+  const serverStatus = useServerStatus();
+  const activeKind = serverStatus.data?.embedding_provider ?? 'ollama';
+  const showOllamaSections = activeKind === 'ollama';
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -140,18 +147,20 @@ export default function ServerPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Server</h1>
           <p className="text-sm text-muted-foreground">
-            Embedding model, indexing parameters, sidecar lifecycle. Saved
-            overrides land in the database and are reapplied on the next
-            sidecar restart — env vars stay as bootstrap defaults.
+            {showOllamaSections
+              ? 'Embedding provider + model, indexing parameters, sidecar lifecycle. Saved overrides land in the database and are reapplied on the next sidecar restart — env vars stay as bootstrap defaults.'
+              : 'Embedding provider selection. For remote providers (OpenAI-compatible, Voyage) all tuning lives inside the provider form below — there is no sidecar to restart and no GPU / batch knobs.'}
           </p>
         </div>
-        <Button
-          onClick={() => setConfirmOpen(true)}
-          disabled={!dirty || isPending || disabled}
-        >
-          {isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
-          Save &amp; Restart
-        </Button>
+        {showOllamaSections ? (
+          <Button
+            onClick={() => setConfirmOpen(true)}
+            disabled={!dirty || isPending || disabled}
+          >
+            {isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
+            Save &amp; Restart
+          </Button>
+        ) : null}
       </header>
 
       {disabled ? (
@@ -169,13 +178,18 @@ export default function ServerPage() {
       <EmbeddingProviderSection />
 
       {/*
-        Ollama-specific tuning + sidecar status — rendered only when the
-        active provider is ollama. For openai/voyage these sections do
-        not apply: there's no GGUF, no llama-server child to restart,
-        no GPU layers / threads. The provider form above is the only
-        edit surface in that case.
+        Ollama-specific cards — rendered only when the active provider
+        is ollama. For openai/voyage these sections do not apply:
+        there's no GGUF, no llama-server child to restart, no GPU
+        layers / threads, no batch size knob. The provider form above
+        is the only edit surface in that case.
+
+        Concurrency lives inside AdvancedSection together with the
+        ollama-only batch size — for v1 we hide the whole card on
+        remote providers. A follow-up may split concurrency into a
+        provider-agnostic card if operators ask for it.
       */}
-      {activeProvider.data?.kind === 'ollama' ? (
+      {showOllamaSections ? (
         <>
           <EmbeddingModelSection
             config={cfg.data}
@@ -194,16 +208,16 @@ export default function ServerPage() {
           />
 
           <SidecarSection />
+
+          <AdvancedSection
+            config={cfg.data}
+            draftConcurrency={draft.max_embedding_concurrency}
+            draftBatch={draft.llama_batch_size}
+            onDraftConcurrency={(n) => setDraft({ ...draft, max_embedding_concurrency: n })}
+            onDraftBatch={(n) => setDraft({ ...draft, llama_batch_size: n })}
+          />
         </>
       ) : null}
-
-      <AdvancedSection
-        config={cfg.data}
-        draftConcurrency={draft.max_embedding_concurrency}
-        draftBatch={draft.llama_batch_size}
-        onDraftConcurrency={(n) => setDraft({ ...draft, max_embedding_concurrency: n })}
-        onDraftBatch={(n) => setDraft({ ...draft, llama_batch_size: n })}
-      />
 
       <SaveAndRestartDialog
         open={confirmOpen}
