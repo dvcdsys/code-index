@@ -104,23 +104,27 @@ const defaultMaxInputBytes = 30_000
 // bytesPerToken is the chars-per-token heuristic used to estimate
 // token cost without a real tokenizer. Voyage's own docs at
 // https://docs.voyageai.com/docs/tokenization recommend "dividing
-// character count by 5" as the rough rule of thumb (they publish
-// real HF tokenizers on huggingface.co/voyageai/voyage-* but
-// pulling one in here would require a CGO Rust dep — deferred).
+// character count by 5" for English prose, but cix is primarily a
+// CODE-indexing workload and dense source code runs much hotter:
+// production logs against voyage-code-3 show 1 token ≈ 1.4 bytes
+// for tight Go/Rust files, so a /5 estimate under-counts by
+// ~3.6×. That's exactly the kind of error that ships an
+// estimated-51K-token batch into a real 187K-token POST and
+// triggers Voyage's 120K hard-cap 400.
 //
-// 5 is calibrated for prose; dense source code can run hotter
-// (1 token ≈ 2–3 bytes), which would make this estimator UNDER-
-// count for code. That's OK: planBatches may then pack inputs
-// tighter than the real cap permits, but embedWithAdaptiveSplit
-// detects the resulting 400 ("max tokens per batch") and bisects.
-// We trade a few extra round-trips on dense files for far fewer
-// spurious splits on ordinary content.
+// 2 is the safer baseline: matches code reality within a small
+// margin, and over-estimates prose by ~2.5× (fewer inputs packed
+// per batch — more round-trips, never a 400). The
+// embedWithAdaptiveSplit bisect remains as a residual safety net
+// for outliers (Voyage publishes real HF tokenizers on
+// huggingface.co/voyageai/voyage-* but pulling one in here would
+// require a CGO Rust dep — deferred to a follow-up).
 //
 // len() in Go returns BYTE length, not rune count, so multi-byte
 // UTF-8 input (Cyrillic comments, CJK) gets over-counted relative
 // to Voyage's character-based heuristic — safe direction (more
 // splits, never fewer).
-const bytesPerToken = 5
+const bytesPerToken = 2
 
 // Config is the persisted shape of the voyage provider's config blob.
 type Config struct {
@@ -466,9 +470,9 @@ func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputTyp
 }
 
 // embedWithAdaptiveSplit wraps embed() with a defensive bisect-on-400
-// loop. Our token estimator (bytes/3) is conservative for prose but
-// not always accurate for dense code; Voyage's real tokenizer can
-// charge more than we predict. On a "batch too large" 400 we split
+// loop. Our byte→token estimator (see bytesPerToken) cannot match
+// Voyage's real tokenizer exactly; pathological inputs may still
+// overflow the per-batch cap. On a "batch too large" 400 we split
 // the batch in half and retry both halves recursively. When the
 // batch is already a single input and STILL too large there's
 // nothing to bisect — we return a clear error pointing the operator

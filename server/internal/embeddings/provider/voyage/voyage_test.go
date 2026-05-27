@@ -174,11 +174,11 @@ func TestEmbedDocumentsSplitsOversizeBatch(t *testing.T) {
 // TestPlanBatches_SplitsByTokenBudget covers the second cap on per-
 // request batch size: even when input count is under maxBatchSize,
 // Voyage hard-limits the request to 120K tokens. Our estimator uses
-// bytesPerToken=5 so a 600_000-byte text estimates to 120_000 tokens,
+// bytesPerToken=2 so a 240_000-byte text estimates to 120_000 tokens,
 // strictly above the 100K budget. Mixing one huge text with several
 // smaller ones should produce multiple batches.
 func TestPlanBatches_SplitsByTokenBudget(t *testing.T) {
-	big := strings.Repeat("x", 600_000) // ~120_000 est tokens at bytesPerToken=5
+	big := strings.Repeat("x", 240_000) // ~120_000 est tokens at bytesPerToken=2
 	small := "tiny"
 	texts := []string{big, small, small, small, small, small}
 
@@ -245,11 +245,11 @@ func TestEmbedDocumentsSplitsByTokenBudget(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// Two big texts ~100K est tokens each (at bytesPerToken=5) →
+	// Two big texts ~100K est tokens each (at bytesPerToken=2) →
 	// should produce >= 2 POSTs. MaxInputBytes set high so the
 	// per-input sliding-window split doesn't trigger; we want to
 	// exercise the batch-level token cap specifically.
-	big := strings.Repeat("x", 500_000)
+	big := strings.Repeat("x", 200_000)
 	texts := []string{big, big}
 	p := New(Config{
 		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-code-3", OutputDtype: DtypeFloat,
@@ -530,8 +530,8 @@ func TestRateLimitTPMThrottlesTokens(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// 300K bytes ≈ 60K est tokens (bytesPerToken=5) — half the burst budget.
-	big := strings.Repeat("x", 300_000)
+	// 120K bytes ≈ 60K est tokens (bytesPerToken=2) — half the burst budget.
+	big := strings.Repeat("x", 120_000)
 
 	// First call drains 60K of the 100K-burst bucket: instant.
 	if _, err := p.EmbedQuery(ctx, big); err != nil {
