@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 )
@@ -262,6 +263,102 @@ func TestEmbedDocumentsSplitsByTokenBudget(t *testing.T) {
 	}
 }
 
+// TestSplitOversizeInput exercises the byte-window splitter
+// directly. Covers: small inputs pass through as a singleton
+// slice; oversize ASCII split into N windows; UTF-8 boundary
+// respected (no codepoint cut in half).
+func TestSplitOversizeInput(t *testing.T) {
+	t.Run("under cap returns singleton", func(t *testing.T) {
+		got := splitOversizeInput("hello world", 100)
+		if len(got) != 1 || got[0] != "hello world" {
+			t.Errorf("got %v, want [hello world]", got)
+		}
+	})
+
+	t.Run("ASCII over cap splits to N windows", func(t *testing.T) {
+		text := strings.Repeat("x", 250)
+		got := splitOversizeInput(text, 100)
+		if len(got) != 3 {
+			t.Fatalf("got %d windows, want 3", len(got))
+		}
+		joined := strings.Join(got, "")
+		if joined != text {
+			t.Errorf("rejoin mismatch: got len=%d, want len=%d", len(joined), len(text))
+		}
+		for i, w := range got {
+			if len(w) > 100 {
+				t.Errorf("window %d has %d bytes, want <= 100", i, len(w))
+			}
+		}
+	})
+
+	t.Run("UTF-8 multi-byte boundary respected", func(t *testing.T) {
+		// 100 Cyrillic letters (2 bytes each in UTF-8) = 200 bytes.
+		// Split cap = 50 bytes. If we split naively at byte 50 we'd
+		// cut a 2-byte rune in half — utf8.ValidString would fail.
+		text := strings.Repeat("щ", 100)
+		got := splitOversizeInput(text, 50)
+		for i, w := range got {
+			if !utf8.ValidString(w) {
+				t.Errorf("window %d is not valid UTF-8: bytes=%v", i, []byte(w))
+			}
+		}
+		// Rejoin must reproduce the original byte-for-byte.
+		if joined := strings.Join(got, ""); joined != text {
+			t.Errorf("rejoin mismatch: lost %d bytes", len(text)-len(joined))
+		}
+	})
+}
+
+// TestEmbedDocuments_AveragesOversizeInputWindows covers the
+// end-to-end sliding-window behaviour: a 250-byte input with
+// MaxInputBytes=100 must be POSTed as 3 separate windows; the
+// returned vector must be the element-wise mean of the 3 window
+// vectors. Mirrors the ollama TokenizeAndEmbed averaging logic.
+func TestEmbedDocuments_AveragesOversizeInputWindows(t *testing.T) {
+	var postCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&postCount, 1)
+		raw, _ := io.ReadAll(r.Body)
+		var req embedRequest
+		_ = json.Unmarshal(raw, &req)
+		// Return a different constant vector per window position so
+		// the average is easy to assert.
+		items := make([]map[string]any, len(req.Input))
+		for i := range req.Input {
+			// Each window's vector = [i+1.0] so 3 windows give
+			// [1.0, 2.0, 3.0] → average 2.0.
+			items[i] = map[string]any{"index": i, "embedding": []float32{float32(i + 1)}}
+		}
+		body, _ := json.Marshal(map[string]any{
+			"data":  items,
+			"model": req.Model,
+			"usage": map[string]int{"total_tokens": 1},
+		})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-code-3", OutputDtype: DtypeFloat,
+		MaxInputBytes: 100,
+	}, fixedSecrets("K", "v"), nil)
+
+	text := strings.Repeat("x", 250) // → 3 windows of 100/100/50 bytes
+	vecs, err := p.EmbedDocuments(context.Background(), []string{text})
+	if err != nil {
+		t.Fatalf("EmbedDocuments: %v", err)
+	}
+	if len(vecs) != 1 {
+		t.Fatalf("got %d vectors, want 1 (averaged)", len(vecs))
+	}
+	// Stub returned [1.0, 2.0, 3.0] for the three windows → mean is 2.0.
+	if got := vecs[0][0]; got < 1.99 || got > 2.01 {
+		t.Errorf("averaged vector[0] = %v, want ~2.0", got)
+	}
+}
+
 // TestEmbedDocuments_BisectsOnBatchTooLarge covers the adaptive
 // recovery path: when Voyage returns 400 "max allowed tokens per
 // submitted batch is 120000. Your batch has N tokens" the provider
@@ -420,6 +517,10 @@ func TestRateLimitTPMThrottlesTokens(t *testing.T) {
 		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-3", OutputDtype: DtypeFloat,
 		// burst = maxTokensPerBatch (100K), refill rate 600K/min = 10K/s.
 		RateLimitTPM: 600_000,
+		// Disable the per-input byte-window split for this test —
+		// we want to send the full 180K-byte input in one POST so
+		// the token-budget bucket actually sees ~60K tokens at once.
+		MaxInputBytes: 1_000_000,
 	}, fixedSecrets("K", "v"), nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

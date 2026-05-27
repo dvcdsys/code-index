@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/time/rate"
 
@@ -86,6 +87,20 @@ const defaultMaxBatchSize = 128
 // byte→token estimation error.
 const defaultMaxTokensPerBatch = 100_000
 
+// defaultMaxInputBytes caps the byte-length of any SINGLE input
+// (one chunk) before it goes to Voyage. When a chunk exceeds this
+// the provider splits it into non-overlapping byte windows and
+// averages the resulting per-window vectors — same pattern as the
+// ollama provider's TokenizeAndEmbed, but byte-based here because
+// Voyage doesn't expose a tokenize endpoint.
+//
+// Sized for voyage-code-3's 32K-token per-input context window
+// with headroom: worst-case dense code can hit ~1 byte / token,
+// so 30K bytes ≈ 30K tokens, leaving the model 2K tokens of
+// margin. Prose typically has ~4 bytes / token, so a 30K-byte
+// English passage is ~7.5K tokens — well under the cap.
+const defaultMaxInputBytes = 30_000
+
 // bytesPerToken is a conservative chars-per-token heuristic used to
 // estimate the request's token cost without a real tokenizer. Voyage
 // does not publish their tokenizer for client-side use; empirically
@@ -127,6 +142,16 @@ type Config struct {
 	// use the default (100K with 20K headroom from Voyage's 120K
 	// hard cap).
 	MaxTokensPerRequest int `json:"max_tokens_per_request,omitempty"`
+
+	// MaxInputBytes caps the byte-length of any SINGLE input before
+	// the provider splits it into byte-aligned windows + averages
+	// the resulting vectors. 0 → use defaultMaxInputBytes (sized
+	// for voyage-code-3's 32K-token per-input context window with
+	// margin). The operator only needs to override when running a
+	// model with a substantially larger context (e.g. future
+	// voyage-* with 64K context) or a different bytes-per-token
+	// regime (heavily non-ASCII content).
+	MaxInputBytes int `json:"max_input_bytes,omitempty"`
 }
 
 // maxBatchSize returns the effective per-POST input cap: explicit
@@ -144,6 +169,62 @@ func (c *Config) maxTokensPerBatch() int {
 		return c.MaxTokensPerRequest
 	}
 	return defaultMaxTokensPerBatch
+}
+
+// maxInputBytes returns the effective per-input byte cap (defines
+// when splitOversizeInput kicks in).
+func (c *Config) maxInputBytes() int {
+	if c.MaxInputBytes > 0 {
+		return c.MaxInputBytes
+	}
+	return defaultMaxInputBytes
+}
+
+// splitOversizeInput slices text into non-overlapping byte windows
+// no larger than maxBytes each, aligned to UTF-8 rune boundaries so
+// we never cut a multi-byte character mid-sequence. Returns the
+// original text in a single-element slice when it's already small
+// enough — common case is zero allocations beyond the slice header.
+//
+// Why byte-based rather than token-aligned: Voyage doesn't expose a
+// /tokenize endpoint we can call client-side. The ollama provider
+// gets to split at exact token boundaries (CLS + content_window +
+// SEP) because llama-server tokenises for us. Voyage's real
+// tokenizer is opaque, so we approximate with bytes. The adaptive
+// bisect on 400 (see embedWithAdaptiveSplit) is the safety net
+// when this approximation under-counts.
+func splitOversizeInput(text string, maxBytes int) []string {
+	if maxBytes <= 0 || len(text) <= maxBytes {
+		return []string{text}
+	}
+	var windows []string
+	start := 0
+	for start < len(text) {
+		end := start + maxBytes
+		if end >= len(text) {
+			windows = append(windows, text[start:])
+			break
+		}
+		// Walk backward to the nearest rune-start byte so we never
+		// split a multi-byte UTF-8 character in the middle.
+		// utf8.RuneStart returns true for ASCII (single-byte) and
+		// for the leading byte of a multi-byte sequence.
+		for end > start && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		if end == start {
+			// Degenerate: maxBytes < the length of the next rune.
+			// Cut at the original boundary to make progress; the
+			// resulting partial codepoint is still bytes Voyage
+			// can tokenise (just less meaningfully). In practice
+			// maxBytes is in the tens of thousands so this branch
+			// is unreachable on real input.
+			end = start + maxBytes
+		}
+		windows = append(windows, text[start:end])
+		start = end
+	}
+	return windows
 }
 
 // Provider is the Voyage HTTP client.
@@ -256,7 +337,7 @@ func (p *Provider) Status() provider.Status {
 }
 
 func (p *Provider) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
-	vecs, err := p.embedWithAdaptiveSplit(ctx, []string{query}, "query")
+	vecs, err := p.embedAndAverage(ctx, []string{query}, "query")
 	if err != nil {
 		return nil, err
 	}
@@ -267,17 +348,66 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	batches := planBatches(texts, p.cfg.maxBatchSize(), p.cfg.maxTokensPerBatch())
+	return p.embedAndAverage(ctx, texts, "document")
+}
+
+// embedAndAverage is the per-input sliding-window pipeline (mirrors
+// ollama.Provider.TokenizeAndEmbed, but byte-based since Voyage has
+// no tokenize endpoint we can hit):
+//
+//  1. Walk every input. If its byte-length exceeds maxInputBytes,
+//     split at rune-aligned boundaries into N non-overlapping
+//     windows. Remember which original each window belongs to via
+//     a (start, length) span table.
+//  2. Send the expanded slice through planBatches → POST chains
+//     with the same adaptive-bisect-on-400 behaviour as before.
+//  3. Reassemble: for inputs that produced multiple windows,
+//     average the per-window vectors back to a single vector.
+//     For inputs that fit unchanged, the vector passes through.
+//
+// The averaging step is what keeps tail content of an over-long
+// chunk from being dropped (which is what truncation:true would do
+// upstream). The trade-off is N times more POST/token cost per
+// such chunk, but oversize chunks are rare on well-chunked
+// indexes — the indexer should already be cutting at function /
+// class boundaries.
+func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputType string) ([][]float32, error) {
+	maxIn := p.cfg.maxInputBytes()
+
+	// Phase 1: expand oversize inputs into windows; track spans.
+	type span struct{ start, length int }
+	spans := make([]span, len(texts))
+	var expanded []string
+	totalSplits := 0
+	for i, t := range texts {
+		windows := splitOversizeInput(t, maxIn)
+		spans[i] = span{start: len(expanded), length: len(windows)}
+		expanded = append(expanded, windows...)
+		if len(windows) > 1 {
+			totalSplits += len(windows)
+		}
+	}
+	if totalSplits > 0 {
+		p.logger.Info("voyage: oversize inputs split into byte-windows",
+			"original_inputs", len(texts),
+			"total_windows", len(expanded),
+			"split_windows", totalSplits,
+			"max_input_bytes", maxIn,
+		)
+	}
+
+	// Phase 2: batch + POST as before, on the expanded slice.
+	batches := planBatches(expanded, p.cfg.maxBatchSize(), p.cfg.maxTokensPerBatch())
 	if len(batches) > 1 {
 		p.logger.Info("voyage: splitting batch",
 			"model", p.cfg.Model,
-			"total_inputs", len(texts),
+			"total_inputs", len(expanded),
 			"sub_batches", len(batches),
 			"limit_inputs", p.cfg.maxBatchSize(),
 			"limit_tokens", p.cfg.maxTokensPerBatch(),
 		)
 	}
-	out := make([][]float32, 0, len(texts))
+	allVecs := make([][]float32, 0, len(expanded))
 	offset := 0
 	for i, batch := range batches {
 		p.logger.Debug("voyage: sub-batch POST",
@@ -286,15 +416,44 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 			"inputs", len(batch),
 			"est_tokens", sumEstimateTokens(batch),
 		)
-		part, err := p.embedWithAdaptiveSplit(ctx, batch, "document")
+		part, err := p.embedWithAdaptiveSplit(ctx, batch, inputType)
 		if err != nil {
 			return nil, fmt.Errorf("voyage: sub-batch %d/%d (offset=%d, inputs=%d, ~%d tokens): %w",
 				i+1, len(batches), offset, len(batch), sumEstimateTokens(batch), err)
 		}
-		out = append(out, part...)
+		allVecs = append(allVecs, part...)
 		offset += len(batch)
 	}
-	return out, nil
+
+	// Phase 3: reassemble — average sub-window vectors back to one
+	// vector per original input. Vectors that came through alone
+	// (one-window inputs) pass through unchanged.
+	if totalSplits == 0 {
+		// Fast path: no oversize inputs, allVecs already maps 1:1
+		// to texts.
+		return allVecs, nil
+	}
+	result := make([][]float32, len(texts))
+	for i, sp := range spans {
+		if sp.length == 1 {
+			result[i] = allVecs[sp.start]
+			continue
+		}
+		dim := len(allVecs[sp.start])
+		avg := make([]float32, dim)
+		for k := 0; k < sp.length; k++ {
+			v := allVecs[sp.start+k]
+			for d := range avg {
+				avg[d] += v[d]
+			}
+		}
+		n := float32(sp.length)
+		for d := range avg {
+			avg[d] /= n
+		}
+		result[i] = avg
+	}
+	return result, nil
 }
 
 // embedWithAdaptiveSplit wraps embed() with a defensive bisect-on-400
