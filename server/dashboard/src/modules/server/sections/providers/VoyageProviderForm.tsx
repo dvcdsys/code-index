@@ -1,9 +1,13 @@
-import { AlertTriangle, Info } from 'lucide-react';
+import { AlertTriangle, ExternalLink, Info } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Input } from '@/ui/input';
 import { Label } from '@/ui/label';
 import { Switch } from '@/ui/switch';
-import type { EmbeddingProviderSecretEnv } from '@/api/types';
+import type {
+  DocumentedEmbeddingLimits,
+  DocumentedModelLimit,
+  EmbeddingProviderSecretEnv,
+} from '@/api/types';
 
 // VoyageConfig mirrors the voyage provider's persisted config blob
 // shape (see server/internal/embeddings/provider/voyage/voyage.go).
@@ -27,6 +31,126 @@ interface Props {
   value: VoyageConfig;
   onChange: (next: VoyageConfig) => void;
   secretEnvs: EmbeddingProviderSecretEnv[];
+  // documentedLimits is the hardcoded snapshot of Voyage's published
+  // rate limits sourced from their public docs (Voyage has no API
+  // endpoint to fetch limits). Undefined when the server is older
+  // than the limits-table feature; the form silently degrades.
+  documentedLimits?: DocumentedEmbeddingLimits;
+}
+
+// formatNumber prints a number in thousands shorthand: 3000000 → "3M",
+// 16000000 → "16M", 2000 → "2K". Used to keep the limits card compact.
+function formatNumber(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n % 1_000 === 0 ? 0 : 1)}K`;
+  return String(n);
+}
+
+// ActiveModelLimitsCard renders the documented rate-limit row for the
+// model currently selected in the form. The whole table lives behind a
+// "Show all models" details expander so the form stays compact by
+// default.
+function ActiveModelLimitsCard({
+  limits,
+  selectedModel,
+}: {
+  limits: DocumentedEmbeddingLimits;
+  selectedModel: string;
+}) {
+  const active = limits.models.find((m) => m.model === selectedModel);
+  return (
+    <div className="rounded-md border bg-muted/30 p-3 text-xs">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="font-medium text-foreground">
+            Documented rate limits for <code>{selectedModel}</code>{' '}
+            <span className="font-normal text-muted-foreground">(Tier 1 baseline)</span>
+          </div>
+          {active ? (
+            <LimitsRow l={active} />
+          ) : (
+            <div className="mt-1 text-muted-foreground">
+              No entry for this model in our snapshot — consult the dashboard.
+            </div>
+          )}
+        </div>
+        <a
+          href="https://dashboard.voyageai.com/"
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs hover:bg-accent"
+          title="Voyage doesn't expose limits via API — open the dashboard to check your live tier"
+        >
+          Open Voyage dashboard <ExternalLink className="h-3 w-3" />
+        </a>
+      </div>
+
+      {/* Tier multiplier note. Voyage scales limits with lifetime spend:
+          ≥$100 → Tier 2 (×2), ≥$1000 → Tier 3 (×3). We can't detect
+          the operator's tier (no API), so we just state the rule and
+          let them mentally apply the multiplier. */}
+      <div className="mt-2 text-muted-foreground">
+        Multiply by <strong className="text-foreground">×2</strong> at Tier 2
+        (≥&nbsp;$100 paid lifetime) and <strong className="text-foreground">×3</strong> at
+        Tier 3 (≥&nbsp;$1000). Voyage doesn't expose your current tier via
+        API — check the dashboard to confirm.
+      </div>
+      <details className="mt-3 group">
+        <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+          Show all models in this snapshot
+        </summary>
+        <table className="mt-2 w-full text-xs">
+          <thead>
+            <tr className="text-left text-muted-foreground">
+              <th className="pr-3 font-normal">Model</th>
+              <th className="pr-3 font-normal">RPM (T1)</th>
+              <th className="pr-3 font-normal">TPM (T1)</th>
+              <th className="pr-3 font-normal">Inputs/req</th>
+              <th className="pr-3 font-normal">Tokens/req</th>
+            </tr>
+          </thead>
+          <tbody>
+            {limits.models.map((m) => (
+              <tr key={m.model} className={m.model === selectedModel ? 'font-medium' : ''}>
+                <td className="pr-3"><code>{m.model}</code></td>
+                <td className="pr-3">{formatNumber(m.tier1_rpm)}</td>
+                <td className="pr-3">{formatNumber(m.tier1_tpm)}</td>
+                <td className="pr-3">{m.max_inputs_per_request}</td>
+                <td className="pr-3">{formatNumber(m.max_tokens_per_request)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </details>
+      <p className="mt-3 text-[10px] text-muted-foreground">{limits.source}</p>
+    </div>
+  );
+}
+
+function LimitsRow({ l }: { l: DocumentedModelLimit }) {
+  return (
+    <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-foreground sm:grid-cols-4">
+      <div>
+        <div className="text-muted-foreground">RPM (Tier 1)</div>
+        <div>{formatNumber(l.tier1_rpm)}</div>
+      </div>
+      <div>
+        <div className="text-muted-foreground">TPM (Tier 1)</div>
+        <div>{formatNumber(l.tier1_tpm)}</div>
+      </div>
+      <div>
+        <div className="text-muted-foreground">Inputs / req</div>
+        <div>{l.max_inputs_per_request}</div>
+      </div>
+      <div>
+        <div className="text-muted-foreground">Tokens / req</div>
+        <div>{formatNumber(l.max_tokens_per_request)}</div>
+      </div>
+      {l.notes ? (
+        <div className="col-span-full text-muted-foreground">{l.notes}</div>
+      ) : null}
+    </div>
+  );
 }
 
 const MODELS = [
@@ -39,7 +163,7 @@ const MODELS = [
 
 const DIMENSIONS = [256, 512, 1024, 2048];
 
-export function VoyageProviderForm({ value, onChange, secretEnvs }: Props) {
+export function VoyageProviderForm({ value, onChange, secretEnvs, documentedLimits }: Props) {
   const apiKeyEnv = secretEnvs.find((e) => e.name === value.api_key_env);
   const apiKeyMissing = apiKeyEnv != null && !apiKeyEnv.set;
 
@@ -82,6 +206,10 @@ export function VoyageProviderForm({ value, onChange, secretEnvs }: Props) {
           ))}
         </select>
       </div>
+
+      {documentedLimits ? (
+        <ActiveModelLimitsCard limits={documentedLimits} selectedModel={value.model} />
+      ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">

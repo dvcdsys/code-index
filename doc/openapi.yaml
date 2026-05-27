@@ -3243,6 +3243,56 @@ components:
             before save.
           items:
             $ref: "#/components/schemas/EmbeddingProviderSecretEnv"
+        documented_limits:
+          description: |
+            Informational snapshot of the provider's published rate
+            limits. Voyage doesn't expose limits via API so we ship
+            a hardcoded table sourced from their public docs. Absent
+            when the provider has no documented limits to show.
+          $ref: "#/components/schemas/DocumentedEmbeddingLimits"
+
+    DocumentedEmbeddingLimits:
+      type: object
+      required: [source, models]
+      properties:
+        source:
+          type: string
+          description: |
+            Free-form attribution string with the docs URL and the
+            date the snapshot was taken. The dashboard renders it as
+            a footnote so the operator knows when to consult upstream
+            docs for a newer version.
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentedModelLimit"
+
+    DocumentedModelLimit:
+      type: object
+      required: [model, tier1_rpm, tier1_tpm, max_inputs_per_request, max_tokens_per_request]
+      properties:
+        model:
+          type: string
+          description: API model name; matches the values offered in the provider form.
+        tier1_rpm:
+          type: integer
+          minimum: 0
+          description: Tier 1 RPM (multiply by 2 for Tier 2, 3 for Tier 3).
+        tier1_tpm:
+          type: integer
+          minimum: 0
+          description: Tier 1 TPM (multiply by 2 for Tier 2, 3 for Tier 3).
+        max_inputs_per_request:
+          type: integer
+          minimum: 0
+          description: Per-request input array cap (not tier-dependent).
+        max_tokens_per_request:
+          type: integer
+          minimum: 0
+          description: Per-request total token cap (not tier-dependent).
+        notes:
+          type: string
+          description: Free-form notes the dashboard renders verbatim (optional).
 
     EmbeddingProviderSecretEnv:
       type: object

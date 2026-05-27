@@ -81,6 +81,8 @@ export type EmbeddingProviderList = components['schemas']['EmbeddingProviderList
 export type ActiveEmbeddingProvider = components['schemas']['ActiveEmbeddingProvider'];
 export type SwitchEmbeddingProviderRequest = components['schemas']['SwitchEmbeddingProviderRequest'];
 export type TestEmbeddingProviderResponse = components['schemas']['TestEmbeddingProviderResponse'];
+export type DocumentedEmbeddingLimits = components['schemas']['DocumentedEmbeddingLimits'];
+export type DocumentedModelLimit = components['schemas']['DocumentedModelLimit'];
 
 // Provider kind union — the dashboard uses this in form-state discriminants.
 export type EmbeddingProviderKind = 'ollama' | 'openai' | 'voyage';

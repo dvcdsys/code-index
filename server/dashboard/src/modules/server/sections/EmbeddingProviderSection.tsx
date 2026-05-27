@@ -79,6 +79,15 @@ export function EmbeddingProviderSection() {
     return providers.data.providers.find((p) => p.kind === draftKind)?.secret_envs ?? [];
   }, [providers.data, draftKind]);
 
+  // Documented rate limits (Voyage only). Sourced from the
+  // /admin/embedding-providers payload's documented_limits field; nil
+  // for ollama/openai. The Voyage form renders the active model's
+  // entry + an expander with the full table.
+  const limitsForKind = useMemo(() => {
+    if (!providers.data) return undefined;
+    return providers.data.providers.find((p) => p.kind === draftKind)?.documented_limits;
+  }, [providers.data, draftKind]);
+
   const test = useTestProvider(draftKind);
 
   if (providers.isLoading || active.isLoading) {
@@ -256,6 +265,7 @@ export function EmbeddingProviderSection() {
             value={voyageDraft}
             onChange={setVoyageDraft}
             secretEnvs={envsForKind}
+            documentedLimits={limitsForKind}
           />
         ) : null}
         {draftKind === 'ollama' ? (

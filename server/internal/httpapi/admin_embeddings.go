@@ -21,6 +21,7 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
+	"github.com/dvcdsys/code-index/server/internal/embeddings/provider/voyage"
 	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
 	"github.com/go-chi/chi/v5"
 )
@@ -30,6 +31,21 @@ type providerInfoPayload struct {
 	Kind       string              `json:"kind"`
 	Schema     json.RawMessage     `json:"schema"`
 	SecretEnvs []secretEnvPayload  `json:"secret_envs"`
+	// DocumentedLimits is an informational snapshot of the provider's
+	// published rate limits. Voyage doesn't expose limits via API so we
+	// ship a hardcoded table sourced from their public docs. Nil when
+	// the provider has no documented limits to show (ollama: local, no
+	// upstream limits; openai: limits vary per organization and aren't
+	// public per-model).
+	DocumentedLimits *documentedLimitsPayload `json:"documented_limits,omitempty"`
+}
+
+// documentedLimitsPayload wraps the per-model limits table plus the
+// source string. The dashboard renders Source as a footnote so the
+// operator can tell when our snapshot was last refreshed.
+type documentedLimitsPayload struct {
+	Source string             `json:"source"`
+	Models []voyage.ModelLimits `json:"models"`
 }
 
 // secretEnvPayload tells the dashboard which env-var names a provider
@@ -83,11 +99,23 @@ func (s *Server) ListEmbeddingProviders(w http.ResponseWriter, r *http.Request) 
 			_, present := os.LookupEnv(name)
 			envPayload = append(envPayload, secretEnvPayload{Name: name, Set: present})
 		}
-		out = append(out, providerInfoPayload{
+		info := providerInfoPayload{
 			Kind:       kind,
 			Schema:     f.SchemaJSON(),
 			SecretEnvs: envPayload,
-		})
+		}
+		// Voyage is the only provider with a hardcoded limits table —
+		// Voyage publishes per-model RPM/TPM in their docs but has no
+		// API endpoint to fetch them. The table is sourced from
+		// voyage.KnownModelLimits; see that file's doc-comment for
+		// the snapshot date and a link.
+		if kind == provider.KindVoyage {
+			info.DocumentedLimits = &documentedLimitsPayload{
+				Source: voyage.KnownLimitsSource,
+				Models: voyage.LimitsList(),
+			}
+		}
+		out = append(out, info)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": out})
 }
