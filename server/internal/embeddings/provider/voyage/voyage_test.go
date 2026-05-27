@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
@@ -165,6 +166,98 @@ func TestEmbedDocumentsSplitsOversizeBatch(t *testing.T) {
 	}
 	if posts != 2 {
 		t.Errorf("expected 2 POSTs (128 + 72), got %d", posts)
+	}
+}
+
+// TestPlanBatches_SplitsByTokenBudget covers the second cap on per-
+// request batch size: even when input count is under maxBatchSize,
+// Voyage hard-limits the request to 120K tokens. Our estimator uses
+// 3 bytes/token so a 300_000-byte text estimates to 100_000 tokens,
+// hitting the budget exactly. Mixing one huge text with several
+// smaller ones should produce multiple batches.
+func TestPlanBatches_SplitsByTokenBudget(t *testing.T) {
+	big := strings.Repeat("x", 300_000) // ~100_000 est tokens
+	small := "tiny"
+	texts := []string{big, small, small, small, small, small}
+
+	batches := planBatches(texts)
+	if len(batches) < 2 {
+		t.Fatalf("expected at least 2 batches, got %d", len(batches))
+	}
+
+	got := 0
+	for _, b := range batches {
+		got += len(b)
+		if est := sumEstimateTokens(b); est > maxTokensPerBatch && len(b) > 1 {
+			t.Errorf("batch with %d inputs exceeds token budget: ~%d tokens > %d",
+				len(b), est, maxTokensPerBatch)
+		}
+	}
+	if got != len(texts) {
+		t.Errorf("inputs lost across batches: got %d, want %d", got, len(texts))
+	}
+}
+
+// TestPlanBatches_RespectsCountCap verifies the legacy 128-input
+// cap is still enforced when token estimates wouldn't trigger a
+// split. 200 small texts → at least 2 batches (128 + 72).
+func TestPlanBatches_RespectsCountCap(t *testing.T) {
+	texts := make([]string, 200)
+	for i := range texts {
+		texts[i] = "chunk"
+	}
+	batches := planBatches(texts)
+	if len(batches) != 2 {
+		t.Fatalf("expected 2 batches (128 + 72), got %d", len(batches))
+	}
+	if len(batches[0]) != maxBatchSize {
+		t.Errorf("first batch has %d inputs, want %d", len(batches[0]), maxBatchSize)
+	}
+	if len(batches[1]) != 72 {
+		t.Errorf("second batch has %d inputs, want 72", len(batches[1]))
+	}
+}
+
+// TestEmbedDocumentsSplitsByTokenBudget exercises the end-to-end
+// flow: an oversize batch should turn into multiple POSTs to the
+// upstream server, even when the input count alone wouldn't trigger
+// the count-based split.
+func TestEmbedDocumentsSplitsByTokenBudget(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		raw, _ := io.ReadAll(r.Body)
+		var req embedRequest
+		_ = json.Unmarshal(raw, &req)
+		items := make([]map[string]any, len(req.Input))
+		for i := range req.Input {
+			items[i] = map[string]any{"index": i, "embedding": []float32{0.1}}
+		}
+		body, _ := json.Marshal(map[string]any{
+			"data":  items,
+			"model": req.Model,
+			"usage": map[string]int{"total_tokens": 1},
+		})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	// Two big texts ~100K est tokens each — should produce >= 2 POSTs.
+	big := strings.Repeat("x", 300_000)
+	texts := []string{big, big}
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-code-3", OutputDtype: DtypeFloat,
+	}, fixedSecrets("K", "v"), nil)
+	vecs, err := p.EmbedDocuments(context.Background(), texts)
+	if err != nil {
+		t.Fatalf("EmbedDocuments: %v", err)
+	}
+	if got := len(vecs); got != 2 {
+		t.Fatalf("got %d vectors, want 2", got)
+	}
+	if atomic.LoadInt32(&hits) < 2 {
+		t.Errorf("expected at least 2 POSTs due to token-budget split, got %d", hits)
 	}
 }
 

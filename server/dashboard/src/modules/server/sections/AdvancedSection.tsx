@@ -77,10 +77,11 @@ export function AdvancedSection({
                 file's chunks as a batch). 1 = strictly sequential. OpenAI
                 and Voyage both accept concurrent requests, but their
                 account-level rate limits still apply — start low (e.g. 2)
-                and raise it if you don't see 429s. Per-request batch
-                limits (Voyage <code>voyage-code-*</code> = 128, OpenAI
-                = 2048) are split server-side under one queue slot, so
-                oversized files are safe. Recommended:{' '}
+                and raise it if you don't see 429s. Per-request limits
+                (Voyage <code>voyage-code-*</code>: 128 inputs <em>or</em>
+                ~100K tokens; OpenAI: 2048 inputs) are split server-side
+                under one queue slot, so oversized files are safe.
+                Recommended:{' '}
                 <code>{rec?.max_embedding_concurrency ?? 1}</code>.
               </p>
             </div>

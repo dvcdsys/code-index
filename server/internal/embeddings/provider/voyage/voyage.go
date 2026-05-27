@@ -52,6 +52,25 @@ const (
 // Too Large from a large file's chunks.
 const maxBatchSize = 128
 
+// maxTokensPerBatch caps the ESTIMATED token budget per /v1/embeddings
+// POST. Voyage's actual hard limit (observed in 400 error messages) is
+// 120000 tokens; we target 100000 to leave 17% headroom for the
+// byte→token estimation error. When a file's chunks sum above this
+// budget the batch is split further, regardless of count.
+const maxTokensPerBatch = 100_000
+
+// bytesPerToken is a conservative chars-per-token heuristic used to
+// estimate the request's token cost without a real tokenizer. Voyage
+// does not publish their tokenizer for client-side use; empirically
+// code averages ~3–4 chars/token and English prose ~4. We use 3 to
+// over-count the cost (safe upper bound — we'll split sooner than the
+// upstream limit, never later).
+//
+// len() in Go returns BYTE length, not rune count, so multi-byte
+// UTF-8 input (Cyrillic comments, CJK) gets further over-counted —
+// also safe.
+const bytesPerToken = 3
+
 // Config is the persisted shape of the voyage provider's config blob.
 type Config struct {
 	BaseURL         string `json:"base_url,omitempty"`
@@ -160,25 +179,87 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	if len(texts) <= maxBatchSize {
-		return p.embed(ctx, texts, "document")
+	batches := planBatches(texts)
+	if len(batches) == 1 {
+		return p.embed(ctx, batches[0], "document")
 	}
 	// Oversize input — split into sequential sub-batches. The Service
 	// queue holds a single slot for the whole call, so concurrency
 	// semantics are preserved (no extra slots consumed).
+	p.logger.Info("voyage: splitting batch",
+		"model", p.cfg.Model,
+		"total_inputs", len(texts),
+		"sub_batches", len(batches),
+		"limit_inputs", maxBatchSize,
+		"limit_tokens", maxTokensPerBatch,
+	)
 	out := make([][]float32, 0, len(texts))
-	for i := 0; i < len(texts); i += maxBatchSize {
-		end := i + maxBatchSize
-		if end > len(texts) {
-			end = len(texts)
-		}
-		part, err := p.embed(ctx, texts[i:end], "document")
+	offset := 0
+	for i, batch := range batches {
+		p.logger.Debug("voyage: sub-batch POST",
+			"index", i+1,
+			"of", len(batches),
+			"inputs", len(batch),
+			"est_tokens", sumEstimateTokens(batch),
+		)
+		part, err := p.embed(ctx, batch, "document")
 		if err != nil {
-			return nil, fmt.Errorf("voyage: sub-batch [%d:%d]: %w", i, end, err)
+			return nil, fmt.Errorf("voyage: sub-batch %d/%d (offset=%d, inputs=%d, ~%d tokens): %w",
+				i+1, len(batches), offset, len(batch), sumEstimateTokens(batch), err)
 		}
 		out = append(out, part...)
+		offset += len(batch)
 	}
 	return out, nil
+}
+
+// planBatches groups texts into sub-batches that each respect BOTH
+// the input-count cap (maxBatchSize) and the token-budget cap
+// (maxTokensPerBatch). A single text that on its own exceeds the
+// token budget is placed in its own batch — Voyage will then 400
+// with a clear "tokens after truncation" message and the caller
+// surfaces that to the operator (indicates the chunker upstream let
+// through an over-long chunk).
+func planBatches(texts []string) [][]string {
+	if len(texts) == 0 {
+		return nil
+	}
+	var batches [][]string
+	var current []string
+	currentTokens := 0
+	for _, t := range texts {
+		est := estimateTokens(t)
+		// Close the current batch when adding this text would exceed
+		// either limit (and the batch already has something to send).
+		if len(current) > 0 && (len(current) >= maxBatchSize || currentTokens+est > maxTokensPerBatch) {
+			batches = append(batches, current)
+			current = nil
+			currentTokens = 0
+		}
+		current = append(current, t)
+		currentTokens += est
+	}
+	if len(current) > 0 {
+		batches = append(batches, current)
+	}
+	return batches
+}
+
+// estimateTokens returns a conservative upper bound on the token cost
+// of one text, in Voyage's tokenizer. Uses byte-length divided by a
+// chars-per-token heuristic; see bytesPerToken doc for rationale.
+func estimateTokens(s string) int {
+	return len(s) / bytesPerToken
+}
+
+// sumEstimateTokens sums estimateTokens over a slice. Cheap; used in
+// log lines so an operator can see the per-batch cost.
+func sumEstimateTokens(texts []string) int {
+	n := 0
+	for _, t := range texts {
+		n += estimateTokens(t)
+	}
+	return n
 }
 
 func (p *Provider) TokenizeAndEmbed(ctx context.Context, texts []string) ([][]float32, error) {
