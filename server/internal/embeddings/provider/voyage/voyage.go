@@ -30,6 +30,8 @@ import (
 	"strconv"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 )
 
@@ -42,22 +44,19 @@ const (
 	DtypeInt8  = "int8"
 )
 
-// maxBatchSize caps how many inputs we send in a single
-// /v1/embeddings POST. Voyage's per-request limits depend on the
-// model — voyage-code-3 and voyage-code-2 cap at 128; voyage-3*
-// models accept up to 1000. We pick the conservative floor so a
-// single constant works across all supported models. EmbedDocuments
-// transparently splits oversize inputs into sequential sub-batches
-// under the same queue slot so the caller never sees 422 Request
-// Too Large from a large file's chunks.
-const maxBatchSize = 128
+// defaultMaxBatchSize is the static safe default for inputs per POST
+// when the operator has not configured an explicit MaxInputsPerRequest
+// in the provider config. Voyage's voyage-code-* models cap at 128;
+// voyage-3* accept up to 1000. We pick the lower bound so a single
+// default works across all models without 422s.
+const defaultMaxBatchSize = 128
 
-// maxTokensPerBatch caps the ESTIMATED token budget per /v1/embeddings
-// POST. Voyage's actual hard limit (observed in 400 error messages) is
-// 120000 tokens; we target 100000 to leave 17% headroom for the
-// byte→token estimation error. When a file's chunks sum above this
-// budget the batch is split further, regardless of count.
-const maxTokensPerBatch = 100_000
+// defaultMaxTokensPerBatch is the static safe default for total
+// estimated tokens per POST when the operator has not configured an
+// explicit MaxTokensPerRequest. Voyage's hard limit (observed in 400
+// responses) is 120K; we target 100K to leave 17% headroom for the
+// byte→token estimation error.
+const defaultMaxTokensPerBatch = 100_000
 
 // bytesPerToken is a conservative chars-per-token heuristic used to
 // estimate the request's token cost without a real tokenizer. Voyage
@@ -79,6 +78,44 @@ type Config struct {
 	OutputDimension int    `json:"output_dimension,omitempty"`
 	OutputDtype     string `json:"output_dtype,omitempty"`
 	Truncation      bool   `json:"truncation,omitempty"`
+
+	// RateLimitRPM caps requests-per-minute the provider will emit.
+	// 0 = no client-side throttling (rely on Voyage to 429 us). When
+	// >0, a token-bucket waits before each POST so we don't exceed
+	// the configured rate. The operator sets this from the Voyage
+	// dashboard's "Rate Limits" page to match their account tier.
+	RateLimitRPM int `json:"rate_limit_rpm,omitempty"`
+
+	// RateLimitTPM caps tokens-per-minute (estimated, summed across
+	// all in-flight + recent requests). 0 = no throttling.
+	RateLimitTPM int `json:"rate_limit_tpm,omitempty"`
+
+	// MaxInputsPerRequest overrides defaultMaxBatchSize. 0 = use
+	// the default (128, safe for voyage-code-*). Operators running
+	// only voyage-3* may bump this to 1000 for fewer round-trips.
+	MaxInputsPerRequest int `json:"max_inputs_per_request,omitempty"`
+
+	// MaxTokensPerRequest overrides defaultMaxTokensPerBatch. 0 =
+	// use the default (100K with 20K headroom from Voyage's 120K
+	// hard cap).
+	MaxTokensPerRequest int `json:"max_tokens_per_request,omitempty"`
+}
+
+// maxBatchSize returns the effective per-POST input cap: explicit
+// config override, falling back to the static default.
+func (c *Config) maxBatchSize() int {
+	if c.MaxInputsPerRequest > 0 {
+		return c.MaxInputsPerRequest
+	}
+	return defaultMaxBatchSize
+}
+
+// maxTokensPerBatch returns the effective per-POST token cap.
+func (c *Config) maxTokensPerBatch() int {
+	if c.MaxTokensPerRequest > 0 {
+		return c.MaxTokensPerRequest
+	}
+	return defaultMaxTokensPerBatch
 }
 
 // Provider is the Voyage HTTP client.
@@ -87,6 +124,18 @@ type Provider struct {
 	logger  *slog.Logger
 	secrets provider.SecretLookup
 	http    *http.Client
+
+	// reqLimiter caps requests-per-minute when cfg.RateLimitRPM > 0.
+	// nil when no throttling is configured. Token-bucket with burst
+	// = 1 — we don't allow client-side bursts, since the upstream
+	// budget is a sliding minute and bursting saves nothing.
+	reqLimiter *rate.Limiter
+
+	// tokenLimiter caps tokens-per-minute when cfg.RateLimitTPM > 0.
+	// Burst is set to maxTokensPerBatch so a single full-budget POST
+	// can pass even when the bucket is otherwise empty (we'd just
+	// wait longer afterward). nil when no throttling.
+	tokenLimiter *rate.Limiter
 }
 
 // New constructs the Provider. Does not contact the endpoint.
@@ -100,12 +149,23 @@ func New(cfg Config, secrets provider.SecretLookup, logger *slog.Logger) *Provid
 	if cfg.OutputDtype == "" {
 		cfg.OutputDtype = DtypeFloat
 	}
-	return &Provider{
+	p := &Provider{
 		cfg:     cfg,
 		logger:  logger,
 		secrets: secrets,
 		http:    &http.Client{Timeout: 60 * time.Second},
 	}
+	// Convert RPM/TPM to per-second token-bucket rates. burst on the
+	// request bucket is 1 (one request worth of "credit"); burst on
+	// the token bucket equals one full POST so we don't deadlock a
+	// legitimate big batch.
+	if cfg.RateLimitRPM > 0 {
+		p.reqLimiter = rate.NewLimiter(rate.Limit(float64(cfg.RateLimitRPM)/60.0), 1)
+	}
+	if cfg.RateLimitTPM > 0 {
+		p.tokenLimiter = rate.NewLimiter(rate.Limit(float64(cfg.RateLimitTPM)/60.0), cfg.maxTokensPerBatch())
+	}
+	return p
 }
 
 func (p *Provider) Kind() string { return provider.KindVoyage }
@@ -179,7 +239,7 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	batches := planBatches(texts)
+	batches := planBatches(texts, p.cfg.maxBatchSize(), p.cfg.maxTokensPerBatch())
 	if len(batches) == 1 {
 		return p.embed(ctx, batches[0], "document")
 	}
@@ -190,8 +250,8 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 		"model", p.cfg.Model,
 		"total_inputs", len(texts),
 		"sub_batches", len(batches),
-		"limit_inputs", maxBatchSize,
-		"limit_tokens", maxTokensPerBatch,
+		"limit_inputs", p.cfg.maxBatchSize(),
+		"limit_tokens", p.cfg.maxTokensPerBatch(),
 	)
 	out := make([][]float32, 0, len(texts))
 	offset := 0
@@ -214,13 +274,17 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 }
 
 // planBatches groups texts into sub-batches that each respect BOTH
-// the input-count cap (maxBatchSize) and the token-budget cap
-// (maxTokensPerBatch). A single text that on its own exceeds the
-// token budget is placed in its own batch — Voyage will then 400
-// with a clear "tokens after truncation" message and the caller
-// surfaces that to the operator (indicates the chunker upstream let
-// through an over-long chunk).
-func planBatches(texts []string) [][]string {
+// the input-count cap and the token-budget cap. A single text that
+// on its own exceeds the token budget is placed in its own batch —
+// Voyage will then 400 with a clear "tokens after truncation"
+// message and the caller surfaces that to the operator (indicates
+// the chunker upstream let through an over-long chunk).
+//
+// maxInputs and maxTokens come from the live Provider.cfg so the
+// operator can override them via the admin form when their tier or
+// chosen model allows a higher cap (e.g. voyage-3-large at 1000
+// inputs/POST instead of 128).
+func planBatches(texts []string, maxInputs, maxTokens int) [][]string {
 	if len(texts) == 0 {
 		return nil
 	}
@@ -231,7 +295,7 @@ func planBatches(texts []string) [][]string {
 		est := estimateTokens(t)
 		// Close the current batch when adding this text would exceed
 		// either limit (and the batch already has something to send).
-		if len(current) > 0 && (len(current) >= maxBatchSize || currentTokens+est > maxTokensPerBatch) {
+		if len(current) > 0 && (len(current) >= maxInputs || currentTokens+est > maxTokens) {
 			batches = append(batches, current)
 			current = nil
 			currentTokens = 0
@@ -297,6 +361,26 @@ func (p *Provider) embed(ctx context.Context, texts []string, inputType string) 
 	key, ok := p.apiKey()
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", provider.ErrMissingAPIKey, p.cfg.APIKeyEnv)
+	}
+
+	// Wait on the operator-configured rate-limit token-buckets before
+	// hitting the wire. Both reservations honour ctx cancellation so
+	// a server shutdown / drain doesn't strand callers in Wait().
+	if p.reqLimiter != nil {
+		if err := p.reqLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("voyage: request-rate wait: %w", err)
+		}
+	}
+	if p.tokenLimiter != nil {
+		est := sumEstimateTokens(texts)
+		if est > p.tokenLimiter.Burst() {
+			est = p.tokenLimiter.Burst()
+		}
+		if est > 0 {
+			if err := p.tokenLimiter.WaitN(ctx, est); err != nil {
+				return nil, fmt.Errorf("voyage: token-rate wait (~%d tokens): %w", est, err)
+			}
+		}
 	}
 
 	body, err := json.Marshal(embedRequest{

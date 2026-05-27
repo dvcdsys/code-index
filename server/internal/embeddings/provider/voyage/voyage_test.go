@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 )
@@ -180,7 +181,7 @@ func TestPlanBatches_SplitsByTokenBudget(t *testing.T) {
 	small := "tiny"
 	texts := []string{big, small, small, small, small, small}
 
-	batches := planBatches(texts)
+	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch)
 	if len(batches) < 2 {
 		t.Fatalf("expected at least 2 batches, got %d", len(batches))
 	}
@@ -188,9 +189,9 @@ func TestPlanBatches_SplitsByTokenBudget(t *testing.T) {
 	got := 0
 	for _, b := range batches {
 		got += len(b)
-		if est := sumEstimateTokens(b); est > maxTokensPerBatch && len(b) > 1 {
+		if est := sumEstimateTokens(b); est > defaultMaxTokensPerBatch && len(b) > 1 {
 			t.Errorf("batch with %d inputs exceeds token budget: ~%d tokens > %d",
-				len(b), est, maxTokensPerBatch)
+				len(b), est, defaultMaxTokensPerBatch)
 		}
 	}
 	if got != len(texts) {
@@ -206,12 +207,12 @@ func TestPlanBatches_RespectsCountCap(t *testing.T) {
 	for i := range texts {
 		texts[i] = "chunk"
 	}
-	batches := planBatches(texts)
+	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch)
 	if len(batches) != 2 {
 		t.Fatalf("expected 2 batches (128 + 72), got %d", len(batches))
 	}
-	if len(batches[0]) != maxBatchSize {
-		t.Errorf("first batch has %d inputs, want %d", len(batches[0]), maxBatchSize)
+	if len(batches[0]) != defaultMaxBatchSize {
+		t.Errorf("first batch has %d inputs, want %d", len(batches[0]), defaultMaxBatchSize)
 	}
 	if len(batches[1]) != 72 {
 		t.Errorf("second batch has %d inputs, want 72", len(batches[1]))
@@ -258,6 +259,85 @@ func TestEmbedDocumentsSplitsByTokenBudget(t *testing.T) {
 	}
 	if atomic.LoadInt32(&hits) < 2 {
 		t.Errorf("expected at least 2 POSTs due to token-budget split, got %d", hits)
+	}
+}
+
+// TestRateLimitRPMThrottlesRequests verifies that when the operator
+// configures RateLimitRPM, the provider actually waits between
+// requests. 120 RPM = 1 request per 500ms (burst of 1), so 2
+// sequential requests on a fresh limiter take ~500ms total.
+func TestRateLimitRPMThrottlesRequests(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1]}],"usage":{"total_tokens":1}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	// 120 RPM → 2 req/s → second call must wait ~500ms (after the
+	// burst-1 bucket drained on the first call).
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-3", OutputDtype: DtypeFloat,
+		RateLimitRPM: 120,
+	}, fixedSecrets("K", "v"), nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// First call: instant (burst available).
+	if _, err := p.EmbedQuery(ctx, "first"); err != nil {
+		t.Fatalf("first EmbedQuery: %v", err)
+	}
+	// Second call: must wait. We don't measure precisely because rate
+	// limiter has sub-millisecond timing variance; ≥ 300ms is enough
+	// to know the throttle fired (well above any test-runtime noise).
+	start := time.Now()
+	if _, err := p.EmbedQuery(ctx, "second"); err != nil {
+		t.Fatalf("second EmbedQuery: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 300*time.Millisecond {
+		t.Errorf("expected second call to wait for RPM limiter (>= 300ms); elapsed=%s", elapsed)
+	}
+}
+
+// TestRateLimitTPMThrottlesTokens verifies the token-budget bucket
+// also forces a wait when consumption exceeds the per-minute rate.
+// 600K TPM = 10K tokens/s, burst = maxTokensPerBatch (100K). Sending
+// two batches of 60K tokens each should make the second wait while
+// the bucket refills.
+func TestRateLimitTPMThrottlesTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1]}],"usage":{"total_tokens":1}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-3", OutputDtype: DtypeFloat,
+		// burst = maxTokensPerBatch (100K), refill rate 600K/min = 10K/s.
+		RateLimitTPM: 600_000,
+	}, fixedSecrets("K", "v"), nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 180K bytes ≈ 60K est tokens — half the burst budget.
+	big := strings.Repeat("x", 180_000)
+
+	// First call drains 60K of the 100K-burst bucket: instant.
+	if _, err := p.EmbedQuery(ctx, big); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	// Second call wants another 60K but only 40K is left; needs to
+	// wait for 20K to refill at 10K/s = ~2s.
+	start := time.Now()
+	if _, err := p.EmbedQuery(ctx, big); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	elapsed := time.Since(start)
+	// Lower bound 1.5s — leaves margin for rate-limiter clock granularity.
+	if elapsed < 1500*time.Millisecond {
+		t.Errorf("expected second call to wait for TPM limiter (>= 1.5s); elapsed=%s", elapsed)
 	}
 }
 

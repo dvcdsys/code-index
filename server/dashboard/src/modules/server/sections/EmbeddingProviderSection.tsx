@@ -67,6 +67,12 @@ export function EmbeddingProviderSection() {
         output_dtype:
           (cfg.output_dtype as 'float' | 'int8') ?? defaultVoyageConfig.output_dtype,
         truncation: cfg.truncation !== false,
+        rate_limit_rpm: typeof cfg.rate_limit_rpm === 'number' ? cfg.rate_limit_rpm : undefined,
+        rate_limit_tpm: typeof cfg.rate_limit_tpm === 'number' ? cfg.rate_limit_tpm : undefined,
+        max_inputs_per_request:
+          typeof cfg.max_inputs_per_request === 'number' ? cfg.max_inputs_per_request : undefined,
+        max_tokens_per_request:
+          typeof cfg.max_tokens_per_request === 'number' ? cfg.max_tokens_per_request : undefined,
       });
     }
   }, [active.data]);
@@ -77,15 +83,6 @@ export function EmbeddingProviderSection() {
   const envsForKind = useMemo<EmbeddingProviderSecretEnv[]>(() => {
     if (!providers.data) return [];
     return providers.data.providers.find((p) => p.kind === draftKind)?.secret_envs ?? [];
-  }, [providers.data, draftKind]);
-
-  // Documented rate limits (Voyage only). Sourced from the
-  // /admin/embedding-providers payload's documented_limits field; nil
-  // for ollama/openai. The Voyage form renders the active model's
-  // entry + an expander with the full table.
-  const limitsForKind = useMemo(() => {
-    if (!providers.data) return undefined;
-    return providers.data.providers.find((p) => p.kind === draftKind)?.documented_limits;
   }, [providers.data, draftKind]);
 
   const test = useTestProvider(draftKind);
@@ -265,7 +262,6 @@ export function EmbeddingProviderSection() {
             value={voyageDraft}
             onChange={setVoyageDraft}
             secretEnvs={envsForKind}
-            documentedLimits={limitsForKind}
           />
         ) : null}
         {draftKind === 'ollama' ? (

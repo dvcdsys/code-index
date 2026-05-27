@@ -12,6 +12,7 @@ require (
 	github.com/philippgille/chromem-go v0.7.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/sync v0.20.0
+	golang.org/x/time v0.15.0
 	modernc.org/sqlite v1.34.1
 )
 
