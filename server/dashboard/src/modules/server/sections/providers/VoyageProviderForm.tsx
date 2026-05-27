@@ -208,15 +208,29 @@ export function VoyageProviderForm({ value, onChange, secretEnvs }: Props) {
         </p>
       </fieldset>
 
-      <div className="flex items-center gap-3">
-        <Switch
-          id="voyage-truncation"
-          checked={value.truncation}
-          onCheckedChange={(c) => onChange({ ...value, truncation: c === true })}
-        />
-        <Label htmlFor="voyage-truncation" className="cursor-pointer">
-          Truncate over-length inputs server-side
-        </Label>
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-3">
+          <Switch
+            id="voyage-truncation"
+            checked={value.truncation}
+            onCheckedChange={(c) => onChange({ ...value, truncation: c === true })}
+          />
+          <Label htmlFor="voyage-truncation" className="cursor-pointer">
+            Truncate over-length inputs server-side
+          </Label>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Controls Voyage's per-input behaviour when a single chunk
+          exceeds the model's context window (e.g. 32K tokens for
+          voyage-code-3). ON (default): Voyage silently truncates the
+          chunk and embeds the truncated version — you always get a
+          vector, but content past the cap is lost from the
+          embedding. OFF: Voyage returns 400 on over-long inputs so
+          the operator can shorten the indexer's chunk size or pick
+          a model with a larger context. Unrelated to the
+          120K-tokens-per-batch cap (which our adaptive bisect
+          handles separately).
+        </p>
       </div>
 
       <div className="space-y-1.5">
