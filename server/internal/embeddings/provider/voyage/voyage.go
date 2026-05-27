@@ -27,6 +27,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -34,6 +35,33 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 )
+
+// voyageBatchTooLargeRegex matches Voyage's per-batch token-limit
+// 400 response so the caller can react adaptively. Voyage's message
+// is fairly stable:
+//   "The max allowed tokens per submitted batch is 120000.
+//    Your batch has 187609 tokens after truncation."
+// We capture both numbers; the actual count drives how aggressively
+// the caller bisects.
+var voyageBatchTooLargeRegex = regexp.MustCompile(
+	`max allowed tokens per submitted batch is (\d+).*Your batch has (\d+) tokens`,
+)
+
+// parseBatchTooLarge tries to extract (cap, actual) token counts
+// from a Voyage 400 message. Returns (0, 0, false) when the message
+// doesn't match — e.g. a different 400 like "model not found".
+func parseBatchTooLarge(errMsg string) (cap, actual int, ok bool) {
+	m := voyageBatchTooLargeRegex.FindStringSubmatch(errMsg)
+	if len(m) < 3 {
+		return 0, 0, false
+	}
+	c, err1 := strconv.Atoi(m[1])
+	a, err2 := strconv.Atoi(m[2])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return c, a, true
+}
 
 // DefaultBaseURL is the public Voyage AI embeddings endpoint origin.
 const DefaultBaseURL = "https://api.voyageai.com"
@@ -228,7 +256,7 @@ func (p *Provider) Status() provider.Status {
 }
 
 func (p *Provider) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
-	vecs, err := p.embed(ctx, []string{query}, "query")
+	vecs, err := p.embedWithAdaptiveSplit(ctx, []string{query}, "query")
 	if err != nil {
 		return nil, err
 	}
@@ -240,19 +268,15 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 		return nil, nil
 	}
 	batches := planBatches(texts, p.cfg.maxBatchSize(), p.cfg.maxTokensPerBatch())
-	if len(batches) == 1 {
-		return p.embed(ctx, batches[0], "document")
+	if len(batches) > 1 {
+		p.logger.Info("voyage: splitting batch",
+			"model", p.cfg.Model,
+			"total_inputs", len(texts),
+			"sub_batches", len(batches),
+			"limit_inputs", p.cfg.maxBatchSize(),
+			"limit_tokens", p.cfg.maxTokensPerBatch(),
+		)
 	}
-	// Oversize input — split into sequential sub-batches. The Service
-	// queue holds a single slot for the whole call, so concurrency
-	// semantics are preserved (no extra slots consumed).
-	p.logger.Info("voyage: splitting batch",
-		"model", p.cfg.Model,
-		"total_inputs", len(texts),
-		"sub_batches", len(batches),
-		"limit_inputs", p.cfg.maxBatchSize(),
-		"limit_tokens", p.cfg.maxTokensPerBatch(),
-	)
 	out := make([][]float32, 0, len(texts))
 	offset := 0
 	for i, batch := range batches {
@@ -262,7 +286,7 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 			"inputs", len(batch),
 			"est_tokens", sumEstimateTokens(batch),
 		)
-		part, err := p.embed(ctx, batch, "document")
+		part, err := p.embedWithAdaptiveSplit(ctx, batch, "document")
 		if err != nil {
 			return nil, fmt.Errorf("voyage: sub-batch %d/%d (offset=%d, inputs=%d, ~%d tokens): %w",
 				i+1, len(batches), offset, len(batch), sumEstimateTokens(batch), err)
@@ -271,6 +295,61 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 		offset += len(batch)
 	}
 	return out, nil
+}
+
+// embedWithAdaptiveSplit wraps embed() with a defensive bisect-on-400
+// loop. Our token estimator (bytes/3) is conservative for prose but
+// not always accurate for dense code; Voyage's real tokenizer can
+// charge more than we predict. On a "batch too large" 400 we split
+// the batch in half and retry both halves recursively. When the
+// batch is already a single input and STILL too large there's
+// nothing to bisect — we return a clear error pointing the operator
+// at the chunker upstream (each chunk should fit voyage's per-input
+// limits; if it doesn't, the chunker let through an over-long unit).
+func (p *Provider) embedWithAdaptiveSplit(ctx context.Context, texts []string, inputType string) ([][]float32, error) {
+	vecs, err := p.embed(ctx, texts, inputType)
+	if err == nil {
+		return vecs, nil
+	}
+	cap, actual, ok := parseBatchTooLarge(err.Error())
+	if !ok {
+		// Different error class (auth, network, rate-limit, …) —
+		// surface as-is, retry would not help.
+		return nil, err
+	}
+	if len(texts) <= 1 {
+		// A single chunk on its own exceeds Voyage's hard cap.
+		// We CAN'T split the text — that would corrupt the
+		// semantic unit the indexer chose. Tell the operator
+		// where to fix it instead.
+		return nil, fmt.Errorf(
+			"voyage: a single chunk produced %d tokens (cap %d). Reduce the indexer's max chunk size or switch to a model with a higher per-request cap: %w",
+			actual, cap, err,
+		)
+	}
+	// Bisect — the caller's batch had multiple inputs whose real
+	// token sum exceeded the cap. Logging deliberately captures
+	// the cap+actual so the operator can spot a pattern (e.g.
+	// estimator consistently off by 1.5x) without grepping the
+	// raw error.
+	mid := len(texts) / 2
+	p.logger.Warn("voyage: batch too large — bisecting and retrying",
+		"inputs", len(texts),
+		"est_tokens", sumEstimateTokens(texts),
+		"voyage_actual_tokens", actual,
+		"voyage_cap", cap,
+		"left_half", mid,
+		"right_half", len(texts)-mid,
+	)
+	left, err := p.embedWithAdaptiveSplit(ctx, texts[:mid], inputType)
+	if err != nil {
+		return nil, err
+	}
+	right, err := p.embedWithAdaptiveSplit(ctx, texts[mid:], inputType)
+	if err != nil {
+		return nil, err
+	}
+	return append(left, right...), nil
 }
 
 // planBatches groups texts into sub-batches that each respect BOTH

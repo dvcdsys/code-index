@@ -262,6 +262,110 @@ func TestEmbedDocumentsSplitsByTokenBudget(t *testing.T) {
 	}
 }
 
+// TestEmbedDocuments_BisectsOnBatchTooLarge covers the adaptive
+// recovery path: when Voyage returns 400 "max allowed tokens per
+// submitted batch is 120000. Your batch has N tokens" the provider
+// splits the batch in half and retries. The stub here rejects any
+// POST with more than 1 input on the first hit; the provider must
+// bisect down to single-input POSTs and succeed.
+func TestEmbedDocuments_BisectsOnBatchTooLarge(t *testing.T) {
+	var posts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&posts, 1)
+		raw, _ := io.ReadAll(r.Body)
+		var req embedRequest
+		_ = json.Unmarshal(raw, &req)
+		// Reject any batch with > 1 input — forces the provider to
+		// bisect all the way to singletons.
+		if len(req.Input) > 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"detail":"Request failed. The max allowed tokens per submitted batch is 120000. Your batch has 200000 tokens after truncation."}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1]}],"usage":{"total_tokens":1}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-code-3", OutputDtype: DtypeFloat,
+		// Pretend our config-time cap is high enough to NOT split via
+		// planBatches; we want to exercise the runtime 400 bisect path.
+		MaxInputsPerRequest: 1000, MaxTokensPerRequest: 10_000_000,
+	}, fixedSecrets("K", "v"), nil)
+
+	vecs, err := p.EmbedDocuments(context.Background(), []string{"a", "b", "c", "d"})
+	if err != nil {
+		t.Fatalf("EmbedDocuments: %v", err)
+	}
+	if len(vecs) != 4 {
+		t.Fatalf("got %d vectors, want 4", len(vecs))
+	}
+	// One initial rejected POST (4 inputs), two more halves rejected
+	// (2 + 2), four singleton POSTs that succeed. Total = 7.
+	if got := atomic.LoadInt32(&posts); got < 7 {
+		t.Errorf("expected at least 7 POSTs (rejected + bisected + singletons), got %d", got)
+	}
+}
+
+// TestEmbedDocuments_SingleInputTooLargeFailsClean covers the
+// "no split possible" case: when a SINGLE chunk produces more
+// tokens than the upstream cap, we cannot bisect further (would
+// corrupt the chunk). The provider returns a clear error that
+// points the operator at the chunker rather than retrying forever.
+func TestEmbedDocuments_SingleInputTooLargeFailsClean(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"detail":"Request failed. The max allowed tokens per submitted batch is 120000. Your batch has 187609 tokens after truncation."}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-code-3", OutputDtype: DtypeFloat,
+		MaxInputsPerRequest: 1000, MaxTokensPerRequest: 10_000_000,
+	}, fixedSecrets("K", "v"), nil)
+
+	_, err := p.EmbedDocuments(context.Background(), []string{"one big chunk"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "single chunk") || !strings.Contains(msg, "187609 tokens") {
+		t.Errorf("error should mention single-chunk + actual token count: %q", msg)
+	}
+	if !strings.Contains(msg, "Reduce the indexer's max chunk size") {
+		t.Errorf("error should hint at upstream chunker fix: %q", msg)
+	}
+}
+
+func TestParseBatchTooLarge(t *testing.T) {
+	cases := []struct {
+		msg                string
+		wantCap, wantAct   int
+		wantOK             bool
+	}{
+		{
+			"voyage: status 400: {\"detail\":\"Request failed. The max allowed tokens per submitted batch is 120000. Your batch has 187609 tokens after truncation.\"}",
+			120000, 187609, true,
+		},
+		{
+			"voyage: status 429: rate limited",
+			0, 0, false,
+		},
+		{
+			"voyage: status 400: model not found",
+			0, 0, false,
+		},
+	}
+	for _, tc := range cases {
+		gotCap, gotAct, ok := parseBatchTooLarge(tc.msg)
+		if ok != tc.wantOK || gotCap != tc.wantCap || gotAct != tc.wantAct {
+			t.Errorf("parseBatchTooLarge(%q) = (%d, %d, %v), want (%d, %d, %v)",
+				tc.msg, gotCap, gotAct, ok, tc.wantCap, tc.wantAct, tc.wantOK)
+		}
+	}
+}
+
 // TestRateLimitRPMThrottlesRequests verifies that when the operator
 // configures RateLimitRPM, the provider actually waits between
 // requests. 120 RPM = 1 request per 500ms (burst of 1), so 2
