@@ -101,17 +101,26 @@ const defaultMaxTokensPerBatch = 100_000
 // English passage is ~7.5K tokens — well under the cap.
 const defaultMaxInputBytes = 30_000
 
-// bytesPerToken is a conservative chars-per-token heuristic used to
-// estimate the request's token cost without a real tokenizer. Voyage
-// does not publish their tokenizer for client-side use; empirically
-// code averages ~3–4 chars/token and English prose ~4. We use 3 to
-// over-count the cost (safe upper bound — we'll split sooner than the
-// upstream limit, never later).
+// bytesPerToken is the chars-per-token heuristic used to estimate
+// token cost without a real tokenizer. Voyage's own docs at
+// https://docs.voyageai.com/docs/tokenization recommend "dividing
+// character count by 5" as the rough rule of thumb (they publish
+// real HF tokenizers on huggingface.co/voyageai/voyage-* but
+// pulling one in here would require a CGO Rust dep — deferred).
+//
+// 5 is calibrated for prose; dense source code can run hotter
+// (1 token ≈ 2–3 bytes), which would make this estimator UNDER-
+// count for code. That's OK: planBatches may then pack inputs
+// tighter than the real cap permits, but embedWithAdaptiveSplit
+// detects the resulting 400 ("max tokens per batch") and bisects.
+// We trade a few extra round-trips on dense files for far fewer
+// spurious splits on ordinary content.
 //
 // len() in Go returns BYTE length, not rune count, so multi-byte
-// UTF-8 input (Cyrillic comments, CJK) gets further over-counted —
-// also safe.
-const bytesPerToken = 3
+// UTF-8 input (Cyrillic comments, CJK) gets over-counted relative
+// to Voyage's character-based heuristic — safe direction (more
+// splits, never fewer).
+const bytesPerToken = 5
 
 // Config is the persisted shape of the voyage provider's config blob.
 type Config struct {

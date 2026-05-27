@@ -174,11 +174,11 @@ func TestEmbedDocumentsSplitsOversizeBatch(t *testing.T) {
 // TestPlanBatches_SplitsByTokenBudget covers the second cap on per-
 // request batch size: even when input count is under maxBatchSize,
 // Voyage hard-limits the request to 120K tokens. Our estimator uses
-// 3 bytes/token so a 300_000-byte text estimates to 100_000 tokens,
-// hitting the budget exactly. Mixing one huge text with several
+// bytesPerToken=5 so a 600_000-byte text estimates to 120_000 tokens,
+// strictly above the 100K budget. Mixing one huge text with several
 // smaller ones should produce multiple batches.
 func TestPlanBatches_SplitsByTokenBudget(t *testing.T) {
-	big := strings.Repeat("x", 300_000) // ~100_000 est tokens
+	big := strings.Repeat("x", 600_000) // ~120_000 est tokens at bytesPerToken=5
 	small := "tiny"
 	texts := []string{big, small, small, small, small, small}
 
@@ -245,11 +245,15 @@ func TestEmbedDocumentsSplitsByTokenBudget(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// Two big texts ~100K est tokens each — should produce >= 2 POSTs.
-	big := strings.Repeat("x", 300_000)
+	// Two big texts ~100K est tokens each (at bytesPerToken=5) →
+	// should produce >= 2 POSTs. MaxInputBytes set high so the
+	// per-input sliding-window split doesn't trigger; we want to
+	// exercise the batch-level token cap specifically.
+	big := strings.Repeat("x", 500_000)
 	texts := []string{big, big}
 	p := New(Config{
 		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-code-3", OutputDtype: DtypeFloat,
+		MaxInputBytes: 1_000_000,
 	}, fixedSecrets("K", "v"), nil)
 	vecs, err := p.EmbedDocuments(context.Background(), texts)
 	if err != nil {
@@ -526,8 +530,8 @@ func TestRateLimitTPMThrottlesTokens(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// 180K bytes ≈ 60K est tokens — half the burst budget.
-	big := strings.Repeat("x", 180_000)
+	// 300K bytes ≈ 60K est tokens (bytesPerToken=5) — half the burst budget.
+	big := strings.Repeat("x", 300_000)
 
 	// First call drains 60K of the 100K-burst bucket: instant.
 	if _, err := p.EmbedQuery(ctx, big); err != nil {
