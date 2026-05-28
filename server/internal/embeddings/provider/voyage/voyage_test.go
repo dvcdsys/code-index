@@ -2,7 +2,9 @@ package voyage
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,11 +52,14 @@ func TestEmbedQuerySendsInputTypeQuery(t *testing.T) {
 		"model": "voyage-code-3",
 		"usage": {"total_tokens": 3}
 	}`)
+	// OutputDimension matches the 2-dim stub response so the per-vector
+	// dimension guard (H2) is satisfied; the assertion below still
+	// proves the configured dimension is forwarded in the request.
 	p := New(Config{
 		BaseURL:         srv.URL,
 		APIKeyEnv:       "K",
 		Model:           "voyage-code-3",
-		OutputDimension: 1024,
+		OutputDimension: 2,
 		OutputDtype:     DtypeFloat,
 	}, fixedSecrets("K", "v"), nil)
 
@@ -66,7 +71,7 @@ func TestEmbedQuerySendsInputTypeQuery(t *testing.T) {
 	if req.InputType != "query" {
 		t.Errorf("input_type %q; expected query", req.InputType)
 	}
-	if req.OutputDimension != 1024 {
+	if req.OutputDimension != 2 {
 		t.Errorf("output_dimension %d", req.OutputDimension)
 	}
 }
@@ -441,9 +446,9 @@ func TestEmbedDocuments_SingleInputTooLargeFailsClean(t *testing.T) {
 
 func TestParseBatchTooLarge(t *testing.T) {
 	cases := []struct {
-		msg                string
-		wantCap, wantAct   int
-		wantOK             bool
+		msg              string
+		wantCap, wantAct int
+		wantOK           bool
 	}{
 		{
 			"voyage: status 400: {\"detail\":\"Request failed. The max allowed tokens per submitted batch is 120000. Your batch has 187609 tokens after truncation.\"}",
@@ -562,5 +567,88 @@ func TestUsageDecodesWithoutPromptTokens(t *testing.T) {
 	}, fixedSecrets("K", "v"), nil)
 	if _, err := p.EmbedDocuments(context.Background(), []string{"x"}); err != nil {
 		t.Fatalf("decode: %v", err)
+	}
+}
+
+// TestEmbed_RejectsWrongDimension guards H2: a configured
+// output_dimension that the model silently ignores must be rejected
+// loudly rather than writing a wrong-width vector into the store.
+func TestEmbed_RejectsWrongDimension(t *testing.T) {
+	srv, _ := stubServer(t, http.StatusOK, `{
+		"data": [{"index": 0, "embedding": [0.1, 0.2]}],
+		"usage": {"total_tokens": 1}
+	}`)
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "m",
+		OutputDimension: 1024, OutputDtype: DtypeFloat,
+	}, fixedSecrets("K", "v"), nil)
+	_, err := p.EmbedDocuments(context.Background(), []string{"x"})
+	if err == nil {
+		t.Fatal("expected error on dimension mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "want 1024") {
+		t.Errorf("error %q should mention the expected dimension", err)
+	}
+}
+
+// TestEmbed_RejectsInconsistentWindowDims guards H2's averaging path:
+// when an oversize input is split into windows and the API returns
+// windows of differing width, the reassembly must error rather than
+// panic with index-out-of-range. OutputDimension=0 so the per-vector
+// check is skipped and the averaging guard is what catches it.
+func TestEmbed_RejectsInconsistentWindowDims(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// One oversize input expands to 2 windows → 2 inputs in this
+		// POST; return vectors of different lengths for each.
+		_, _ = io.WriteString(w, `{
+			"data": [
+				{"index": 0, "embedding": [0.1, 0.2]},
+				{"index": 1, "embedding": [0.1, 0.2, 0.3]}
+			],
+			"usage": {"total_tokens": 2}
+		}`)
+	}))
+	t.Cleanup(srv.Close)
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "m",
+		OutputDtype: DtypeFloat, MaxInputBytes: 10,
+	}, fixedSecrets("K", "v"), nil)
+	// 20 bytes > MaxInputBytes(10) → splits into 2 windows.
+	_, err := p.EmbedDocuments(context.Background(), []string{strings.Repeat("a", 20)})
+	if err == nil {
+		t.Fatal("expected error on inconsistent window dims, got nil")
+	}
+	if !strings.Contains(err.Error(), "inconsistent window dims") {
+		t.Errorf("error %q should mention inconsistent window dims", err)
+	}
+}
+
+// TestInt8Dequantize_Base64 guards M4: int8 returned as a base64-packed
+// byte string (rather than a JSON int array) is dequantized correctly.
+func TestInt8Dequantize_Base64(t *testing.T) {
+	// int8 [127, -127, 0, 64] packed as raw signed bytes → base64.
+	ints := []int8{127, -127, 0, 64}
+	packed := make([]byte, len(ints))
+	for i, v := range ints {
+		packed[i] = byte(v)
+	}
+	b64 := base64.StdEncoding.EncodeToString(packed)
+	srv, _ := stubServer(t, http.StatusOK, fmt.Sprintf(`{
+		"data": [{"index": 0, "embedding": %q}],
+		"usage": {"total_tokens": 1}
+	}`, b64))
+	p := New(Config{
+		BaseURL: srv.URL, APIKeyEnv: "K", Model: "m", OutputDtype: DtypeInt8,
+	}, fixedSecrets("K", "v"), nil)
+	vecs, err := p.EmbedDocuments(context.Background(), []string{"x"})
+	if err != nil {
+		t.Fatalf("EmbedDocuments: %v", err)
+	}
+	if len(vecs) != 1 || len(vecs[0]) != 4 {
+		t.Fatalf("shape wrong: %v", vecs)
+	}
+	v := vecs[0]
+	if v[0] < 0.999 || v[1] > -0.999 || v[2] != 0 || v[3] < 0.50 || v[3] > 0.51 {
+		t.Errorf("base64 int8 dequantized values out of range: %v", v)
 	}
 }

@@ -21,6 +21,7 @@ package voyage
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -40,8 +42,10 @@ import (
 // voyageBatchTooLargeRegex matches Voyage's per-batch token-limit
 // 400 response so the caller can react adaptively. Voyage's message
 // is fairly stable:
-//   "The max allowed tokens per submitted batch is 120000.
-//    Your batch has 187609 tokens after truncation."
+//
+//	"The max allowed tokens per submitted batch is 120000.
+//	 Your batch has 187609 tokens after truncation."
+//
 // We capture both numbers; the actual count drives how aggressively
 // the caller bisects.
 var voyageBatchTooLargeRegex = regexp.MustCompile(
@@ -268,6 +272,10 @@ func New(cfg Config, secrets provider.SecretLookup, logger *slog.Logger) *Provid
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = DefaultBaseURL
 	}
+	// Normalise away a trailing slash so url building (BaseURL +
+	// "/v1/embeddings") never produces a double slash, which stricter
+	// OpenAI-compatible proxies in front of Voyage can 404 on.
+	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if cfg.OutputDtype == "" {
 		cfg.OutputDtype = DtypeFloat
 	}
@@ -303,7 +311,7 @@ func (p *Provider) ID() string {
 	return "voyage:" + p.cfg.Model + ":" + dimStr + ":" + p.cfg.OutputDtype
 }
 
-func (p *Provider) Dimension() int       { return p.cfg.OutputDimension }
+func (p *Provider) Dimension() int         { return p.cfg.OutputDimension }
 func (p *Provider) SupportsTokenize() bool { return false }
 
 func (p *Provider) Start(ctx context.Context) error {
@@ -456,6 +464,14 @@ func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputTyp
 		avg := make([]float32, dim)
 		for k := 0; k < sp.length; k++ {
 			v := allVecs[sp.start+k]
+			// All windows of one input must share a width; otherwise the
+			// avg[d] += v[d] below would panic with index-out-of-range.
+			// Surface a clean error instead (only reachable if the API
+			// returns inconsistent dims across a split input).
+			if len(v) != dim {
+				return nil, fmt.Errorf("voyage: inconsistent window dims for input %d: window %d has %d, want %d",
+					i, k, len(v), dim)
+			}
 			for d := range avg {
 				avg[d] += v[d]
 			}
@@ -680,6 +696,16 @@ func (p *Provider) embed(ctx context.Context, texts []string, inputType string) 
 		if err != nil {
 			return nil, fmt.Errorf("voyage: decode embedding[%d]: %w", item.Index, err)
 		}
+		// Guard against a model silently ignoring output_dimension (e.g.
+		// a model that doesn't support Matryoshka shrink, or a typo'd
+		// model name): writing the wrong-width vector into the store
+		// corrupts the collection deep in the upsert path with no
+		// attribution back to here. Only enforced when a dimension was
+		// explicitly requested (0 = model's native default, unknown).
+		if want := p.cfg.OutputDimension; want > 0 && len(vec) != want {
+			return nil, fmt.Errorf("voyage: embedding[%d] has %d dims, want %d (model ignored output_dimension?)",
+				item.Index, len(vec), want)
+		}
 		out[item.Index] = vec
 	}
 	for i, v := range out {
@@ -703,6 +729,27 @@ func (p *Provider) embed(ctx context.Context, texts []string, inputType string) 
 func dequantize(raw json.RawMessage, dtype string) ([]float32, error) {
 	switch dtype {
 	case DtypeInt8:
+		// Voyage returns int8 either as a JSON array of integers (the
+		// default, which is what cix gets since it never sets
+		// encoding_format) or, in some configurations / behind an
+		// OpenAI-compatible proxy, as a base64-packed byte string.
+		// Handle the string form defensively so a proxy swap doesn't
+		// fail the whole batch with an opaque "int8 decode" error.
+		if len(raw) > 0 && raw[0] == '"' {
+			var b64 string
+			if err := json.Unmarshal(raw, &b64); err != nil {
+				return nil, fmt.Errorf("int8 base64 string decode: %w", err)
+			}
+			bs, err := base64.StdEncoding.DecodeString(b64)
+			if err != nil {
+				return nil, fmt.Errorf("int8 base64 decode: %w", err)
+			}
+			out := make([]float32, len(bs))
+			for i, b := range bs {
+				out[i] = float32(int8(b)) / 127.0
+			}
+			return out, nil
+		}
 		var ints []int8
 		if err := json.Unmarshal(raw, &ints); err != nil {
 			return nil, fmt.Errorf("int8 decode: %w", err)
