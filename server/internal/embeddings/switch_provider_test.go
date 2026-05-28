@@ -7,8 +7,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
@@ -135,4 +138,53 @@ func TestReopenVectorStore_NoopWhenUnwired(t *testing.T) {
 func dirExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.IsDir()
+}
+
+// TestRestart_ConcurrentWithEmbeds_NoRace guards H1: Restart swaps the
+// s.queue pointer when the concurrency cap changes, while Embed* callers
+// read it to acquire/release slots. Run under -race with many embedders
+// hammering the queue while a restarter repeatedly swaps it. A remote
+// (non-ollama) fake provider keeps Restart on the queue-only path with no
+// sidecar to manage.
+func TestRestart_ConcurrentWithEmbeds_NoRace(t *testing.T) {
+	s := &Service{
+		logger:  quiet(),
+		queue:   NewQueue(2, time.Second),
+		current: fakeProv{id: "fake:m"},
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_, _ = s.EmbedTexts(context.Background(), []string{"x"})
+				}
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 300; i++ {
+			// Alternate the cap so every other Restart actually swaps the
+			// queue pointer (the racy write H1 fixes).
+			n := 2 + (i % 3) // 2, 3, 4
+			_ = s.Restart(context.Background(), &config.Config{
+				MaxEmbeddingConcurrency: n,
+				EmbeddingQueueTimeout:   1,
+			})
+		}
+		close(stop)
+	}()
+
+	wg.Wait()
 }

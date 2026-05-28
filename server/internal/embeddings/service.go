@@ -42,8 +42,17 @@ type Service struct {
 	queue    *Queue
 	disabled bool
 
-	// mu guards current — swaps happen behind it (under BlockNew/Resume
-	// at the queue layer, but mu makes the swap itself atomic).
+	// lifecycleMu serializes the two provider-lifecycle operations
+	// (SwitchProvider and Restart) against each other so they never
+	// interleave their s.current / s.queue mutations or both tear down a
+	// provider. Embed* methods do NOT take it — they run concurrently via
+	// the queue + an s.mu snapshot of current/queue.
+	lifecycleMu sync.Mutex
+
+	// mu guards current AND the queue pointer — both are swapped at
+	// runtime (current by SwitchProvider/Restart, queue by Restart when
+	// the concurrency cap changes), so every read must snapshot them
+	// under the read lock rather than touching the fields directly.
 	mu      sync.RWMutex
 	current provider.Provider
 
@@ -198,6 +207,10 @@ func (s *Service) SwitchProvider(ctx context.Context, kind string, cfgBytes []by
 	if s == nil || s.disabled {
 		return ErrDisabled
 	}
+	// Serialize against Restart so the two lifecycle ops never interleave
+	// their s.current / s.queue mutations.
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 
 	newProv, err := provider.Build(ctx, kind, cfgBytes, envSecrets, s.logger)
 	if err != nil {
@@ -207,15 +220,16 @@ func (s *Service) SwitchProvider(ctx context.Context, kind string, cfgBytes []by
 		return fmt.Errorf("start %s provider: %w", kind, err)
 	}
 
-	s.queue.BlockNew()
+	q := s.currentQueue()
+	q.BlockNew()
 	drainCtx, drainCancel := context.WithTimeout(ctx, 30*time.Second)
-	if derr := s.queue.WaitDrain(drainCtx); derr != nil {
+	if derr := q.WaitDrain(drainCtx); derr != nil {
 		s.logger.Warn("embeddings: drain timed out during switch; proceeding anyway",
-			"in_flight", s.queue.InFlight(), "err", derr,
+			"in_flight", q.InFlight(), "err", derr,
 		)
 	}
 	drainCancel()
-	s.queue.Resume()
+	q.Resume()
 
 	s.mu.Lock()
 	old := s.current
@@ -367,8 +381,8 @@ func (s *Service) Status() provider.Status {
 		return provider.Status{State: provider.StateFailed, LastError: "provider not initialised"}
 	}
 	st := cur.Status()
-	if s.queue != nil {
-		st.InFlight = s.queue.InFlight()
+	if q := s.currentQueue(); q != nil {
+		st.InFlight = q.InFlight()
 	}
 	return st
 }
@@ -423,21 +437,32 @@ func (s *Service) Restart(ctx context.Context, cfg *config.Config) error {
 	if s == nil || s.disabled {
 		return ErrDisabled
 	}
+	// Serialize against SwitchProvider so the two lifecycle ops never
+	// interleave their s.current / s.queue mutations.
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 
-	s.queue.BlockNew()
-	defer s.queue.Resume()
+	// Snapshot the live queue, block + drain it. Resume targets this same
+	// instance: if we swap below it's discarded (the resume is harmless),
+	// otherwise it's still s.queue and the resume re-opens it.
+	oldQ := s.currentQueue()
+	oldQ.BlockNew()
+	defer oldQ.Resume()
 	drainCtx, drainCancel := context.WithTimeout(ctx, 30*time.Second)
-	if err := s.queue.WaitDrain(drainCtx); err != nil {
+	if err := oldQ.WaitDrain(drainCtx); err != nil {
 		drainCancel()
 		s.logger.Warn("embeddings: drain timed out, proceeding with restart anyway",
-			"in_flight", s.queue.InFlight(), "err", err,
+			"in_flight", oldQ.InFlight(), "err", err,
 		)
 	} else {
 		drainCancel()
 	}
 
-	if cfg.MaxEmbeddingConcurrency != cap(s.queue.slots) {
-		s.queue = NewQueue(cfg.MaxEmbeddingConcurrency, time.Duration(cfg.EmbeddingQueueTimeout)*time.Second)
+	if cfg.MaxEmbeddingConcurrency != cap(oldQ.slots) {
+		newQ := NewQueue(cfg.MaxEmbeddingConcurrency, time.Duration(cfg.EmbeddingQueueTimeout)*time.Second)
+		s.mu.Lock()
+		s.queue = newQ
+		s.mu.Unlock()
 	}
 
 	// Snapshot the live provider's kind under the read lock — we don't
@@ -518,12 +543,12 @@ func (s *Service) EmbedQuery(ctx context.Context, query string) ([]float32, erro
 	if s == nil || s.disabled {
 		return nil, ErrDisabled
 	}
-	cur, err := s.acquireProvider(ctx)
+	cur, q, err := s.acquireProvider(ctx)
 	if err != nil {
 		return nil, err
 	}
 	slotStart := time.Now()
-	defer s.queue.Release(slotStart)
+	defer q.Release(slotStart)
 	return cur.EmbedQuery(ctx, query)
 }
 
@@ -535,12 +560,12 @@ func (s *Service) EmbedTexts(ctx context.Context, texts []string) ([][]float32, 
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	cur, err := s.acquireProvider(ctx)
+	cur, q, err := s.acquireProvider(ctx)
 	if err != nil {
 		return nil, err
 	}
 	slotStart := time.Now()
-	defer s.queue.Release(slotStart)
+	defer q.Release(slotStart)
 	return cur.EmbedDocuments(ctx, texts)
 }
 
@@ -555,25 +580,38 @@ func (s *Service) TokenizeAndEmbed(ctx context.Context, texts []string) ([][]flo
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	cur, err := s.acquireProvider(ctx)
+	cur, q, err := s.acquireProvider(ctx)
 	if err != nil {
 		return nil, err
 	}
 	slotStart := time.Now()
-	defer s.queue.Release(slotStart)
+	defer q.Release(slotStart)
 	if cur.SupportsTokenize() {
 		return cur.TokenizeAndEmbed(ctx, texts)
 	}
 	return cur.EmbedDocuments(ctx, texts)
 }
 
-// acquireProvider acquires a queue slot and returns the active
-// provider snapshot. Caller is responsible for queue.Release once the
-// call returns (deferred at call site so the slot is released even on
-// provider error).
-func (s *Service) acquireProvider(ctx context.Context) (provider.Provider, error) {
-	if err := s.queue.Acquire(ctx); err != nil {
-		return nil, err
+// currentQueue returns the active queue under the read lock. Restart
+// swaps the queue pointer when the concurrency cap changes, so callers
+// must snapshot it rather than reading s.queue directly (otherwise the
+// read races the swap).
+func (s *Service) currentQueue() *Queue {
+	s.mu.RLock()
+	q := s.queue
+	s.mu.RUnlock()
+	return q
+}
+
+// acquireProvider acquires a queue slot and returns the active provider
+// snapshot AND the queue the slot was taken from. The caller must
+// Release on the RETURNED queue (not s.queue, which Restart may have
+// swapped meanwhile) — deferred at the call site so the slot is released
+// even on provider error.
+func (s *Service) acquireProvider(ctx context.Context) (provider.Provider, *Queue, error) {
+	q := s.currentQueue()
+	if err := q.Acquire(ctx); err != nil {
+		return nil, nil, err
 	}
 	s.mu.RLock()
 	cur := s.current
@@ -581,8 +619,8 @@ func (s *Service) acquireProvider(ctx context.Context) (provider.Provider, error
 	if cur == nil {
 		// We hold the slot but have nothing to call — release it before
 		// returning the error so subsequent callers aren't starved.
-		s.queue.Release(time.Now())
-		return nil, ErrSupervisor
+		q.Release(time.Now())
+		return nil, nil, ErrSupervisor
 	}
-	return cur, nil
+	return cur, q, nil
 }
