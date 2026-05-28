@@ -67,6 +67,56 @@ func TestListEmbeddingProviders_ViewerForbidden(t *testing.T) {
 	}
 }
 
+// The following three tests close the per-endpoint 403 gating gap
+// required by the project's auth rule: a non-admin (viewer) caller must
+// be rejected on EVERY admin embedding-provider route, not just the list.
+
+func TestGetActiveEmbeddingProvider_ViewerForbidden(t *testing.T) {
+	f := newAdminFixture(t)
+	f.Deps.EmbeddingsCfg = embeddingscfg.New(f.Deps.DB)
+	f.Router = NewRouter(f.Deps)
+	cookie := viewerCookie(t, f)
+
+	req := withCookie(httptest.NewRequest(http.MethodGet,
+		"/api/v1/admin/embedding-providers/active", nil), cookie)
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSwitchEmbeddingProvider_ViewerForbidden(t *testing.T) {
+	f := newAdminFixture(t)
+	f.Deps.EmbeddingsCfg = embeddingscfg.New(f.Deps.DB)
+	f.Router = NewRouter(f.Deps)
+	cookie := viewerCookie(t, f)
+
+	body, _ := json.Marshal(map[string]any{"kind": "ollama", "config": map[string]any{}})
+	req := withCookie(httptest.NewRequest(http.MethodPut,
+		"/api/v1/admin/embedding-providers/active", bytes.NewReader(body)), cookie)
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestTestEmbeddingProvider_ViewerForbidden(t *testing.T) {
+	f := newAdminFixture(t)
+	f.Deps.EmbeddingsCfg = embeddingscfg.New(f.Deps.DB)
+	f.Router = NewRouter(f.Deps)
+	cookie := viewerCookie(t, f)
+
+	req := withCookie(httptest.NewRequest(http.MethodPost,
+		"/api/v1/admin/embedding-providers/voyage/test", bytes.NewReader([]byte(`{}`))), cookie)
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
 func TestSwitchEmbeddingProvider_RejectsUnknownKind(t *testing.T) {
 	f := newAdminFixture(t)
 	f.Deps.EmbeddingsCfg = embeddingscfg.New(f.Deps.DB)

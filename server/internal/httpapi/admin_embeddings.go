@@ -199,13 +199,22 @@ func (s *Server) SwitchEmbeddingProvider(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Resolve the actor for the audit field. mustBeAdmin returns a nil
+	// authContext when CIX_AUTH_DISABLED=true (a legitimate deployment
+	// mode), so guard before dereferencing — matches the ac != nil
+	// pattern used elsewhere (e.g. tunnels.go).
+	actorID := ""
+	if user != nil {
+		actorID = user.User.ID
+	}
+
 	// Persist BEFORE swap so the DB always leads the live state.
 	// If SwitchProvider then fails, the operator's next call (or
 	// container restart) reads the new row and tries again.
 	if err := s.Deps.EmbeddingsCfg.Save(r.Context(), embeddingscfg.Snapshot{
 		Kind:   req.Kind,
 		Config: cfgBytes,
-	}, user.User.ID); err != nil {
+	}, actorID); err != nil {
 		writeError(w, http.StatusInternalServerError, "persist provider: "+err.Error())
 		return
 	}
