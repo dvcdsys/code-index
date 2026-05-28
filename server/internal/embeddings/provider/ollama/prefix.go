@@ -9,11 +9,11 @@ import "strings"
 // Keep this map string-for-string identical to the Python dict. The parity gate
 // depends on the prefix being literally the same bytes sent to the model.
 var QueryPrefixes = map[string]string{
-	"nomic-ai/CodeRankEmbed":              "Represent this query for searching relevant code: ",
-	"nomic-ai/nomic-embed-text-v1.5":      "search_query: ",
-	"BAAI/bge-base-en-v1.5":               "Represent this sentence for searching relevant passages: ",
-	"BAAI/bge-large-en-v1.5":              "Represent this sentence for searching relevant passages: ",
-	"awhiteside/CodeRankEmbed-Q8_0-GGUF":  "Represent this query for searching relevant code: ",
+	"nomic-ai/CodeRankEmbed":             "Represent this query for searching relevant code: ",
+	"nomic-ai/nomic-embed-text-v1.5":     "search_query: ",
+	"BAAI/bge-base-en-v1.5":              "Represent this sentence for searching relevant passages: ",
+	"BAAI/bge-large-en-v1.5":             "Represent this sentence for searching relevant passages: ",
+	"awhiteside/CodeRankEmbed-Q8_0-GGUF": "Represent this query for searching relevant code: ",
 }
 
 // ResolveQueryPrefix returns the prefix string to prepend to queries for the

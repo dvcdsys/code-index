@@ -15,10 +15,10 @@ import (
 // extracts them from *config.Config so the ollama package stays free
 // of the config dependency.
 type GGUFInputs struct {
-	GGUFPath          string // CIX_GGUF_PATH absolute override
-	Model             string // HF repo id ("owner/repo") or absolute path
-	CacheDir          string // base dir under which downloaded GGUFs live
-	BootstrapPath     string // CIX_BOOTSTRAP_GGUF_PATH one-shot import source
+	GGUFPath      string // CIX_GGUF_PATH absolute override
+	Model         string // HF repo id ("owner/repo") or absolute path
+	CacheDir      string // base dir under which downloaded GGUFs live
+	BootstrapPath string // CIX_BOOTSTRAP_GGUF_PATH one-shot import source
 }
 
 // ResolveGGUFPath walks the precedence chain:
