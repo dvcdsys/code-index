@@ -253,7 +253,7 @@ func (s *Server) enrichProjectStorage(out *openapi.Project, p *projects.Project)
 	if cfg == nil {
 		return
 	}
-	sqlitePath := cfg.DynamicSQLitePath()
+	sqlitePath := cfg.SQLitePath
 	if sqlitePath != "" {
 		out.SqlitePath = ptrString(sqlitePath)
 		if info, err := os.Stat(sqlitePath); err == nil {
@@ -261,9 +261,11 @@ func (s *Server) enrichProjectStorage(out *openapi.Project, p *projects.Project)
 			out.SqliteSizeBytes = &sz
 		}
 	}
-	if cfg.ChromaPersistDir != "" {
+	// Chroma dir is namespaced by the ACTIVE provider's identity slug, so
+	// the displayed path tracks whatever provider is live now.
+	if slug := es.StorageSlug(); cfg.ChromaPersistDir != "" && slug != "" {
 		col := vectorstore.CollectionName(p.HostPath)
-		dir := filepath.Join(cfg.DynamicChromaPersistDir(), col)
+		dir := filepath.Join(cfg.ChromaDirForSlug(slug), col)
 		out.ChromaPath = ptrString(dir)
 		if sz, ok := dirSizeBytes(dir); ok {
 			out.ChromaSizeBytes = &sz

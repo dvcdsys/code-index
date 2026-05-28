@@ -107,8 +107,14 @@ func TestLoadOverrides(t *testing.T) {
 	if got := c.ModelSafeName(); got != "test_model_name" {
 		t.Errorf("ModelSafeName = %q", got)
 	}
-	if got := c.DynamicSQLitePath(); got != "/tmp/test_test_model_name.db" {
-		t.Errorf("DynamicSQLitePath = %q", got)
+	// LegacyDynamicSQLitePath still reconstructs the OLD per-model filename
+	// (used only by the boot-time adoption migration).
+	if got := c.LegacyDynamicSQLitePath(); got != "/tmp/test_test_model_name.db" {
+		t.Errorf("LegacyDynamicSQLitePath = %q", got)
+	}
+	// ChromaDirForSlug suffixes the chroma base with the given identity slug.
+	if got := c.ChromaDirForSlug("voyage_voyage_code_3_2048_float"); got != c.ChromaPersistDir+"_voyage_voyage_code_3_2048_float" {
+		t.Errorf("ChromaDirForSlug = %q", got)
 	}
 }
 

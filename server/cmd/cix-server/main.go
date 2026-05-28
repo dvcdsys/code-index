@@ -25,8 +25,8 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
 	"github.com/dvcdsys/code-index/server/internal/githubapi"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
-	"github.com/dvcdsys/code-index/server/internal/groups"
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
+	"github.com/dvcdsys/code-index/server/internal/groups"
 	"github.com/dvcdsys/code-index/server/internal/httpapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
@@ -35,6 +35,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/storage"
 	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
 	"github.com/dvcdsys/code-index/server/internal/users"
@@ -116,7 +117,16 @@ func run() error {
 	chunker.Configure(cfg.Languages)
 	logger.Info("chunker languages configured", "active", chunker.SupportedLanguages())
 
-	dbPath := cfg.DynamicSQLitePath()
+	// The system DB is model-INDEPENDENT (one permanent file at
+	// cfg.SQLitePath holding accounts + catalog + parsed code). Older
+	// builds suffixed the model name onto the path; adopt any such legacy
+	// per-model file as the canonical system DB (idempotent, one-time).
+	// LEGACY-MIGRATION (remove next release): drop this adoption call once
+	// all deployments have booted on the unified layout.
+	if err := storage.AdoptLegacyModelDB(cfg.SQLitePath, cfg.LegacyDynamicSQLitePath(), logger); err != nil {
+		return fmt.Errorf("adopt legacy system db: %w", err)
+	}
+	dbPath := cfg.SQLitePath
 	logger.Info("opening database", "path", dbPath)
 	database, err := db.OpenWith(db.OpenOptions{
 		Path:    dbPath,
@@ -156,14 +166,10 @@ func run() error {
 		"batch", cfg.LlamaBatchSize,
 		"sources", snap.Source,
 	)
-	// DynamicSQLitePath embeds ModelSafeName(); if the dashboard switched the
-	// model, the storage path resolved a moment ago is for the OLD model. The
-	// already-opened DB is still correct (it's the OLD model's state) but the
-	// chroma vectorstore opened below needs to honour the NEW model. Recompute
-	// dbPath only matters if we want to re-open under the new model — for PR-E
-	// we deliberately keep the old DB so historical projects keep their
-	// indexed_with_model and the dashboard can show the drift. Sidecar +
-	// vectorstore use the new model.
+	// The system DB is model-independent (opened above at cfg.SQLitePath).
+	// Only the chroma vector store is namespaced per embedding identity —
+	// it is opened below once the active provider is known, using
+	// provider.StorageSlug(Provider.ID()).
 
 	// Embeddings service. When disabled we still build the value so router
 	// wiring stays consistent — Service methods return ErrDisabled in that case.
@@ -234,21 +240,49 @@ func run() error {
 		}
 	}()
 
+	// Prefix legacy un-prefixed chroma dirs (pre-unification ollama-only
+	// builds) to the unified "<base>_ollama_<model>" naming so existing
+	// ollama vectors are reused under the new identity-namespaced scheme
+	// without a reindex. Idempotent; runs once per legacy dir.
+	// LEGACY-MIGRATION (remove next release): drop this prefixing call once
+	// all deployments have booted on the unified layout.
+	if err := storage.PrefixLegacyChromaDirs(cfg.ChromaPersistDir, logger); err != nil {
+		logger.Warn("could not migrate legacy chroma dirs (continuing)", "err", err)
+	}
+
+	// The vector store is namespaced by the ACTIVE provider identity slug
+	// so vectors of different dimensions never share a collection.
+	chromaSlug := embedSvc.StorageSlug()
+	if chromaSlug == "" {
+		// Embeddings disabled / provider not built: deterministic ollama-
+		// shaped fallback so toggling embeddings on/off doesn't move dirs.
+		chromaSlug = provider.StorageSlug("ollama:" + cfg.EmbeddingModel)
+	}
+	chromaDir := cfg.ChromaDirForSlug(chromaSlug)
+
 	// Detect and back up a legacy ChromaDB layout left by the Python server.
-	if backed, bErr := vectorstore.DetectLegacyAndBackup(cfg.DynamicChromaPersistDir()); bErr != nil {
+	if backed, bErr := vectorstore.DetectLegacyAndBackup(chromaDir); bErr != nil {
 		logger.Warn("could not back up legacy chroma dir", "err", bErr)
 	} else if backed {
 		logger.Warn("legacy chroma layout detected — backed up; re-run cix init to reindex")
 	}
 
-	// Vector store (chromem-go). Lives under the dynamic chroma persist dir so
-	// the path includes the model-safe name, matching Python parity.
-	vs, err := vectorstore.Open(cfg.DynamicChromaPersistDir())
+	vs, err := vectorstore.Open(chromaDir)
 	if err != nil {
 		return fmt.Errorf("open vectorstore: %w", err)
 	}
+	// Wrap in a swappable Holder shared by indexer / repojobs / httpapi so
+	// a runtime provider switch can reopen the store under a new namespace.
+	vsHolder := vectorstore.NewHolder(vs)
+	// Wire the live-reopen path used by SwitchProvider.
+	embedSvc.AttachVectorStore(
+		vsHolder,
+		cfg.ChromaDirForSlug,
+		vectorstore.Open,
+		func() error { return storage.PrefixLegacyChromaDirs(cfg.ChromaPersistDir, logger) },
+	)
 
-	idx := indexer.New(database, vs, embedSvc, logger)
+	idx := indexer.New(database, vsHolder, embedSvc, logger)
 	idx.SetEmbedIncludePath(cfg.EmbedIncludePath)
 	// Record the active embedding model on every indexed project so the
 	// dashboard can highlight stale vectors when the runtime provider /
@@ -332,7 +366,7 @@ func run() error {
 		GitRepos:                   grSvc,
 		GithubTokens:               ghSvc,
 		Indexer:                    idx,
-		VectorStore:                vs,
+		VectorStore:                vsHolder,
 		DataDir:                    cfg.WorkspacesDataDir,
 		Logger:                     logger,
 		DefaultPollIntervalSeconds: int(cfg.DefaultPollInterval.Seconds()),
@@ -454,7 +488,7 @@ func run() error {
 		Sessions:          sessSvc,
 		APIKeys:           akSvc,
 		EmbeddingSvc:      embedSvc,
-		VectorStore:       vs,
+		VectorStore:       vsHolder,
 		Indexer:           idx,
 		RuntimeCfg:        rcfg,
 		EmbeddingsCfg:     embedCfgStore,

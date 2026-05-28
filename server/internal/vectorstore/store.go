@@ -65,7 +65,7 @@ func collectionName(projectPath string) string {
 
 // CollectionName is the exported alias for the per-project chromem-go
 // collection identifier. The dashboard's project-detail card uses it to
-// resolve the on-disk directory under cfg.DynamicChromaPersistDir().
+// resolve the on-disk directory under cfg.ChromaDirForSlug(activeSlug).
 func CollectionName(projectPath string) string { return collectionName(projectPath) }
 
 // docID format: "{md5hex(filePath)[:12]}:{startLine}-{endLine}:{idx}"

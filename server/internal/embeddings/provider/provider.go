@@ -20,6 +20,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 // Kind enumerates the built-in provider kinds. New kinds are added by
@@ -173,6 +174,41 @@ var ErrMissingAPIKey = errors.New("provider: required API key env var is not set
 // return this until the provider is replaced (admin perspective) or
 // the process is restarted. Caller maps to HTTP 503 without retry.
 var ErrUnrecoverable = errors.New("provider: unrecoverable failure")
+
+// StorageSlug turns a Provider.ID() fingerprint into a filesystem-safe
+// slug used to namespace the on-disk vector store directory, so each
+// distinct embedding identity (kind + model + dim + dtype) gets its own
+// chroma collection space. Switching providers therefore never mixes
+// vectors of different dimensions in one collection, and switching back
+// reuses the prior namespace without a reindex.
+//
+// Rules: lowercase, then replace every rune outside [a-z0-9_] (including
+// '/', '-', ':') with '_'. Deliberately a pure per-rune map — no
+// run-collapsing or trimming — so the transform is deterministic and
+// idempotent. (It is not strictly injective: e.g. "a:b" and "a-b" both
+// map to "a_b". That is harmless here because real Provider.ID() strings
+// for a given kind never differ only in a separator — model names carry
+// no ':' and dims/dtypes are fixed tokens.) Examples:
+//
+//	"voyage:voyage-code-3:2048:float"            → "voyage_voyage_code_3_2048_float"
+//	"ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF"  → "ollama_awhiteside_coderankembed_q8_0_gguf"
+//	"openai:text-embedding-3-large:256"          → "openai_text_embedding_3_large_256"
+//
+// An empty ID yields an empty slug; callers guard against that.
+func StorageSlug(id string) string {
+	lower := strings.ToLower(id)
+	var b strings.Builder
+	b.Grow(len(lower))
+	for _, r := range lower {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
 
 // SecretLookup resolves an env-var name to its current value at the
 // moment of the call. Implementations must return (value, true) when

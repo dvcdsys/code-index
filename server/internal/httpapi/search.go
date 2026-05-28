@@ -374,7 +374,7 @@ func groupByFile(items []searchResultItem) []fileGroupResult {
 // applyPostLangFilter=true).
 func fetchVectorResults(
 	ctx context.Context,
-	store *vectorstore.Store,
+	store vectorstore.Interface,
 	projectPath string,
 	qEmb []float32,
 	n int,

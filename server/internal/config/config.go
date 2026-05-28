@@ -19,7 +19,7 @@ import (
 // default was a Python-FastAPI parallel-rollout carry-over; the Python
 // backend was archived 2026-04 and the parity is no longer meaningful.
 type Config struct {
-	APIKey                  string
+	APIKey string
 	// AuthDisabled, when true, makes the server skip the API-key check on
 	// every endpoint. Off by default — must be turned on EXPLICITLY via
 	// CIX_AUTH_DISABLED=true (and also requires CIX_API_KEY to be empty).
@@ -176,24 +176,41 @@ type Config struct {
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
-// filesystem paths. Matches Settings.model_safe_name in api/app/config.py.
+// filesystem paths. Originally mirrored Settings.model_safe_name in the
+// archived Python backend; now used ONLY to reconstruct the legacy
+// per-model SQLite filename during the one-time DB adoption migration
+// (internal/storage.AdoptLegacyModelDB). It no longer drives any live
+// storage path — the system DB is model-independent and the vector store
+// is namespaced by provider.StorageSlug(Provider.ID()).
+//
+// LEGACY-MIGRATION (remove next release): this and LegacyDynamicSQLitePath
+// exist solely for the one-time storage-unification adoption. Once every
+// deployment has booted on the unified layout, delete both along with
+// storage.AdoptLegacyModelDB and its call in cmd/cix-server/main.go.
 func (c *Config) ModelSafeName() string {
 	s := strings.ReplaceAll(c.EmbeddingModel, "/", "_")
 	s = strings.ReplaceAll(s, "-", "_")
 	return strings.ToLower(s)
 }
 
-// DynamicSQLitePath returns the SQLite path with the model-safe name suffixed
-// before the extension. Matches Settings.dynamic_sqlite_path in Python.
-func (c *Config) DynamicSQLitePath() string {
+// LegacyDynamicSQLitePath reconstructs the OLD per-model SQLite filename
+// (<base>_<ModelSafeName>.db) that pre-unification builds wrote to. It is
+// used solely by the boot-time DB adoption migration to locate the file
+// to adopt as the new model-independent system DB; no live code path
+// should depend on it.
+func (c *Config) LegacyDynamicSQLitePath() string {
 	ext := filepath.Ext(c.SQLitePath)
 	base := strings.TrimSuffix(c.SQLitePath, ext)
 	return fmt.Sprintf("%s_%s%s", base, c.ModelSafeName(), ext)
 }
 
-// DynamicChromaPersistDir matches Settings.dynamic_chroma_persist_dir.
-func (c *Config) DynamicChromaPersistDir() string {
-	return fmt.Sprintf("%s_%s", c.ChromaPersistDir, c.ModelSafeName())
+// ChromaDirForSlug returns the on-disk vector-store directory for a given
+// embedding-identity slug (see provider.StorageSlug). The slug namespaces
+// the chroma persist dir so vectors of different dimensions never share a
+// collection. The slug is computed by the caller from the ACTIVE
+// provider's ID(), keeping the model identity out of config.
+func (c *Config) ChromaDirForSlug(slug string) string {
+	return fmt.Sprintf("%s_%s", c.ChromaPersistDir, slug)
 }
 
 // Load reads CIX_* environment variables and returns a populated Config.
@@ -345,7 +362,6 @@ func Load() (*Config, error) {
 
 	c.VersionCheckRepo = getenv("CIX_VERSION_CHECK_REPO", "dvcdsys/code-index")
 
-
 	c.SecretKey = getenv("CIX_SECRET_KEY", "")
 	c.SecretKeyFile = getenv("CIX_SECRET_KEYFILE", "")
 	c.SecretsDataDir = getenv("CIX_SECRETS_DATA_DIR", filepath.Dir(c.SQLitePath))
@@ -463,8 +479,8 @@ func defaultDataDir() string {
 }
 
 // defaultSQLitePath resolves the local SQLite database path under the
-// platform data dir. The `_` suffix from DynamicSQLitePath is appended at
-// query time, not here.
+// platform data dir. This is the literal, model-independent system DB
+// path the server opens (no model suffix is appended any more).
 func defaultSQLitePath() string {
 	return filepath.Join(defaultDataDir(), "sqlite", "projects.db")
 }

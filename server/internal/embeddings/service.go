@@ -13,7 +13,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider/ollama"
-
+	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 
 	// Blank imports trigger each provider package's init() which
 	// registers a Factory in the registry. Service builds the active
@@ -46,6 +46,65 @@ type Service struct {
 	// at the queue layer, but mu makes the swap itself atomic).
 	mu      sync.RWMutex
 	current provider.Provider
+
+	// Vector-store reopen hooks, wired by main.go via AttachVectorStore.
+	// When set, SwitchProvider reopens the vector store under the new
+	// provider's identity slug and atomically swaps it into vsHolder, so
+	// a runtime provider switch moves to a dimension-isolated namespace
+	// without a process restart. All four are nil in tests that don't
+	// exercise the reopen path (SwitchProvider then only swaps the
+	// provider, matching the pre-unification behaviour).
+	vsHolder  *vectorstore.Holder
+	vsDirFor  func(slug string) string                     // cfg.ChromaDirForSlug
+	vsOpener  func(dir string) (*vectorstore.Store, error) // vectorstore.Open
+	vsMigrate func() error                                 // legacy chroma-dir prefix migration (idempotent)
+}
+
+// AttachVectorStore wires the live vector-store reopen path used by
+// SwitchProvider. main.go calls it once after constructing the Service
+// and the shared Holder:
+//
+//	dirFor  — cfg.ChromaDirForSlug (maps a StorageSlug to an on-disk dir)
+//	opener  — vectorstore.Open
+//	migrate — optional idempotent legacy-dir migration run before each
+//	          reopen (lets a switch back to ollama on a pre-unification
+//	          box adopt its renamed dir without a restart); may be nil
+//
+// Passing the formula (dirFor) and opener as funcs keeps embeddings free
+// of a hard dependency on config path layout and avoids an
+// embeddings→storage import for the migration hook.
+func (s *Service) AttachVectorStore(
+	holder *vectorstore.Holder,
+	dirFor func(slug string) string,
+	opener func(dir string) (*vectorstore.Store, error),
+	migrate func() error,
+) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.vsHolder = holder
+	s.vsDirFor = dirFor
+	s.vsOpener = opener
+	s.vsMigrate = migrate
+	s.mu.Unlock()
+}
+
+// StorageSlug returns the filesystem slug of the ACTIVE provider's
+// identity (provider.StorageSlug(current.ID())), or "" when disabled /
+// not yet built. The dashboard's project-detail handler uses it to show
+// the live chroma directory.
+func (s *Service) StorageSlug() string {
+	if s == nil || s.disabled {
+		return ""
+	}
+	s.mu.RLock()
+	cur := s.current
+	s.mu.RUnlock()
+	if cur == nil {
+		return ""
+	}
+	return provider.StorageSlug(cur.ID())
 }
 
 // New constructs a Service from the env-derived config. The legacy
@@ -174,6 +233,47 @@ func (s *Service) SwitchProvider(ctx context.Context, kind string, cfgBytes []by
 		}(old)
 	}
 	s.logger.Info("embeddings: switched provider", "kind", kind, "id", newProv.ID())
+
+	// Reopen the vector store under the new provider's identity slug so
+	// its (possibly different-dimension) vectors land in their own
+	// namespace instead of colliding with the previous provider's
+	// collection. The provider has ALREADY been swapped above; if the
+	// reopen fails we do NOT roll it back (the new provider is live for
+	// embedding) — we keep the holder on the old store and surface a
+	// loud error so the operator restarts. Without the reopen, the next
+	// reindex would write new-dim vectors into the old dir.
+	if err := s.reopenVectorStore(newProv); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reopenVectorStore opens a fresh *vectorstore.Store under the directory
+// derived from prov's identity slug and atomically swaps it into the
+// shared Holder. No-op when AttachVectorStore was never called (tests).
+func (s *Service) reopenVectorStore(prov provider.Provider) error {
+	s.mu.RLock()
+	holder, dirFor, opener, migrate := s.vsHolder, s.vsDirFor, s.vsOpener, s.vsMigrate
+	s.mu.RUnlock()
+	if holder == nil || dirFor == nil || opener == nil {
+		return nil // reopen path not wired (e.g. unit tests)
+	}
+	if migrate != nil {
+		// Idempotent legacy-dir prefixing — lets a switch back to ollama
+		// on a pre-unification box adopt its renamed dir without restart.
+		if err := migrate(); err != nil {
+			s.logger.Warn("embeddings: chroma legacy-dir migration failed during switch (continuing)", "err", err)
+		}
+	}
+	dir := dirFor(provider.StorageSlug(prov.ID()))
+	newStore, err := opener(dir)
+	if err != nil {
+		s.logger.Error("embeddings: provider switched but vector store reopen failed; keeping previous store until restart",
+			"dir", dir, "err", err)
+		return fmt.Errorf("reopen vector store at %s: %w", dir, err)
+	}
+	holder.Swap(newStore)
+	s.logger.Info("embeddings: vector store reopened under new provider namespace", "dir", dir)
 	return nil
 }
 

@@ -140,6 +140,49 @@ func OpenWith(opts OpenOptions) (*sql.DB, error) {
 	return db, nil
 }
 
+// HasTables reports whether the SQLite database at path contains ALL of
+// the named tables. It opens the file read-write (so any pending WAL is
+// recovered cleanly) with a busy timeout, runs NO migrations, and closes
+// before returning. A missing file is not an error — it returns
+// (false, nil). Used by the boot-time DB adoption migration
+// (internal/storage) to tell a real unified system DB (has both
+// schema_migrations and users) apart from a pre-auth fossil that merely
+// happens to occupy the target path.
+func HasTables(path string, names ...string) (bool, error) {
+	if path == "" || len(names) == 0 {
+		return false, nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	dsn, err := buildDSN(path)
+	if err != nil {
+		return false, err
+	}
+	sdb, err := sql.Open(DriverName, dsn)
+	if err != nil {
+		return false, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer sdb.Close()
+	sdb.SetMaxOpenConns(1)
+	for _, name := range names {
+		var got string
+		err := sdb.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, name,
+		).Scan(&got)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("check table %q in %s: %w", name, path, err)
+		}
+	}
+	return true, nil
+}
+
 // applyMigrations runs every entry in registeredMigrations whose version is
 // greater than the current high-water mark in schema_migrations. Each
 // successful migration records a (version, name, applied_at) row so the

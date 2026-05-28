@@ -90,7 +90,7 @@ type TokenAwareEmbedder interface {
 // Service owns sessions and wires dependencies for the three-phase protocol.
 type Service struct {
 	db     *sql.DB
-	vs     *vectorstore.Store
+	vs     vectorstore.Interface
 	emb    Embedder
 	logger *slog.Logger
 
@@ -127,7 +127,7 @@ type Service struct {
 
 // New constructs a Service. All deps are required except logger (falls back to
 // slog.Default).
-func New(db *sql.DB, vs *vectorstore.Store, emb Embedder, logger *slog.Logger) *Service {
+func New(db *sql.DB, vs vectorstore.Interface, emb Embedder, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}

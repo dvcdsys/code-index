@@ -74,8 +74,10 @@ type Deps struct {
 	// tests). Phase 5 uses it for semantic search.
 	EmbeddingSvc EmbeddingsQuerier
 	// VectorStore is the chromem-go backed vector store (Phase 4). Nil-safe:
-	// semantic search returns empty results when absent.
-	VectorStore *vectorstore.Store
+	// semantic search returns empty results when absent. Typed as the
+	// vectorstore.Interface so production can supply a *vectorstore.Holder
+	// (swappable on provider switch) while tests pass a raw *Store.
+	VectorStore vectorstore.Interface
 	// Indexer drives the three-phase index protocol (Phase 5). Nil-safe: the
 	// indexing endpoints return 503 when absent.
 	Indexer *indexer.Service
