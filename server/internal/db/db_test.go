@@ -215,9 +215,12 @@ func TestOpenMigratesPreEDB(t *testing.T) {
 // is a bare model name ("awhiteside/CodeRankEmbed-Q8_0-GGUF") must
 // be rewritten to the prefixed form ("ollama:awhiteside/...") so the
 // drift-detector and dashboard see a match with the live Provider.ID().
-// Rows that already contain ":" (any prefixed form) must be left
-// untouched — important for idempotency and for DBs that were partially
-// upgraded before this migration shipped.
+// Rows that already start with a known kind prefix (ollama:/openai:/
+// voyage:) must be left untouched — important for idempotency and for
+// DBs partially upgraded before this migration shipped. A legacy
+// Ollama-style name that merely contains a colon (e.g.
+// "nomic-embed-text:latest") is NOT yet prefixed and MUST still get the
+// "ollama:" prefix.
 func TestMigrate_IndexedWithModelProviderPrefix(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "indexed-prefix.db")
 
@@ -246,9 +249,10 @@ func TestMigrate_IndexedWithModelProviderPrefix(t *testing.T) {
 	rows := []struct {
 		host, model string
 	}{
-		{"/legacy/bare", "awhiteside/CodeRankEmbed-Q8_0-GGUF"},      // should get "ollama:" prefix
+		{"/legacy/bare", "awhiteside/CodeRankEmbed-Q8_0-GGUF"},             // should get "ollama:" prefix
+		{"/legacy/colon", "nomic-embed-text:latest"},                       // colon, but no kind prefix → should get "ollama:"
 		{"/already/prefixed", "ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF"}, // untouched
-		{"/already/voyage", "voyage:voyage-code-3:1024:float"},          // untouched
+		{"/already/voyage", "voyage:voyage-code-3:1024:float"},             // untouched
 	}
 	for _, r := range rows {
 		if _, err := seed.Exec(
@@ -277,6 +281,7 @@ func TestMigrate_IndexedWithModelProviderPrefix(t *testing.T) {
 
 	expectations := map[string]sql.NullString{
 		"/legacy/bare":      {String: "ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF", Valid: true},
+		"/legacy/colon":     {String: "ollama:nomic-embed-text:latest", Valid: true},
 		"/already/prefixed": {String: "ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF", Valid: true},
 		"/already/voyage":   {String: "voyage:voyage-code-3:1024:float", Valid: true},
 		"/legacy/null":      {Valid: false},

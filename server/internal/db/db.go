@@ -713,10 +713,10 @@ func migratePathHash(db *sql.DB) error {
 	haveColumn := false
 	for rows.Next() {
 		var (
-			cid                 int
-			name, typ           string
-			notnull, pk         int
-			dflt                sql.NullString
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
 		)
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
 			rows.Close()
@@ -817,21 +817,28 @@ func migrateEmbeddingProvider(db *sql.DB) error {
 // "ollama:<model>" and a reindex would *still* write the new prefixed
 // form — leaving every UN-reindexed project flagged falsely.
 //
-// Heuristic: rows whose value contains no ":" predate the prefix
-// convention. Prepend "ollama:" — safe because pre-refactor there
-// was no other embedding backend; every legacy row was produced by
-// the in-process llama-server sidecar.
+// Heuristic: rows that don't already start with a known provider-kind
+// prefix predate the prefix convention. Prepend "ollama:" — safe
+// because pre-refactor there was no other embedding backend; every
+// legacy row was produced by the in-process llama-server sidecar.
+// (Testing for the kind prefix rather than for the mere presence of a
+// ":" matters: a legacy Ollama-style model name like
+// "nomic-embed-text:latest" contains a colon but is NOT yet prefixed,
+// so a presence-of-colon test would wrongly skip it and leave it
+// flagged stale forever.)
 //
-// Idempotent: rows already containing ":" are left alone, so
-// re-running this migration (or running it against a DB that was
-// already partially upgraded) is a no-op.
+// Idempotent: rows already starting with ollama:/openai:/voyage: are
+// left alone, so re-running this migration (or running it against a DB
+// that was already partially upgraded) is a no-op.
 func migrateIndexedWithModelProviderPrefix(db *sql.DB) error {
 	_, err := db.Exec(`
 		UPDATE projects
 		SET indexed_with_model = 'ollama:' || indexed_with_model
 		WHERE indexed_with_model IS NOT NULL
 		  AND indexed_with_model != ''
-		  AND instr(indexed_with_model, ':') = 0
+		  AND indexed_with_model NOT LIKE 'ollama:%'
+		  AND indexed_with_model NOT LIKE 'openai:%'
+		  AND indexed_with_model NOT LIKE 'voyage:%'
 	`)
 	if err != nil {
 		return fmt.Errorf("backfill indexed_with_model prefix: %w", err)

@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
@@ -51,6 +52,10 @@ func New(cfg Config, secrets provider.SecretLookup, logger *slog.Logger) *Provid
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// Normalise away a trailing slash so url building (BaseURL +
+	// "/v1/embeddings") never produces a double slash, which stricter
+	// OpenAI-compatible servers (vLLM/TEI behind a proxy) can 404 on.
+	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	return &Provider{
 		cfg:     cfg,
 		logger:  logger,
@@ -72,7 +77,7 @@ func (p *Provider) ID() string {
 	return "openai:" + p.cfg.Model
 }
 
-func (p *Provider) Dimension() int    { return p.cfg.Dimensions }
+func (p *Provider) Dimension() int         { return p.cfg.Dimensions }
 func (p *Provider) SupportsTokenize() bool { return false }
 
 // Start runs a one-shot connect test: embed a single short string.

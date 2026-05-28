@@ -85,6 +85,29 @@ func TestEmbedDocumentsBatch(t *testing.T) {
 	}
 }
 
+// TestBaseURLTrailingSlashNormalized guards L4: a base_url with a
+// trailing slash must not produce a double-slash request path, which
+// stricter OpenAI-compatible servers can 404 on.
+func TestBaseURLTrailingSlashNormalized(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = io.WriteString(w, `{"data":[{"index":0,"embedding":[0.1]}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	p := New(Config{
+		BaseURL:   srv.URL + "/", // trailing slash
+		Model:     "m",
+		APIKeyEnv: "K",
+	}, fixedSecrets("K", "v"), nil)
+	if _, err := p.EmbedDocuments(context.Background(), []string{"x"}); err != nil {
+		t.Fatalf("EmbedDocuments: %v", err)
+	}
+	if gotPath != "/v1/embeddings" {
+		t.Errorf("request path = %q, want /v1/embeddings (no double slash)", gotPath)
+	}
+}
+
 func TestEmbedDocumentsHTTPError(t *testing.T) {
 	srv, _ := stubServer(t, http.StatusUnauthorized, `{"error":"bad key"}`)
 	p := New(Config{
