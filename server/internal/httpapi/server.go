@@ -103,16 +103,16 @@ func (s *Server) GetStatus(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 	resp := map[string]any{
-		"status":                              "ok",
-		"backend":                             s.Deps.Backend,
-		"server_version":                      s.Deps.ServerVersion,
-		"api_version":                         s.Deps.APIVersion,
-		"model_loaded":                        modelLoaded,
-		"embedding_model":                     model,
-		"embedding_provider":                  providerKind,
-		"embedding_provider_manages_process":  managesProcess,
-		"projects":                            projectCount,
-		"active_indexing_jobs":                activeJobs,
+		"status":                             "ok",
+		"backend":                            s.Deps.Backend,
+		"server_version":                     s.Deps.ServerVersion,
+		"api_version":                        s.Deps.APIVersion,
+		"model_loaded":                       modelLoaded,
+		"embedding_model":                    model,
+		"embedding_provider":                 providerKind,
+		"embedding_provider_manages_process": managesProcess,
+		"projects":                           projectCount,
+		"active_indexing_jobs":               activeJobs,
 	}
 	// Version-check fields — folded in only when the service is wired.
 	// `update_available` is always present (false when unknown) so the
@@ -615,7 +615,7 @@ func (s *Server) GetProjectSummary(w http.ResponseWriter, r *http.Request, path 
 	}
 
 	writeJSON(w, http.StatusOK, openapi.ProjectSummary{
-		PathHash:       projects.HashPath(p.HostPath),
+		PathHash:       p.PathHash,
 		HostPath:       p.HostPath,
 		Status:         p.Status,
 		Languages:      langs,
@@ -1046,7 +1046,7 @@ func projectToOpenAPI(p *projects.Project) openapi.Project {
 		}
 	}
 	out := openapi.Project{
-		PathHash:      projects.HashPath(p.HostPath),
+		PathHash:      p.PathHash,
 		HostPath:      p.HostPath,
 		ContainerPath: p.ContainerPath,
 		Languages:     langs,

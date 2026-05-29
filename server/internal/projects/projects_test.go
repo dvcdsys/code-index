@@ -47,6 +47,61 @@ func TestCreateAndGet(t *testing.T) {
 	}
 }
 
+// TestGet_ReturnsStoredPathHashNotRecomputed guards the dashboard 404
+// regression: a project whose host_path and stored path_hash legitimately
+// diverge — e.g. a local project keyed as sha1("local:{machine}:{path}")
+// while host_path stays the bare filesystem path — must surface the STORED
+// hash, because that is what GetByHash resolves against. Recomputing the
+// hash from host_path would hand the dashboard a link no lookup matches →
+// "project not found".
+func TestGet_ReturnsStoredPathHashNotRecomputed(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	const host = "/Users/me/proj"
+	const stored = "deadbeefcafe0001" // intentionally != hashPath(host)
+	if hashPath(host) == stored {
+		t.Fatal("precondition: stored hash must differ from the bare host-path hash")
+	}
+	now := "2026-01-01T00:00:00Z"
+	if _, err := d.ExecContext(ctx,
+		`INSERT INTO projects (host_path, container_path, languages, settings, stats, status, created_at, updated_at, path_hash, display_path, machine_id)
+		 VALUES (?, ?, '[]', '{}', '{}', 'indexed', ?, ?, ?, ?, ?)`,
+		host, host, now, now, stored, host, "machine-xyz",
+	); err != nil {
+		t.Fatalf("seed insert: %v", err)
+	}
+
+	got, err := Get(ctx, d, host)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.PathHash != stored {
+		t.Errorf("Get PathHash = %q, want stored %q (must not recompute from host_path)", got.PathHash, stored)
+	}
+
+	list, err := List(ctx, d)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].PathHash != stored {
+		t.Errorf("List PathHash = %+v, want [%q]", list, stored)
+	}
+
+	// The stored hash must resolve back to the project (the dashboard
+	// click path: link hash → GetByHash → detail).
+	byHash, err := GetByHash(ctx, d, stored)
+	if err != nil {
+		t.Fatalf("GetByHash(stored): %v", err)
+	}
+	if byHash.HostPath != host {
+		t.Errorf("GetByHash HostPath = %q, want %q", byHash.HostPath, host)
+	}
+	if byHash.PathHash != stored {
+		t.Errorf("GetByHash PathHash = %q, want %q", byHash.PathHash, stored)
+	}
+}
+
 // Create preserves the host_path verbatim — matching Python which does not
 // normalise. Stripping trailing slashes here would silently change the stored
 // value and break subsequent lookups that hash the caller's original path.
@@ -256,7 +311,6 @@ func TestHashPath_MatchesPython(t *testing.T) {
 		t.Errorf("HashPath length = %d, want 16", len(h1))
 	}
 }
-
 
 // TestCreate_MachineNamespacingAvoidsCollision verifies that the same
 // filesystem path indexed from two different machines becomes two distinct
