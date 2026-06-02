@@ -116,6 +116,26 @@ docs.
 
 ## Configuration
 
+### Targeting multiple cix servers
+
+The bundled CLI supports more than one **named server** (e.g. a local
+box and a remote corporate server). One is the default; commands use it
+unless `--server <alias>` is passed:
+
+```bash
+cix config set server.corporate.url https://cix.corp.internal
+cix config set server.corporate.key <bearer-token>
+cix config set default_server corporate     # optional: make it the default
+cix --server corporate search "rate limiter"
+cix config show                              # lists servers; * marks the default
+```
+
+Legacy single-server config (`api.url` / `api.key`, `--api-url` /
+`--api-key`) still works and operates on the default server; old
+`~/.cix/config.yaml` files are migrated automatically. The `cix` skill
+(SKILL.md) documents this for the agent. Full reference:
+[`cli/README.md`](https://github.com/dvcdsys/code-index/blob/main/cli/README.md#multiple-servers).
+
 ### Where the bundled CLI is installed
 
 The wrapper installs `cix` to `~/.local/bin/cix` by default. To override
