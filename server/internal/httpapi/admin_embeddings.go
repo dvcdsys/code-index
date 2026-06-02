@@ -262,6 +262,18 @@ func (s *Server) TestEmbeddingProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unknown provider kind: "+kind)
 		return
 	}
+	// The /test endpoint Start()s a throw-away provider. For the HTTP-only
+	// providers that is a harmless one-shot connect probe, but ollama's
+	// Start() spawns a real llama-server child — on the SAME socket path as
+	// the live sidecar, which would conflict with the running process. The
+	// dashboard never tests ollama (it is configured via the runtime-config
+	// form, not this endpoint), so reject it here rather than risk spawning
+	// a competing sidecar from an ad-hoc admin call.
+	if kind == provider.KindOllama {
+		writeError(w, http.StatusBadRequest,
+			"ollama is configured via the runtime-config form, not the provider test endpoint; testing it here would spawn a competing llama-server sidecar")
+		return
+	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 	if err != nil {

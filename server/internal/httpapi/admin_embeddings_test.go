@@ -155,6 +155,25 @@ func TestTestEmbeddingProvider_BadKind(t *testing.T) {
 	}
 }
 
+// TestTestEmbeddingProvider_RejectsOllama guards the /test endpoint against
+// kind=ollama: Start()ing a throw-away ollama provider would spawn a second
+// llama-server child on the live sidecar's socket. The endpoint must reject
+// it (400) without ever building/starting a provider.
+func TestTestEmbeddingProvider_RejectsOllama(t *testing.T) {
+	f := newAdminFixture(t)
+	f.Deps.EmbeddingsCfg = embeddingscfg.New(f.Deps.DB)
+	f.Router = NewRouter(f.Deps)
+	cookie := adminCookie(t, f)
+
+	req := withCookie(httptest.NewRequest(http.MethodPost,
+		"/api/v1/admin/embedding-providers/ollama/test", bytes.NewReader([]byte(`{}`))), cookie)
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
 func TestTestEmbeddingProvider_MissingAPIKey(t *testing.T) {
 	f := newAdminFixture(t)
 	f.Deps.EmbeddingsCfg = embeddingscfg.New(f.Deps.DB)
