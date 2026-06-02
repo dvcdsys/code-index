@@ -313,6 +313,19 @@ func (p *Provider) ID() string {
 func (p *Provider) Dimension() int         { return p.cfg.OutputDimension }
 func (p *Provider) SupportsTokenize() bool { return false }
 
+// StorageComponents namespaces the vector store as
+// voyage/<model-slug>/<dim>_<dtype>. dim+dtype share one variant segment
+// because both change vector identity and are known at config time;
+// mirrors the dim/dtype parts of ID() ("auto" when dimension is unset).
+func (p *Provider) StorageComponents() []string {
+	dimStr := "auto"
+	if p.cfg.OutputDimension > 0 {
+		dimStr = strconv.Itoa(p.cfg.OutputDimension)
+	}
+	variant := provider.StorageSlug(dimStr + "_" + p.cfg.OutputDtype)
+	return []string{provider.KindVoyage, provider.StorageSlug(p.cfg.Model), variant}
+}
+
 func (p *Provider) Start(ctx context.Context) error {
 	if p.cfg.Model == "" {
 		return errors.New("voyage: model is required")

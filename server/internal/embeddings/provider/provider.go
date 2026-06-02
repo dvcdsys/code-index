@@ -107,6 +107,19 @@ type Provider interface {
 	// EmbedDocuments — callers must use SupportsTokenize() to decide
 	// whether to chunk inputs themselves.
 	TokenizeAndEmbed(ctx context.Context, texts []string) ([][]float32, error)
+
+	// StorageComponents returns the on-disk path components that
+	// namespace this provider's vector store, MOST-significant first:
+	// {kind, model-slug[, variant]}. Each component is already
+	// filesystem-safe (run through StorageSlug at the source). The
+	// vector-store dir is filepath.Join(ChromaPersistDir, components...).
+	//
+	// Crucially these are STRUCTURED fields the provider knows directly
+	// — never derived by re-parsing the flattened ID() — so the kind
+	// (always its own path segment) can never collide with a model name
+	// that happens to normalise to "ollama_…"/"voyage_…". That collision
+	// is what the flat single-slug scheme suffered from.
+	StorageComponents() []string
 }
 
 // State enumerates the dashboard-facing provider states surfaced via

@@ -10,52 +10,49 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 )
 
-// knownProviderPrefixes are the StorageSlug prefixes a vector-store dir
-// gets under the unified scheme (provider.StorageSlug of an ID always
-// starts with "<kind>_"). A legacy dir lacking any of these was produced
-// by the old model-only naming, which only ever ran the ollama sidecar.
-var knownProviderPrefixes = []string{"ollama_", "openai_", "voyage_"}
-
-// PrefixLegacyChromaDirs renames legacy, un-prefixed vector-store
-// directories to the unified "ollama_"-prefixed form so existing ollama
-// vectors survive the switch to provider-identity namespacing WITHOUT a
-// reindex. Heuristic: a dir named "<base>_<X>" where X carries no known
-// provider prefix was written by the pre-unification ollama-only build,
-// so its true identity is "ollama:<model>" → "<base>_ollama_<slug(X)>".
+// MigrateFlatChromaToNested moves pre-unification FLAT vector-store dirs
+// into the unified NESTED layout. Old ollama-only builds wrote one dir per
+// model as a flat sibling of the chroma container:
 //
-// The legacy suffix X was produced by the old Config.ModelSafeName (which
-// only mapped '/' and '-' to '_'), but the running server resolves the
-// dir via provider.StorageSlug, which maps EVERY non-[a-z0-9_] rune. For
-// model names containing characters the two normalizers treat differently
-// (e.g. a '.' or ':' in "nomic-embed-text:v1.5"), a naive "<base>_ollama_"+X
-// would NOT equal the dir the server opens, silently orphaning the vectors.
-// We therefore re-run the suffix through provider.StorageSlug. This is
-// exact for ALL models because StorageSlug(ModelSafeName(m)) ==
-// StorageSlug(m): ModelSafeName only collapses a subset ('/','-') of the
-// runes StorageSlug collapses, and '_' is preserved by StorageSlug, so the
-// two compose to the same canonical form.
+//	<base>_<ModelSafeName>      e.g.  /data/chroma_nomic_embed_text
 //
-// chromaBase is cfg.ChromaPersistDir (e.g. ".../chroma"); legacy dirs sit
-// next to it as ".../chroma_<slug>". The scan covers ALL such dirs, not
-// just the active provider's: the active provider may be voyage (no legacy
-// dir to migrate) while the operator's ollama vectors wait under the
-// un-prefixed name for a future switch back.
+// The unified scheme namespaces by provider identity as nested dirs INSIDE
+// the container, one path segment per identity field:
 //
-// Idempotent: already-prefixed dirs are skipped; a rename whose target
-// already exists is skipped with a warning (never clobbers).
+//	<base>/<kind>/<model-slug>[/<variant>]   e.g.  /data/chroma/ollama/nomic_embed_text
 //
-// LEGACY-MIGRATION (remove next release): one-time prefixing shim for
-// pre-unification ollama-only chroma dirs. Once every deployment has
-// booted on the unified layout, delete this function and its calls in
-// cmd/cix-server/main.go and embeddings.Service (the AttachVectorStore
-// migrate hook).
-func PrefixLegacyChromaDirs(chromaBase string, logger *slog.Logger) error {
+// Because the old build only ever ran ollama, EVERY flat sibling is a
+// legacy ollama model dir — there is no prefix-guessing (that ambiguity is
+// exactly what the nested layout removes: the provider kind is now its own
+// directory level, never glued onto the model slug). We move each
+// <base>_<X> → <base>/ollama/<StorageSlug(X)>/.
+//
+// StorageSlug(ModelSafeName(m)) == StorageSlug(m) (ModelSafeName collapses
+// only a subset — '/','-' — of the runes StorageSlug collapses, and '_' is
+// preserved), so the destination matches the dir the running server
+// resolves for "ollama:<model>" — even for a model whose name normalises to
+// a kind-looking slug, e.g. "openai-community/x" → ollama/openai_community_x
+// (correct), where the old flat scheme silently orphaned it.
+//
+// Idempotent: once moved, the dirs live inside <base>/ and no longer match
+// the flat sibling pattern, so a re-run is a cheap no-op. The caller is
+// responsible for first relocating any legacy Python ChromaDB store that
+// occupies <base> itself (vectorstore.DetectLegacyAndBackup), so this can
+// safely use <base> as the container.
+//
+// LEGACY-MIGRATION (remove next release): one-time shim. Drop once every
+// deployment has booted on the nested layout.
+func MigrateFlatChromaToNested(chromaBase string, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if chromaBase == "" {
 		return nil
 	}
+	if err := os.MkdirAll(chromaBase, 0o755); err != nil {
+		return fmt.Errorf("create chroma container %s: %w", chromaBase, err)
+	}
+
 	parent := filepath.Dir(chromaBase)
 	prefix := filepath.Base(chromaBase) + "_" // e.g. "chroma_"
 
@@ -69,43 +66,37 @@ func PrefixLegacyChromaDirs(chromaBase string, logger *slog.Logger) error {
 
 	for _, e := range entries {
 		if !e.IsDir() {
-			continue // skip files like chroma_*.python-backup.* tarballs
+			continue // skip files (e.g. *.tar backups)
 		}
 		name := e.Name()
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
+		if strings.Contains(name, ".python-backup.") {
+			continue // a backup DetectLegacyAndBackup created — leave it
+		}
 		suffix := strings.TrimPrefix(name, prefix)
 		if suffix == "" {
-			continue // exactly the base dir name + trailing "_": ignore
+			continue // exactly the base name + trailing "_"
 		}
-		if hasKnownPrefix(suffix) {
-			continue // already migrated / native unified dir
-		}
+
 		src := filepath.Join(parent, name)
-		// Canonicalise the suffix through StorageSlug so the renamed dir
-		// matches the path the running server resolves for this identity
-		// (handles model names with '.'/':' etc.; see func doc).
-		dst := filepath.Join(parent, prefix+"ollama_"+provider.StorageSlug(suffix))
+		// Every flat sibling is a legacy ollama model dir. Canonicalise the
+		// suffix through StorageSlug so it matches the path the server
+		// resolves for this identity ("ollama:<model>").
+		dst := filepath.Join(chromaBase, provider.KindOllama, provider.StorageSlug(suffix))
 		if fileExists(dst) {
-			logger.Warn("storage: skipping chroma legacy-prefix rename, target already exists",
+			logger.Warn("storage: skipping flat→nested chroma move, target already exists (no clobber)",
 				"src", src, "dst", dst)
 			continue
 		}
-		logger.Info("storage: prefixing legacy ollama chroma dir to unified naming",
-			"src", src, "dst", dst)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("create nested parent %s: %w", filepath.Dir(dst), err)
+		}
+		logger.Info("storage: migrating legacy flat chroma dir to nested layout", "src", src, "dst", dst)
 		if err := os.Rename(src, dst); err != nil {
 			return fmt.Errorf("rename %s -> %s: %w", src, dst, err)
 		}
 	}
 	return nil
-}
-
-func hasKnownPrefix(suffix string) bool {
-	for _, p := range knownProviderPrefixes {
-		if strings.HasPrefix(suffix, p) {
-			return true
-		}
-	}
-	return false
 }

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -112,9 +113,10 @@ func TestLoadOverrides(t *testing.T) {
 	if got := c.LegacyDynamicSQLitePath(); got != "/tmp/test_test_model_name.db" {
 		t.Errorf("LegacyDynamicSQLitePath = %q", got)
 	}
-	// ChromaDirForSlug suffixes the chroma base with the given identity slug.
-	if got := c.ChromaDirForSlug("voyage_voyage_code_3_2048_float"); got != c.ChromaPersistDir+"_voyage_voyage_code_3_2048_float" {
-		t.Errorf("ChromaDirForSlug = %q", got)
+	// ChromaDirFor joins the identity path components under the chroma base.
+	comps := []string{"voyage", "voyage_code_3", "2048", "float"}
+	if got, want := c.ChromaDirFor(comps), filepath.Join(append([]string{c.ChromaPersistDir}, comps...)...); got != want {
+		t.Errorf("ChromaDirFor = %q, want %q", got, want)
 	}
 }
 

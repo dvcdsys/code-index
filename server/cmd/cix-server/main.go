@@ -254,46 +254,40 @@ func run() error {
 		}
 	}()
 
-	// Prefix legacy un-prefixed chroma dirs (pre-unification ollama-only
-	// builds) to the unified "<base>_ollama_<model>" naming so existing
-	// ollama vectors are reused under the new identity-namespaced scheme
-	// without a reindex. Idempotent; runs once per legacy dir.
-	// LEGACY-MIGRATION (remove next release): drop this prefixing call once
-	// all deployments have booted on the unified layout.
-	if err := storage.PrefixLegacyChromaDirs(cfg.ChromaPersistDir, logger); err != nil {
-		// Fail closed. A half-completed rename here would leave the
-		// server opening a fresh empty namespace while existing vectors
-		// sit under the un-migrated legacy dir — search would silently
-		// return nothing on a "healthy" server. Surface it instead so the
-		// operator fixes the cause (e.g. dir perms under prod uid 1001,
-		// or a cross-device /data mount) rather than losing the index.
+	// Relocate a legacy Python ChromaDB store occupying the container path
+	// itself, so chromaBase is free to become the nested container below.
+	if backed, bErr := vectorstore.DetectLegacyAndBackup(cfg.ChromaPersistDir); bErr != nil {
+		return fmt.Errorf("back up legacy python chroma store: %w", bErr)
+	} else if backed {
+		logger.Warn("legacy python chroma layout detected at container path — backed up; re-run cix init to reindex")
+	}
+
+	// Migrate pre-unification FLAT ollama dirs (<base>_<model>) into the
+	// unified NESTED layout (<base>/ollama/<model-slug>/) so existing
+	// vectors are reused without a reindex. Unambiguous: every flat sibling
+	// is a legacy ollama dir (the provider kind is now its own path level,
+	// not guessed from a name prefix). Idempotent.
+	// LEGACY-MIGRATION (remove next release): drop once every deployment has
+	// booted on the nested layout.
+	if err := storage.MigrateFlatChromaToNested(cfg.ChromaPersistDir, logger); err != nil {
+		// Fail closed. A half-completed move would leave the server opening
+		// a fresh empty namespace while existing vectors sit under the
+		// un-migrated legacy dir — search would silently return nothing on
+		// a "healthy" server. Surface it so the operator fixes the cause
+		// (e.g. dir perms under prod uid 1001) rather than losing the index.
 		return fmt.Errorf("migrate legacy chroma dirs: %w", err)
 	}
 
-	// The vector store is namespaced by the ACTIVE provider identity slug
-	// so vectors of different dimensions never share a collection.
-	chromaSlug := embedSvc.StorageSlug()
-	if chromaSlug == "" {
+	// The vector store is namespaced by the ACTIVE provider's identity path
+	// components (<kind>/<model>[/<variant>]) so vectors of different
+	// dimensions never share a collection.
+	components := embedSvc.StoragePath()
+	if len(components) == 0 {
 		// Embeddings disabled / provider not built: deterministic ollama-
 		// shaped fallback so toggling embeddings on/off doesn't move dirs.
-		chromaSlug = provider.StorageSlug("ollama:" + cfg.EmbeddingModel)
+		components = []string{provider.KindOllama, provider.StorageSlug(cfg.EmbeddingModel)}
 	}
-	chromaDir := cfg.ChromaDirForSlug(chromaSlug)
-	// Visibility guard for the orphaned-namespace failure mode: if the
-	// active provider's dir does not exist yet but sibling chroma dirs do,
-	// prior vectors were indexed under a different identity/layout and the
-	// active provider will start empty. Warn loudly instead of silently
-	// returning zero search results on an apparently-healthy server.
-	if warnErr := vectorstore.WarnIfNamespaceOrphaned(cfg.ChromaPersistDir, chromaDir, logger); warnErr != nil {
-		logger.Warn("could not check for orphaned chroma namespaces", "err", warnErr)
-	}
-
-	// Detect and back up a legacy ChromaDB layout left by the Python server.
-	if backed, bErr := vectorstore.DetectLegacyAndBackup(chromaDir); bErr != nil {
-		logger.Warn("could not back up legacy chroma dir", "err", bErr)
-	} else if backed {
-		logger.Warn("legacy chroma layout detected — backed up; re-run cix init to reindex")
-	}
+	chromaDir := cfg.ChromaDirFor(components)
 
 	vs, err := vectorstore.Open(chromaDir)
 	if err != nil {
@@ -305,9 +299,9 @@ func run() error {
 	// Wire the live-reopen path used by SwitchProvider.
 	embedSvc.AttachVectorStore(
 		vsHolder,
-		cfg.ChromaDirForSlug,
+		cfg.ChromaDirFor,
 		vectorstore.Open,
-		func() error { return storage.PrefixLegacyChromaDirs(cfg.ChromaPersistDir, logger) },
+		func() error { return storage.MigrateFlatChromaToNested(cfg.ChromaPersistDir, logger) },
 	)
 
 	idx := indexer.New(database, vsHolder, embedSvc, logger)

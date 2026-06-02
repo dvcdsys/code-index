@@ -112,6 +112,13 @@ func (p *Provider) Dimension() int { return 0 }
 // SupportsTokenize is true: llama-server exposes /tokenize.
 func (p *Provider) SupportsTokenize() bool { return true }
 
+// StorageComponents namespaces the vector store as ollama/<model-slug>.
+// Dimension is not part of the path: it is unknown at config time
+// (Dimension() == 0) and the model name already pins the GGUF/quant.
+func (p *Provider) StorageComponents() []string {
+	return []string{provider.KindOllama, provider.StorageSlug(p.cfg.Model)}
+}
+
 // Start resolves the GGUF path then spawns the supervisor. Blocks
 // until the readiness probe succeeds or ctx expires.
 func (p *Provider) Start(ctx context.Context) error {

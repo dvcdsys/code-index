@@ -261,11 +261,11 @@ func (s *Server) enrichProjectStorage(out *openapi.Project, p *projects.Project)
 			out.SqliteSizeBytes = &sz
 		}
 	}
-	// Chroma dir is namespaced by the ACTIVE provider's identity slug, so
+	// Chroma dir is namespaced by the ACTIVE provider's identity path, so
 	// the displayed path tracks whatever provider is live now.
-	if slug := es.StorageSlug(); cfg.ChromaPersistDir != "" && slug != "" {
+	if comps := es.StoragePath(); cfg.ChromaPersistDir != "" && len(comps) > 0 {
 		col := vectorstore.CollectionName(p.HostPath)
-		dir := filepath.Join(cfg.ChromaDirForSlug(slug), col)
+		dir := filepath.Join(cfg.ChromaDirFor(comps), col)
 		out.ChromaPath = ptrString(dir)
 		if sz, ok := dirSizeBytes(dir); ok {
 			out.ChromaSizeBytes = &sz

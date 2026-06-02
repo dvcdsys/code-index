@@ -204,13 +204,15 @@ func (c *Config) LegacyDynamicSQLitePath() string {
 	return fmt.Sprintf("%s_%s%s", base, c.ModelSafeName(), ext)
 }
 
-// ChromaDirForSlug returns the on-disk vector-store directory for a given
-// embedding-identity slug (see provider.StorageSlug). The slug namespaces
-// the chroma persist dir so vectors of different dimensions never share a
-// collection. The slug is computed by the caller from the ACTIVE
-// provider's ID(), keeping the model identity out of config.
-func (c *Config) ChromaDirForSlug(slug string) string {
-	return fmt.Sprintf("%s_%s", c.ChromaPersistDir, slug)
+// ChromaDirFor returns the on-disk vector-store directory for an embedding
+// identity expressed as nested path components (see
+// provider.Provider.StorageComponents): {kind, model-slug[, variant]}.
+// ChromaPersistDir is the container; each component is its own directory
+// level, so the provider kind can never collide with a model name that
+// normalises to a kind-looking slug. Empty components → the bare
+// container (callers guard against that).
+func (c *Config) ChromaDirFor(components []string) string {
+	return filepath.Join(append([]string{c.ChromaPersistDir}, components...)...)
 }
 
 // Load reads CIX_* environment variables and returns a populated Config.

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,7 +18,9 @@ import (
 )
 
 // fakeProv is a minimal provider.Provider for exercising the vector-store
-// reopen path; only ID() is consulted by reopenVectorStore / StorageSlug.
+// reopen path. StorageComponents derives the nested namespace by splitting
+// the id on ":" and slugging each field — enough to give distinct
+// providers distinct on-disk paths.
 type fakeProv struct{ id string }
 
 func (f fakeProv) Kind() string                                          { return "fake" }
@@ -35,13 +38,28 @@ func (f fakeProv) EmbedDocuments(context.Context, []string) ([][]float32, error)
 func (f fakeProv) TokenizeAndEmbed(context.Context, []string) ([][]float32, error) {
 	return nil, nil
 }
+func (f fakeProv) StorageComponents() []string {
+	parts := strings.Split(f.id, ":")
+	for i := range parts {
+		parts[i] = provider.StorageSlug(parts[i])
+	}
+	return parts
+}
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// nestedDirFor mirrors cfg.ChromaDirFor: join the identity components under
+// a chroma container dir.
+func nestedDirFor(base string) func([]string) string {
+	return func(comps []string) string {
+		return filepath.Join(append([]string{base}, comps...)...)
+	}
+}
 
 // fakeFactory registers a test-only provider kind so SwitchProvider can be
 // driven end-to-end (it builds the new provider through the registry).
 // Build echoes the config bytes into the provider ID so the derived
-// storage slug is deterministic per test.
+// storage path is deterministic per test.
 type fakeFactory struct{}
 
 func (fakeFactory) Kind() string            { return "fake-switch" }
@@ -60,8 +78,9 @@ func init() { provider.Register(fakeFactory{}) }
 // queue is resumed so the service keeps serving.
 func TestSwitchProvider_RollbackOnReopenFailure(t *testing.T) {
 	dir := t.TempDir()
+	base := filepath.Join(dir, "chroma")
 	const project = "/proj"
-	initial, err := vectorstore.Open(filepath.Join(dir, "chroma_ollama_m"))
+	initial, err := vectorstore.Open(filepath.Join(base, "ollama", "m"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +95,7 @@ func TestSwitchProvider_RollbackOnReopenFailure(t *testing.T) {
 	s := &Service{logger: quiet(), queue: NewQueue(2, time.Second), current: oldProv}
 	s.AttachVectorStore(
 		holder,
-		func(slug string) string { return filepath.Join(dir, "chroma_"+slug) },
+		nestedDirFor(base),
 		func(string) (*vectorstore.Store, error) { return nil, errors.New("boom") }, // reopen always fails
 		nil,
 	)
@@ -109,8 +128,9 @@ func TestSwitchProvider_RollbackOnReopenFailure(t *testing.T) {
 // (empty) namespace, and the queue ends unblocked.
 func TestSwitchProvider_SuccessSwapsProviderAndStore(t *testing.T) {
 	dir := t.TempDir()
+	base := filepath.Join(dir, "chroma")
 	const project = "/proj"
-	initial, err := vectorstore.Open(filepath.Join(dir, "chroma_ollama_m"))
+	initial, err := vectorstore.Open(filepath.Join(base, "ollama", "m"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,12 +142,7 @@ func TestSwitchProvider_SuccessSwapsProviderAndStore(t *testing.T) {
 	holder := vectorstore.NewHolder(initial)
 
 	s := &Service{logger: quiet(), queue: NewQueue(2, time.Second), current: fakeProv{id: "ollama:m"}}
-	s.AttachVectorStore(
-		holder,
-		func(slug string) string { return filepath.Join(dir, "chroma_"+slug) },
-		vectorstore.Open,
-		nil,
-	)
+	s.AttachVectorStore(holder, nestedDirFor(base), vectorstore.Open, nil)
 
 	if err := s.SwitchProvider(context.Background(), "fake-switch", []byte("newid")); err != nil {
 		t.Fatalf("switch: %v", err)
@@ -141,6 +156,10 @@ func TestSwitchProvider_SuccessSwapsProviderAndStore(t *testing.T) {
 	if got := holder.Count(project); got != 0 {
 		t.Errorf("after switch holder Count = %d, want 0 (new empty namespace)", got)
 	}
+	// New provider's nested namespace was created on disk.
+	if !dirExists(filepath.Join(base, "fake", "newid")) {
+		t.Errorf("new nested chroma dir chroma/fake/newid should exist")
+	}
 	if err := s.queue.Acquire(context.Background()); err != nil {
 		t.Errorf("queue should be unblocked after switch, Acquire = %v", err)
 	} else {
@@ -148,26 +167,28 @@ func TestSwitchProvider_SuccessSwapsProviderAndStore(t *testing.T) {
 	}
 }
 
-func TestServiceStorageSlug(t *testing.T) {
+func TestServiceStoragePath(t *testing.T) {
 	s := &Service{logger: quiet(), current: fakeProv{id: "voyage:voyage-code-3:2048:float"}}
-	if got := s.StorageSlug(); got != "voyage_voyage_code_3_2048_float" {
-		t.Errorf("StorageSlug = %q", got)
+	if got := strings.Join(s.StoragePath(), "/"); got != "voyage/voyage_code_3/2048/float" {
+		t.Errorf("StoragePath = %q", got)
 	}
 	// Disabled / no provider → empty.
-	if got := (&Service{logger: quiet(), disabled: true}).StorageSlug(); got != "" {
-		t.Errorf("disabled StorageSlug = %q, want empty", got)
+	if got := (&Service{logger: quiet(), disabled: true}).StoragePath(); len(got) != 0 {
+		t.Errorf("disabled StoragePath = %v, want empty", got)
 	}
-	if got := (&Service{logger: quiet()}).StorageSlug(); got != "" {
-		t.Errorf("nil-provider StorageSlug = %q, want empty", got)
+	if got := (&Service{logger: quiet()}).StoragePath(); len(got) != 0 {
+		t.Errorf("nil-provider StoragePath = %v, want empty", got)
 	}
 }
 
 func TestReopenVectorStore_SwapsToNewNamespace(t *testing.T) {
 	dir := t.TempDir()
+	base := filepath.Join(dir, "chroma")
 	const project = "/proj"
 
-	// Initial store has one chunk for the project.
-	initial, err := vectorstore.Open(filepath.Join(dir, "chroma_ollama_m"))
+	// Initial store has one chunk for the project, under ollama's namespace.
+	oldDir := filepath.Join(base, "ollama", "m")
+	initial, err := vectorstore.Open(oldDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,12 +203,7 @@ func TestReopenVectorStore_SwapsToNewNamespace(t *testing.T) {
 	}
 
 	s := &Service{logger: quiet()}
-	s.AttachVectorStore(
-		holder,
-		func(slug string) string { return filepath.Join(dir, "chroma_"+slug) },
-		vectorstore.Open,
-		nil,
-	)
+	s.AttachVectorStore(holder, nestedDirFor(base), vectorstore.Open, nil)
 
 	// Switch to a new identity → reopen into a fresh, empty namespace.
 	if err := s.reopenVectorStore(fakeProv{id: "voyage:voyage-code-3:2048:float"}); err != nil {
@@ -196,19 +212,20 @@ func TestReopenVectorStore_SwapsToNewNamespace(t *testing.T) {
 	if got := holder.Count(project); got != 0 {
 		t.Errorf("after reopen Count = %d, want 0 (new empty namespace)", got)
 	}
-	// New dir created on disk; old dir still present (reuse on switch back).
-	if !dirExists(filepath.Join(dir, "chroma_voyage_voyage_code_3_2048_float")) {
-		t.Errorf("new chroma dir should exist")
+	// New nested dir created on disk; old dir still present (reuse on switch back).
+	if !dirExists(filepath.Join(base, "voyage", "voyage_code_3", "2048", "float")) {
+		t.Errorf("new nested chroma dir should exist")
 	}
-	if !dirExists(filepath.Join(dir, "chroma_ollama_m")) {
+	if !dirExists(oldDir) {
 		t.Errorf("old chroma dir should be preserved")
 	}
 }
 
 func TestReopenVectorStore_OpenerFailureKeepsOldStore(t *testing.T) {
 	dir := t.TempDir()
+	base := filepath.Join(dir, "chroma")
 	const project = "/proj"
-	initial, err := vectorstore.Open(filepath.Join(dir, "chroma_ollama_m"))
+	initial, err := vectorstore.Open(filepath.Join(base, "ollama", "m"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +239,7 @@ func TestReopenVectorStore_OpenerFailureKeepsOldStore(t *testing.T) {
 	s := &Service{logger: quiet()}
 	s.AttachVectorStore(
 		holder,
-		func(slug string) string { return filepath.Join(dir, "chroma_"+slug) },
+		nestedDirFor(base),
 		func(string) (*vectorstore.Store, error) { return nil, errors.New("boom") },
 		nil,
 	)

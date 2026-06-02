@@ -79,6 +79,17 @@ func (p *Provider) ID() string {
 func (p *Provider) Dimension() int         { return p.cfg.Dimensions }
 func (p *Provider) SupportsTokenize() bool { return false }
 
+// StorageComponents namespaces the vector store as
+// openai/<model-slug>[/<dim>]. The dimension is a path segment only when
+// explicitly configured (Matryoshka shrink), mirroring ID().
+func (p *Provider) StorageComponents() []string {
+	comps := []string{provider.KindOpenAI, provider.StorageSlug(p.cfg.Model)}
+	if p.cfg.Dimensions > 0 {
+		comps = append(comps, strconv.Itoa(p.cfg.Dimensions))
+	}
+	return comps
+}
+
 // Start runs a one-shot connect test: embed a single short string.
 // Surfaces auth / network errors before the provider is wired into
 // the request path.
