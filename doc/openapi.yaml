@@ -515,6 +515,131 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /api/v1/admin/embedding-providers:
+    get:
+      operationId: listEmbeddingProviders
+      tags: [admin]
+      summary: List registered embedding-provider kinds (admin only)
+      description: |
+        Returns one entry per registered provider kind with its config
+        schema and the names of the env vars it reads for credentials,
+        plus whether those env vars are currently set on the server.
+        The dashboard uses this to render the kind dropdown, the
+        per-kind form, and the "set CIX_VOYAGE_API_KEY before saving"
+        banner when a key is missing.
+      responses:
+        "200":
+          description: List of registered providers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmbeddingProviderList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/embedding-providers/active:
+    get:
+      operationId: getActiveEmbeddingProvider
+      tags: [admin]
+      summary: Get the currently active embedding provider (admin only)
+      description: |
+        Returns the persisted provider selection (kind + JSON config
+        blob) and the live `Provider.ID()` fingerprint. API keys are
+        never persisted, so the config blob carries env-var NAMES
+        only — safe to surface to admin clients verbatim.
+      responses:
+        "200":
+          description: Currently active provider
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActiveEmbeddingProvider"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Embeddings service not wired (e.g. CIX_EMBEDDINGS_ENABLED=false)
+    put:
+      operationId: switchEmbeddingProvider
+      tags: [admin]
+      summary: Switch to a different embedding provider (admin only)
+      description: |
+        Atomic switch. The server validates the submitted config, persists
+        it, then swaps the live Service over (drains the queue first).
+        On any error the existing provider stays untouched.
+
+        Switching changes the active `Provider.ID()` fingerprint; every
+        project's `indexed_with_model` becomes stale and the next
+        clone job per project triggers a full reindex
+        (`mode=full, reason=model-change`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SwitchEmbeddingProviderRequest"
+      responses:
+        "202":
+          description: Switch accepted; new provider is live
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActiveEmbeddingProvider"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/embedding-providers/{kind}/test:
+    post:
+      operationId: testEmbeddingProvider
+      tags: [admin]
+      summary: Validate an embedding-provider config without persisting (admin only)
+      description: |
+        Builds a throw-away provider from the submitted config, calls
+        Start (one short embed for HTTP providers; spawning a child for
+        ollama), then Stops it. Returns the detected dimension and an
+        ok flag. Use this from the dashboard before calling PUT
+        /embedding-providers/active so the admin sees an actionable
+        error (bad key, wrong URL, missing env var) before the swap.
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [ollama, openai, voyage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Provider-specific config blob (shape varies by kind).
+              additionalProperties: true
+      responses:
+        "200":
+          description: Connect test succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestEmbeddingProviderResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          description: |
+            Connect test failed against the upstream service (auth
+            rejected, network unreachable, etc).
+
   /api/v1/api-keys:
     get:
       operationId: listApiKeys
@@ -2723,6 +2848,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    BadRequest:
+      description: Invalid request (missing fields, unknown kind, bad config)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     InternalError:
       description: Unhandled server error
       content:
@@ -3079,6 +3210,94 @@ components:
           type: string
           description: The CIX_GGUF_CACHE_DIR that was scanned. Empty list with non-empty cache_dir = no .gguf files found.
 
+    EmbeddingProviderList:
+      type: object
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmbeddingProviderInfo"
+
+    EmbeddingProviderInfo:
+      type: object
+      required: [kind, schema, secret_envs]
+      properties:
+        kind:
+          type: string
+          enum: [ollama, openai, voyage]
+        schema:
+          type: object
+          description: |
+            ConfigSchema as JSON — describes the form fields the
+            provider accepts. Shape is `{fields: [{name, label, kind,
+            required, default, enum, description}]}`. Hardcoded React
+            forms ignore this; it's exposed for external tooling.
+          additionalProperties: true
+        secret_envs:
+          type: array
+          description: |
+            Env-var names this provider reads for credentials, with a
+            flag telling whether each is currently set on the server.
+            Used by the dashboard to render the missing-key banner
+            before save.
+          items:
+            $ref: "#/components/schemas/EmbeddingProviderSecretEnv"
+
+    EmbeddingProviderSecretEnv:
+      type: object
+      required: [name, set]
+      properties:
+        name:
+          type: string
+          description: Env-var name (e.g. `CIX_VOYAGE_API_KEY`).
+        set:
+          type: boolean
+          description: True when the env var is present (and non-empty) on the server.
+
+    ActiveEmbeddingProvider:
+      type: object
+      required: [kind, id]
+      properties:
+        kind:
+          type: string
+          enum: [ollama, openai, voyage]
+        id:
+          type: string
+          description: |
+            `Provider.ID()` fingerprint, e.g. `voyage:voyage-code-3:1024:float`.
+            Matches `embedding_model` on /status.
+        config:
+          type: object
+          description: |
+            Persisted provider config blob. Shape varies by kind; API
+            keys are NOT stored — only env-var names are.
+          additionalProperties: true
+
+    SwitchEmbeddingProviderRequest:
+      type: object
+      required: [kind, config]
+      properties:
+        kind:
+          type: string
+          enum: [ollama, openai, voyage]
+        config:
+          type: object
+          additionalProperties: true
+
+    TestEmbeddingProviderResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        dimension:
+          type: integer
+          minimum: 0
+          description: |
+            Embedding dimension as reported by the provider after
+            Start. 0 when the provider learns the dimension lazily.
+
     Session:
       type: object
       required: [id, created_at, expires_at, last_seen_at, is_current]
@@ -3226,7 +3445,26 @@ components:
             False when the sidecar is starting or has crashed.
         embedding_model:
           type: string
-          description: Hugging Face model id (e.g. `awhiteside/CodeRankEmbed-Q8_0-GGUF`).
+          description: |
+            Active provider fingerprint — formerly the HuggingFace repo id,
+            now `Provider.ID()` e.g. `ollama:CodeRankEmbed`,
+            `openai:text-embedding-3-small`, `voyage:voyage-code-3:1024:float`.
+            Used by the dashboard to compare against each project's
+            `indexed_with_model` and render the stale-model badge.
+        embedding_provider:
+          type: string
+          description: |
+            Active provider kind: `ollama`, `openai`, or `voyage`. Empty
+            when the embedding service is disabled or the fake fixtures
+            substitute a non-Service implementation.
+        embedding_provider_manages_process:
+          type: boolean
+          description: |
+            True when the active provider owns an in-process child
+            (currently only `ollama`). The footer renders a green/red
+            liveness dot when true, and a permanent green dot otherwise
+            (HTTP-only providers have no process to die — Ready failures
+            surface at request time, not on every footer poll).
         projects:
           type: integer
           minimum: 0

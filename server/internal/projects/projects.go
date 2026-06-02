@@ -55,7 +55,15 @@ type Stats struct {
 
 // Project is the full project record returned from the database.
 type Project struct {
-	HostPath      string
+	HostPath string
+	// PathHash is the STORED path_hash column — the canonical URL identity
+	// the dashboard links to and GetByHash resolves against. It is returned
+	// verbatim rather than recomputed from HostPath: a project's host_path
+	// and its stored path_hash can legitimately diverge (e.g. a local
+	// project whose host_path is the bare filesystem path while path_hash
+	// is keyed as sha1("local:{machine}:{path}")), and recomputing from
+	// host_path would yield a hash that no lookup matches → 404.
+	PathHash      string
 	ContainerPath string
 	Languages     []string
 	Settings      Settings
@@ -242,7 +250,7 @@ func findOverlap(ctx context.Context, db *sql.DB, candidate string) (string, err
 // Get retrieves a project by its host_path. Returns ErrNotFound if absent.
 func Get(ctx context.Context, db *sql.DB, hostPath string) (*Project, error) {
 	row := db.QueryRowContext(ctx,
-		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label
+		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label, path_hash
 		 FROM projects WHERE host_path = ?`, hostPath,
 	)
 	return scanProject(hostPath, row)
@@ -270,7 +278,7 @@ func GetByHash(ctx context.Context, db *sql.DB, pathHash string) (*Project, erro
 // List returns all projects ordered by created_at descending.
 func List(ctx context.Context, db *sql.DB) ([]Project, error) {
 	rows, err := db.QueryContext(ctx,
-		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label
+		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label, path_hash
 		 FROM projects ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -368,12 +376,13 @@ func scanProject(hostPath string, row *sql.Row) (*Project, error) {
 		displayPath             *string
 		machineID               *string
 		machineLabel            *string
+		pathHash                *string
 	)
 	err := row.Scan(
 		&hp, &containerPath,
 		&langsJSON, &settingsJSON, &statsJSON,
 		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel, &ownerUserID,
-		&displayPath, &machineID, &machineLabel,
+		&displayPath, &machineID, &machineLabel, &pathHash,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, hostPath)
@@ -381,7 +390,7 @@ func scanProject(hostPath string, row *sql.Row) (*Project, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan project row: %w", err)
 	}
-	return buildProject(hp, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel)
+	return buildProject(hp, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel, pathHash)
 }
 
 func scanProjectRow(rows *sql.Rows) (*Project, error) {
@@ -396,19 +405,20 @@ func scanProjectRow(rows *sql.Rows) (*Project, error) {
 		displayPath             *string
 		machineID               *string
 		machineLabel            *string
+		pathHash                *string
 	)
 	if err := rows.Scan(
 		&hostPath, &containerPath,
 		&langsJSON, &settingsJSON, &statsJSON,
 		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel, &ownerUserID,
-		&displayPath, &machineID, &machineLabel,
+		&displayPath, &machineID, &machineLabel, &pathHash,
 	); err != nil {
 		return nil, fmt.Errorf("scan project: %w", err)
 	}
-	return buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel)
+	return buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel, pathHash)
 }
 
-func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt string, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel *string) (*Project, error) {
+func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt string, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel, pathHash *string) (*Project, error) {
 	var langs []string
 	if err := json.Unmarshal([]byte(langsJSON), &langs); err != nil {
 		langs = nil
@@ -428,8 +438,17 @@ func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, s
 	if displayPath != nil && *displayPath != "" {
 		dp = *displayPath
 	}
+	// Fall back to the host-path hash only when the stored column is
+	// absent (pre-m7 rows backfill it on Open, so this is belt-and-braces).
+	ph := ""
+	if pathHash != nil && *pathHash != "" {
+		ph = *pathHash
+	} else {
+		ph = hashPath(hostPath)
+	}
 	return &Project{
 		HostPath:         hostPath,
+		PathHash:         ph,
 		ContainerPath:    containerPath,
 		Languages:        langs,
 		Settings:         settings,

@@ -83,7 +83,7 @@ func TestEmbeddingParity(t *testing.T) {
 
 	embedCtx, embedCancel := context.WithTimeout(ctx, 90*time.Second)
 	defer embedCancel()
-	got, err := svc.embedRaw(embedCtx, texts)
+	got, err := embedRawForParity(embedCtx, svc, texts)
 	if err != nil {
 		t.Fatalf("embedRaw: %v", err)
 	}
@@ -130,6 +130,31 @@ func TestEmbeddingParity(t *testing.T) {
 }
 
 // --- helpers ---
+
+// rawEmbedder is the subset of the active provider used by the parity
+// gate: embed verbatim, no asymmetric-retrieval prefix. The ollama
+// provider satisfies it via Provider.EmbedRaw; this matches the
+// reference inputs (which already carry their prefixes) 1:1.
+type rawEmbedder interface {
+	EmbedRaw(context.Context, []string) ([][]float32, error)
+}
+
+// embedRawForParity reaches the live provider behind the Service and
+// embeds texts verbatim, bypassing the queue and prefix logic — the
+// behaviour the deleted Service.embedRaw helper used to provide.
+func embedRawForParity(ctx context.Context, s *Service, texts []string) ([][]float32, error) {
+	s.mu.RLock()
+	cur := s.current
+	s.mu.RUnlock()
+	if cur == nil {
+		return nil, ErrSupervisor
+	}
+	re, ok := cur.(rawEmbedder)
+	if !ok {
+		return nil, fmt.Errorf("active provider %T does not support raw embedding", cur)
+	}
+	return re.EmbedRaw(ctx, texts)
+}
 
 type refItem struct {
 	Phrase   string    `json:"phrase"`

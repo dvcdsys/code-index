@@ -74,3 +74,13 @@ export type SidecarStatus = components['schemas']['SidecarStatus'];
 export type ModelEntry = components['schemas']['ModelEntry'];
 export type ModelList = components['schemas']['ModelList'];
 export type RestartAccepted = components['schemas']['RestartAccepted'];
+
+export type EmbeddingProviderInfo = components['schemas']['EmbeddingProviderInfo'];
+export type EmbeddingProviderSecretEnv = components['schemas']['EmbeddingProviderSecretEnv'];
+export type EmbeddingProviderList = components['schemas']['EmbeddingProviderList'];
+export type ActiveEmbeddingProvider = components['schemas']['ActiveEmbeddingProvider'];
+export type SwitchEmbeddingProviderRequest = components['schemas']['SwitchEmbeddingProviderRequest'];
+export type TestEmbeddingProviderResponse = components['schemas']['TestEmbeddingProviderResponse'];
+
+// Provider kind union — the dashboard uses this in form-state discriminants.
+export type EmbeddingProviderKind = 'ollama' | 'openai' | 'voyage';

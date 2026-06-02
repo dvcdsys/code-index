@@ -307,19 +307,48 @@ The watcher monitors the project with `fsnotify`, debounces events (5 s default)
 ### Configuration
 
 ```bash
-cix config show              # print current config
-cix config set <key> <val>   # set a value
+cix config init              # first-run wizard (TUI form)
+cix config edit              # interactive edit (TUI form)
+cix config show              # print current config (lists servers; * marks default)
+cix config keys              # list every settable key with default/env/description
+cix config set <key> <val>   # set one value
+cix config unset <key>       # remove a server / clear a key
 cix config path              # show config file location
 ```
 
-Config file: `~/.cix/config.yaml`
+Config file: `~/.cix/config.yaml`. The full key reference lives in
+[`doc/CLI_CONFIG.md`](doc/CLI_CONFIG.md) — `cix config keys` is the
+canonical runtime view.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `api.url` | `http://localhost:21847` | API server URL |
-| `api.key` | — | Bearer token (`cix_*`) — required |
-| `watcher.debounce_ms` | `5000` | Delay before reindex triggers after a file change |
-| `indexing.batch_size` | `20` | Files per `/index/files` batch |
+#### Env overrides (CI)
+
+| Variable        | Overrides                                |
+|-----------------|------------------------------------------|
+| `CIX_SERVER`    | which alias resolves when `--server` is empty |
+| `CIX_API_URL`   | the resolved server's URL                |
+| `CIX_API_KEY`   | the resolved server's API key            |
+
+Precedence is **flag > env > file > default**. Env overrides apply only
+to the current process — they never write back to `~/.cix/config.yaml`.
+
+#### Multiple servers
+
+`cix` can be configured with several named servers and pick one per
+command with the global `--server <alias>` flag (without it, the
+`default_server` is used):
+
+```bash
+cix config set server.corporate.url https://cix.corp.internal
+cix config set server.corporate.key cix_...
+cix config set default_server corporate     # optional
+cix --server corporate search "rate limiter"
+cix config unset server.corporate           # remove it
+```
+
+The legacy `api.url` / `api.key` keys and the `--api-url` / `--api-key`
+flags still work — they read/override the default server — and old flat
+`api:` config files are migrated to the `servers:` layout automatically
+on first load.
 
 ---
 

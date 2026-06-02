@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -107,8 +108,15 @@ func TestLoadOverrides(t *testing.T) {
 	if got := c.ModelSafeName(); got != "test_model_name" {
 		t.Errorf("ModelSafeName = %q", got)
 	}
-	if got := c.DynamicSQLitePath(); got != "/tmp/test_test_model_name.db" {
-		t.Errorf("DynamicSQLitePath = %q", got)
+	// LegacyDynamicSQLitePath still reconstructs the OLD per-model filename
+	// (used only by the boot-time adoption migration).
+	if got := c.LegacyDynamicSQLitePath(); got != "/tmp/test_test_model_name.db" {
+		t.Errorf("LegacyDynamicSQLitePath = %q", got)
+	}
+	// ChromaDirFor joins the identity path components under the chroma base.
+	comps := []string{"voyage", "voyage_code_3", "2048", "float"}
+	if got, want := c.ChromaDirFor(comps), filepath.Join(append([]string{c.ChromaPersistDir}, comps...)...); got != want {
+		t.Errorf("ChromaDirFor = %q, want %q", got, want)
 	}
 }
 

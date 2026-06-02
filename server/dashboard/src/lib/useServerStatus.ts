@@ -5,6 +5,11 @@ interface StatusPayload {
   server_version: string;
   embedding_model: string;
   model_loaded: boolean;
+  // Pluggable-provider fields (server >= migration 12). Present on
+  // every fresh-built server; older clients may see them as
+  // undefined while a rolling upgrade is in progress.
+  embedding_provider?: string;
+  embedding_provider_manages_process?: boolean;
   // Version-check fields are present only when the server has the
   // versioncheck service wired (see CIX_VERSION_CHECK_ENABLED).
   update_available?: boolean;

@@ -167,7 +167,16 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
     max_embedding_concurrency INTEGER,
     llama_batch_size INTEGER,
     updated_at TEXT NOT NULL,
-    updated_by TEXT
+    updated_by TEXT,
+    -- Pluggable embedding provider (added in migration 12).
+    -- embedding_provider selects the active backend kind; if NULL the
+    -- server falls back to the env/recommended ollama defaults so old
+    -- installs stay on llama-server until the admin picks otherwise.
+    embedding_provider TEXT,
+    -- embedding_provider_config holds the provider-specific config as
+    -- a JSON blob (shape varies by provider). API keys are NEVER stored
+    -- here — providers read them live from env vars named in this blob.
+    embedding_provider_config TEXT
 );
 
 -- Workspaces group indexed projects (rows in the projects table,

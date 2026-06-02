@@ -5,16 +5,41 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	API      APIConfig      `yaml:"api"`
+	// Servers is the canonical list of named cix servers the CLI can talk to.
+	// One of them is the default (DefaultServer). Commands target the default
+	// unless --server <name> is given.
+	Servers []ServerEntry `yaml:"servers" key:"servers" desc:"Named cix servers; the entry matching default_server is the active one"`
+	// DefaultServer is the name of the server used when --server is absent.
+	// CIX_SERVER env var overrides it when --server is not given.
+	DefaultServer string `yaml:"default_server" key:"default_server" env:"CIX_SERVER" desc:"Alias of the server used when --server is omitted"`
+
+	// API is the legacy single-server config (pre-multi-server). It is read
+	// from old config files and migrated into Servers on Load (see
+	// migrateToServers), then cleared so it is no longer written back.
+	// omitempty keeps it out of freshly-written configs.
+	API APIConfig `yaml:"api,omitempty"`
+
 	Watcher  WatcherConfig  `yaml:"watcher"`
-	Server   ServerConfig   `yaml:"server"`
 	Indexing IndexingConfig `yaml:"indexing"`
-	Projects []ProjectEntry `yaml:"projects"`
+	Projects []ProjectEntry `yaml:"projects" key:"projects" desc:"Registered project paths and their auto-watch flag"`
+}
+
+// ServerEntry is a single named cix server: a friendly alias plus its base
+// URL and API key. The alias is what users pass to --server.
+//
+// CIX_API_URL / CIX_API_KEY do NOT bind to a specific entry — they override
+// the URL/key of the *resolved* server (the one picked by --server or
+// default_server) inside getClient. Hence no `env:` tags here.
+type ServerEntry struct {
+	Name string `yaml:"name" desc:"Server alias"`
+	URL  string `yaml:"url" desc:"Base URL of the cix server" validate:"omitempty,url"`
+	Key  string `yaml:"key" desc:"API key (bearer token)" sensitive:"true"`
 }
 
 type APIConfig struct {
@@ -22,31 +47,34 @@ type APIConfig struct {
 	Key string `yaml:"key"`
 }
 
+// DefaultServerName is the alias assigned to the implicit/migrated server.
+const DefaultServerName = "default"
+
 type WatcherConfig struct {
-	Enabled          bool     `yaml:"enabled"`
-	DebounceMS       int      `yaml:"debounce_ms"`
-	ExcludePatterns  []string `yaml:"exclude"`
-	SyncIntervalMins int      `yaml:"sync_interval_mins"`
+	Enabled          bool     `yaml:"enabled" key:"watcher.enabled" desc:"Run the file watcher" default:"true"`
+	DebounceMS       int      `yaml:"debounce_ms" key:"watcher.debounce_ms" desc:"Debounce delay (ms)" default:"5000" validate:"min=100,max=60000"`
+	ExcludePatterns  []string `yaml:"exclude" key:"watcher.exclude" desc:"Paths/globs to skip (comma-separated; REPLACE semantics on set)" default:"node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store"`
+	SyncIntervalMins int      `yaml:"sync_interval_mins" key:"watcher.sync_interval_mins" desc:"Periodic sync interval (minutes)" default:"5" validate:"min=1"`
 }
 
-type ServerConfig struct {
-	Port     int `yaml:"port"`
-	CacheTTL int `yaml:"cache_ttl"`
-}
+// ServerConfig used to hold port/cache_ttl knobs for an in-process server.
+// The CLI runs no server, so the struct and its fields were removed. Old
+// `server:` blocks in existing config files still load without error —
+// koanf silently drops unknown keys during unmarshal.
 
 type IndexingConfig struct {
-	BatchSize int `yaml:"batchsize"`
+	BatchSize int `yaml:"batch_size" key:"indexing.batch_size" desc:"Indexing batch size" default:"20" validate:"min=1"`
 
 	// StreamingIdleTimeoutSec is the maximum allowed silence on the streaming
 	// /index/files response before the CLI gives up and closes the conn. The
 	// server emits a heartbeat every 10s, so 30s gives the network three
 	// retry windows. Set to 0 to disable the watchdog (not recommended).
-	StreamingIdleTimeoutSec int `yaml:"streaming_idle_timeout_sec"`
+	StreamingIdleTimeoutSec int `yaml:"streaming_idle_timeout_sec" key:"indexing.streaming_idle_timeout_sec" desc:"Streaming /index/files idle timeout (seconds); 0 disables watchdog" default:"30" validate:"min=0"`
 }
 
 type ProjectEntry struct {
-	Path      string `yaml:"path"`
-	AutoWatch bool   `yaml:"auto_watch"`
+	Path      string `yaml:"path" desc:"Absolute path of the project root"`
+	AutoWatch bool   `yaml:"auto_watch" desc:"Start the file watcher automatically for this project"`
 }
 
 var (
@@ -54,31 +82,9 @@ var (
 	configPath   string
 )
 
-// defaults returns a Config populated with default values.
-func defaults() Config {
-	return Config{
-		API: APIConfig{
-			URL: "http://localhost:21847",
-		},
-		Watcher: WatcherConfig{
-			Enabled:    true,
-			DebounceMS: 5000,
-			ExcludePatterns: []string{
-				"node_modules", ".git", ".venv", "__pycache__",
-				"dist", "build", ".next", ".cache", ".DS_Store",
-			},
-			SyncIntervalMins: 5,
-		},
-		Server: ServerConfig{
-			Port:     8080,
-			CacheTTL: 300,
-		},
-		Indexing: IndexingConfig{
-			BatchSize:               20,
-			StreamingIdleTimeoutSec: 30,
-		},
-	}
-}
+// (defaults() removed: the canonical source of default values is now the
+// `default:"…"` struct tag set; loadWithKoanf seeds them via the schema
+// walker. Servers/DefaultServer are populated by migrateToServers as before.)
 
 // normalizeLegacyKeys maps old viper-generated YAML key names to the current
 // yaml struct tag names. Provides backward compatibility for configs created
@@ -89,6 +95,10 @@ func normalizeLegacyKeys(data []byte) []byte {
 		{"excludepatterns:", "exclude:"},
 		{"cachettl:", "cache_ttl:"},
 		{"autowatch:", "auto_watch:"},
+		// `batchsize:` was the viper-mangled emission of the `BatchSize` Go
+		// field. We now use `batch_size:` everywhere (consistent with other
+		// snake_case keys); this mapping keeps old files loading.
+		{"batchsize:", "batch_size:"},
 	} {
 		data = bytes.ReplaceAll(data, []byte(pair[0]), []byte(pair[1]))
 	}
@@ -97,47 +107,71 @@ func normalizeLegacyKeys(data []byte) []byte {
 
 // Load loads configuration from ~/.cix/config.yaml.
 // Fields absent from the file keep their default values.
+//
+// Implementation: delegates the heavy lifting to loadWithKoanf
+// (loader_koanf.go) — defaults come from struct tags, the YAML file is the
+// override layer, and migrateToServers handles the legacy `api:` block and
+// the implicit localhost seeding. Load owns the singleton cache and the
+// "re-save when the loader rewrote the on-disk form" side effect.
 func Load() (*Config, error) {
 	if globalConfig != nil {
 		return globalConfig, nil
 	}
 
-	home, err := os.UserHomeDir()
+	_, path, err := configPaths()
 	if err != nil {
-		return nil, fmt.Errorf("get home dir: %w", err)
+		return nil, err
 	}
+	configPath = path
 
-	configDir := filepath.Join(home, ".cix")
-	configPath = filepath.Join(configDir, "config.yaml")
-
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return nil, fmt.Errorf("create config dir: %w", err)
-	}
-
-	cfg := defaults()
-
-	data, err := os.ReadFile(configPath)
+	cfg, needsResave, err := loadWithKoanf()
 	if err != nil {
-		if os.IsNotExist(err) {
-			globalConfig = &cfg
-			return globalConfig, nil
-		}
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, err
 	}
 
-	normalized := normalizeLegacyKeys(data)
-	if err := yaml.Unmarshal(normalized, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	globalConfig = cfg
+	if needsResave {
+		_ = Save(cfg)
 	}
-
-	globalConfig = &cfg
-
-	// If the file used legacy viper-style keys, re-save in the current format.
-	if !bytes.Equal(data, normalized) {
-		_ = Save(&cfg)
-	}
-
 	return globalConfig, nil
+}
+
+// migrateToServers upgrades a parsed config to the multi-server layout in
+// place and reports whether anything changed (so Load can re-save).
+//
+//   - Legacy single-server config (api: only, no servers:) → one server named
+//     "default" carrying the old url/key; api: is cleared so it is no longer
+//     written back.
+//   - servers: present but no default_server → default to the first entry.
+//   - Neither servers: nor api: (e.g. a partial hand-written file) → seed the
+//     implicit localhost default so the CLI is always usable.
+func migrateToServers(cfg *Config) (changed bool) {
+	if len(cfg.Servers) == 0 {
+		url := cfg.API.URL
+		if url == "" {
+			// No api.url (fresh install, or a legacy file that only set
+			// api.key): fall back to the historical localhost default so the
+			// migrated server is usable.
+			url = "http://localhost:21847"
+		}
+		cfg.Servers = []ServerEntry{
+			{Name: DefaultServerName, URL: url, Key: cfg.API.Key},
+		}
+		cfg.DefaultServer = DefaultServerName
+		cfg.API = APIConfig{}
+		return true
+	}
+
+	// Servers present. Clear any leftover legacy api block and ensure a default.
+	if cfg.API.URL != "" || cfg.API.Key != "" {
+		cfg.API = APIConfig{}
+		changed = true
+	}
+	if cfg.DefaultServer == "" {
+		cfg.DefaultServer = cfg.Servers[0].Name
+		changed = true
+	}
+	return changed
 }
 
 // Save writes cfg to disk and updates the in-memory singleton.
@@ -165,6 +199,154 @@ func GetConfigPath() string {
 func ResetForTesting() {
 	globalConfig = nil
 	configPath = ""
+}
+
+// validateServerName checks a server alias is usable as both a YAML name and
+// a `server.<name>.url` config key (which is split on "."). Names must be
+// non-empty and contain no dots or whitespace.
+func validateServerName(name string) error {
+	if name == "" {
+		return fmt.Errorf("server name must not be empty")
+	}
+	if strings.ContainsAny(name, " \t\r\n") {
+		return fmt.Errorf("server name %q must not contain whitespace", name)
+	}
+	if strings.Contains(name, ".") {
+		return fmt.Errorf("server name %q must not contain '.'", name)
+	}
+	return nil
+}
+
+// GetServer returns a pointer to the server entry with the given name.
+func (c *Config) GetServer(name string) (*ServerEntry, bool) {
+	for i := range c.Servers {
+		if c.Servers[i].Name == name {
+			return &c.Servers[i], true
+		}
+	}
+	return nil, false
+}
+
+// DefaultServerEntry returns the configured default server, falling back to
+// the first server when DefaultServer is unset or dangling.
+func (c *Config) DefaultServerEntry() (*ServerEntry, bool) {
+	if c.DefaultServer != "" {
+		if s, ok := c.GetServer(c.DefaultServer); ok {
+			return s, true
+		}
+	}
+	if len(c.Servers) > 0 {
+		return &c.Servers[0], true
+	}
+	return nil, false
+}
+
+// ResolveServer selects which server a command should target. An empty name
+// means "use the default"; a non-empty name must match a configured alias
+// exactly. On miss the error lists the available aliases.
+func (c *Config) ResolveServer(name string) (*ServerEntry, error) {
+	if name == "" {
+		if s, ok := c.DefaultServerEntry(); ok {
+			return s, nil
+		}
+		return nil, fmt.Errorf("no servers configured; run 'cix config set api.url <url>' or 'cix config set server.<name>.url <url>'")
+	}
+	if s, ok := c.GetServer(name); ok {
+		return s, nil
+	}
+	return nil, fmt.Errorf("server %q not found; configured servers:\n  - %s", name, strings.Join(c.serverNames(), "\n  - "))
+}
+
+// serverNames returns the aliases of all configured servers.
+func (c *Config) serverNames() []string {
+	names := make([]string, 0, len(c.Servers))
+	for _, s := range c.Servers {
+		names = append(names, s.Name)
+	}
+	return names
+}
+
+// upsertServer finds or appends the named server, applies mut, and makes it
+// the default when no default is set yet.
+func upsertServer(cfg *Config, name string, mut func(*ServerEntry)) {
+	if s, ok := cfg.GetServer(name); ok {
+		mut(s)
+	} else {
+		cfg.Servers = append(cfg.Servers, ServerEntry{Name: name})
+		mut(&cfg.Servers[len(cfg.Servers)-1])
+	}
+	if cfg.DefaultServer == "" {
+		cfg.DefaultServer = name
+	}
+}
+
+// SetServerURL sets (or creates) the URL of the named server and persists.
+func SetServerURL(name, url string) error {
+	if err := validateServerName(name); err != nil {
+		return err
+	}
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	upsertServer(cfg, name, func(s *ServerEntry) { s.URL = url })
+	return Save(cfg)
+}
+
+// SetServerKey sets (or creates) the API key of the named server and persists.
+func SetServerKey(name, key string) error {
+	if err := validateServerName(name); err != nil {
+		return err
+	}
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	upsertServer(cfg, name, func(s *ServerEntry) { s.Key = key })
+	return Save(cfg)
+}
+
+// SetDefaultServer marks an existing server as the default and persists.
+func SetDefaultServer(name string) error {
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	if _, ok := cfg.GetServer(name); !ok {
+		return fmt.Errorf("server %q not found; configured servers:\n  - %s", name, strings.Join(cfg.serverNames(), "\n  - "))
+	}
+	cfg.DefaultServer = name
+	return Save(cfg)
+}
+
+// RemoveServer deletes the named server and persists. If the removed server
+// was the default and others remain, the default is reassigned to the first
+// remaining server and its name is returned in reassignedTo. Removing the
+// last server leaves none — the next Load() re-seeds the localhost default.
+func RemoveServer(name string) (reassignedTo string, err error) {
+	cfg, err := Load()
+	if err != nil {
+		return "", err
+	}
+	if _, ok := cfg.GetServer(name); !ok {
+		return "", fmt.Errorf("server %q not found", name)
+	}
+	kept := make([]ServerEntry, 0, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		if s.Name != name {
+			kept = append(kept, s)
+		}
+	}
+	cfg.Servers = kept
+	if cfg.DefaultServer == name {
+		if len(kept) > 0 {
+			cfg.DefaultServer = kept[0].Name
+			reassignedTo = kept[0].Name
+		} else {
+			cfg.DefaultServer = ""
+		}
+	}
+	return reassignedTo, Save(cfg)
 }
 
 // AddProject adds a project to the config.

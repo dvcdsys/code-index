@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 
 	"github.com/google/uuid"
@@ -261,17 +262,22 @@ func (s *Server) GetSidecarStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	st := embedSvc.Status()
 
+	// "ready" must be true for a healthy provider of EITHER flavour: a
+	// running ollama sidecar (StateRunning) OR an operational HTTP-only
+	// provider (StateRemote — openai/voyage, which have no managed
+	// process to be "running"). Comparing only against "running"
+	// regressed every remote provider to a permanently not-ready status.
 	body := map[string]any{
 		"state":             st.State,
-		"ready":             st.Ready,
+		"ready":             st.State == provider.StateRunning || st.State == provider.StateRemote,
 		"in_flight":         st.InFlight,
 		"restart_in_flight": restartInFlight.Load(),
 	}
 	if st.PID > 0 {
 		body["pid"] = st.PID
 	}
-	if st.Uptime > 0 {
-		body["uptime_seconds"] = int(st.Uptime.Seconds())
+	if st.UptimeSeconds > 0 {
+		body["uptime_seconds"] = st.UptimeSeconds
 	}
 	if st.Model != "" {
 		body["model"] = st.Model

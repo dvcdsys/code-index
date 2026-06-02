@@ -64,6 +64,8 @@ var registeredMigrations = []migration{
 	{9, "git_repos_polling", func(db *sql.DB, _ OpenOptions) error { return migrateGitReposPolling(db) }},
 	{10, "auth_groups_ownership", func(db *sql.DB, _ OpenOptions) error { return migrateAuthGroupsOwnership(db) }},
 	{11, "project_machine_identity", func(db *sql.DB, _ OpenOptions) error { return migrateProjectMachineIdentity(db) }},
+	{12, "embedding_provider", func(db *sql.DB, _ OpenOptions) error { return migrateEmbeddingProvider(db) }},
+	{13, "indexed_with_model_provider_prefix", func(db *sql.DB, _ OpenOptions) error { return migrateIndexedWithModelProviderPrefix(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -136,6 +138,49 @@ func OpenWith(opts OpenOptions) (*sql.DB, error) {
 	}
 
 	return db, nil
+}
+
+// HasTables reports whether the SQLite database at path contains ALL of
+// the named tables. It opens the file read-write (so any pending WAL is
+// recovered cleanly) with a busy timeout, runs NO migrations, and closes
+// before returning. A missing file is not an error — it returns
+// (false, nil). Used by the boot-time DB adoption migration
+// (internal/storage) to tell a real unified system DB (has both
+// schema_migrations and users) apart from a pre-auth fossil that merely
+// happens to occupy the target path.
+func HasTables(path string, names ...string) (bool, error) {
+	if path == "" || len(names) == 0 {
+		return false, nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	dsn, err := buildDSN(path)
+	if err != nil {
+		return false, err
+	}
+	sdb, err := sql.Open(DriverName, dsn)
+	if err != nil {
+		return false, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer sdb.Close()
+	sdb.SetMaxOpenConns(1)
+	for _, name := range names {
+		var got string
+		err := sdb.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, name,
+		).Scan(&got)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("check table %q in %s: %w", name, path, err)
+		}
+	}
+	return true, nil
 }
 
 // applyMigrations runs every entry in registeredMigrations whose version is
@@ -668,10 +713,10 @@ func migratePathHash(db *sql.DB) error {
 	haveColumn := false
 	for rows.Next() {
 		var (
-			cid                 int
-			name, typ           string
-			notnull, pk         int
-			dflt                sql.NullString
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
 		)
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
 			rows.Close()
@@ -716,6 +761,87 @@ func migratePathHash(db *sql.DB) error {
 		if _, err := db.Exec(`UPDATE projects SET path_hash = ? WHERE host_path = ?`, HashHostPath(hp), hp); err != nil {
 			return fmt.Errorf("backfill path_hash: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateEmbeddingProvider adds the pluggable-provider columns to
+// runtime_settings:
+//   - embedding_provider TEXT — kind selector ("ollama"/"openai"/"voyage")
+//   - embedding_provider_config TEXT — provider-specific JSON blob
+//
+// Rows stay NULL until the admin first persists a non-default provider;
+// boot logic in main.go then falls through to the env-derived ollama
+// defaults exactly as before. Idempotent — checked via PRAGMA
+// table_info, ALTER only on absence.
+func migrateEmbeddingProvider(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(runtime_settings)`)
+	if err != nil {
+		return fmt.Errorf("table_info runtime_settings: %w", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if !have["embedding_provider"] {
+		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN embedding_provider TEXT`); err != nil {
+			return fmt.Errorf("add embedding_provider column: %w", err)
+		}
+	}
+	if !have["embedding_provider_config"] {
+		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN embedding_provider_config TEXT`); err != nil {
+			return fmt.Errorf("add embedding_provider_config column: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateIndexedWithModelProviderPrefix backfills projects indexed
+// before the pluggable-provider refactor (migration 12). Pre-refactor
+// the indexer wrote a bare model name like
+// "awhiteside/CodeRankEmbed-Q8_0-GGUF"; post-refactor it writes the
+// fully-qualified Provider.ID() of the form "ollama:<model>". Without
+// this migration every legacy project would show a "stale model"
+// badge forever because the bare string never matches the live
+// "ollama:<model>" and a reindex would *still* write the new prefixed
+// form — leaving every UN-reindexed project flagged falsely.
+//
+// Heuristic: rows that don't already start with a known provider-kind
+// prefix predate the prefix convention. Prepend "ollama:" — safe
+// because pre-refactor there was no other embedding backend; every
+// legacy row was produced by the in-process llama-server sidecar.
+// (Testing for the kind prefix rather than for the mere presence of a
+// ":" matters: a legacy Ollama-style model name like
+// "nomic-embed-text:latest" contains a colon but is NOT yet prefixed,
+// so a presence-of-colon test would wrongly skip it and leave it
+// flagged stale forever.)
+//
+// Idempotent: rows already starting with ollama:/openai:/voyage: are
+// left alone, so re-running this migration (or running it against a DB
+// that was already partially upgraded) is a no-op.
+func migrateIndexedWithModelProviderPrefix(db *sql.DB) error {
+	_, err := db.Exec(`
+		UPDATE projects
+		SET indexed_with_model = 'ollama:' || indexed_with_model
+		WHERE indexed_with_model IS NOT NULL
+		  AND indexed_with_model != ''
+		  AND indexed_with_model NOT LIKE 'ollama:%'
+		  AND indexed_with_model NOT LIKE 'openai:%'
+		  AND indexed_with_model NOT LIKE 'voyage:%'
+	`)
+	if err != nil {
+		return fmt.Errorf("backfill indexed_with_model prefix: %w", err)
 	}
 	return nil
 }

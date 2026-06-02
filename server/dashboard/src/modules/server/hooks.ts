@@ -1,17 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import type {
+  ActiveEmbeddingProvider,
+  EmbeddingProviderList,
   ModelList,
   RestartAccepted,
   RuntimeConfig,
   RuntimeConfigUpdate,
   SidecarStatus,
+  SwitchEmbeddingProviderRequest,
+  TestEmbeddingProviderResponse,
 } from '@/api/types';
 
 export const serverKeys = {
   runtimeConfig: ['server', 'runtime-config'] as const,
   sidecarStatus: ['server', 'sidecar-status'] as const,
   models: ['server', 'models'] as const,
+  embeddingProviders: ['server', 'embedding-providers'] as const,
+  activeProvider: ['server', 'embedding-provider', 'active'] as const,
 };
 
 export function useRuntimeConfig() {
@@ -75,5 +81,57 @@ export function useGGUFModels() {
     // Cache aggressively: GGUFs only change when the operator runs
     // `cix init` or manually drops a file in the cache.
     staleTime: 60_000,
+  });
+}
+
+// useEmbeddingProviders returns the list of registered provider
+// kinds, their schemas, and which API-key env vars are currently set
+// on the server. Polled occasionally so a freshly-exported env var
+// flips the missing-key banner without a hard reload.
+export function useEmbeddingProviders() {
+  return useQuery({
+    queryKey: serverKeys.embeddingProviders,
+    queryFn: ({ signal }) =>
+      api.get<EmbeddingProviderList>('/admin/embedding-providers', { signal }),
+    staleTime: 30_000,
+  });
+}
+
+// useActiveProvider returns the persisted active provider + config.
+// Invalidated by useSwitchProvider on success.
+export function useActiveProvider() {
+  return useQuery({
+    queryKey: serverKeys.activeProvider,
+    queryFn: ({ signal }) =>
+      api.get<ActiveEmbeddingProvider>('/admin/embedding-providers/active', { signal }),
+  });
+}
+
+// useTestProvider calls /test for a given kind+config. Doesn't
+// touch the active state on the server.
+export function useTestProvider(kind: string) {
+  return useMutation({
+    mutationFn: (config: Record<string, unknown>) =>
+      api.post<TestEmbeddingProviderResponse>(
+        `/admin/embedding-providers/${encodeURIComponent(kind)}/test`,
+        config
+      ),
+  });
+}
+
+// useSwitchProvider PUTs the new selection. On success: invalidate
+// the active-provider cache, the /status cache (footer indicator),
+// and the sidecar-status cache (the latter goes to "n/a" for
+// non-ollama providers).
+export function useSwitchProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: SwitchEmbeddingProviderRequest) =>
+      api.put<ActiveEmbeddingProvider>('/admin/embedding-providers/active', req),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: serverKeys.activeProvider });
+      qc.invalidateQueries({ queryKey: serverKeys.sidecarStatus });
+      qc.invalidateQueries({ queryKey: ['runtime-model'] });
+    },
   });
 }

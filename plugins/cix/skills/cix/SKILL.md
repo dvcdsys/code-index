@@ -157,6 +157,40 @@ The watcher auto-reindexes on file change — manual `reindex` is rarely
 needed. `cix status` shows whether the watcher is running and the
 last-sync timestamp.
 
+### Servers — talk to more than one cix backend
+
+`cix` can be configured with several **named servers** (e.g. a local
+box and a remote corporate server). One is the **default**; every
+command targets the default unless you pass `--server <alias>`.
+
+```bash
+cix config show                                # lists servers; * marks the default
+cix --server corporate search "rate limiter"   # run any command against a named server
+cix search "rate limiter" --server corporate   # --server is global; either position works
+```
+
+Servers are managed through `cix config` (persisted in
+`~/.cix/config.yaml`):
+
+```bash
+cix config set server.corporate.url https://cix.corp.internal
+cix config set server.corporate.key <bearer-token>
+cix config set default_server corporate        # change which server is the default
+cix config unset server.corporate              # remove a server
+cix config unset server.corporate.key          # clear just its key
+```
+
+The legacy single-server keys still work and operate on the **default**
+server, so existing setups keep working unchanged:
+`cix config set api.url <url>` / `cix config set api.key <key>`. The
+`--api-url` / `--api-key` flags override the selected server's URL/key
+for a single invocation.
+
+**Agent rule:** use the default server (no flag) unless the user names a
+specific server. Only add `--server <alias>` when the task explicitly
+targets that named backend; never guess an alias — run `cix config show`
+to see the configured names if unsure.
+
 ---
 
 ## Search quality — what scores mean

@@ -1,4 +1,4 @@
-package embeddings
+package ollama
 
 import (
 	"context"
@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 )
 
 // darwinSunPathMax is the platform limit for unix socket paths on macOS.
@@ -270,7 +272,7 @@ func (s *supervisor) spawn(ctx context.Context) error {
 		s.lastSpawnErr.Store(err.Error())
 		s.killGroup()
 		<-s.waiterDone
-		return fmt.Errorf("%w: %v", ErrNotReady, err)
+		return fmt.Errorf("%w: %v", provider.ErrNotReady, err)
 	}
 	close(s.readySignal)
 	s.lastSpawnErr.Store("") // clear any stale error from a prior failed start
@@ -395,15 +397,20 @@ func pruneRestarts(ts []time.Time, now time.Time, window time.Duration) []time.T
 // the graceful path failed. The caller's context controls the deadline —
 // main.go already uses a 10s shutdown context.
 func (s *supervisor) Stop(ctx context.Context) error {
+	// Snapshot cmd + waiterDone together under the lock: a crash-driven
+	// spawn() reassigns s.waiterDone under s.mu, so reading the field bare
+	// races that write. Use the local for every wait below.
+	s.mu.RLock()
+	cmd := s.cmd
+	waiterDone := s.waiterDone
+	s.mu.RUnlock()
+
 	if !s.stopping.CompareAndSwap(false, true) {
 		// Already stopping; just wait for the existing teardown.
-		<-s.waiterDone
+		<-waiterDone
 		return nil
 	}
 
-	s.mu.RLock()
-	cmd := s.cmd
-	s.mu.RUnlock()
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
@@ -416,7 +423,7 @@ func (s *supervisor) Stop(ctx context.Context) error {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 
 	select {
-	case <-s.waiterDone:
+	case <-waiterDone:
 		// Also clean up the socket file so a subsequent run does not trip on it.
 		if s.cfg.Transport == "unix" {
 			_ = os.Remove(s.cfg.SocketPath)
@@ -425,7 +432,7 @@ func (s *supervisor) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		s.logger.Warn("SIGTERM timed out, sending SIGKILL", "pgid", pgid)
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		<-s.waiterDone
+		<-waiterDone
 		if s.cfg.Transport == "unix" {
 			_ = os.Remove(s.cfg.SocketPath)
 		}
@@ -573,7 +580,7 @@ func (s *supervisor) Status() SupervisorStatus {
 // Ready blocks until the current child is ready or ctx expires.
 func (s *supervisor) Ready(ctx context.Context) error {
 	if s.dead.Load() {
-		return ErrSupervisor
+		return provider.ErrUnrecoverable
 	}
 	s.mu.RLock()
 	ch := s.readySignal

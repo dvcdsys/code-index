@@ -6,11 +6,18 @@ import type { RuntimeConfig, RuntimeConfigUpdate } from '@/api/types';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
 import { Skeleton } from '@/ui/skeleton';
-import { useRestartSidecar, useRuntimeConfig, useSidecarStatus, useUpdateRuntimeConfig } from './hooks';
+import { useServerStatus } from '@/lib/useServerStatus';
+import {
+  useRestartSidecar,
+  useRuntimeConfig,
+  useSidecarStatus,
+  useUpdateRuntimeConfig,
+} from './hooks';
 import { EmbeddingModelSection } from './sections/EmbeddingModelSection';
 import { RuntimeParamsSection } from './sections/RuntimeParamsSection';
 import { SidecarSection } from './sections/SidecarSection';
 import { AdvancedSection } from './sections/AdvancedSection';
+import { EmbeddingProviderSection } from './sections/EmbeddingProviderSection';
 import { SaveAndRestartDialog } from './components/SaveAndRestartDialog';
 
 interface Draft {
@@ -62,6 +69,14 @@ export default function ServerPage() {
   const status = useSidecarStatus();
   const update = useUpdateRuntimeConfig();
   const restart = useRestartSidecar();
+  // /status is shared with the footer (already polled every 30s) and
+  // its embedding_provider field reflects the LIVE active provider —
+  // the right signal for "should we show ollama sections?". We default
+  // to true while it loads so the page doesn't flash empty between
+  // mount and the first /status response.
+  const serverStatus = useServerStatus();
+  const activeKind = serverStatus.data?.embedding_provider ?? 'ollama';
+  const showOllamaSections = activeKind === 'ollama';
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -132,9 +147,9 @@ export default function ServerPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Server</h1>
           <p className="text-sm text-muted-foreground">
-            Embedding model, indexing parameters, sidecar lifecycle. Saved
-            overrides land in the database and are reapplied on the next
-            sidecar restart — env vars stay as bootstrap defaults.
+            {showOllamaSections
+              ? 'Embedding provider + model, indexing parameters, sidecar lifecycle, throughput. Saved overrides land in the database and are reapplied on the next sidecar restart — env vars stay as bootstrap defaults.'
+              : 'Embedding provider + concurrency. For remote providers (OpenAI-compatible, Voyage) the per-provider form above is the main edit surface; this page also exposes the server-wide concurrency cap that all providers honour.'}
           </p>
         </div>
         <Button
@@ -142,7 +157,7 @@ export default function ServerPage() {
           disabled={!dirty || isPending || disabled}
         >
           {isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
-          Save &amp; Restart
+          {showOllamaSections ? 'Save & Restart' : 'Save'}
         </Button>
       </header>
 
@@ -158,30 +173,56 @@ export default function ServerPage() {
         </Alert>
       ) : null}
 
-      <EmbeddingModelSection
-        config={cfg.data}
-        draftModel={draft.embedding_model}
-        onDraftChange={(v) => setDraft({ ...draft, embedding_model: v })}
-      />
+      <EmbeddingProviderSection />
 
-      <RuntimeParamsSection
-        config={cfg.data}
-        draftCtx={draft.llama_ctx_size}
-        draftGpuLayers={draft.llama_n_gpu_layers}
-        draftThreads={draft.llama_n_threads}
-        onDraftCtx={(n) => setDraft({ ...draft, llama_ctx_size: n })}
-        onDraftGpuLayers={(n) => setDraft({ ...draft, llama_n_gpu_layers: n })}
-        onDraftThreads={(n) => setDraft({ ...draft, llama_n_threads: n })}
-      />
+      {/*
+        Ollama-specific cards — rendered only when the active provider
+        is ollama. For openai/voyage these sections do not apply:
+        there's no GGUF, no llama-server child to restart, no GPU
+        layers / threads, no batch size knob. The provider form above
+        is the only edit surface in that case.
 
-      <SidecarSection />
+        Concurrency lives inside AdvancedSection together with the
+        ollama-only batch size — for v1 we hide the whole card on
+        remote providers. A follow-up may split concurrency into a
+        provider-agnostic card if operators ask for it.
+      */}
+      {showOllamaSections ? (
+        <>
+          <EmbeddingModelSection
+            config={cfg.data}
+            draftModel={draft.embedding_model}
+            onDraftChange={(v) => setDraft({ ...draft, embedding_model: v })}
+          />
 
+          <RuntimeParamsSection
+            config={cfg.data}
+            draftCtx={draft.llama_ctx_size}
+            draftGpuLayers={draft.llama_n_gpu_layers}
+            draftThreads={draft.llama_n_threads}
+            onDraftCtx={(n) => setDraft({ ...draft, llama_ctx_size: n })}
+            onDraftGpuLayers={(n) => setDraft({ ...draft, llama_n_gpu_layers: n })}
+            onDraftThreads={(n) => setDraft({ ...draft, llama_n_threads: n })}
+          />
+
+          <SidecarSection />
+        </>
+      ) : null}
+
+      {/*
+        Throughput / concurrency — always visible. The queue concurrency
+        is the Service-level cap on parallel /v1/embeddings POSTs and
+        applies to every provider (ollama, openai, voyage all accept
+        concurrent requests). The llama batch field inside the card
+        is gated on isOllama.
+      */}
       <AdvancedSection
         config={cfg.data}
         draftConcurrency={draft.max_embedding_concurrency}
         draftBatch={draft.llama_batch_size}
         onDraftConcurrency={(n) => setDraft({ ...draft, max_embedding_concurrency: n })}
         onDraftBatch={(n) => setDraft({ ...draft, llama_batch_size: n })}
+        isOllama={showOllamaSections}
       />
 
       <SaveAndRestartDialog

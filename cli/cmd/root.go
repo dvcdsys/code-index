@@ -39,9 +39,10 @@ func printBanner() {
 }
 
 var (
-	cfgFile string
-	apiURL  string
-	apiKey  string
+	cfgFile    string
+	apiURL     string
+	apiKey     string
+	serverName string
 )
 
 // rootCmd represents the base command
@@ -71,8 +72,9 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&apiURL, "api-url", "", "API server URL (default from config)")
-	rootCmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "API key (default from config)")
+	rootCmd.PersistentFlags().StringVar(&serverName, "server", "", "named server alias from config (default: the configured default server)")
+	rootCmd.PersistentFlags().StringVar(&apiURL, "api-url", "", "API server URL (overrides the selected server's URL)")
+	rootCmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "API key (overrides the selected server's key)")
 }
 
 // resolveProjectByName performs an exact-match lookup of name against the
@@ -130,24 +132,64 @@ func findProjectRoot(candidatePath string, apiClient *client.Client) string {
 	return candidatePath
 }
 
-// getClient creates an API client from config or flags
+// Env-var names recognised by the CLI for server selection / overrides.
+// Precedence is always flag > env > config-file > default. The CIX_*
+// surface is deliberately tiny — three vars, all about reaching a server.
+// Everything else lives in ~/.cix/config.yaml.
+const (
+	envServer = "CIX_SERVER"
+	envAPIURL = "CIX_API_URL"
+	envAPIKey = "CIX_API_KEY"
+)
+
+// getClient creates an API client from config / flags / env.
+//
+// Precedence per axis:
+//   - target server alias:  --server > CIX_SERVER > default_server
+//   - server URL override:  --api-url > CIX_API_URL > the resolved server's URL
+//   - server key override:  --api-key > CIX_API_KEY > the resolved server's key
+//
+// The env vars override the *resolved* server's URL/key locally — they
+// never mutate the in-memory ServerEntry, so a follow-up config.Save() will
+// not persist them. This matches the flag behavior and is what users in CI
+// expect: `CIX_API_KEY=secret cix search …` must not write the secret back
+// to ~/.cix/config.yaml.
 func getClient() (*client.Client, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
-	url := apiURL
-	if url == "" {
-		url = cfg.API.URL
+	// Server alias: flag > env > default. Read env only when the flag is
+	// empty; the flag is the authoritative override.
+	name := serverName
+	if name == "" {
+		name = os.Getenv(envServer)
+	}
+	srv, err := cfg.ResolveServer(name)
+	if err != nil {
+		return nil, err
 	}
 
+	// URL override: flag > env > entry.
+	url := apiURL
+	if url == "" {
+		url = os.Getenv(envAPIURL)
+	}
+	if url == "" {
+		url = srv.URL
+	}
+
+	// Key override: flag > env > entry. Local copy — never write back.
 	key := apiKey
 	if key == "" {
-		key = cfg.API.Key
-		if key == "" {
-			return nil, fmt.Errorf("API key not set. Use --api-key flag or run 'cix config set api.key <key>'")
-		}
+		key = os.Getenv(envAPIKey)
+	}
+	if key == "" {
+		key = srv.Key
+	}
+	if key == "" {
+		return nil, fmt.Errorf("API key not set for server %q. Use --api-key flag, set %s=…, or run 'cix config set server.%s.key <key>'", srv.Name, envAPIKey, srv.Name)
 	}
 
 	c := client.New(url, key)

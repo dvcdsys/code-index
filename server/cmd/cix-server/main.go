@@ -21,10 +21,12 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
+	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
+	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
 	"github.com/dvcdsys/code-index/server/internal/githubapi"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
-	"github.com/dvcdsys/code-index/server/internal/groups"
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
+	"github.com/dvcdsys/code-index/server/internal/groups"
 	"github.com/dvcdsys/code-index/server/internal/httpapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
@@ -33,6 +35,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/storage"
 	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
 	"github.com/dvcdsys/code-index/server/internal/users"
@@ -114,7 +117,16 @@ func run() error {
 	chunker.Configure(cfg.Languages)
 	logger.Info("chunker languages configured", "active", chunker.SupportedLanguages())
 
-	dbPath := cfg.DynamicSQLitePath()
+	// The system DB is model-INDEPENDENT (one permanent file at
+	// cfg.SQLitePath holding accounts + catalog + parsed code). Older
+	// builds suffixed the model name onto the path; adopt any such legacy
+	// per-model file as the canonical system DB (idempotent, one-time).
+	// LEGACY-MIGRATION (remove next release): drop this adoption call once
+	// all deployments have booted on the unified layout.
+	if err := storage.AdoptLegacyModelDB(cfg.SQLitePath, cfg.LegacyDynamicSQLitePath(), logger); err != nil {
+		return fmt.Errorf("adopt legacy system db: %w", err)
+	}
+	dbPath := cfg.SQLitePath
 	logger.Info("opening database", "path", dbPath)
 	database, err := db.OpenWith(db.OpenOptions{
 		Path:    dbPath,
@@ -154,14 +166,10 @@ func run() error {
 		"batch", cfg.LlamaBatchSize,
 		"sources", snap.Source,
 	)
-	// DynamicSQLitePath embeds ModelSafeName(); if the dashboard switched the
-	// model, the storage path resolved a moment ago is for the OLD model. The
-	// already-opened DB is still correct (it's the OLD model's state) but the
-	// chroma vectorstore opened below needs to honour the NEW model. Recompute
-	// dbPath only matters if we want to re-open under the new model — for PR-E
-	// we deliberately keep the old DB so historical projects keep their
-	// indexed_with_model and the dashboard can show the drift. Sidecar +
-	// vectorstore use the new model.
+	// The system DB is model-independent (opened above at cfg.SQLitePath).
+	// Only the chroma vector store is namespaced per embedding identity —
+	// it is opened below once the active provider is known, using
+	// provider.StorageSlug(Provider.ID()).
 
 	// Embeddings service. When disabled we still build the value so router
 	// wiring stays consistent — Service methods return ErrDisabled in that case.
@@ -169,7 +177,62 @@ func run() error {
 	// window for the HF download path on cold cache.
 	startupCtx, startupCancel := context.WithTimeout(context.Background(),
 		time.Duration(cfg.LlamaStartupSec)*time.Second+30*time.Second)
-	embedSvc, err := embeddings.New(startupCtx, cfg, logger)
+
+	// Bootstrap pluggable-provider selection. If the runtime_settings row
+	// has no embedding_provider yet (fresh install or pre-migration DB),
+	// seed it with the env-derived ollama config and use that for boot.
+	// Otherwise the persisted blob is authoritative — env vars (other
+	// than API-key envs that providers read live) are ignored.
+	embedCfgStore := embeddingscfg.New(database)
+	persistedProv, hasProv, err := embedCfgStore.Get(context.Background())
+	if err != nil {
+		startupCancel()
+		return fmt.Errorf("load embedding provider config: %w", err)
+	}
+	if !hasProv && cfg.EmbeddingsEnabled {
+		seed, serr := embeddings.BuildOllamaConfigFromEnv(cfg)
+		if serr != nil {
+			startupCancel()
+			return fmt.Errorf("seed embedding provider config: %w", serr)
+		}
+		if serr := embedCfgStore.Save(context.Background(),
+			embeddingscfg.Snapshot{Kind: "ollama", Config: seed}, ""); serr != nil {
+			logger.Warn("could not seed embedding provider config (continuing on env)", "err", serr)
+		}
+		persistedProv = embeddingscfg.Snapshot{Kind: "ollama", Config: seed}
+		hasProv = true
+	}
+
+	var embedSvc *embeddings.Service
+	if !cfg.EmbeddingsEnabled || !hasProv {
+		// Legacy / disabled path — fall back to env-only ollama wiring.
+		embedSvc, err = embeddings.New(startupCtx, cfg, logger)
+	} else {
+		prov, perr := provider.Build(startupCtx, persistedProv.Kind, persistedProv.Config, embeddings.EnvSecrets(), logger)
+		if perr != nil {
+			// The persisted provider config is malformed (bad JSON /
+			// unknown kind). Don't brick the whole server over it: fall
+			// back to env-only ollama so the dashboard stays reachable to
+			// fix the config or re-switch the provider.
+			logger.Error("could not build persisted embedding provider; falling back to env ollama (fix or re-switch via dashboard)",
+				"kind", persistedProv.Kind, "err", perr)
+			embedSvc, err = embeddings.New(startupCtx, cfg, logger)
+		} else {
+			if perr := prov.Start(startupCtx); perr != nil {
+				// A remote provider's boot connect-test (or the ollama
+				// sidecar spawn) failed — a transient upstream blip, a
+				// revoked key, or a missing API-key env after a redeploy.
+				// Attach the provider anyway instead of failing the whole
+				// process: the HTTP server (dashboard, auth, every project
+				// API) must stay up so an operator can recover, and remote
+				// providers self-heal once the upstream/key is back. Embeds
+				// return a clear error until then and Status() reports it.
+				logger.Error("persisted embedding provider failed to start; continuing in degraded state — embeddings unavailable until it recovers or is switched",
+					"kind", persistedProv.Kind, "err", perr)
+			}
+			embedSvc = embeddings.NewWithProvider(cfg, prov, logger)
+		}
+	}
 	startupCancel()
 	if err != nil {
 		return fmt.Errorf("embeddings: %w", err)
@@ -191,25 +254,67 @@ func run() error {
 		}
 	}()
 
-	// Detect and back up a legacy ChromaDB layout left by the Python server.
-	if backed, bErr := vectorstore.DetectLegacyAndBackup(cfg.DynamicChromaPersistDir()); bErr != nil {
-		logger.Warn("could not back up legacy chroma dir", "err", bErr)
+	// Relocate a legacy Python ChromaDB store occupying the container path
+	// itself, so chromaBase is free to become the nested container below.
+	if backed, bErr := vectorstore.DetectLegacyAndBackup(cfg.ChromaPersistDir); bErr != nil {
+		return fmt.Errorf("back up legacy python chroma store: %w", bErr)
 	} else if backed {
-		logger.Warn("legacy chroma layout detected — backed up; re-run cix init to reindex")
+		logger.Warn("legacy python chroma layout detected at container path — backed up; re-run cix init to reindex")
 	}
 
-	// Vector store (chromem-go). Lives under the dynamic chroma persist dir so
-	// the path includes the model-safe name, matching Python parity.
-	vs, err := vectorstore.Open(cfg.DynamicChromaPersistDir())
+	// Migrate pre-unification FLAT ollama dirs (<base>_<model>) into the
+	// unified NESTED layout (<base>/ollama/<model-slug>/) so existing
+	// vectors are reused without a reindex. Unambiguous: every flat sibling
+	// is a legacy ollama dir (the provider kind is now its own path level,
+	// not guessed from a name prefix). Idempotent.
+	// LEGACY-MIGRATION (remove next release): drop once every deployment has
+	// booted on the nested layout.
+	if err := storage.MigrateFlatChromaToNested(cfg.ChromaPersistDir, logger); err != nil {
+		// Fail closed. A half-completed move would leave the server opening
+		// a fresh empty namespace while existing vectors sit under the
+		// un-migrated legacy dir — search would silently return nothing on
+		// a "healthy" server. Surface it so the operator fixes the cause
+		// (e.g. dir perms under prod uid 1001) rather than losing the index.
+		return fmt.Errorf("migrate legacy chroma dirs: %w", err)
+	}
+
+	// The vector store is namespaced by the ACTIVE provider's identity path
+	// components (<kind>/<model>[/<variant>]) so vectors of different
+	// dimensions never share a collection.
+	components := embedSvc.StoragePath()
+	if len(components) == 0 {
+		// Embeddings disabled / provider not built: deterministic ollama-
+		// shaped fallback so toggling embeddings on/off doesn't move dirs.
+		components = []string{provider.KindOllama, provider.StorageSlug(cfg.EmbeddingModel)}
+	}
+	chromaDir := cfg.ChromaDirFor(components)
+
+	vs, err := vectorstore.Open(chromaDir)
 	if err != nil {
 		return fmt.Errorf("open vectorstore: %w", err)
 	}
+	// Wrap in a swappable Holder shared by indexer / repojobs / httpapi so
+	// a runtime provider switch can reopen the store under a new namespace.
+	vsHolder := vectorstore.NewHolder(vs)
+	// Wire the live-reopen path used by SwitchProvider.
+	embedSvc.AttachVectorStore(
+		vsHolder,
+		cfg.ChromaDirFor,
+		vectorstore.Open,
+		func() error { return storage.MigrateFlatChromaToNested(cfg.ChromaPersistDir, logger) },
+	)
 
-	idx := indexer.New(database, vs, embedSvc, logger)
+	idx := indexer.New(database, vsHolder, embedSvc, logger)
 	idx.SetEmbedIncludePath(cfg.EmbedIncludePath)
-	// PR-E — record the active embedding model on every indexed project so the
-	// dashboard can highlight stale vectors when the runtime model changes.
-	idx.SetEmbeddingModel(cfg.EmbeddingModel)
+	// Record the active embedding model on every indexed project so the
+	// dashboard can highlight stale vectors when the runtime provider /
+	// model changes. Wire it as a live lookup so a runtime provider
+	// switch (PUT /admin/embedding-providers/active) is reflected in the
+	// next FinishIndexing without a process restart — the indexer reads
+	// embedSvc.EmbeddingModel() at write time and that returns the active
+	// Provider.ID() ("ollama:<model>" / "voyage:..."), matching what the
+	// drift-detector and dashboard compare against.
+	idx.SetEmbeddingModelLookup(embedSvc.EmbeddingModel)
 	if cfg.EmbedIncludePath {
 		logger.Info("embedding format: path-aware preamble enabled (CIX_EMBED_INCLUDE_PATH=true) — full reindex required if upgrading")
 	}
@@ -283,7 +388,7 @@ func run() error {
 		GitRepos:                   grSvc,
 		GithubTokens:               ghSvc,
 		Indexer:                    idx,
-		VectorStore:                vs,
+		VectorStore:                vsHolder,
 		DataDir:                    cfg.WorkspacesDataDir,
 		Logger:                     logger,
 		DefaultPollIntervalSeconds: int(cfg.DefaultPollInterval.Seconds()),
@@ -405,9 +510,10 @@ func run() error {
 		Sessions:          sessSvc,
 		APIKeys:           akSvc,
 		EmbeddingSvc:      embedSvc,
-		VectorStore:       vs,
+		VectorStore:       vsHolder,
 		Indexer:           idx,
 		RuntimeCfg:        rcfg,
+		EmbeddingsCfg:     embedCfgStore,
 		VersionCheck:      vcSvc,
 		Workspaces:        wsSvc,
 		GithubTokens:      ghSvc,

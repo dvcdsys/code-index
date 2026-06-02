@@ -114,7 +114,7 @@ type Deps struct {
 	GitRepos     *gitrepos.Service
 	GithubTokens *githubtokens.Service
 	Indexer      *indexer.Service
-	VectorStore  *vectorstore.Store
+	VectorStore  vectorstore.Interface
 	DataDir      string // root for cloned repos: <DataDir>/repos/<path_hash>/
 	Logger       *slog.Logger
 	// DefaultPollIntervalSeconds / MinPollIntervalSeconds resolve the poll

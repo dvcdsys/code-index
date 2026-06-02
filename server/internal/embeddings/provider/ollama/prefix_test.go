@@ -1,4 +1,4 @@
-package embeddings
+package ollama
 
 import "testing"
 

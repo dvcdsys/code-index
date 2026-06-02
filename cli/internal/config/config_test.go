@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,11 +32,18 @@ func TestLoad_Defaults(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.API.URL != "http://localhost:21847" {
-		t.Errorf("API.URL = %q, want %q", cfg.API.URL, "http://localhost:21847")
+	// With no config file, the implicit localhost default server is seeded.
+	if len(cfg.Servers) != 1 {
+		t.Fatalf("Servers len = %d, want 1 (seeded default)", len(cfg.Servers))
 	}
-	if cfg.API.Key != "" {
-		t.Errorf("API.Key = %q, want empty", cfg.API.Key)
+	if cfg.DefaultServer != DefaultServerName {
+		t.Errorf("DefaultServer = %q, want %q", cfg.DefaultServer, DefaultServerName)
+	}
+	if cfg.Servers[0].Name != DefaultServerName || cfg.Servers[0].URL != "http://localhost:21847" {
+		t.Errorf("default server = %+v, want {default, localhost:21847, <no key>}", cfg.Servers[0])
+	}
+	if cfg.Servers[0].Key != "" {
+		t.Errorf("default server Key = %q, want empty", cfg.Servers[0].Key)
 	}
 	if !cfg.Watcher.Enabled {
 		t.Error("Watcher.Enabled = false, want true")
@@ -45,12 +53,6 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if len(cfg.Watcher.ExcludePatterns) == 0 {
 		t.Error("Watcher.ExcludePatterns is empty, want default list")
-	}
-	if cfg.Server.Port != 8080 {
-		t.Errorf("Server.Port = %d, want 8080", cfg.Server.Port)
-	}
-	if cfg.Server.CacheTTL != 300 {
-		t.Errorf("Server.CacheTTL = %d, want 300", cfg.Server.CacheTTL)
 	}
 	if cfg.Indexing.BatchSize != 20 {
 		t.Errorf("Indexing.BatchSize = %d, want 20", cfg.Indexing.BatchSize)
@@ -90,11 +92,22 @@ indexing:
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.API.URL != "http://myserver:9000" {
-		t.Errorf("API.URL = %q, want %q", cfg.API.URL, "http://myserver:9000")
+	// Legacy api: block migrates to a single "default" server.
+	if len(cfg.Servers) != 1 {
+		t.Fatalf("Servers len = %d, want 1 (migrated from api:)", len(cfg.Servers))
 	}
-	if cfg.API.Key != "secret-key-123" {
-		t.Errorf("API.Key = %q, want %q", cfg.API.Key, "secret-key-123")
+	if cfg.DefaultServer != DefaultServerName {
+		t.Errorf("DefaultServer = %q, want %q", cfg.DefaultServer, DefaultServerName)
+	}
+	if cfg.Servers[0].URL != "http://myserver:9000" {
+		t.Errorf("default server URL = %q, want %q", cfg.Servers[0].URL, "http://myserver:9000")
+	}
+	if cfg.Servers[0].Key != "secret-key-123" {
+		t.Errorf("default server Key = %q, want %q", cfg.Servers[0].Key, "secret-key-123")
+	}
+	// The legacy api block must be cleared after migration.
+	if cfg.API.URL != "" || cfg.API.Key != "" {
+		t.Errorf("API block = %+v, want cleared after migration", cfg.API)
 	}
 	if cfg.Watcher.Enabled {
 		t.Error("Watcher.Enabled = true, want false")
@@ -105,12 +118,9 @@ indexing:
 	if cfg.Watcher.SyncIntervalMins != 10 {
 		t.Errorf("Watcher.SyncIntervalMins = %d, want 10", cfg.Watcher.SyncIntervalMins)
 	}
-	if cfg.Server.Port != 3000 {
-		t.Errorf("Server.Port = %d, want 3000", cfg.Server.Port)
-	}
-	if cfg.Server.CacheTTL != 60 {
-		t.Errorf("Server.CacheTTL = %d, want 60", cfg.Server.CacheTTL)
-	}
+	// server.port / server.cache_ttl removed (dead fields, step 13). The
+	// `server:` block in the input file is parsed-then-dropped by koanf —
+	// no assertion needed beyond "this load did not error".
 	if cfg.Indexing.BatchSize != 5 {
 		t.Errorf("Indexing.BatchSize = %d, want 5", cfg.Indexing.BatchSize)
 	}
@@ -139,15 +149,16 @@ api:
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.API.Key != "partial-key" {
-		t.Errorf("API.Key = %q, want %q", cfg.API.Key, "partial-key")
+	// api.key-only legacy file migrates to the default server, with the URL
+	// falling back to the historical localhost default.
+	if len(cfg.Servers) != 1 {
+		t.Fatalf("Servers len = %d, want 1", len(cfg.Servers))
 	}
-	// Default must still apply for the URL.
-	if cfg.API.URL != "http://localhost:21847" {
-		t.Errorf("API.URL = %q, want default http://localhost:21847", cfg.API.URL)
+	if cfg.Servers[0].Key != "partial-key" {
+		t.Errorf("default server Key = %q, want %q", cfg.Servers[0].Key, "partial-key")
 	}
-	if cfg.Server.Port != 8080 {
-		t.Errorf("Server.Port = %d, want default 8080", cfg.Server.Port)
+	if cfg.Servers[0].URL != "http://localhost:21847" {
+		t.Errorf("default server URL = %q, want default http://localhost:21847", cfg.Servers[0].URL)
 	}
 	if cfg.Indexing.BatchSize != 20 {
 		t.Errorf("Indexing.BatchSize = %d, want default 20", cfg.Indexing.BatchSize)
@@ -215,19 +226,15 @@ func TestSave_RoundTrip(t *testing.T) {
 	}
 
 	want := &Config{
-		API: APIConfig{
-			URL: "http://saved:8888",
-			Key: "saved-key",
+		Servers: []ServerEntry{
+			{Name: DefaultServerName, URL: "http://saved:8888", Key: "saved-key"},
 		},
+		DefaultServer: DefaultServerName,
 		Watcher: WatcherConfig{
 			Enabled:          false,
 			DebounceMS:       1234,
 			SyncIntervalMins: 15,
 			ExcludePatterns:  []string{".git", "vendor"},
-		},
-		Server: ServerConfig{
-			Port:     4444,
-			CacheTTL: 99,
 		},
 		Indexing: IndexingConfig{
 			BatchSize: 7,
@@ -246,11 +253,14 @@ func TestSave_RoundTrip(t *testing.T) {
 		t.Fatalf("Load() after Save() error = %v", err)
 	}
 
-	if got.API.URL != want.API.URL {
-		t.Errorf("API.URL = %q, want %q", got.API.URL, want.API.URL)
+	if len(got.Servers) != 1 {
+		t.Fatalf("Servers len = %d, want 1", len(got.Servers))
 	}
-	if got.API.Key != want.API.Key {
-		t.Errorf("API.Key = %q, want %q", got.API.Key, want.API.Key)
+	if got.Servers[0].URL != want.Servers[0].URL {
+		t.Errorf("server URL = %q, want %q", got.Servers[0].URL, want.Servers[0].URL)
+	}
+	if got.Servers[0].Key != want.Servers[0].Key {
+		t.Errorf("server Key = %q, want %q", got.Servers[0].Key, want.Servers[0].Key)
 	}
 	if got.Watcher.Enabled != want.Watcher.Enabled {
 		t.Errorf("Watcher.Enabled = %v, want %v", got.Watcher.Enabled, want.Watcher.Enabled)
@@ -260,9 +270,6 @@ func TestSave_RoundTrip(t *testing.T) {
 	}
 	if got.Watcher.SyncIntervalMins != want.Watcher.SyncIntervalMins {
 		t.Errorf("Watcher.SyncIntervalMins = %d, want %d", got.Watcher.SyncIntervalMins, want.Watcher.SyncIntervalMins)
-	}
-	if got.Server.Port != want.Server.Port {
-		t.Errorf("Server.Port = %d, want %d", got.Server.Port, want.Server.Port)
 	}
 	if got.Indexing.BatchSize != want.Indexing.BatchSize {
 		t.Errorf("Indexing.BatchSize = %d, want %d", got.Indexing.BatchSize, want.Indexing.BatchSize)
@@ -347,12 +354,9 @@ projects:
 	if len(cfg.Watcher.ExcludePatterns) != 2 {
 		t.Errorf("ExcludePatterns len = %d, want 2 (legacy key: excludepatterns)", len(cfg.Watcher.ExcludePatterns))
 	}
-	if cfg.Server.CacheTTL != 120 {
-		t.Errorf("CacheTTL = %d, want 120 (legacy key: cachettl)", cfg.Server.CacheTTL)
-	}
-	if cfg.Server.Port != 9090 {
-		t.Errorf("Port = %d, want 9090", cfg.Server.Port)
-	}
+	// server.port / server.cache_ttl removed (dead fields, step 13). The
+	// legacy `server:` block must still parse without error, but its
+	// values are dropped — koanf silently ignores them on unmarshal.
 	if len(cfg.Projects) != 1 || !cfg.Projects[0].AutoWatch {
 		t.Errorf("Projects[0].AutoWatch = false, want true (legacy key: autowatch)")
 	}
@@ -430,6 +434,190 @@ func TestRemoveProject(t *testing.T) {
 	}
 	if len(cfg.Projects) != 1 || cfg.Projects[0].Path != "/srv/b" {
 		t.Errorf("after remove, Projects = %v, want only /srv/b", cfg.Projects)
+	}
+}
+
+// TestMigrate_ReSavesNewFormat verifies a legacy api: file is rewritten to the
+// servers: layout on disk (api: dropped) the first time it is loaded.
+func TestMigrate_ReSavesNewFormat(t *testing.T) {
+	home := isolateHome(t)
+
+	cfgDir := filepath.Join(home, ".cix")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := "api:\n  url: \"http://legacy:9000\"\n  key: \"legacy-key\"\n"
+	path := filepath.Join(cfgDir, "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	if !strings.Contains(got, "servers:") {
+		t.Errorf("re-saved config missing servers::\n%s", got)
+	}
+	if !strings.Contains(got, "default_server: default") {
+		t.Errorf("re-saved config missing default_server:\n%s", got)
+	}
+	if strings.Contains(got, "api:") {
+		t.Errorf("re-saved config should not contain api::\n%s", got)
+	}
+	if !strings.Contains(got, "http://legacy:9000") || !strings.Contains(got, "legacy-key") {
+		t.Errorf("re-saved config lost url/key:\n%s", got)
+	}
+}
+
+func TestResolveServer(t *testing.T) {
+	c := &Config{
+		Servers: []ServerEntry{
+			{Name: "default", URL: "http://local", Key: "k1"},
+			{Name: "corp", URL: "http://corp", Key: "k2"},
+		},
+		DefaultServer: "default",
+	}
+
+	// Empty name → default server.
+	s, err := c.ResolveServer("")
+	if err != nil || s.Name != "default" {
+		t.Errorf("ResolveServer(\"\") = %v, %v; want default", s, err)
+	}
+	// Named alias.
+	s, err = c.ResolveServer("corp")
+	if err != nil || s.URL != "http://corp" {
+		t.Errorf("ResolveServer(corp) = %v, %v; want corp URL", s, err)
+	}
+	// Unknown → error listing available names.
+	_, err = c.ResolveServer("nope")
+	if err == nil {
+		t.Fatal("expected error for unknown server")
+	}
+	for _, want := range []string{"nope", "default", "corp"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+// TestResolveServer_DanglingDefault falls back to the first server when
+// DefaultServer points at a missing entry.
+func TestResolveServer_DanglingDefault(t *testing.T) {
+	c := &Config{
+		Servers:       []ServerEntry{{Name: "only", URL: "http://only"}},
+		DefaultServer: "ghost",
+	}
+	s, err := c.ResolveServer("")
+	if err != nil || s.Name != "only" {
+		t.Errorf("ResolveServer(\"\") with dangling default = %v, %v; want first server", s, err)
+	}
+}
+
+func TestSetServer_UpsertAndDefault(t *testing.T) {
+	isolateHome(t)
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Adding a server's URL creates the entry. The seeded localhost default
+	// already exists, so the new one does NOT become default.
+	if err := SetServerURL("corp", "http://corp"); err != nil {
+		t.Fatalf("SetServerURL: %v", err)
+	}
+	if err := SetServerKey("corp", "corp-key"); err != nil {
+		t.Fatalf("SetServerKey: %v", err)
+	}
+
+	cfg, _ := Load()
+	s, ok := cfg.GetServer("corp")
+	if !ok || s.URL != "http://corp" || s.Key != "corp-key" {
+		t.Fatalf("corp server = %+v, ok=%v", s, ok)
+	}
+	if cfg.DefaultServer != DefaultServerName {
+		t.Errorf("DefaultServer = %q, want %q (unchanged)", cfg.DefaultServer, DefaultServerName)
+	}
+
+	// Updating url again must not duplicate the entry.
+	if err := SetServerURL("corp", "http://corp2"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = Load()
+	if n := len(cfg.Servers); n != 2 {
+		t.Errorf("Servers len = %d, want 2 (default + corp)", n)
+	}
+}
+
+func TestSetDefaultServer(t *testing.T) {
+	isolateHome(t)
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetServerURL("corp", "http://corp"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unknown name rejected.
+	if err := SetDefaultServer("ghost"); err == nil {
+		t.Error("expected error setting default to unknown server")
+	}
+	// Known name switches default.
+	if err := SetDefaultServer("corp"); err != nil {
+		t.Fatalf("SetDefaultServer: %v", err)
+	}
+	cfg, _ := Load()
+	if cfg.DefaultServer != "corp" {
+		t.Errorf("DefaultServer = %q, want corp", cfg.DefaultServer)
+	}
+}
+
+func TestRemoveServer_ReassignsDefault(t *testing.T) {
+	isolateHome(t)
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetServerURL("corp", "http://corp"); err != nil {
+		t.Fatal(err)
+	}
+	// default is still "default"; remove it → reassign to remaining "corp".
+	reassigned, err := RemoveServer(DefaultServerName)
+	if err != nil {
+		t.Fatalf("RemoveServer: %v", err)
+	}
+	if reassigned != "corp" {
+		t.Errorf("reassignedTo = %q, want corp", reassigned)
+	}
+	cfg, _ := Load()
+	if cfg.DefaultServer != "corp" {
+		t.Errorf("DefaultServer = %q, want corp", cfg.DefaultServer)
+	}
+	if _, ok := cfg.GetServer(DefaultServerName); ok {
+		t.Error("default server should have been removed")
+	}
+
+	// Removing an unknown server errors.
+	if _, err := RemoveServer("ghost"); err == nil {
+		t.Error("expected error removing unknown server")
+	}
+}
+
+func TestValidateServerName(t *testing.T) {
+	isolateHome(t)
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"", "has.dot", "has space"} {
+		if err := SetServerURL(bad, "http://x"); err == nil {
+			t.Errorf("SetServerURL(%q) expected validation error", bad)
+		}
+	}
+	if err := SetServerURL("ok_name-1", "http://x"); err != nil {
+		t.Errorf("SetServerURL(valid) unexpected error: %v", err)
 	}
 }
 
