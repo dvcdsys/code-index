@@ -127,7 +127,14 @@ func parseDefaultValue(raw string, t reflect.Type) (any, bool) {
 		}
 		return v, true
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		v, err := strconv.ParseInt(raw, 10, 64)
+		// bitSize 0 parses into the platform int width, so the int(v)
+		// conversion below cannot truncate on 32-bit builds (passing 64
+		// here would let an int64 silently narrow — CodeQL
+		// go/incorrect-integer-conversion). default: tags are
+		// developer-controlled small values (ports, counts, timeouts),
+		// well within int range; an out-of-range tag now errors here
+		// (ok=false) rather than truncating.
+		v, err := strconv.ParseInt(raw, 10, 0)
 		if err != nil {
 			return nil, false
 		}
