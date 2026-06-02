@@ -307,7 +307,11 @@ func (p *Provider) TokenizeAndEmbed(ctx context.Context, texts []string) ([][]fl
 		cls := ids[0]
 		sep := ids[len(ids)-1]
 		content := ids[1 : len(ids)-1]
-		windowSize := maxTokens - 2
+		// Reserve two slots for the CLS/SEP tokens. Guard against a
+		// pathologically small CtxSize (<= 2): windowSize must be >= 1
+		// or the split loop below never advances `start` and spins
+		// forever while holding a queue slot.
+		windowSize := max(maxTokens-2, 1)
 
 		spanStart := len(sequences)
 		for start := 0; start < len(content); start += windowSize {

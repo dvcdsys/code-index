@@ -222,6 +222,14 @@ func (s *Service) SwitchProvider(ctx context.Context, kind string, cfgBytes []by
 
 	q := s.currentQueue()
 	q.BlockNew()
+	// Keep the queue blocked across BOTH the provider swap and the
+	// vector-store reopen below; resume only on the way out (all return
+	// paths). A blocked queue fails Acquire fast with a 503, so no embed
+	// runs in the window where s.current is the NEW provider while the
+	// Holder still points at the OLD store — that window is exactly what
+	// would write new-dimension vectors into the previous provider's
+	// collection.
+	defer q.Resume()
 	drainCtx, drainCancel := context.WithTimeout(ctx, 30*time.Second)
 	if derr := q.WaitDrain(drainCtx); derr != nil {
 		s.logger.Warn("embeddings: drain timed out during switch; proceeding anyway",
@@ -229,37 +237,49 @@ func (s *Service) SwitchProvider(ctx context.Context, kind string, cfgBytes []by
 		)
 	}
 	drainCancel()
-	q.Resume()
 
 	s.mu.Lock()
 	old := s.current
 	s.current = newProv
 	s.mu.Unlock()
 
-	if old != nil {
-		go func(p provider.Provider) {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := p.Stop(stopCtx); err != nil {
-				s.logger.Warn("embeddings: old provider Stop returned error",
-					"kind", p.Kind(), "err", err)
-			}
-		}(old)
-	}
-	s.logger.Info("embeddings: switched provider", "kind", kind, "id", newProv.ID())
-
 	// Reopen the vector store under the new provider's identity slug so
 	// its (possibly different-dimension) vectors land in their own
 	// namespace instead of colliding with the previous provider's
-	// collection. The provider has ALREADY been swapped above; if the
-	// reopen fails we do NOT roll it back (the new provider is live for
-	// embedding) — we keep the holder on the old store and surface a
-	// loud error so the operator restarts. Without the reopen, the next
-	// reindex would write new-dim vectors into the old dir.
+	// collection. If the reopen fails we roll the provider swap BACK to
+	// the old provider (whose store the Holder still points at) and stop
+	// the new provider we started: fail closed, never leave a
+	// new-provider / old-store pairing that corrupts the old collection.
 	if err := s.reopenVectorStore(newProv); err != nil {
+		s.mu.Lock()
+		s.current = old
+		s.mu.Unlock()
+		go stopProviderAsync(s.logger, newProv)
+		s.logger.Error("embeddings: provider switch rolled back — vector store reopen failed",
+			"kind", kind, "err", err)
 		return err
 	}
+
+	if old != nil {
+		go stopProviderAsync(s.logger, old)
+	}
+	s.logger.Info("embeddings: switched provider", "kind", kind, "id", newProv.ID())
 	return nil
+}
+
+// stopProviderAsync stops a provider in the background with a bounded
+// timeout, logging (not failing) on error. Used to release the provider
+// displaced by a switch — or the half-started new provider on a switch
+// rollback — without blocking the caller.
+func stopProviderAsync(logger *slog.Logger, p provider.Provider) {
+	if p == nil {
+		return
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := p.Stop(stopCtx); err != nil {
+		logger.Warn("embeddings: provider Stop returned error", "kind", p.Kind(), "err", err)
+	}
 }
 
 // reopenVectorStore opens a fresh *vectorstore.Store under the directory
@@ -442,12 +462,12 @@ func (s *Service) Restart(ctx context.Context, cfg *config.Config) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 
-	// Snapshot the live queue, block + drain it. Resume targets this same
-	// instance: if we swap below it's discarded (the resume is harmless),
-	// otherwise it's still s.queue and the resume re-opens it.
+	// Snapshot the live queue, block + drain it. The queue stays blocked
+	// through the respawn below and is resumed via the deferred
+	// activeQ.Resume() once s.current is valid again (activeQ is oldQ, or
+	// the new queue when the concurrency cap changed).
 	oldQ := s.currentQueue()
 	oldQ.BlockNew()
-	defer oldQ.Resume()
 	drainCtx, drainCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := oldQ.WaitDrain(drainCtx); err != nil {
 		drainCancel()
@@ -458,12 +478,22 @@ func (s *Service) Restart(ctx context.Context, cfg *config.Config) error {
 		drainCancel()
 	}
 
+	// activeQ is the queue that stays live through the respawn below and
+	// must be resumed on the way out. When the concurrency cap changes we
+	// install a NEW queue — it must also start blocked, otherwise embed
+	// callers acquire a slot on it during the sidecar respawn (when
+	// s.current is briefly nil) and get ErrSupervisor instead of a clean
+	// drain-style 503. Resuming oldQ would be a no-op (it's discarded).
+	activeQ := oldQ
 	if cfg.MaxEmbeddingConcurrency != cap(oldQ.slots) {
 		newQ := NewQueue(cfg.MaxEmbeddingConcurrency, time.Duration(cfg.EmbeddingQueueTimeout)*time.Second)
+		newQ.BlockNew()
 		s.mu.Lock()
 		s.queue = newQ
 		s.mu.Unlock()
+		activeQ = newQ
 	}
+	defer activeQ.Resume()
 
 	// Snapshot the live provider's kind under the read lock — we don't
 	// want to swap an ollama for a voyage just because the runtime-

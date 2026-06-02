@@ -126,9 +126,11 @@ func (s *Server) GetActiveEmbeddingProvider(w http.ResponseWriter, r *http.Reque
 
 // SwitchEmbeddingProvider — PUT /api/v1/admin/embedding-providers/active.
 //
-// Atomic switch: validate the new config by building + Starting a
-// provider, persist on success, then swap the live Service over.
-// On any failure the existing provider stays untouched.
+// Validate-then-persist: SwitchProvider builds + Start()s the new
+// provider and swaps the live Service over (failing without side effects
+// if the config is bad), and only on success is the new provider
+// persisted. On any failure the previously-active provider stays the
+// live AND persisted one.
 func (s *Server) SwitchEmbeddingProvider(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.mustBeAdmin(w, r)
 	if !ok {
@@ -208,19 +210,29 @@ func (s *Server) SwitchEmbeddingProvider(w http.ResponseWriter, r *http.Request)
 		actorID = user.User.ID
 	}
 
-	// Persist BEFORE swap so the DB always leads the live state.
-	// If SwitchProvider then fails, the operator's next call (or
-	// container restart) reads the new row and tries again.
+	// Validate-then-persist: apply the swap live FIRST (SwitchProvider
+	// builds + Start()s the new provider before touching live state, so a
+	// bad config / unreachable endpoint / missing key fails here without
+	// changing anything). Only persist once the swap succeeded. Persisting
+	// first would let a transient switch failure leave the DB pointing at a
+	// provider that won't start — which the boot path then re-adopts,
+	// turning one failed switch into a delayed boot brick.
+	if err := embedSvc.SwitchProvider(r.Context(), req.Kind, cfgBytes); err != nil {
+		writeError(w, http.StatusInternalServerError, "switch provider: "+err.Error())
+		return
+	}
+
 	if err := s.Deps.EmbeddingsCfg.Save(r.Context(), embeddingscfg.Snapshot{
 		Kind:   req.Kind,
 		Config: cfgBytes,
 	}, actorID); err != nil {
-		writeError(w, http.StatusInternalServerError, "persist provider: "+err.Error())
-		return
-	}
-
-	if err := embedSvc.SwitchProvider(r.Context(), req.Kind, cfgBytes); err != nil {
-		writeError(w, http.StatusInternalServerError, "switch provider: "+err.Error())
+		// The live provider IS switched but we couldn't persist it. Report
+		// the inconsistency loudly; a container restart will revert to the
+		// previous persisted provider (safe — both old config and old
+		// vectors are intact), so this degrades rather than corrupts.
+		s.Deps.Logger.Error("embedding provider switched live but persist failed; will revert on restart",
+			"kind", req.Kind, "err", err)
+		writeError(w, http.StatusInternalServerError, "provider switched but persist failed (will revert on restart): "+err.Error())
 		return
 	}
 

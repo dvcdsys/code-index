@@ -38,6 +38,116 @@ func (f fakeProv) TokenizeAndEmbed(context.Context, []string) ([][]float32, erro
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// fakeFactory registers a test-only provider kind so SwitchProvider can be
+// driven end-to-end (it builds the new provider through the registry).
+// Build echoes the config bytes into the provider ID so the derived
+// storage slug is deterministic per test.
+type fakeFactory struct{}
+
+func (fakeFactory) Kind() string            { return "fake-switch" }
+func (fakeFactory) SchemaJSON() []byte      { return []byte("{}") }
+func (fakeFactory) SecretEnvVars() []string { return nil }
+func (fakeFactory) Build(cfg []byte, _ provider.SecretLookup, _ *slog.Logger) (provider.Provider, error) {
+	return fakeProv{id: "fake:" + string(cfg)}, nil
+}
+
+func init() { provider.Register(fakeFactory{}) }
+
+// TestSwitchProvider_RollbackOnReopenFailure guards the switch-atomicity
+// fix: when the vector-store reopen fails, the provider swap is rolled
+// back to the old provider (never a new-provider / old-store pairing that
+// would write wrong-dimension vectors into the old collection), and the
+// queue is resumed so the service keeps serving.
+func TestSwitchProvider_RollbackOnReopenFailure(t *testing.T) {
+	dir := t.TempDir()
+	const project = "/proj"
+	initial, err := vectorstore.Open(filepath.Join(dir, "chroma_ollama_m"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.UpsertChunks(context.Background(), project,
+		[]vectorstore.Chunk{{Content: "x", FilePath: "a.go", StartLine: 1, EndLine: 1, Language: "go"}},
+		[][]float32{{1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	holder := vectorstore.NewHolder(initial)
+
+	oldProv := fakeProv{id: "ollama:m"}
+	s := &Service{logger: quiet(), queue: NewQueue(2, time.Second), current: oldProv}
+	s.AttachVectorStore(
+		holder,
+		func(slug string) string { return filepath.Join(dir, "chroma_"+slug) },
+		func(string) (*vectorstore.Store, error) { return nil, errors.New("boom") }, // reopen always fails
+		nil,
+	)
+
+	if err := s.SwitchProvider(context.Background(), "fake-switch", []byte("newid")); err == nil {
+		t.Fatal("expected switch to fail on reopen error")
+	}
+
+	// Rolled back to the OLD provider — not the half-applied new one.
+	s.mu.RLock()
+	cur := s.current
+	s.mu.RUnlock()
+	if cur.ID() != oldProv.ID() {
+		t.Errorf("after rollback current.ID() = %q, want %q", cur.ID(), oldProv.ID())
+	}
+	// Holder still serves the old store (reopen never Swapped).
+	if got := holder.Count(project); got != 1 {
+		t.Errorf("holder count = %d, want 1 (old store retained)", got)
+	}
+	// Queue must be resumed, not left blocked, so the service keeps serving.
+	if err := s.queue.Acquire(context.Background()); err != nil {
+		t.Errorf("queue should be resumed after rollback, Acquire = %v", err)
+	} else {
+		s.queue.Release(time.Now())
+	}
+}
+
+// TestSwitchProvider_SuccessSwapsProviderAndStore is the happy path: the
+// live provider becomes the new one, the holder reopens into the new
+// (empty) namespace, and the queue ends unblocked.
+func TestSwitchProvider_SuccessSwapsProviderAndStore(t *testing.T) {
+	dir := t.TempDir()
+	const project = "/proj"
+	initial, err := vectorstore.Open(filepath.Join(dir, "chroma_ollama_m"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.UpsertChunks(context.Background(), project,
+		[]vectorstore.Chunk{{Content: "x", FilePath: "a.go", StartLine: 1, EndLine: 1, Language: "go"}},
+		[][]float32{{1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	holder := vectorstore.NewHolder(initial)
+
+	s := &Service{logger: quiet(), queue: NewQueue(2, time.Second), current: fakeProv{id: "ollama:m"}}
+	s.AttachVectorStore(
+		holder,
+		func(slug string) string { return filepath.Join(dir, "chroma_"+slug) },
+		vectorstore.Open,
+		nil,
+	)
+
+	if err := s.SwitchProvider(context.Background(), "fake-switch", []byte("newid")); err != nil {
+		t.Fatalf("switch: %v", err)
+	}
+	s.mu.RLock()
+	cur := s.current
+	s.mu.RUnlock()
+	if cur.ID() != "fake:newid" {
+		t.Errorf("current.ID() = %q, want %q", cur.ID(), "fake:newid")
+	}
+	if got := holder.Count(project); got != 0 {
+		t.Errorf("after switch holder Count = %d, want 0 (new empty namespace)", got)
+	}
+	if err := s.queue.Acquire(context.Background()); err != nil {
+		t.Errorf("queue should be unblocked after switch, Acquire = %v", err)
+	} else {
+		s.queue.Release(time.Now())
+	}
+}
+
 func TestServiceStorageSlug(t *testing.T) {
 	s := &Service{logger: quiet(), current: fakeProv{id: "voyage:voyage-code-3:2048:float"}}
 	if got := s.StorageSlug(); got != "voyage_voyage_code_3_2048_float" {

@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
@@ -55,7 +54,7 @@ func New(cfg Config, secrets provider.SecretLookup, logger *slog.Logger) *Provid
 	// Normalise away a trailing slash so url building (BaseURL +
 	// "/v1/embeddings") never produces a double slash, which stricter
 	// OpenAI-compatible servers (vLLM/TEI behind a proxy) can 404 on.
-	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+	cfg.BaseURL = provider.NormalizeBaseURL(cfg.BaseURL)
 	return &Provider{
 		cfg:     cfg,
 		logger:  logger,
@@ -112,23 +111,11 @@ func (p *Provider) Stop(_ context.Context) error { return nil }
 // always-green footer dot for HTTP-only providers matches the
 // dashboard's documented behaviour.
 func (p *Provider) Ready(_ context.Context) error {
-	if _, ok := p.apiKey(); !ok {
-		return fmt.Errorf("%w: %s", provider.ErrMissingAPIKey, p.cfg.APIKeyEnv)
-	}
-	return nil
+	return provider.RemoteReady(p.secrets, p.cfg.APIKeyEnv)
 }
 
 func (p *Provider) Status() provider.Status {
-	st := provider.Status{
-		State:          provider.StateRemote,
-		ManagesProcess: false,
-		Model:          p.cfg.Model,
-	}
-	if _, ok := p.apiKey(); !ok {
-		st.State = provider.StateFailed
-		st.LastError = "API key env var " + p.cfg.APIKeyEnv + " is not set"
-	}
-	return st
+	return provider.RemoteStatus(p.cfg.Model, p.cfg.APIKeyEnv, p.secrets)
 }
 
 // EmbedQuery is a pass-through to EmbedDocuments — generic
@@ -242,15 +229,5 @@ func (p *Provider) embed(ctx context.Context, texts []string) ([][]float32, erro
 }
 
 func (p *Provider) apiKey() (string, bool) {
-	if p.secrets == nil {
-		return "", false
-	}
-	if p.cfg.APIKeyEnv == "" {
-		return "", false
-	}
-	v, ok := p.secrets(p.cfg.APIKeyEnv)
-	if !ok || v == "" {
-		return "", false
-	}
-	return v, true
+	return provider.ResolveAPIKey(p.secrets, p.cfg.APIKeyEnv)
 }

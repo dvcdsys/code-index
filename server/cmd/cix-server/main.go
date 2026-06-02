@@ -210,14 +210,28 @@ func run() error {
 	} else {
 		prov, perr := provider.Build(startupCtx, persistedProv.Kind, persistedProv.Config, embeddings.EnvSecrets(), logger)
 		if perr != nil {
-			startupCancel()
-			return fmt.Errorf("build %s provider: %w", persistedProv.Kind, perr)
+			// The persisted provider config is malformed (bad JSON /
+			// unknown kind). Don't brick the whole server over it: fall
+			// back to env-only ollama so the dashboard stays reachable to
+			// fix the config or re-switch the provider.
+			logger.Error("could not build persisted embedding provider; falling back to env ollama (fix or re-switch via dashboard)",
+				"kind", persistedProv.Kind, "err", perr)
+			embedSvc, err = embeddings.New(startupCtx, cfg, logger)
+		} else {
+			if perr := prov.Start(startupCtx); perr != nil {
+				// A remote provider's boot connect-test (or the ollama
+				// sidecar spawn) failed — a transient upstream blip, a
+				// revoked key, or a missing API-key env after a redeploy.
+				// Attach the provider anyway instead of failing the whole
+				// process: the HTTP server (dashboard, auth, every project
+				// API) must stay up so an operator can recover, and remote
+				// providers self-heal once the upstream/key is back. Embeds
+				// return a clear error until then and Status() reports it.
+				logger.Error("persisted embedding provider failed to start; continuing in degraded state — embeddings unavailable until it recovers or is switched",
+					"kind", persistedProv.Kind, "err", perr)
+			}
+			embedSvc = embeddings.NewWithProvider(cfg, prov, logger)
 		}
-		if perr := prov.Start(startupCtx); perr != nil {
-			startupCancel()
-			return fmt.Errorf("start %s provider: %w", persistedProv.Kind, perr)
-		}
-		embedSvc = embeddings.NewWithProvider(cfg, prov, logger)
 	}
 	startupCancel()
 	if err != nil {
@@ -247,7 +261,13 @@ func run() error {
 	// LEGACY-MIGRATION (remove next release): drop this prefixing call once
 	// all deployments have booted on the unified layout.
 	if err := storage.PrefixLegacyChromaDirs(cfg.ChromaPersistDir, logger); err != nil {
-		logger.Warn("could not migrate legacy chroma dirs (continuing)", "err", err)
+		// Fail closed. A half-completed rename here would leave the
+		// server opening a fresh empty namespace while existing vectors
+		// sit under the un-migrated legacy dir — search would silently
+		// return nothing on a "healthy" server. Surface it instead so the
+		// operator fixes the cause (e.g. dir perms under prod uid 1001,
+		// or a cross-device /data mount) rather than losing the index.
+		return fmt.Errorf("migrate legacy chroma dirs: %w", err)
 	}
 
 	// The vector store is namespaced by the ACTIVE provider identity slug
@@ -259,6 +279,14 @@ func run() error {
 		chromaSlug = provider.StorageSlug("ollama:" + cfg.EmbeddingModel)
 	}
 	chromaDir := cfg.ChromaDirForSlug(chromaSlug)
+	// Visibility guard for the orphaned-namespace failure mode: if the
+	// active provider's dir does not exist yet but sibling chroma dirs do,
+	// prior vectors were indexed under a different identity/layout and the
+	// active provider will start empty. Warn loudly instead of silently
+	// returning zero search results on an apparently-healthy server.
+	if warnErr := vectorstore.WarnIfNamespaceOrphaned(cfg.ChromaPersistDir, chromaDir, logger); warnErr != nil {
+		logger.Warn("could not check for orphaned chroma namespaces", "err", warnErr)
+	}
 
 	// Detect and back up a legacy ChromaDB layout left by the Python server.
 	if backed, bErr := vectorstore.DetectLegacyAndBackup(chromaDir); bErr != nil {

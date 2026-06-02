@@ -30,7 +30,6 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -275,7 +274,7 @@ func New(cfg Config, secrets provider.SecretLookup, logger *slog.Logger) *Provid
 	// Normalise away a trailing slash so url building (BaseURL +
 	// "/v1/embeddings") never produces a double slash, which stricter
 	// OpenAI-compatible proxies in front of Voyage can 404 on.
-	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+	cfg.BaseURL = provider.NormalizeBaseURL(cfg.BaseURL)
 	if cfg.OutputDtype == "" {
 		cfg.OutputDtype = DtypeFloat
 	}
@@ -338,23 +337,11 @@ func (p *Provider) Start(ctx context.Context) error {
 func (p *Provider) Stop(_ context.Context) error { return nil }
 
 func (p *Provider) Ready(_ context.Context) error {
-	if _, ok := p.apiKey(); !ok {
-		return fmt.Errorf("%w: %s", provider.ErrMissingAPIKey, p.cfg.APIKeyEnv)
-	}
-	return nil
+	return provider.RemoteReady(p.secrets, p.cfg.APIKeyEnv)
 }
 
 func (p *Provider) Status() provider.Status {
-	st := provider.Status{
-		State:          provider.StateRemote,
-		ManagesProcess: false,
-		Model:          p.cfg.Model,
-	}
-	if _, ok := p.apiKey(); !ok {
-		st.State = provider.StateFailed
-		st.LastError = "API key env var " + p.cfg.APIKeyEnv + " is not set"
-	}
-	return st
+	return provider.RemoteStatus(p.cfg.Model, p.cfg.APIKeyEnv, p.secrets)
 }
 
 func (p *Provider) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
@@ -772,15 +759,5 @@ func dequantize(raw json.RawMessage, dtype string) ([]float32, error) {
 }
 
 func (p *Provider) apiKey() (string, bool) {
-	if p.secrets == nil {
-		return "", false
-	}
-	if p.cfg.APIKeyEnv == "" {
-		return "", false
-	}
-	v, ok := p.secrets(p.cfg.APIKeyEnv)
-	if !ok || v == "" {
-		return "", false
-	}
-	return v, true
+	return provider.ResolveAPIKey(p.secrets, p.cfg.APIKeyEnv)
 }
