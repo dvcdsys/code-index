@@ -91,12 +91,28 @@ func (c *Client) do(method, path string, body interface{}) (*http.Response, erro
 }
 
 // encodeProjectPath returns the project's URL hash (first 16 hex chars of
-// SHA1 of the identity key). Local projects are namespaced per machine —
-// "local:{machine_id}:{path}" — so the same filesystem path on different
-// machines/users maps to different projects. MUST stay byte-identical to the
-// server's projects.LocalProjectKey + hashPath (server/internal/projects).
+// SHA1 of the identity key). MUST stay byte-identical to the server's
+// projects.Create key derivation (server/internal/projects/projects.go).
+//
+// The server namespaces ONLY local projects, and only those: it wraps the
+// identity key as "local:{machine_id}:{path}" when MachineID != "" (set during
+// `cix init` for a real filesystem project), and uses the path as-is otherwise.
+// External projects (GitHub repos attached via the dashboard) have no MachineID
+// and a globally-unique host_path like "github.com/owner/repo@branch", which is
+// hashed bare.
+//
+// We mirror that split with filepath.IsAbs: local projects are always addressed
+// by an ABSOLUTE filesystem path (the CLI runs filepath.Abs on cwd / -p before
+// it gets here), so an absolute input is local → namespace it. A non-absolute
+// input is an external project identifier (e.g. from `cix search -n
+// github.com/owner/repo@branch`) → hash it bare so the hash matches the row the
+// server stored. Wrapping external IDs in "local:" was a regression that made
+// every `-n <external>` lookup 404.
 func encodeProjectPath(path string) string {
-	key := "local:" + machineID() + ":" + path
+	key := path
+	if filepath.IsAbs(path) {
+		key = "local:" + machineID() + ":" + path
+	}
 	h := sha1.Sum([]byte(key))
 	return fmt.Sprintf("%x", h)[:16]
 }
