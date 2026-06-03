@@ -4,6 +4,7 @@ import { useServerStatus } from '@/lib/useServerStatus';
 import { Card, CardDescription, CardHeader, CardTitle } from '@/ui/card';
 import { cn } from '@/lib/cn';
 import { MODULES } from '../registry';
+import { ConnectClaudeCodeCard } from './ConnectClaudeCodeCard';
 
 // One-line pitch per module — kept here (not on the Module type) so the
 // sidebar stays terse and only the landing page carries the prose.
@@ -53,6 +54,8 @@ export default function HomePage() {
           />
         </div>
       )}
+
+      <ConnectClaudeCodeCard />
 
       <div>
         <h2 className="mb-3 text-sm font-medium text-muted-foreground">Modules</h2>

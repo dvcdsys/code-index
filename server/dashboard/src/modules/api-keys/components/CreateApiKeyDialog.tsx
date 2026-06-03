@@ -15,6 +15,7 @@ import {
 } from '@/ui/dialog';
 import { Input } from '@/ui/input';
 import { Label } from '@/ui/label';
+import { cixConnectCommand } from '@/lib/cixServer';
 import { useCreateApiKey } from '../hooks';
 
 // Last-resort copy when the async Clipboard API isn't available — happens
@@ -39,21 +40,6 @@ function legacyCopy(text: string): boolean {
   }
   document.body.removeChild(ta);
   return ok;
-}
-
-// Derive a cix CLI server alias from the browser host. The CLI stores each
-// server as one entry under `server.<alias>` and parses that config key by
-// splitting on dots, so the alias must be dot-free (and whitespace-free, and
-// non-empty) — see validateServerName / parseServerKey in the CLI. We fold the
-// host (including any non-default port, so distinct ports get distinct aliases)
-// to [a-z0-9-]:  "cix.example.com" -> "cix-example-com",
-// "localhost:21847" -> "localhost-21847".
-function cixServerAlias(host: string): string {
-  const alias = host
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return alias || 'default';
 }
 
 // Two-stage dialog: collect a name, then reveal the freshly minted key once.
@@ -121,14 +107,13 @@ export function CreateApiKeyDialog() {
   // One-paste command that registers THIS server (URL + the freshly minted key,
   // as a single `server.<alias>` entry) in the cix CLI config and makes it the
   // default. The dashboard is served same-origin from cix-server, so
-  // window.location.origin is exactly the base URL the CLI must talk to. Values
-  // are shell-safe (a URL, a `cix_<hex>` key, an [a-z0-9-] alias), so no quoting
-  // is needed — matching the CLI README's unquoted examples.
-  const alias = cixServerAlias(window.location.host);
-  const connectCmd =
-    `cix config set server.${alias}.url ${window.location.origin} && ` +
-    `cix config set server.${alias}.key ${revealed ?? '<key>'} && ` +
-    `cix config set default_server ${alias}`;
+  // window.location.origin is exactly the base URL the CLI must talk to. Shared
+  // with the home-page onboarding card via cixConnectCommand so they never drift.
+  const connectCmd = cixConnectCommand(
+    window.location.origin,
+    window.location.host,
+    revealed ?? '<key>'
+  );
 
   async function copyKey() {
     if (!revealed) return;
