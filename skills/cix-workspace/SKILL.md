@@ -31,6 +31,36 @@ to implementation before you can answer all three with evidence.
 
 ---
 
+## First: which server hosts the workspace?
+
+The `cix` CLI can be configured with **several named servers** (a local
+box, a remote corporate backend, …). Each server hosts its **own** set of
+workspaces and projects — a workspace named `platform` on one server is
+unrelated to anything on another. Every `cix` command targets the
+**default** server unless you pass the global `--server <alias>` flag (or
+set `CIX_SERVER`).
+
+```bash
+cix config show     # lists configured servers; * marks the default
+```
+
+**A workspace and all its repos live on exactly one server.** So before
+you run the workflow, decide which server you're on, then be **consistent**:
+pass the *same* `--server <alias>` to *every* command in the flow —
+`cix ws`, workspace search, per-project drill-down, and the sub-agent
+fan-out. Mixing servers mid-workflow (orient on server A, drill down on
+the default) silently returns empty or wrong-repo results, because the
+project simply doesn't exist on the other server.
+
+**Agent rule:** use the default server (no flag) unless the user names a
+specific server, or the primary project's workspace isn't on the default.
+Never guess an alias — run `cix config show` to see the configured names.
+Once you know the alias, thread it through the whole workflow. The
+examples below omit `--server` for readability; add it to **every** command
+when the target workspace is on a non-default server.
+
+---
+
 ## When to reach for workspace search
 
 | Signal in the user's request | What to do |
@@ -57,9 +87,15 @@ The goal-driven loop. Don't shortcut it. Each step is fast.
 ### Step 0 — orient
 
 ```bash
-cix ws                       # list workspaces; find the one your primary is in
+cix config show              # which servers exist? which is default?
+cix ws                       # list workspaces on the (default) server
 cix ws <name>                # describe — confirm repos are indexed (✓ count)
 ```
+
+If `cix ws` doesn't list the workspace your task is about, it may live on
+a different server — re-run with `--server <alias>` (the alias from
+`cix config show`) and keep that flag on every later command. Lock in the
+server here, before searching.
 
 If the workspace shows `stale_fts_repos` in any search response later,
 trust the dense ranking less — see the troubleshooting section.
@@ -107,20 +143,27 @@ deeper read, not as the full answer.
 For repos other than the primary, you have two options:
 
 **A. Quick scan (≤ 2 repos to investigate):** use single-project
-search directly.
+search directly via the CLI, scoped with `-n` to the project. Pass the
+`project_path` from the workspace-search `projects[]` panel verbatim:
 
 ```bash
-# Search inside one specific project
-curl -G -H "Authorization: Bearer $CIX_KEY" \
-  --data-urlencode "q=rate limit middleware handler" \
-  --data-urlencode "min_score=0" \
-  "$CIX_URL/api/v1/projects/$(project_hash)/search"
+# Search inside one specific project (-n = exact project ID from cix list /
+# the workspace projects[] panel). --server keeps it on the same backend
+# the workspace lives on — REQUIRED when that's not the default server.
+cix search "rate limit middleware handler" -n <project_path> --min-score 0
+cix search "rate limit middleware handler" -n <project_path> --server corporate --min-score 0
 ```
 
 The per-project default `min_score` is `0.2` — light floor that
 keeps abstract NL queries non-empty. For drill-down on a natural-
-language question ("how does X work end-to-end"), pass `min_score=0`
+language question ("how does X work end-to-end"), pass `--min-score 0`
 explicitly to be safe. For strict code-symbol matching, pass `0.4+`.
+
+> Prefer the CLI over a raw `curl … /api/v1/projects/{hash}/search`: the
+> CLI resolves the right server (and its key) from your config, so you
+> can't accidentally point `$CIX_URL`/`$CIX_KEY` at a *different* server
+> than the workspace. If you do hand-roll curl, make sure the URL + key
+> belong to the server that hosts this workspace.
 
 **B. Fan-out to sub-agents (≥ 3 repos, or you need a thorough read):**
 spawn one `cix-workspace-investigator` sub-agent per relevant repo, in
@@ -366,6 +409,14 @@ entry in `projects[]`. Paste that string verbatim into the sub-agent prompt,
 and tell the sub-agent explicitly which shape it is so it doesn't waste
 calls grepping a tree that isn't there. One repo per spawn.
 
+**Pass the server alias too.** If the workspace is on a non-default server,
+the sub-agent's `cix search -n <project>` calls must carry the *same*
+`--server <alias>` — otherwise they hit the default server, where the
+project doesn't exist, and come back empty. State it plainly in the prompt:
+"This project lives on server `corporate`; add `--server corporate` to every
+`cix` call." If you're on the default server, say so (or omit it) so the
+sub-agent doesn't invent a flag.
+
 #### 3. Seed chunks **with your commentary**
 
 This is the part most often done badly. Don't just paste raw chunk
@@ -404,6 +455,8 @@ Seed chunks from workspace search:
   shared utilities.
 
 Panel-level notes:
+- Server: this project is on `corporate` — pass `--server corporate` on
+  every cix call (it does NOT exist on the default server).
 - Workspace ranked this project #1 with a clear lead (project_score
   1.000 vs next 0.860). High confidence this is the right repo.
 - bm25_score=8.5, dense_score=0.54 — strong on both signals, not a
@@ -590,6 +643,11 @@ language to see what stack it actually uses, then refine.
 ## Quick command reference
 
 ```bash
+# Servers (run first if more than one backend is configured)
+cix config show                 # list servers; * marks the default
+cix ws --server corporate       # any command takes the global --server <alias>
+# (CIX_SERVER=corporate also selects it; --server wins over the env var)
+
 # List workspaces
 cix ws
 cix ws list --json
@@ -628,12 +686,16 @@ Flags:
 
 When the user's task plausibly spans more than one repo:
 
+0. `cix config show` → if more than one server, decide which one hosts
+   the workspace and thread the **same** `--server <alias>` through every
+   command below (default server → no flag needed).
 1. `cix ws` → find the workspace, then `cix ws <name>` describe it.
 2. Workspace search with a **short, term-rich** query.
 3. Read `projects[]` → that's your scope (Q1 answered).
-4. For each repo in scope, either single-project search or spawn a
-   `cix-workspace-investigator` sub-agent — in parallel, with seed
-   chunks AND your interpretive commentary on what to trust.
+4. For each repo in scope, either single-project search (`cix search
+   -n <project_path>`) or spawn a `cix-workspace-investigator` sub-agent
+   — in parallel, with seed chunks, the server alias, AND your
+   interpretive commentary on what to trust.
 5. Synthesize the sub-agent reports → plan changes per repo, with
    order constraints (Q2 + Q3 answered).
 6. Ask the user to confirm the scope and plan before implementing.

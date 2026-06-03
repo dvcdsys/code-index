@@ -66,6 +66,7 @@ var registeredMigrations = []migration{
 	{11, "project_machine_identity", func(db *sql.DB, _ OpenOptions) error { return migrateProjectMachineIdentity(db) }},
 	{12, "embedding_provider", func(db *sql.DB, _ OpenOptions) error { return migrateEmbeddingProvider(db) }},
 	{13, "indexed_with_model_provider_prefix", func(db *sql.DB, _ OpenOptions) error { return migrateIndexedWithModelProviderPrefix(db) }},
+	{14, "user_local_project_disabled", func(db *sql.DB, _ OpenOptions) error { return migrateUserLocalProjectDisabled(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -842,6 +843,28 @@ func migrateIndexedWithModelProviderPrefix(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("backfill indexed_with_model prefix: %w", err)
+	}
+	return nil
+}
+
+// migrateUserLocalProjectDisabled adds users.local_project_disabled to
+// pre-feature databases. The column gates local-project creation and
+// indexing/reindexing for a user. DEFAULT 0 means every existing row (and
+// every future INSERT that omits the column) is "allowed" — backward
+// compatible by construction; an admin opts a user out by setting it to 1.
+// Idempotent via columnExists.
+func migrateUserLocalProjectDisabled(db *sql.DB) error {
+	have, err := columnExists(db, "users", "local_project_disabled")
+	if err != nil {
+		return err
+	}
+	if have {
+		return nil
+	}
+	if _, err := db.Exec(
+		`ALTER TABLE users ADD COLUMN local_project_disabled INTEGER NOT NULL DEFAULT 0`,
+	); err != nil {
+		return fmt.Errorf("add users.local_project_disabled: %w", err)
 	}
 	return nil
 }

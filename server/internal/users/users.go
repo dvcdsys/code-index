@@ -96,6 +96,10 @@ type User struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	DisabledAt         *time.Time
+	// LocalProjectDisabled, when true, forbids the user from creating local
+	// projects and from indexing/reindexing. Search of already-indexed
+	// projects and workspace creation stay allowed. Admins are exempt.
+	LocalProjectDisabled bool
 }
 
 // Service wraps the users table. Stateless — safe to share across handlers.
@@ -205,7 +209,7 @@ type UserWithStats struct {
 func (s *Service) ListWithStats(ctx context.Context) ([]UserWithStats, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	const q = `
-		SELECT id, email, role, must_change_password, created_at, updated_at, disabled_at,
+		SELECT id, email, role, must_change_password, created_at, updated_at, disabled_at, local_project_disabled,
 			(SELECT MAX(created_at) FROM sessions WHERE user_id = users.id),
 			(SELECT COUNT(1) FROM sessions WHERE user_id = users.id AND expires_at > ?),
 			(SELECT COUNT(1) FROM api_keys WHERE owner_user_id = users.id AND revoked_at IS NULL)
@@ -221,18 +225,20 @@ func (s *Service) ListWithStats(ctx context.Context) ([]UserWithStats, error) {
 		var (
 			u                       User
 			mcp                     int
+			localProjectDisabled    int
 			createdAt, updatedAt    string
 			disabledAt              sql.NullString
 			lastLogin               sql.NullString
 			activeSessions, apiKeys int
 		)
 		if err := rows.Scan(
-			&u.ID, &u.Email, &u.Role, &mcp, &createdAt, &updatedAt, &disabledAt,
+			&u.ID, &u.Email, &u.Role, &mcp, &createdAt, &updatedAt, &disabledAt, &localProjectDisabled,
 			&lastLogin, &activeSessions, &apiKeys,
 		); err != nil {
 			return nil, err
 		}
 		u.MustChangePassword = mcp == 1
+		u.LocalProjectDisabled = localProjectDisabled == 1
 		u.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 		u.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 		if disabledAt.Valid {
@@ -259,19 +265,20 @@ func (s *Service) ListWithStats(ctx context.Context) ([]UserWithStats, error) {
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
 	email = normalizeEmail(email)
 	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, password_hash, role, must_change_password, created_at, updated_at, disabled_at, email
+		`SELECT id, password_hash, role, must_change_password, created_at, updated_at, disabled_at, local_project_disabled, email
 		   FROM users WHERE email = ? COLLATE NOCASE`, email)
 
 	var (
-		u            User
-		hash         string
-		mcp          int
-		disabledAt   sql.NullString
-		createdAt    string
-		updatedAt    string
-		emailOut     string
+		u                    User
+		hash                 string
+		mcp                  int
+		localProjectDisabled int
+		disabledAt           sql.NullString
+		createdAt            string
+		updatedAt            string
+		emailOut             string
 	)
-	if err := row.Scan(&u.ID, &hash, &u.Role, &mcp, &createdAt, &updatedAt, &disabledAt, &emailOut); err != nil {
+	if err := row.Scan(&u.ID, &hash, &u.Role, &mcp, &createdAt, &updatedAt, &disabledAt, &localProjectDisabled, &emailOut); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Match the timing of a hash-compare to mitigate user-enumeration
 			// via response time. dummyHash carries the active cost, so this
@@ -289,6 +296,7 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 	}
 	u.Email = emailOut
 	u.MustChangePassword = mcp == 1
+	u.LocalProjectDisabled = localProjectDisabled == 1
 	u.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	u.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	if disabledAt.Valid {
@@ -372,6 +380,35 @@ func (s *Service) SetDisabled(ctx context.Context, id string, disabled bool) err
 	return nil
 }
 
+// SetLocalProjectDisabled toggles the per-user restriction on creating local
+// projects and indexing/reindexing. No last-admin guard: admins are exempt
+// from the restriction at enforcement time, so the flag is meaningful only
+// for regular users and never locks anyone out of administration.
+//
+// The column is independent of role: promoting a restricted user to admin
+// does NOT clear it (admins simply ignore it via the enforcement guard), so a
+// later demotion back to user re-activates the stored restriction. This is
+// intentional — the flag records an explicit admin decision about that
+// account, and a round-trip through admin shouldn't silently erase it. The
+// dashboard renders "Always" for admin rows to reflect the exemption without
+// implying the stored value changed.
+func (s *Service) SetLocalProjectDisabled(ctx context.Context, id string, disabled bool) error {
+	v := 0
+	if disabled {
+		v = 1
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET local_project_disabled = ?, updated_at = ? WHERE id = ?`, v, now, id)
+	if err != nil {
+		return fmt.Errorf("update local_project_disabled: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Delete removes a user (cascades to sessions + api_keys via FK).
 // Refuses to delete the last active admin.
 func (s *Service) Delete(ctx context.Context, id string) error {
@@ -412,7 +449,7 @@ func (s *Service) guardLastAdmin(ctx context.Context, id string) error {
 
 // --- helpers ---
 
-const listSelect = `SELECT id, email, role, must_change_password, created_at, updated_at, disabled_at FROM users`
+const listSelect = `SELECT id, email, role, must_change_password, created_at, updated_at, disabled_at, local_project_disabled FROM users`
 
 func (s *Service) scanOne(ctx context.Context, where string, args ...any) (User, error) {
 	row := s.DB.QueryRowContext(ctx, listSelect+" "+where, args...)
@@ -429,15 +466,17 @@ type rowScanner interface {
 
 func scanUserRow(r rowScanner) (User, error) {
 	var (
-		u                       User
-		mcp                     int
-		createdAt, updatedAt    string
-		disabledAt              sql.NullString
+		u                    User
+		mcp                  int
+		localProjectDisabled int
+		createdAt, updatedAt string
+		disabledAt           sql.NullString
 	)
-	if err := r.Scan(&u.ID, &u.Email, &u.Role, &mcp, &createdAt, &updatedAt, &disabledAt); err != nil {
+	if err := r.Scan(&u.ID, &u.Email, &u.Role, &mcp, &createdAt, &updatedAt, &disabledAt, &localProjectDisabled); err != nil {
 		return User{}, err
 	}
 	u.MustChangePassword = mcp == 1
+	u.LocalProjectDisabled = localProjectDisabled == 1
 	u.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	u.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	if disabledAt.Valid {

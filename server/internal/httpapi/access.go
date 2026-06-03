@@ -24,6 +24,41 @@ func (s *Server) callerIdentity(r *http.Request) (userID string, isAdmin bool) {
 	return ac.User.ID, ac.User.Role == users.RoleAdmin
 }
 
+// requireLocalProjectActions gates the operations a user can be restricted
+// from: creating a local project and indexing/reindexing. Admins and the
+// CIX_AUTH_DISABLED dev mode are always exempt (an admin is never blocked by a
+// per-user flag) — only a regular user with local_project_disabled=1 is
+// rejected with 403. Search and workspace creation never call this. On
+// rejection it writes the response and returns false:
+//
+//	if !s.requireLocalProjectActions(w, r) { return }
+//
+// Mid-indexing edge: the flag is checked per request, so flipping it on while
+// a user has an in-flight index session (begin succeeded) makes the next
+// index/files or index/finish 403 and strands that session. This is benign —
+// index/cancel is deliberately NOT gated (see IndexCancel) so the user/CLI can
+// still release the run lock, and an abandoned session expires on its own TTL.
+// We accept the rare stranded-session window rather than special-casing
+// in-flight runs.
+func (s *Server) requireLocalProjectActions(w http.ResponseWriter, r *http.Request) bool {
+	if s.Deps.AuthDisabled {
+		return true
+	}
+	ac, ok := authFromCtx(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return false
+	}
+	if ac.User.Role == users.RoleAdmin {
+		return true
+	}
+	if ac.User.LocalProjectDisabled {
+		writeError(w, http.StatusForbidden, "your account is not permitted to create or index local projects")
+		return false
+	}
+	return true
+}
+
 // canAccessProject reports whether the caller has READ access to an
 // already-loaded project: admin, owner, or a member of a view-group it is
 // shared to. Used where the project is resolved by the handler (not the
