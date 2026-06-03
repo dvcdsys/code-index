@@ -33,11 +33,15 @@ function writeCollapsed(v: boolean): void {
 const INSTALL_CMD =
   'curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install.sh | bash';
 
-// Claude Code marketplace + plugin install (README "Agent Integration").
+// Claude Code marketplace + plugin install, as `claude plugin` console
+// commands (run in a terminal) rather than the in-session `/plugin` slash
+// commands — so the whole onboarding flow stays in the shell next to the CLI
+// steps. `marketplace add` takes a GitHub owner/repo shorthand; `install`
+// takes plugin@marketplace. Installing via the CLI applies on the next
+// `claude` session start, so there's no `/reload-plugins` equivalent to run.
 const PLUGIN_CMDS = [
-  '/plugin marketplace add dvcdsys/code-index',
-  '/plugin install cix@code-index',
-  '/reload-plugins',
+  'claude plugin marketplace add dvcdsys/code-index',
+  'claude plugin install cix@code-index',
 ].join('\n');
 
 // Optional local-project indexing + connection check.
@@ -130,7 +134,7 @@ export function ConnectClaudeCodeCard() {
           <Step
             n={3}
             title="Add the plugin to Claude Code"
-            hint="Type these in a Claude Code session. The marketplace command registers the source; install pulls the cix plugin; reload activates it."
+            hint="Run these in a terminal (not inside a Claude Code session). The first registers this repo as a plugin marketplace; the second installs the cix plugin. It activates automatically the next time you start claude — no reload needed."
           >
             <CommandBlock command={PLUGIN_CMDS} />
           </Step>
@@ -160,7 +164,7 @@ export function ConnectClaudeCodeCard() {
           <Step
             n={5}
             title="See the cix skills in Claude Code"
-            hint="After /reload-plugins, these commands and the cix / cix-workspace skills are available — that's the finish line:"
+            hint="Once the plugin is installed and you start a new claude session, these commands and the cix / cix-workspace skills are available — that's the finish line:"
           >
             <div className="flex flex-wrap gap-1.5">
               {SKILL_COMMANDS.map((c) => (
