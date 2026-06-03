@@ -9,7 +9,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,10 +26,56 @@ const (
 	RoleUser  = "user"
 )
 
-// BcryptCost is the work factor for password hashing. 12 is the current
-// industry default — tunable here without touching call sites if the
-// hardware moves.
-const BcryptCost = 12
+// defaultBcryptCost is the production work factor for password hashing. 12 is
+// the current industry default — high enough that one hash costs ~250ms, which
+// is what makes offline cracking expensive (and what makes a test suite that
+// mints a user per fixture crawl).
+const defaultBcryptCost = 12
+
+// BcryptCost is the work factor actually used by Create / UpdatePassword. It is
+// resolved once, at package init, from (highest precedence first):
+//
+//  1. CIX_BCRYPT_COST — explicit override, clamped to bcrypt's [MinCost,
+//     MaxCost]. An escape hatch; production should leave it unset.
+//  2. testing.Testing() — under `go test` we drop to bcrypt.MinCost. The hash
+//     itself is never what the tests assert, yet at cost 12 the deliberate
+//     ~250ms/hash dominated the whole server suite (hundreds of fixtures each
+//     seed a user → minutes of pure bcrypt under -race). MinCost is ~256×
+//     cheaper and keeps the round-trip behaviour identical. Safe in prod
+//     because testing.Testing() is false outside test binaries, and importing
+//     "testing" no longer registers test flags (Go 1.13+), so cix-server's
+//     flag.Parse() is unaffected.
+//  3. defaultBcryptCost (12) — production default.
+var BcryptCost = resolveBcryptCost()
+
+func resolveBcryptCost() int {
+	if v := os.Getenv("CIX_BCRYPT_COST"); v != "" {
+		if c, err := strconv.Atoi(v); err == nil && c >= bcrypt.MinCost && c <= bcrypt.MaxCost {
+			return c
+		}
+	}
+	if testing.Testing() {
+		return bcrypt.MinCost
+	}
+	return defaultBcryptCost
+}
+
+// dummyHash is a real bcrypt hash, computed once at the active BcryptCost. It is
+// fed to CompareHashAndPassword on the user-not-found login path to burn the
+// same CPU a genuine check would, so response timing can't be used to enumerate
+// accounts. Deriving it from BcryptCost — rather than hard-coding a $2a$12$…
+// literal — keeps the mitigation accurate when the cost is overridden and keeps
+// the not-found path cheap under test.
+var dummyHash = mustDummyHash()
+
+func mustDummyHash() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("user-enumeration-timing-equaliser"), BcryptCost)
+	if err != nil {
+		// BcryptCost is clamped to bcrypt's valid range, so this is unreachable.
+		panic(fmt.Sprintf("users: precompute dummy bcrypt hash: %v", err))
+	}
+	return h
+}
 
 var (
 	ErrNotFound       = errors.New("user not found")
@@ -225,9 +274,9 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 	if err := row.Scan(&u.ID, &hash, &u.Role, &mcp, &createdAt, &updatedAt, &disabledAt, &emailOut); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Match the timing of a hash-compare to mitigate user-enumeration
-			// via response time. CompareHashAndPassword on a known-bad hash
-			// burns the same cost as a real login.
-			_ = bcrypt.CompareHashAndPassword([]byte("$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvali"), []byte(password))
+			// via response time. dummyHash carries the active cost, so this
+			// burns the same CPU as a real login (see dummyHash).
+			_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
 			return User{}, ErrInvalidLogin
 		}
 		return User{}, fmt.Errorf("scan user: %w", err)
