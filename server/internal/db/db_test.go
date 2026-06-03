@@ -521,6 +521,69 @@ func TestOpenMigratesPreAuthModelDB(t *testing.T) {
 	again.Close()
 }
 
+// TestOpenMigratesLocalProjectDisabled seeds a legacy users table without the
+// local_project_disabled column and confirms migration #14 adds it and
+// backfills existing rows to 0 (allowed) — the backward-compat guarantee.
+func TestOpenMigratesLocalProjectDisabled(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "pre-m14.db")
+	seed, err := sql.Open(DriverName, "file:"+tmp)
+	if err != nil {
+		t.Fatalf("seed Open: %v", err)
+	}
+	// Legacy users table: no local_project_disabled column.
+	if _, err := seed.Exec(`CREATE TABLE users (
+		id TEXT PRIMARY KEY, email TEXT NOT NULL, password_hash TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'user', must_change_password INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL, disabled_at TEXT)`); err != nil {
+		t.Fatalf("seed CREATE TABLE users: %v", err)
+	}
+	if _, err := seed.Exec(`INSERT INTO users (id, email, password_hash, role, created_at, updated_at)
+		VALUES ('u_legacy', 'legacy@x.com', 'h', 'user', '2024-01-01', '2024-01-01')`); err != nil {
+		t.Fatalf("seed INSERT user: %v", err)
+	}
+	seed.Close()
+
+	database, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("Open migrates pre-m14 DB: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(tmp)
+
+	// Existing row backfilled to allowed (0).
+	var disabled int
+	if err := database.QueryRow(
+		`SELECT local_project_disabled FROM users WHERE id = 'u_legacy'`,
+	).Scan(&disabled); err != nil {
+		t.Fatalf("select local_project_disabled: %v", err)
+	}
+	if disabled != 0 {
+		t.Errorf("legacy user local_project_disabled = %d, want 0 (allowed)", disabled)
+	}
+
+	// New INSERT that omits the column also defaults to 0.
+	if _, err := database.Exec(`INSERT INTO users (id, email, password_hash, role, created_at, updated_at)
+		VALUES ('u_new', 'new@x.com', 'h', 'user', '2024-07-01', '2024-07-01')`); err != nil {
+		t.Fatalf("insert new user: %v", err)
+	}
+	if err := database.QueryRow(
+		`SELECT local_project_disabled FROM users WHERE id = 'u_new'`,
+	).Scan(&disabled); err != nil {
+		t.Fatalf("select new local_project_disabled: %v", err)
+	}
+	if disabled != 0 {
+		t.Errorf("new user local_project_disabled = %d, want 0 (default)", disabled)
+	}
+
+	// Second Open is idempotent.
+	database.Close()
+	again, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("second Open (idempotent): %v", err)
+	}
+	again.Close()
+}
+
 func TestSymbolsIndexExists(t *testing.T) {
 	database, err := Open(":memory:")
 	if err != nil {

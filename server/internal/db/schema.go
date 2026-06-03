@@ -121,7 +121,12 @@ CREATE TABLE IF NOT EXISTS users (
     must_change_password INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    disabled_at TEXT
+    disabled_at TEXT,
+    -- When 1, the user may not create local projects or index/reindex anything
+    -- (search of already-indexed projects + workspace creation stay allowed).
+    -- Default 0 = allowed, so existing and new users keep full access; an admin
+    -- flips it to 1 to restrict a specific user. Admins are always exempt.
+    local_project_disabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE);
 

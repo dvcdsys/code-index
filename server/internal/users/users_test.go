@@ -118,6 +118,57 @@ func TestDelete_LastAdminBlock(t *testing.T) {
 	}
 }
 
+// TestLocalProjectDisabled_DefaultAndRoundTrip verifies the new per-user flag:
+// new users default to allowed (false), the setter toggles it, and the value
+// survives every User builder (GetByID, List, Authenticate).
+func TestLocalProjectDisabled_DefaultAndRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t)
+
+	u, err := s.Create(ctx, "a@b.com", "password1234", RoleUser, false)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if u.LocalProjectDisabled {
+		t.Fatalf("new user should default to allowed (LocalProjectDisabled=false)")
+	}
+
+	// Disable, then confirm it is visible through GetByID.
+	if err := s.SetLocalProjectDisabled(ctx, u.ID, true); err != nil {
+		t.Fatalf("SetLocalProjectDisabled(true): %v", err)
+	}
+	got, err := s.GetByID(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if !got.LocalProjectDisabled {
+		t.Errorf("GetByID: LocalProjectDisabled = false, want true")
+	}
+
+	// Authenticate must also carry the flag (it builds User from its own SELECT).
+	auth, err := s.Authenticate(ctx, "a@b.com", "password1234")
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if !auth.LocalProjectDisabled {
+		t.Errorf("Authenticate: LocalProjectDisabled = false, want true")
+	}
+
+	// Re-enable round-trips back to false.
+	if err := s.SetLocalProjectDisabled(ctx, u.ID, false); err != nil {
+		t.Fatalf("SetLocalProjectDisabled(false): %v", err)
+	}
+	got, _ = s.GetByID(ctx, u.ID)
+	if got.LocalProjectDisabled {
+		t.Errorf("after re-enable: LocalProjectDisabled = true, want false")
+	}
+
+	// Unknown id → ErrNotFound.
+	if err := s.SetLocalProjectDisabled(ctx, "no-such-id", true); !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetLocalProjectDisabled(unknown) err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestInvalidRole(t *testing.T) {
 	s := newTestService(t)
 	_, err := s.Create(context.Background(), "a@b.com", "password1", "superadmin", false)

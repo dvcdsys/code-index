@@ -13,6 +13,7 @@ import { formatDateTime, formatRelative } from '@/lib/formatDate';
 import { DeleteUserDialog } from './DeleteUserDialog';
 import { DisableUserButton } from './DisableUserButton';
 import { UserRoleSelect } from './UserRoleSelect';
+import { UserLocalProjectToggle } from './UserLocalProjectToggle';
 
 export function UsersTable({
   users,
@@ -28,6 +29,9 @@ export function UsersTable({
           <TableRow>
             <TableHead>Email</TableHead>
             <TableHead className="w-[140px]">Role</TableHead>
+            <TableHead className="w-[120px]" title="Allow creating local projects and indexing/reindexing. Search and workspaces are always allowed. Admins are always allowed.">
+              Local projects
+            </TableHead>
             <TableHead>Created</TableHead>
             <TableHead>Last login</TableHead>
             <TableHead className="text-right">Sessions</TableHead>
@@ -49,6 +53,16 @@ export function UsersTable({
                 </TableCell>
                 <TableCell>
                   <UserRoleSelect userId={u.id} role={u.role} disabled={isSelf} />
+                </TableCell>
+                <TableCell>
+                  {u.role === 'admin' ? (
+                    <span className="text-xs text-muted-foreground">Always</span>
+                  ) : (
+                    <UserLocalProjectToggle
+                      userId={u.id}
+                      localProjectDisabled={u.local_project_disabled}
+                    />
+                  )}
                 </TableCell>
                 <TableCell
                   className="text-xs text-muted-foreground"

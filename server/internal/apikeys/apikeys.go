@@ -139,25 +139,26 @@ func (s *Service) Authenticate(ctx context.Context, fullKey string) (users.User,
 		`SELECT k.id, k.owner_user_id, k.name, k.prefix, k.created_at,
 		        k.last_used_at, k.last_used_ip, k.last_used_ua, k.revoked_at,
 		        u.email, u.role, u.must_change_password,
-		        u.created_at, u.updated_at, u.disabled_at
+		        u.created_at, u.updated_at, u.disabled_at, u.local_project_disabled
 		   FROM api_keys k
 		   JOIN users u ON u.id = k.owner_user_id
 		  WHERE k.hash = ?`, hash)
 
 	var (
-		ak                                  ApiKey
-		createdAt                           string
-		lastUsedAt, revokedAt               sql.NullString
-		lastUsedIP, lastUsedUA              sql.NullString
-		uEmail, uRole                       string
-		uMcp                                int
-		uCreatedAt, uUpdatedAt              string
-		uDisabledAt                         sql.NullString
+		ak                     ApiKey
+		createdAt              string
+		lastUsedAt, revokedAt  sql.NullString
+		lastUsedIP, lastUsedUA sql.NullString
+		uEmail, uRole          string
+		uMcp                   int
+		uLocalProjectDisabled  int
+		uCreatedAt, uUpdatedAt string
+		uDisabledAt            sql.NullString
 	)
 	err := row.Scan(
 		&ak.ID, &ak.OwnerUserID, &ak.Name, &ak.Prefix, &createdAt,
 		&lastUsedAt, &lastUsedIP, &lastUsedUA, &revokedAt,
-		&uEmail, &uRole, &uMcp, &uCreatedAt, &uUpdatedAt, &uDisabledAt,
+		&uEmail, &uRole, &uMcp, &uCreatedAt, &uUpdatedAt, &uDisabledAt, &uLocalProjectDisabled,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -179,10 +180,11 @@ func (s *Service) Authenticate(ctx context.Context, fullKey string) (users.User,
 	}
 
 	u := users.User{
-		ID:                 ak.OwnerUserID,
-		Email:              uEmail,
-		Role:               uRole,
-		MustChangePassword: uMcp == 1,
+		ID:                   ak.OwnerUserID,
+		Email:                uEmail,
+		Role:                 uRole,
+		MustChangePassword:   uMcp == 1,
+		LocalProjectDisabled: uLocalProjectDisabled == 1,
 	}
 	u.CreatedAt, _ = time.Parse(time.RFC3339Nano, uCreatedAt)
 	u.UpdatedAt, _ = time.Parse(time.RFC3339Nano, uUpdatedAt)
@@ -314,10 +316,10 @@ func scanKeyRow(r interface {
 	Scan(dest ...any) error
 }) (ApiKey, error) {
 	var (
-		ak                       ApiKey
-		createdAt                string
-		lastUsedAt, revokedAt    sql.NullString
-		lastUsedIP, lastUsedUA   sql.NullString
+		ak                     ApiKey
+		createdAt              string
+		lastUsedAt, revokedAt  sql.NullString
+		lastUsedIP, lastUsedUA sql.NullString
 	)
 	err := r.Scan(&ak.ID, &ak.OwnerUserID, &ak.Name, &ak.Prefix, &createdAt,
 		&lastUsedAt, &lastUsedIP, &lastUsedUA, &revokedAt)

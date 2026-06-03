@@ -333,7 +333,7 @@ func TestApiKey_CreateListRevokeFlow(t *testing.T) {
 		t.Fatalf("create key status = %d (body=%s)", rr.Code, rr.Body.String())
 	}
 	var created struct {
-		FullKey string `json:"full_key"`
+		FullKey string              `json:"full_key"`
 		ApiKey  struct{ ID string } `json:"api_key"`
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &created)
@@ -534,6 +534,145 @@ func TestExternalAndTokenEndpoints_AdminOnly(t *testing.T) {
 	}
 }
 
+// TestLocalProjectDisabled_GatesCreateAndIndex locks the per-user restriction:
+// a user with local_project_disabled=true cannot create local projects or
+// index/reindex (403), while search/read of their existing projects and
+// workspace creation stay allowed. Admins are always exempt.
+func TestLocalProjectDisabled_GatesCreateAndIndex(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	// Seed alice (regular user) and log in.
+	aliceBody, _ := json.Marshal(map[string]string{
+		"email": "alice@example.com", "initial_password": "alicepass1", "role": "user",
+	})
+	req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(aliceBody)), adminCookie)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.Router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("seed alice status = %d (body=%s)", rr.Code, rr.Body.String())
+	}
+	var alice struct {
+		ID                   string `json:"id"`
+		LocalProjectDisabled bool   `json:"local_project_disabled"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &alice)
+	if alice.ID == "" {
+		t.Fatalf("seed alice missing id: %s", rr.Body.String())
+	}
+	if alice.LocalProjectDisabled {
+		t.Fatalf("new user should default to allowed (local_project_disabled=false)")
+	}
+	aliceCookie := sessionCookie(loginRR(t, f.Router, "alice@example.com", "alicepass1"))
+
+	do := func(cookie, method, path string, body []byte) int {
+		t.Helper()
+		var rdr *bytes.Reader
+		if body == nil {
+			rdr = bytes.NewReader(nil)
+		} else {
+			rdr = bytes.NewReader(body)
+		}
+		req := withCookie(httptest.NewRequest(method, path, rdr), cookie)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		f.Router.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	createProject := func(cookie, hostPath string) (int, string) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"host_path": hostPath})
+		req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewReader(body)), cookie)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		f.Router.ServeHTTP(rr, req)
+		var created struct {
+			PathHash string `json:"path_hash"`
+		}
+		_ = json.Unmarshal(rr.Body.Bytes(), &created)
+		return rr.Code, created.PathHash
+	}
+	setLPD := func(userID string, disabled bool) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"local_project_disabled": disabled})
+		if code := do(adminCookie, http.MethodPatch, "/api/v1/admin/users/"+userID, body); code != http.StatusOK {
+			t.Fatalf("admin PATCH local_project_disabled=%v = %d", disabled, code)
+		}
+	}
+
+	// While allowed, alice can create a local project.
+	code, aliceProj := createProject(aliceCookie, "/tmp/alice-lpd")
+	if code != http.StatusCreated || aliceProj == "" {
+		t.Fatalf("alice create (allowed) = %d, hash=%q", code, aliceProj)
+	}
+
+	// Restrict alice.
+	setLPD(alice.ID, true)
+
+	t.Run("restricted: create local project is 403", func(t *testing.T) {
+		if code, _ := createProject(aliceCookie, "/tmp/alice-lpd-2"); code != http.StatusForbidden {
+			t.Errorf("restricted create = %d, want 403", code)
+		}
+	})
+	t.Run("restricted: index/begin is 403", func(t *testing.T) {
+		if code := do(aliceCookie, http.MethodPost, "/api/v1/projects/"+aliceProj+"/index/begin", []byte("{}")); code != http.StatusForbidden {
+			t.Errorf("restricted index/begin = %d, want 403", code)
+		}
+	})
+	t.Run("restricted: index/finish is 403", func(t *testing.T) {
+		if code := do(aliceCookie, http.MethodPost, "/api/v1/projects/"+aliceProj+"/index/finish", []byte(`{"run_id":"x"}`)); code != http.StatusForbidden {
+			t.Errorf("restricted index/finish = %d, want 403", code)
+		}
+	})
+	t.Run("restricted: /auth/me reflects the flag", func(t *testing.T) {
+		req := withCookie(httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil), aliceCookie)
+		rr := httptest.NewRecorder()
+		f.Router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("me status = %d", rr.Code)
+		}
+		var me struct {
+			User struct {
+				LocalProjectDisabled bool `json:"local_project_disabled"`
+			} `json:"user"`
+		}
+		_ = json.Unmarshal(rr.Body.Bytes(), &me)
+		if !me.User.LocalProjectDisabled {
+			t.Errorf("me.user.local_project_disabled = false, want true")
+		}
+	})
+	t.Run("restricted: read (index/status) of own project is not gated", func(t *testing.T) {
+		// Read access uses requireProjectAccess (the same gate search uses) and
+		// is never blocked by local_project_disabled — must not be 403.
+		if code := do(aliceCookie, http.MethodGet, "/api/v1/projects/"+aliceProj+"/index/status", nil); code == http.StatusForbidden {
+			t.Errorf("restricted index/status = 403, want non-403 (read stays allowed)")
+		}
+	})
+	t.Run("restricted: workspace creation stays allowed", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]string{"name": "alice-ws"})
+		if code := do(aliceCookie, http.MethodPost, "/api/v1/workspaces", body); code != http.StatusCreated {
+			t.Errorf("restricted workspace create = %d, want 201", code)
+		}
+	})
+
+	t.Run("admin is exempt even when flagged", func(t *testing.T) {
+		// Flag the admin too — admins ignore the restriction.
+		setLPD(f.UserID, true)
+		if code, hash := createProject(adminCookie, "/tmp/admin-lpd"); code != http.StatusCreated || hash == "" {
+			t.Errorf("flagged admin create = %d, want 201 (admins exempt)", code)
+		}
+		setLPD(f.UserID, false)
+	})
+
+	t.Run("re-enabling restores access", func(t *testing.T) {
+		setLPD(alice.ID, false)
+		if code, hash := createProject(aliceCookie, "/tmp/alice-lpd-3"); code != http.StatusCreated || hash == "" {
+			t.Errorf("re-enabled create = %d, want 201", code)
+		}
+	})
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -572,7 +711,9 @@ func TestIndexCancel_AnyAuthenticatedUser(t *testing.T) {
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("viewer create project status = %d (body=%s)", rr.Code, rr.Body.String())
 	}
-	var created struct{ PathHash string `json:"path_hash"` }
+	var created struct {
+		PathHash string `json:"path_hash"`
+	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &created)
 
 	// Viewer cancels — must NOT 403 (idempotent 200 even when no run is active).
