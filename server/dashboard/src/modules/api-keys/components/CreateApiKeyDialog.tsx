@@ -149,11 +149,14 @@ export function CreateApiKeyDialog() {
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        // Once a key is revealed, only the explicit "I've saved it" button
-        // (or close-X) may dismiss the dialog. Outside-click and Escape are
-        // blocked at the DialogContent layer below; we still gate state-resets
-        // here so a sibling dismiss path can't wipe the key silently.
-        if (!next && revealed) return;
+        // Accidental dismissal of the reveal screen (outside-click, Escape) is
+        // blocked at the DialogContent layer below via preventDefault, so it
+        // never reaches here. The only close paths that DO reach onOpenChange
+        // while a key is revealed are explicit user intent — the top-right X
+        // button (the "I've saved it" button sets state directly) — so honor
+        // every close and always reset. (An earlier guard returned here when a
+        // key was revealed, which also swallowed the X click: the dialog could
+        // then only be dismissed by reloading the page.)
         setOpen(next);
         if (!next) reset();
       }}
