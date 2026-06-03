@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, Loader2, KeyRound, AlertTriangle } from 'lucide-react';
+import { Check, Copy, Loader2, KeyRound, AlertTriangle, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
@@ -41,6 +41,21 @@ function legacyCopy(text: string): boolean {
   return ok;
 }
 
+// Derive a cix CLI server alias from the browser host. The CLI stores each
+// server as one entry under `server.<alias>` and parses that config key by
+// splitting on dots, so the alias must be dot-free (and whitespace-free, and
+// non-empty) — see validateServerName / parseServerKey in the CLI. We fold the
+// host (including any non-default port, so distinct ports get distinct aliases)
+// to [a-z0-9-]:  "cix.example.com" -> "cix-example-com",
+// "localhost:21847" -> "localhost-21847".
+function cixServerAlias(host: string): string {
+  const alias = host
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return alias || 'default';
+}
+
 // Two-stage dialog: collect a name, then reveal the freshly minted key once.
 // Once revealed, the dialog refuses outside-click and Escape — accidental
 // dismissal would lose the unrecoverable secret. Only the explicit "I've
@@ -49,7 +64,8 @@ export function CreateApiKeyDialog() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [revealed, setRevealed] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [copiedCmd, setCopiedCmd] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const create = useCreateApiKey();
 
@@ -65,7 +81,8 @@ export function CreateApiKeyDialog() {
   function reset() {
     setName('');
     setRevealed(null);
-    setCopied(false);
+    setCopiedKey(false);
+    setCopiedCmd(false);
     create.reset();
   }
 
@@ -81,23 +98,50 @@ export function CreateApiKeyDialog() {
     }
   }
 
-  async function copyToClipboard() {
-    if (!revealed) return;
-    // navigator.clipboard requires a secure context (HTTPS or localhost). On
-    // bare-IP / HTTP deploys it throws — fall back to document.execCommand
-    // through a transient textarea so users still get one-click copy.
+  // copyText copies one string to the clipboard, surfacing a toast on failure.
+  // navigator.clipboard requires a secure context (HTTPS or localhost). On
+  // bare-IP / HTTP deploys it throws — fall back to document.execCommand
+  // through a transient textarea so users still get one-click copy.
+  async function copyText(text: string): Promise<boolean> {
     try {
       if (window.isSecureContext && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(revealed);
+        await navigator.clipboard.writeText(text);
       } else {
-        if (!legacyCopy(revealed)) throw new Error('legacy copy failed');
+        if (!legacyCopy(text)) throw new Error('legacy copy failed');
       }
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      return true;
     } catch {
       toast.error('Could not copy automatically.', {
-        description: 'Click the field, ⌘A / Ctrl-A to select, then copy.',
+        description: 'Select the text, ⌘A / Ctrl-A, then copy.',
       });
+      return false;
+    }
+  }
+
+  // One-paste command that registers THIS server (URL + the freshly minted key,
+  // as a single `server.<alias>` entry) in the cix CLI config and makes it the
+  // default. The dashboard is served same-origin from cix-server, so
+  // window.location.origin is exactly the base URL the CLI must talk to. Values
+  // are shell-safe (a URL, a `cix_<hex>` key, an [a-z0-9-] alias), so no quoting
+  // is needed — matching the CLI README's unquoted examples.
+  const alias = cixServerAlias(window.location.host);
+  const connectCmd =
+    `cix config set server.${alias}.url ${window.location.origin} && ` +
+    `cix config set server.${alias}.key ${revealed ?? '<key>'} && ` +
+    `cix config set default_server ${alias}`;
+
+  async function copyKey() {
+    if (!revealed) return;
+    if (await copyText(revealed)) {
+      setCopiedKey(true);
+      window.setTimeout(() => setCopiedKey(false), 2000);
+    }
+  }
+
+  async function copyConnectCmd() {
+    if (await copyText(connectCmd)) {
+      setCopiedCmd(true);
+      window.setTimeout(() => setCopiedCmd(false), 2000);
     }
   }
 
@@ -165,8 +209,8 @@ export function CreateApiKeyDialog() {
                   onFocus={(e) => e.currentTarget.select()}
                   onClick={(e) => e.currentTarget.select()}
                 />
-                <Button type="button" variant="secondary" onClick={copyToClipboard}>
-                  {copied ? (
+                <Button type="button" variant="secondary" onClick={copyKey}>
+                  {copiedKey ? (
                     <>
                       <Check className="mr-1 h-4 w-4" />
                       Copied
@@ -182,6 +226,46 @@ export function CreateApiKeyDialog() {
               <p className="text-xs text-muted-foreground">
                 Click the field to select all, then ⌘C / Ctrl-C if the Copy
                 button is blocked by your browser.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="apikey-connect-cmd" className="flex items-center gap-1.5">
+                <Terminal className="h-4 w-4" />
+                Connect the cix CLI
+              </Label>
+              <div className="flex items-stretch gap-2">
+                {/* Read-only, wrapping command box: one paste registers this
+                    server (URL + key as a single entry) and makes it the
+                    default, so `cix search …` works right after. */}
+                <pre
+                  id="apikey-connect-cmd"
+                  className="flex-1 overflow-auto rounded-md border bg-muted p-2 font-mono text-xs whitespace-pre-wrap break-all max-h-32"
+                >
+                  {connectCmd}
+                </pre>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="self-start"
+                  onClick={copyConnectCmd}
+                >
+                  {copiedCmd ? (
+                    <>
+                      <Check className="mr-1 h-4 w-4" />
+                      Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="mr-1 h-4 w-4" />
+                      Copy
+                    </>
+                  )}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Paste this in a terminal with the cix CLI installed. It saves the
+                server to <code>~/.cix/config.yaml</code> as the default, then{' '}
+                <code>cix search &quot;…&quot;</code> works.
               </p>
             </div>
             <DialogFooter>
