@@ -135,6 +135,15 @@ repos are dependencies / consumers / providers / counter-parties.
 
 ### Step 2 — answer "what code is relevant?"
 
+**Now switch from workspace search to per-project search.** Workspace
+search is a *scoping* tool: it tells you which repos are in play and shows
+a teaser of chunks, but that teaser is capped (round-robin, ~5 chunks per
+repo) and is NOT where you read the code. Once you know the target repos,
+drill into each one with single-project search (`cix search -n
+<project_path>`) or a `cix-workspace-investigator` sub-agent — that is
+where the real, file-grouped depth comes from. Don't try to answer the
+task from the workspace chunk panel alone.
+
 For each repo from step 1, look at the chunks panel. The chunk list
 is interleaved by rank across surviving projects so each repo's top
 hit appears early. Use these chunks as **starting points** for a
@@ -273,9 +282,13 @@ the words live", not "where should the change happen".
 ### Rule 4 — Drop down to single-project search for depth
 
 When `projects[]` shows the target at rank 1 with a clear lead
-(`project_score` ≥ 1.5× the next), switch to per-project search.
-You get file-grouped, deeper results without the cross-project
-round-robin cap of 5 chunks per repo.
+(`project_score` ≥ 1.5× the next), switch to per-project search:
+`cix search -n <project_path> "<query>"` (add `--server <alias>` when the
+workspace is on a non-default server). You get file-grouped, deeper
+results without the cross-project round-robin cap of 5 chunks per repo.
+`-n` takes the exact `project_path` from `projects[]` (e.g.
+`github.com/owner/repo@branch`) — that is the correct, working way to
+target one project; don't use `-p` (a filesystem path) for a remote repo.
 
 ### Rule 5 — `min_score=0` for intentional cross-project sweeps
 
