@@ -384,6 +384,14 @@ func (s *Service) SetDisabled(ctx context.Context, id string, disabled bool) err
 // projects and indexing/reindexing. No last-admin guard: admins are exempt
 // from the restriction at enforcement time, so the flag is meaningful only
 // for regular users and never locks anyone out of administration.
+//
+// The column is independent of role: promoting a restricted user to admin
+// does NOT clear it (admins simply ignore it via the enforcement guard), so a
+// later demotion back to user re-activates the stored restriction. This is
+// intentional — the flag records an explicit admin decision about that
+// account, and a round-trip through admin shouldn't silently erase it. The
+// dashboard renders "Always" for admin rows to reflect the exemption without
+// implying the stored value changed.
 func (s *Service) SetLocalProjectDisabled(ctx context.Context, id string, disabled bool) error {
 	v := 0
 	if disabled {

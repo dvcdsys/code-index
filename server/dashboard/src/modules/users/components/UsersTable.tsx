@@ -55,6 +55,10 @@ export function UsersTable({
                   <UserRoleSelect userId={u.id} role={u.role} disabled={isSelf} />
                 </TableCell>
                 <TableCell>
+                  {/* Admins ignore local_project_disabled (always allowed), so
+                      we show "Always" instead of a toggle. The stored flag is
+                      left untouched — if this admin is later demoted to user it
+                      takes effect again. */}
                   {u.role === 'admin' ? (
                     <span className="text-xs text-muted-foreground">Always</span>
                   ) : (

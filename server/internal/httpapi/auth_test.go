@@ -620,6 +620,13 @@ func TestLocalProjectDisabled_GatesCreateAndIndex(t *testing.T) {
 			t.Errorf("restricted index/begin = %d, want 403", code)
 		}
 	})
+	t.Run("restricted: index/files is 403", func(t *testing.T) {
+		// Same guard as begin/finish — the gate runs before the body is read,
+		// so an empty body still 403s. Covers the mid-protocol upload step.
+		if code := do(aliceCookie, http.MethodPost, "/api/v1/projects/"+aliceProj+"/index/files", []byte("{}")); code != http.StatusForbidden {
+			t.Errorf("restricted index/files = %d, want 403", code)
+		}
+	})
 	t.Run("restricted: index/finish is 403", func(t *testing.T) {
 		if code := do(aliceCookie, http.MethodPost, "/api/v1/projects/"+aliceProj+"/index/finish", []byte(`{"run_id":"x"}`)); code != http.StatusForbidden {
 			t.Errorf("restricted index/finish = %d, want 403", code)
