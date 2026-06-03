@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, Loader2, KeyRound, AlertTriangle } from 'lucide-react';
+import { Check, Copy, Loader2, KeyRound, AlertTriangle, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
@@ -15,6 +15,7 @@ import {
 } from '@/ui/dialog';
 import { Input } from '@/ui/input';
 import { Label } from '@/ui/label';
+import { cixConnectCommand } from '@/lib/cixServer';
 import { useCreateApiKey } from '../hooks';
 
 // Last-resort copy when the async Clipboard API isn't available — happens
@@ -49,7 +50,8 @@ export function CreateApiKeyDialog() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [revealed, setRevealed] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [copiedCmd, setCopiedCmd] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const create = useCreateApiKey();
 
@@ -65,7 +67,8 @@ export function CreateApiKeyDialog() {
   function reset() {
     setName('');
     setRevealed(null);
-    setCopied(false);
+    setCopiedKey(false);
+    setCopiedCmd(false);
     create.reset();
   }
 
@@ -81,23 +84,49 @@ export function CreateApiKeyDialog() {
     }
   }
 
-  async function copyToClipboard() {
-    if (!revealed) return;
-    // navigator.clipboard requires a secure context (HTTPS or localhost). On
-    // bare-IP / HTTP deploys it throws — fall back to document.execCommand
-    // through a transient textarea so users still get one-click copy.
+  // copyText copies one string to the clipboard, surfacing a toast on failure.
+  // navigator.clipboard requires a secure context (HTTPS or localhost). On
+  // bare-IP / HTTP deploys it throws — fall back to document.execCommand
+  // through a transient textarea so users still get one-click copy.
+  async function copyText(text: string): Promise<boolean> {
     try {
       if (window.isSecureContext && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(revealed);
+        await navigator.clipboard.writeText(text);
       } else {
-        if (!legacyCopy(revealed)) throw new Error('legacy copy failed');
+        if (!legacyCopy(text)) throw new Error('legacy copy failed');
       }
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      return true;
     } catch {
       toast.error('Could not copy automatically.', {
-        description: 'Click the field, ⌘A / Ctrl-A to select, then copy.',
+        description: 'Select the text, ⌘A / Ctrl-A, then copy.',
       });
+      return false;
+    }
+  }
+
+  // One-paste command that registers THIS server (URL + the freshly minted key,
+  // as a single `server.<alias>` entry) in the cix CLI config and makes it the
+  // default. The dashboard is served same-origin from cix-server, so
+  // window.location.origin is exactly the base URL the CLI must talk to. Shared
+  // with the home-page onboarding card via cixConnectCommand so they never drift.
+  const connectCmd = cixConnectCommand(
+    window.location.origin,
+    window.location.host,
+    revealed ?? '<key>'
+  );
+
+  async function copyKey() {
+    if (!revealed) return;
+    if (await copyText(revealed)) {
+      setCopiedKey(true);
+      window.setTimeout(() => setCopiedKey(false), 2000);
+    }
+  }
+
+  async function copyConnectCmd() {
+    if (await copyText(connectCmd)) {
+      setCopiedCmd(true);
+      window.setTimeout(() => setCopiedCmd(false), 2000);
     }
   }
 
@@ -105,11 +134,14 @@ export function CreateApiKeyDialog() {
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        // Once a key is revealed, only the explicit "I've saved it" button
-        // (or close-X) may dismiss the dialog. Outside-click and Escape are
-        // blocked at the DialogContent layer below; we still gate state-resets
-        // here so a sibling dismiss path can't wipe the key silently.
-        if (!next && revealed) return;
+        // Accidental dismissal of the reveal screen (outside-click, Escape) is
+        // blocked at the DialogContent layer below via preventDefault, so it
+        // never reaches here. The only close paths that DO reach onOpenChange
+        // while a key is revealed are explicit user intent — the top-right X
+        // button (the "I've saved it" button sets state directly) — so honor
+        // every close and always reset. (An earlier guard returned here when a
+        // key was revealed, which also swallowed the X click: the dialog could
+        // then only be dismissed by reloading the page.)
         setOpen(next);
         if (!next) reset();
       }}
@@ -165,8 +197,8 @@ export function CreateApiKeyDialog() {
                   onFocus={(e) => e.currentTarget.select()}
                   onClick={(e) => e.currentTarget.select()}
                 />
-                <Button type="button" variant="secondary" onClick={copyToClipboard}>
-                  {copied ? (
+                <Button type="button" variant="secondary" onClick={copyKey}>
+                  {copiedKey ? (
                     <>
                       <Check className="mr-1 h-4 w-4" />
                       Copied
@@ -182,6 +214,46 @@ export function CreateApiKeyDialog() {
               <p className="text-xs text-muted-foreground">
                 Click the field to select all, then ⌘C / Ctrl-C if the Copy
                 button is blocked by your browser.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="apikey-connect-cmd" className="flex items-center gap-1.5">
+                <Terminal className="h-4 w-4" />
+                Connect the cix CLI
+              </Label>
+              <div className="flex items-stretch gap-2">
+                {/* Read-only, wrapping command box: one paste registers this
+                    server (URL + key as a single entry) and makes it the
+                    default, so `cix search …` works right after. */}
+                <pre
+                  id="apikey-connect-cmd"
+                  className="flex-1 overflow-auto rounded-md border bg-muted p-2 font-mono text-xs whitespace-pre-wrap break-all max-h-32"
+                >
+                  {connectCmd}
+                </pre>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="self-start"
+                  onClick={copyConnectCmd}
+                >
+                  {copiedCmd ? (
+                    <>
+                      <Check className="mr-1 h-4 w-4" />
+                      Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="mr-1 h-4 w-4" />
+                      Copy
+                    </>
+                  )}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Paste this in a terminal with the cix CLI installed. It saves the
+                server to <code>~/.cix/config.yaml</code> as the default, then{' '}
+                <code>cix search &quot;…&quot;</code> works.
               </p>
             </div>
             <DialogFooter>

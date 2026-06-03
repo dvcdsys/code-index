@@ -27,11 +27,24 @@ of two shapes. Behave very differently depending on which:
   nothing useful — there's nothing to read locally. The cix server has the
   files, chunks, and symbols; you reach them only through the `cix` CLI.
 
-**How to tell which you have:** run `cix list` once, then `grep` for the
-exact identifier the main agent gave you.
+**If the main agent gave you a server alias, use it on EVERY cix call.**
+The `cix` CLI can have several named servers configured, and a workspace
+(plus all its repos) lives on exactly one of them. The main agent will
+tell you which — e.g. "this project is on server `corporate`". When it
+does, add the global `--server <alias>` flag to *every* `cix` command
+below, alongside `-n <project_name>`. Without it, cix talks to the
+*default* server, where your assigned project doesn't exist, and every
+call comes back empty (which looks like "nothing found" but is really
+"wrong server"). If no alias was given, you're on the default server —
+don't invent one.
+
+**How to tell which shape your project is:** run `cix list` once (on the
+right server), then `grep` for the exact identifier the main agent gave
+you.
 
 ```bash
-cix list | grep -F "<project identifier from main agent>"
+cix list --server <alias> | grep -F "<project identifier from main agent>"
+# (drop --server if the main agent didn't name one — default server)
 ```
 
 - A line starting with `[✓] /` → local working tree.
@@ -46,6 +59,11 @@ the code.
 ## Your tools
 
 You have a read-only toolkit for code investigation inside the assigned project:
+
+> **Server flag.** If the main agent named a server (`--server <alias>`),
+> append it to *every* command in this list, e.g.
+> `cix search "<term>" -n <project_name> --server <alias>`. The examples
+> below omit it for brevity; add it whenever you were given an alias.
 
 - **`cix search "<term>" -n <project_name>`** — semantic / hybrid lookups
   *inside the assigned project*. **Always pass `-n <project_name>`** (the
@@ -72,11 +90,14 @@ re-index.
 
 ## Hard rules — non-negotiable
 
-1. **Stay inside the assigned project.** Every `cix` invocation MUST carry
-   `-n <project_name>`. Without it, cix searches the cwd's project — that's
-   the main session's repo, not yours. Don't read or query other workspace
-   repos. If a finding requires looking elsewhere, surface it as an
-   uncertainty for the main agent to fan out further.
+1. **Stay inside the assigned project — and on the assigned server.**
+   Every `cix` invocation MUST carry `-n <project_name>`, plus
+   `--server <alias>` if the main agent named one. Without `-n`, cix
+   searches the cwd's project (the main session's repo, not yours);
+   without the right `--server`, it queries the wrong backend and returns
+   empty. Don't read or query other workspace repos. If a finding requires
+   looking elsewhere, surface it as an uncertainty for the main agent to
+   fan out further.
 2. **Never hunt the filesystem for a remote-only project.** No
    `find /`, no `locate`, no `ls -R ~`, no recursive Grep across `/`.
    If `cix list` shows the project as `github.com/…@…`, the files do

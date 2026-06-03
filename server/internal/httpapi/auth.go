@@ -17,25 +17,27 @@ import (
 // using the generated openapi.User to keep date formatting under our
 // control (RFC3339Nano UTC) — keeps wire output stable across Go versions.
 type userPayload struct {
-	ID                 string  `json:"id"`
-	Email              string  `json:"email"`
-	Role               string  `json:"role"`
-	MustChangePassword bool    `json:"must_change_password"`
-	CreatedAt          string  `json:"created_at"`
-	UpdatedAt          string  `json:"updated_at"`
-	Disabled           bool    `json:"disabled"`
-	DisabledAt         *string `json:"disabled_at"`
+	ID                   string  `json:"id"`
+	Email                string  `json:"email"`
+	Role                 string  `json:"role"`
+	MustChangePassword   bool    `json:"must_change_password"`
+	CreatedAt            string  `json:"created_at"`
+	UpdatedAt            string  `json:"updated_at"`
+	Disabled             bool    `json:"disabled"`
+	DisabledAt           *string `json:"disabled_at"`
+	LocalProjectDisabled bool    `json:"local_project_disabled"`
 }
 
 func userToPayload(u users.User) userPayload {
 	p := userPayload{
-		ID:                 u.ID,
-		Email:              u.Email,
-		Role:               u.Role,
-		MustChangePassword: u.MustChangePassword,
-		CreatedAt:          u.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt:          u.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		Disabled:           u.DisabledAt != nil,
+		ID:                   u.ID,
+		Email:                u.Email,
+		Role:                 u.Role,
+		MustChangePassword:   u.MustChangePassword,
+		CreatedAt:            u.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:            u.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		Disabled:             u.DisabledAt != nil,
+		LocalProjectDisabled: u.LocalProjectDisabled,
 	}
 	if u.DisabledAt != nil {
 		s := u.DisabledAt.UTC().Format(time.RFC3339Nano)
@@ -425,8 +427,9 @@ func (s *Server) UpdateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	var body struct {
-		Role     *string `json:"role"`
-		Disabled *bool   `json:"disabled"`
+		Role                 *string `json:"role"`
+		Disabled             *bool   `json:"disabled"`
+		LocalProjectDisabled *bool   `json:"local_project_disabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
@@ -440,6 +443,12 @@ func (s *Server) UpdateUser(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if body.Disabled != nil {
 		if err := s.Deps.Users.SetDisabled(r.Context(), id, *body.Disabled); err != nil {
+			respondUserMutationError(w, err)
+			return
+		}
+	}
+	if body.LocalProjectDisabled != nil {
+		if err := s.Deps.Users.SetLocalProjectDisabled(r.Context(), id, *body.LocalProjectDisabled); err != nil {
 			respondUserMutationError(w, err)
 			return
 		}
@@ -610,4 +619,3 @@ func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 		Secure:   r.TLS != nil,
 	})
 }
-

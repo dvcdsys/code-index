@@ -739,6 +739,14 @@ paths:
                 $ref: "#/components/schemas/Project"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            The caller's account has `local_project_disabled=true`
+            (cannot create local projects). Admins are exempt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "409":
           description: A project with this `host_path` already exists
           content:
@@ -1091,6 +1099,15 @@ paths:
                 $ref: "#/components/schemas/IndexBeginResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            The caller's account has `local_project_disabled=true`
+            (cannot index/reindex), or the caller can read the project but
+            is not its owner. Admins are exempt from the former.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -2907,7 +2924,7 @@ components:
 
     User:
       type: object
-      required: [id, email, role, must_change_password, created_at, updated_at, disabled]
+      required: [id, email, role, must_change_password, created_at, updated_at, disabled, local_project_disabled]
       properties:
         id:
           type: string
@@ -2934,6 +2951,15 @@ components:
           type: string
           format: date-time
           nullable: true
+        local_project_disabled:
+          type: boolean
+          description: |
+            When true, the user may not create local projects or
+            index/reindex any project (both return 403). Search of
+            already-indexed projects and workspace creation remain
+            allowed. Admins are always exempt regardless of this flag.
+            Defaults to false; existing users created before this field
+            was introduced are false (allowed) for backward compatibility.
 
     UserWithStats:
       allOf:
@@ -3051,6 +3077,12 @@ components:
           description: |
             When true, the user can no longer authenticate. Refused for
             the last enabled admin when set to true.
+        local_project_disabled:
+          type: boolean
+          description: |
+            When true, the user may not create local projects or
+            index/reindex any project. Search and workspace creation stay
+            allowed; admins are always exempt. Has no last-admin guard.
 
     RuntimeConfig:
       type: object

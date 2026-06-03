@@ -120,7 +120,7 @@ func (s *Service) Get(ctx context.Context, rawToken string) (Session, users.User
 	hash := HashToken(rawToken)
 	row := s.DB.QueryRowContext(ctx,
 		`SELECT s.id, s.user_id, s.created_at, s.expires_at, s.last_seen_at, s.last_seen_ip, s.last_seen_ua,
-		        u.email, u.role, u.must_change_password, u.created_at, u.updated_at, u.disabled_at
+		        u.email, u.role, u.must_change_password, u.created_at, u.updated_at, u.disabled_at, u.local_project_disabled
 		   FROM sessions s
 		   JOIN users u ON u.id = s.user_id
 		  WHERE s.id = ?`, hash)
@@ -131,12 +131,13 @@ func (s *Service) Get(ctx context.Context, rawToken string) (Session, users.User
 		createdAt, expiresAt, lastSeenAt string
 		uEmail, uRole                    string
 		uMcp                             int
+		uLocalProjectDisabled            int
 		uCreatedAt, uUpdatedAt           string
 		uDisabledAt                      sql.NullString
 	)
 	err := row.Scan(
 		&sess.ID, &sess.UserID, &createdAt, &expiresAt, &lastSeenAt, &ip, &ua,
-		&uEmail, &uRole, &uMcp, &uCreatedAt, &uUpdatedAt, &uDisabledAt,
+		&uEmail, &uRole, &uMcp, &uCreatedAt, &uUpdatedAt, &uDisabledAt, &uLocalProjectDisabled,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -158,10 +159,11 @@ func (s *Service) Get(ctx context.Context, rawToken string) (Session, users.User
 	}
 
 	u := users.User{
-		ID:                 sess.UserID,
-		Email:              uEmail,
-		Role:               uRole,
-		MustChangePassword: uMcp == 1,
+		ID:                   sess.UserID,
+		Email:                uEmail,
+		Role:                 uRole,
+		MustChangePassword:   uMcp == 1,
+		LocalProjectDisabled: uLocalProjectDisabled == 1,
 	}
 	u.CreatedAt, _ = time.Parse(time.RFC3339Nano, uCreatedAt)
 	u.UpdatedAt, _ = time.Parse(time.RFC3339Nano, uUpdatedAt)

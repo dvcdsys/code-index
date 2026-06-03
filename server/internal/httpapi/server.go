@@ -153,6 +153,9 @@ func nilIfEmpty(s string) any {
 
 // CreateProject — POST /api/v1/projects.
 func (s *Server) CreateProject(w http.ResponseWriter, r *http.Request) {
+	if !s.requireLocalProjectActions(w, r) {
+		return
+	}
 	var body openapi.CreateProjectRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid request body")
@@ -792,6 +795,9 @@ func fileGroupsToOpenAPI(in []fileGroupResult) []openapi.FileGroupResult {
 
 // IndexBegin — POST /api/v1/projects/{path}/index/begin.
 func (s *Server) IndexBegin(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
+	if !s.requireLocalProjectActions(w, r) {
+		return
+	}
 	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return
@@ -833,6 +839,9 @@ func (s *Server) IndexBegin(w http.ResponseWriter, r *http.Request, path openapi
 // Honours `Accept: application/x-ndjson` to switch into the streaming
 // variant; otherwise returns the legacy single-JSON summary.
 func (s *Server) IndexFiles(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash, params openapi.IndexFilesParams) {
+	if !s.requireLocalProjectActions(w, r) {
+		return
+	}
 	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return
@@ -898,6 +907,9 @@ func (s *Server) IndexFiles(w http.ResponseWriter, r *http.Request, path openapi
 
 // IndexFinish — POST /api/v1/projects/{path}/index/finish.
 func (s *Server) IndexFinish(w http.ResponseWriter, r *http.Request, path openapi.ProjectHash) {
+	if !s.requireLocalProjectActions(w, r) {
+		return
+	}
 	p := s.requireProjectOwnership(w, r)
 	if p == nil {
 		return

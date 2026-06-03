@@ -61,12 +61,13 @@ follows instructions and reports.
 ### Install
 
 Easiest path is the **`cix` Claude Code plugin** (v0.2.0+) — both the
-skill and the sub-agent are bundled and installed together:
+skill and the sub-agent are bundled and installed together. Run these in
+a terminal (not inside a Claude Code session); the install applies the
+next time you start `claude`, so there's no reload step:
 
-```
-/plugin marketplace add dvcdsys/code-index
-/plugin install cix@code-index
-/reload-plugins
+```bash
+claude plugin marketplace add dvcdsys/code-index
+claude plugin install cix@code-index
 ```
 
 Or manually:
