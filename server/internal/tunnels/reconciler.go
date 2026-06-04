@@ -33,8 +33,11 @@ type TokenRevealer interface {
 // WebhookClient is the GitHub webhook API surface. Satisfied by
 // *githubapi.Client.
 type WebhookClient interface {
-	CreateWebhook(ctx context.Context, opts githubapi.CreateWebhookOptions) (githubapi.HookResponse, error)
 	UpdateWebhook(ctx context.Context, opts githubapi.UpdateWebhookOptions) (githubapi.HookResponse, error)
+	// EnsureWebhook registers idempotently: it reuses an existing hook whose
+	// delivery URL already matches (deduping accumulated duplicates) or
+	// creates one. The bool reports whether a new hook was created.
+	EnsureWebhook(ctx context.Context, opts githubapi.CreateWebhookOptions) (githubapi.HookResponse, bool, error)
 }
 
 // Reconciler re-points every webhook_mode=auto repo at the current public
@@ -172,7 +175,11 @@ func (r *Reconciler) reconcileOne(ctx context.Context, g gitrepos.GitRepo, baseU
 		r.logger.Warn("webhook gone on GitHub side, recreating", "project", g.ProjectPath)
 	}
 
-	hr, cerr := r.gh.CreateWebhook(ctx, githubapi.CreateWebhookOptions{
+	// No (usable) stored hook id: register idempotently. EnsureWebhook reuses
+	// a hook already pointing at this delivery URL — and prunes duplicates —
+	// rather than blindly POSTing a new one, which is how repos accumulated
+	// duplicate hooks before (issue #68).
+	hr, created, cerr := r.gh.EnsureWebhook(ctx, githubapi.CreateWebhookOptions{
 		Owner:  owner,
 		Repo:   repo,
 		PAT:    pat,
@@ -187,6 +194,10 @@ func (r *Reconciler) reconcileOne(ctx context.Context, g gitrepos.GitRepo, baseU
 	if serr := r.repos.SetWebhookID(ctx, g.ProjectPath, hr.ID); serr != nil {
 		r.logger.Warn("could not persist webhook id", "project", g.ProjectPath, "err", serr)
 	}
-	out.Action = "created"
+	if created {
+		out.Action = "created"
+	} else {
+		out.Action = "updated"
+	}
 	return out
 }

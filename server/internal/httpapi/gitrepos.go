@@ -602,7 +602,10 @@ func (s *Server) tryAutoRegisterWebhook(ctx context.Context, g gitrepos.GitRepo,
 	if perr != nil {
 		return false, "github_url is not a parseable owner/repo URL"
 	}
-	hr, herr := githubapi.New().CreateWebhook(ctx, githubapi.CreateWebhookOptions{
+	// EnsureWebhook is idempotent: if the repo already has a hook pointing at
+	// this delivery URL it reuses (and PATCHes) it instead of POSTing a
+	// duplicate, and prunes any accumulated duplicates (issue #68).
+	hr, _, herr := githubapi.New().EnsureWebhook(ctx, githubapi.CreateWebhookOptions{
 		Owner:  owner,
 		Repo:   repo,
 		PAT:    pat,
