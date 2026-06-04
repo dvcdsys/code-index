@@ -73,10 +73,10 @@ func New() *Client {
 // repo-picker UI actually renders — so we don't bloat the JSON payload
 // (a single user can have several hundred repos visible via a PAT).
 type Repo struct {
-	FullName      string    `json:"full_name"`       // "owner/name"
-	DefaultBranch string    `json:"default_branch"`  // used to auto-fill the branch input
-	Private       bool      `json:"private"`         // shown as a lock icon in the dropdown
-	HTMLURL       string    `json:"html_url"`        // canonical https://github.com/... form
+	FullName      string    `json:"full_name"`      // "owner/name"
+	DefaultBranch string    `json:"default_branch"` // used to auto-fill the branch input
+	Private       bool      `json:"private"`        // shown as a lock icon in the dropdown
+	HTMLURL       string    `json:"html_url"`       // canonical https://github.com/... form
 	Description   string    `json:"description,omitempty"`
 	Owner         RepoOwner `json:"owner"`
 }
@@ -359,11 +359,22 @@ type CreateWebhookOptions struct {
 	Insecure bool // mostly for tests against http:// origins
 }
 
-// HookResponse is the slice of the GitHub response we care about.
+// HookConfig mirrors the `config` slice of a GitHub hook. We only read
+// `url` — the delivery target — which is what makes registration
+// idempotent: a hook whose config.url already equals our delivery URL is
+// the cix hook, so we reuse it instead of POSTing a duplicate.
+type HookConfig struct {
+	URL string `json:"url"`
+}
+
+// HookResponse is the slice of the GitHub response we care about. The
+// top-level URL is the hook's own API URL (…/hooks/{id}); Config.URL is the
+// delivery target the hook POSTs to.
 type HookResponse struct {
-	ID     int64  `json:"id"`
-	URL    string `json:"url"`
-	Active bool   `json:"active"`
+	ID     int64      `json:"id"`
+	URL    string     `json:"url"`
+	Active bool       `json:"active"`
+	Config HookConfig `json:"config"`
 }
 
 // CreateWebhook calls POST /repos/{owner}/{repo}/hooks. Returns the
@@ -420,6 +431,124 @@ func (c *Client) CreateWebhook(ctx context.Context, opts CreateWebhookOptions) (
 	default:
 		return HookResponse{}, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(respBody))
 	}
+}
+
+// ListWebhooks calls GET /repos/{owner}/{repo}/hooks and returns the repo's
+// configured hooks (with their delivery config.url). Used to make
+// registration idempotent — callers match on config.url to find an existing
+// cix hook before creating a new one. Walks Link rel=next up to maxPages
+// (0 = no cap); a repo with >100 hooks is pathological, so the default
+// caller passes a small ceiling.
+func (c *Client) ListWebhooks(ctx context.Context, owner, repo, pat string, maxPages int) ([]HookResponse, error) {
+	if owner == "" || repo == "" {
+		return nil, fmt.Errorf("owner/repo required")
+	}
+	if pat == "" {
+		return nil, fmt.Errorf("PAT required")
+	}
+	out := []HookResponse{}
+	page := 0
+	pageURL := c.BaseURL + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/hooks?per_page=100"
+	for pageURL != "" {
+		page++
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.signRequest(req, pat)
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("github API: %w", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusOK:
+			var batch []HookResponse
+			if err := json.Unmarshal(body, &batch); err != nil {
+				return nil, fmt.Errorf("parse hooks page: %w", err)
+			}
+			out = append(out, batch...)
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return nil, fmt.Errorf("%w: %s", ErrUnauthorized, githubMessage(body))
+		case http.StatusNotFound:
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, githubMessage(body))
+		default:
+			return nil, fmt.Errorf("github API %d: %s", resp.StatusCode, githubMessage(body))
+		}
+		if maxPages > 0 && page >= maxPages {
+			break
+		}
+		pageURL = parseNextLink(resp.Header.Get("Link"))
+	}
+	return out, nil
+}
+
+// EnsureWebhook is the idempotent registration entry point. It lists the
+// repo's existing hooks and, if one already targets opts.URL, PATCHes it in
+// place (refreshing the secret/events/active flag) and returns its id;
+// otherwise it POSTs a fresh hook. Any *additional* hooks pointing at the
+// same delivery URL are deleted, so a repo that already accumulated
+// duplicates (issue #68) converges to exactly one cix hook.
+//
+// The returned bool reports whether a new hook was created (false = an
+// existing one was reused). Callers persist the returned id either way.
+func (c *Client) EnsureWebhook(ctx context.Context, opts CreateWebhookOptions) (HookResponse, bool, error) {
+	hooks, err := c.ListWebhooks(ctx, opts.Owner, opts.Repo, opts.PAT, 10)
+	if err != nil {
+		return HookResponse{}, false, err
+	}
+	var matches []HookResponse
+	for _, h := range hooks {
+		if sameDeliveryURL(h.Config.URL, opts.URL) {
+			matches = append(matches, h)
+		}
+	}
+	if len(matches) == 0 {
+		hr, cerr := c.CreateWebhook(ctx, opts)
+		if cerr != nil {
+			return HookResponse{}, false, cerr
+		}
+		return hr, true, nil
+	}
+
+	// Reuse the first match; PATCH to refresh delivery config. If GitHub
+	// reports it gone (raced delete between list and patch), create instead.
+	keep := matches[0]
+	hr, uerr := c.UpdateWebhook(ctx, UpdateWebhookOptions{
+		Owner:    opts.Owner,
+		Repo:     opts.Repo,
+		PAT:      opts.PAT,
+		HookID:   keep.ID,
+		URL:      opts.URL,
+		Secret:   opts.Secret,
+		Events:   opts.Events,
+		Insecure: opts.Insecure,
+	})
+	if uerr != nil {
+		if errors.Is(uerr, ErrNotFound) {
+			hr2, cerr := c.CreateWebhook(ctx, opts)
+			if cerr != nil {
+				return HookResponse{}, false, cerr
+			}
+			return hr2, true, nil
+		}
+		return HookResponse{}, false, uerr
+	}
+
+	// Prune any leftover duplicates so the repo ends up with one cix hook.
+	for _, dup := range matches[1:] {
+		_ = c.DeleteWebhook(ctx, opts.Owner, opts.Repo, opts.PAT, dup.ID)
+	}
+	return hr, false, nil
+}
+
+// sameDeliveryURL compares two hook delivery URLs for idempotency. Exact
+// match after trimming a trailing slash — cix builds delivery URLs
+// deterministically, so anything subtler would risk treating a genuinely
+// different endpoint as the same hook.
+func sameDeliveryURL(a, b string) bool {
+	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/") && a != ""
 }
 
 // UpdateWebhookOptions parameterises a hook update. HookID identifies the

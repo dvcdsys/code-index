@@ -196,18 +196,25 @@ func (fakeTokens) Touch(_ context.Context, _ string) error            { return n
 type fakeGH struct {
 	created, updated   int
 	failUpdateNotFound bool
+	// existing simulates GitHub-side hooks keyed by delivery URL, so
+	// EnsureWebhook can model the idempotent reuse path.
+	existing map[string]int64
 }
 
-func (f *fakeGH) CreateWebhook(_ context.Context, _ githubapi.CreateWebhookOptions) (githubapi.HookResponse, error) {
-	f.created++
-	return githubapi.HookResponse{ID: 999}, nil
-}
 func (f *fakeGH) UpdateWebhook(_ context.Context, opts githubapi.UpdateWebhookOptions) (githubapi.HookResponse, error) {
 	if f.failUpdateNotFound {
 		return githubapi.HookResponse{}, fmt.Errorf("%w: gone", githubapi.ErrNotFound)
 	}
 	f.updated++
 	return githubapi.HookResponse{ID: opts.HookID}, nil
+}
+func (f *fakeGH) EnsureWebhook(_ context.Context, opts githubapi.CreateWebhookOptions) (githubapi.HookResponse, bool, error) {
+	if id, ok := f.existing[opts.URL]; ok {
+		f.updated++
+		return githubapi.HookResponse{ID: id, Config: githubapi.HookConfig{URL: opts.URL}}, false, nil
+	}
+	f.created++
+	return githubapi.HookResponse{ID: 999, Config: githubapi.HookConfig{URL: opts.URL}}, true, nil
 }
 
 func i64(v int64) *int64 { return &v }
@@ -253,6 +260,32 @@ func TestReconcileRecreatesWhenHookGone(t *testing.T) {
 	}
 	if res.Created != 1 || gh.created != 1 {
 		t.Fatalf("expected recreate on 404 update, got created=%d (%+v)", res.Created, res.Outcomes)
+	}
+}
+
+func TestReconcileReusesExistingHookWithoutStoredID(t *testing.T) {
+	// A repo with no stored WebhookID but an existing hook already pointing
+	// at the delivery URL must be reused (updated), not duplicated. This is
+	// the idempotency guarantee of issue #68.
+	repos := &fakeRepos{repos: []gitrepos.GitRepo{
+		{ProjectPath: "github.com/o/a@main", PathHash: "aaa", GitHubURL: "https://github.com/o/a", TokenID: "t1", WebhookSecret: "s", WebhookMode: gitrepos.WebhookModeAuto},
+	}}
+	delivery := "https://x.trycloudflare.com" + WebhookPathPrefix + "aaa"
+	gh := &fakeGH{existing: map[string]int64{delivery: 77}}
+	r := NewReconciler(repos, fakeTokens{}, gh, nil)
+
+	res, err := r.Reconcile(context.Background(), "https://x.trycloudflare.com")
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.Created != 0 || res.Updated != 1 {
+		t.Fatalf("expected reuse (updated), got created=%d updated=%d (%+v)", res.Created, res.Updated, res.Outcomes)
+	}
+	if gh.created != 0 {
+		t.Fatalf("must not POST a duplicate hook, got created=%d", gh.created)
+	}
+	if repos.setIDs["github.com/o/a@main"] != 77 {
+		t.Fatalf("reused hook id should be persisted, got %v", repos.setIDs)
 	}
 }
 
