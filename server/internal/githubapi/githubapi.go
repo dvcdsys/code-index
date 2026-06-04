@@ -527,9 +527,15 @@ func (c *Client) EnsureWebhook(ctx context.Context, opts CreateWebhookOptions) (
 	})
 	if uerr != nil {
 		if errors.Is(uerr, ErrNotFound) {
+			// matches[0] was deleted out from under us between list and
+			// patch. Create a replacement, but still prune any other
+			// same-URL duplicates we listed so we don't leave them behind.
 			hr2, cerr := c.CreateWebhook(ctx, opts)
 			if cerr != nil {
 				return HookResponse{}, false, cerr
+			}
+			for _, dup := range matches[1:] {
+				_ = c.DeleteWebhook(ctx, opts.Owner, opts.Repo, opts.PAT, dup.ID)
 			}
 			return hr2, true, nil
 		}
