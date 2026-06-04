@@ -40,6 +40,14 @@ type ServerEntry struct {
 	Name string `yaml:"name" desc:"Server alias"`
 	URL  string `yaml:"url" desc:"Base URL of the cix server" validate:"omitempty,url"`
 	Key  string `yaml:"key" desc:"API key (bearer token)" sensitive:"true"`
+	// Headers are extra HTTP headers attached to every request the CLI makes
+	// to this server (in addition to the cix Bearer). They let the client
+	// satisfy an authenticating reverse proxy / Zero-Trust gateway in front
+	// of cix — e.g. a Cloudflare Access service token
+	// (CF-Access-Client-Id / CF-Access-Client-Secret). Values support
+	// ${ENV} expansion at request time so secrets stay out of the file.
+	// Opt-in: absent = current behavior.
+	Headers map[string]string `yaml:"headers,omitempty" sensitive:"true" desc:"Extra HTTP headers sent on every request (values support ${ENV} expansion)"`
 }
 
 type APIConfig struct {
@@ -305,6 +313,85 @@ func SetServerKey(name, key string) error {
 	upsertServer(cfg, name, func(s *ServerEntry) { s.Key = key })
 	return Save(cfg)
 }
+
+// SetServerHeader sets (or creates) a custom HTTP header on the named server
+// and persists. The header name must be a valid HTTP token and the value must
+// not contain CR/LF (header-injection guard). Creates the server entry if it
+// does not exist yet, mirroring SetServerURL/SetServerKey.
+func SetServerHeader(name, headerName, value string) error {
+	if err := validateServerName(name); err != nil {
+		return err
+	}
+	if err := validateHeader(headerName, value); err != nil {
+		return err
+	}
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	upsertServer(cfg, name, func(s *ServerEntry) {
+		if s.Headers == nil {
+			s.Headers = map[string]string{}
+		}
+		s.Headers[headerName] = value
+	})
+	return Save(cfg)
+}
+
+// UnsetServerHeader removes a custom header from the named server and persists.
+// Missing server or missing header is a no-op (the post-condition — header
+// absent — already holds).
+func UnsetServerHeader(name, headerName string) error {
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	s, ok := cfg.GetServer(name)
+	if !ok {
+		return fmt.Errorf("server %q not found", name)
+	}
+	if s.Headers == nil {
+		return nil
+	}
+	delete(s.Headers, headerName)
+	if len(s.Headers) == 0 {
+		// Drop the empty map so it round-trips out of the YAML (omitempty).
+		s.Headers = nil
+	}
+	return Save(cfg)
+}
+
+// isHeaderTokenChar reports whether r is allowed in an HTTP field-name per
+// RFC 7230 §3.2.6 (token). Used to reject malformed / injection-prone names.
+func isHeaderTokenChar(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	}
+	return strings.ContainsRune("!#$%&'*+-.^_`|~", r)
+}
+
+// validateHeader checks a custom header name/value pair. The name must be a
+// non-empty RFC 7230 token; the value must not embed CR or LF (which would let
+// a config value inject additional headers or split the request).
+func validateHeader(name, value string) error {
+	if name == "" {
+		return fmt.Errorf("header name must not be empty")
+	}
+	for _, r := range name {
+		if !isHeaderTokenChar(r) {
+			return fmt.Errorf("invalid character %q in header name %q (must be a valid HTTP token)", r, name)
+		}
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("header %q value must not contain CR or LF", name)
+	}
+	return nil
+}
+
+// ValidateHeader is the exported guard for callers outside this package (e.g.
+// getClient, after ${ENV} expansion). Same rules as the internal check.
+func ValidateHeader(name, value string) error { return validateHeader(name, value) }
 
 // SetDefaultServer marks an existing server as the default and persists.
 func SetDefaultServer(name string) error {

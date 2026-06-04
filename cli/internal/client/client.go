@@ -21,6 +21,12 @@ type Client struct {
 	apiKey     string
 	httpClient *http.Client
 
+	// customHeaders are user-configured headers attached to every outbound
+	// request (in addition to the cix Bearer) so the client can satisfy an
+	// authenticating reverse proxy in front of cix. Values are already
+	// ${ENV}-expanded and validated by the caller (getClient). Never logged.
+	customHeaders map[string]string
+
 	// streamingClient is used for endpoints that return chunked NDJSON
 	// (currently only POST /index/files when Accept advertises x-ndjson).
 	// Timeout is 0 because the natural duration of an indexing batch is
@@ -47,6 +53,22 @@ func New(baseURL, apiKey string) *Client {
 		},
 		streamingClient:      &http.Client{Timeout: 0},
 		streamingIdleTimeout: defaultStreamingIdleTimeout,
+	}
+}
+
+// SetCustomHeaders configures extra headers attached to every request. The
+// map is used as-is (values must already be expanded/validated by the caller).
+// Passing nil or an empty map is a no-op — current behavior is preserved.
+func (c *Client) SetCustomHeaders(h map[string]string) {
+	c.customHeaders = h
+}
+
+// applyCustomHeaders attaches the configured custom headers to req. It is
+// always called BEFORE the cix-managed headers (Authorization, Content-Type,
+// Accept) are set, so a stray config value can never clobber authentication.
+func (c *Client) applyCustomHeaders(req *http.Request) {
+	for k, v := range c.customHeaders {
+		req.Header.Set(k, v)
 	}
 }
 
@@ -77,6 +99,8 @@ func (c *Client) do(method, path string, body interface{}) (*http.Response, erro
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
+	// Custom headers first, then cix-managed headers — so the latter win.
+	c.applyCustomHeaders(req)
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -192,9 +216,17 @@ func parseResponse(resp *http.Response, v interface{}) error {
 	return nil
 }
 
-// Health checks if the API server is running
+// Health checks if the API server is running. Although /health is public on
+// cix, the request must still carry any custom headers — behind an
+// authenticating reverse proxy the probe would otherwise be bounced (302/403)
+// at the edge before reaching cix.
 func (c *Client) Health() error {
-	resp, err := c.httpClient.Get(c.baseURL + "/health")
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/health", nil)
+	if err != nil {
+		return fmt.Errorf("health check failed: %w", err)
+	}
+	c.applyCustomHeaders(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
 	}

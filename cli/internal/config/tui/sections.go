@@ -29,11 +29,11 @@ type row struct {
 type rowKind int
 
 const (
-	rowKindInert        rowKind = iota // no action on Enter
-	rowKindScalarEdit                  // Enter opens text input; SetByPath on save
-	rowKindBoolToggle                  // space/x flips bool; Enter does too
-	rowKindServerEdit                  // Enter opens server URL/key editor
-	rowKindDefaultPick                 // Enter cycles default_server alias
+	rowKindInert       rowKind = iota // no action on Enter
+	rowKindScalarEdit                 // Enter opens text input; SetByPath on save
+	rowKindBoolToggle                 // space/x flips bool; Enter does too
+	rowKindServerEdit                 // Enter opens server URL/key editor
+	rowKindDefaultPick                // Enter cycles default_server alias
 )
 
 // rowsFor returns the rendered rows for the currently selected section.
@@ -70,9 +70,16 @@ func serverRows(cfg *config.Config) []row {
 		if s.Key != "" {
 			keyStatus = "(set)"
 		}
+		value := fmt.Sprintf("%s   key %s", s.URL, keyStatus)
+		// Surface custom headers by COUNT only — values may be secrets and are
+		// never shown in the TUI. Edit them via `cix config set
+		// server.<name>.header.<Name>` or by hand in config.yaml.
+		if n := len(s.Headers); n > 0 {
+			value += fmt.Sprintf("   headers %d", n)
+		}
 		out = append(out, row{
 			label:     fmt.Sprintf("%s %s", marker, s.Name),
-			value:     fmt.Sprintf("%s   key %s", s.URL, keyStatus),
+			value:     value,
 			kind:      rowKindServerEdit,
 			serverIdx: i,
 		})

@@ -193,6 +193,23 @@ func getClient() (*client.Client, error) {
 	}
 
 	c := client.New(url, key)
+
+	// Custom headers: ${ENV}-expand each value into a local copy (never
+	// written back to disk, like the url/key overrides above) so secrets can
+	// stay in the environment rather than in config.yaml. Validate after
+	// expansion; on a bad header fail loudly WITHOUT echoing the value.
+	if len(srv.Headers) > 0 {
+		expanded := make(map[string]string, len(srv.Headers))
+		for name, raw := range srv.Headers {
+			val := os.ExpandEnv(raw)
+			if err := config.ValidateHeader(name, val); err != nil {
+				return nil, fmt.Errorf("invalid custom header %q for server %q: %w", name, srv.Name, err)
+			}
+			expanded[name] = val
+		}
+		c.SetCustomHeaders(expanded)
+	}
+
 	if cfg.Indexing.StreamingIdleTimeoutSec > 0 {
 		c.SetStreamingIdleTimeout(time.Duration(cfg.Indexing.StreamingIdleTimeoutSec) * time.Second)
 	}

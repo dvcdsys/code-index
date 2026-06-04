@@ -56,6 +56,18 @@ plain HTTP for the upstream hop, the auto-detection will return false and
 - Or configure the proxy to make the upstream hop look TLS-marked — the
   details vary; consult the proxy docs.
 
+## Authenticating reverse proxy / Zero-Trust gateway
+
+If you put an authenticating proxy in front of cix (Cloudflare Access,
+oauth2-proxy, Authelia, an SSO/mTLS-terminating LB), the browser dashboard
+passes it via interactive SSO, but the `cix` CLI and AI-agent tooling send only
+the cix Bearer and get bounced at the edge (302/403) unless their source IP is
+allow-listed. The CLI can attach **custom request headers** (e.g. a Cloudflare
+Access service token) on every request to satisfy the edge layer in addition to
+the cix Bearer — the proxy validates and strips them, so cix needs no knowledge
+of the proxy. See
+[`CLI_CONFIG.md` → Custom request headers](CLI_CONFIG.md#custom-request-headers-auth-behind-a-reverse-proxy).
+
 ## Login brute-force resistance
 
 POST `/api/v1/auth/login` is rate-limited in process (`internal/httpapi/loginlimiter.go`):
