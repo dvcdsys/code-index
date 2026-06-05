@@ -525,6 +525,74 @@ contract Token is IERC20 {
 	}
 }
 
+// TestRegistry_SolidityAllNodeKindsPresent is a stricter sibling to
+// TestRegistry_NodeNamesMatchAST: the generic test passes if *any* one of a
+// language's configured node types appears in the AST, which would let a
+// grammar rename of e.g. `modifier_definition` slip through unnoticed.
+//
+// Solidity's registry entry advertises 10 node kinds. This test parses a
+// contract that exercises every one of them and fails loudly if any single
+// kind is missing from the AST — protecting downstream `cix def` / `cix refs`
+// behavior for modifiers, events, constructors, and receive/fallback
+// functions, which are easy to overlook in the broader smoke test.
+func TestRegistry_SolidityAllNodeKindsPresent(t *testing.T) {
+	defer Configure(nil)
+	Configure(nil)
+
+	src := `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface I { function f() external; }
+library L { function g() internal pure returns (uint) { return 1; } }
+contract C {
+    struct S { uint x; }
+    enum E { A, B }
+    event Ev(uint x);
+    modifier m() { _; }
+    constructor() {}
+    receive() external payable {}
+    function f() public {}
+}
+`
+
+	registryMu.RLock()
+	fn, ok := languageRegistry["solidity"]
+	nodes := languageNodes["solidity"]
+	registryMu.RUnlock()
+	if !ok {
+		t.Fatal("solidity not in registry")
+	}
+	if nodes == nil {
+		t.Fatal("solidity has no node map")
+	}
+
+	grammar := fn()
+	if grammar == nil {
+		t.Fatal("nil solidity grammar")
+	}
+
+	parser := sitter.NewParser(grammar)
+	tree, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	root := tree.RootNode()
+	if root == nil {
+		t.Fatal("nil root")
+	}
+
+	seen := map[string]struct{}{}
+	collectNodeTypes(root, grammar, seen)
+
+	for _, types := range nodes {
+		for _, ty := range types {
+			if _, found := seen[ty]; !found {
+				t.Errorf("configured Solidity node type %q not present in AST — grammar rename?", ty)
+			}
+		}
+	}
+}
+
 // --- Configure() filtering ---
 
 func TestConfigure_FilterToSubset(t *testing.T) {
@@ -655,7 +723,22 @@ func TestRegistry_NodeNamesMatchAST(t *testing.T) {
 		"fortran":    "subroutine s\nend subroutine\n",
 		"haskell":    "module M where\n\nf :: Int -> Int\nf x = x\n",
 		"ocaml":      "let f x = x\n",
-		"solidity":   "contract C {\n    function f() public {}\n}\n",
+		// Covers every configured kind: contract_declaration, library_declaration,
+		// interface_declaration, struct_declaration, enum_declaration, event_definition,
+		// function_definition, modifier_definition, constructor_definition,
+		// fallback_receive_definition. Guards against grammar renames for any of them.
+		"solidity": "" +
+			"interface I { function f() external; }\n" +
+			"library L { function g() internal pure returns (uint) { return 1; } }\n" +
+			"contract C {\n" +
+			"    struct S { uint x; }\n" +
+			"    enum E { A, B }\n" +
+			"    event Ev(uint x);\n" +
+			"    modifier m() { _; }\n" +
+			"    constructor() {}\n" +
+			"    receive() external payable {}\n" +
+			"    function f() public {}\n" +
+			"}\n",
 	}
 
 	for lang, src := range fixtures {
