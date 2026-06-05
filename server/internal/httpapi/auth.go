@@ -11,7 +11,6 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
-	"github.com/go-chi/chi/v5"
 )
 
 // userPayload mirrors the OpenAPI `User` schema. Built by hand instead of
@@ -482,17 +481,10 @@ func (s *Server) DeleteUser(w http.ResponseWriter, r *http.Request, id string) {
 // disables anyone, so no last-admin guard applies. The target user's existing
 // sessions are revoked so they must log back in and pass the change-password
 // gate.
-//
-// Mounted directly in router.go (chi.URLParam for {id}) rather than through the
-// generated OpenAPI mux: the committed openapi.gen.go predates the pinned
-// oapi-codegen and several other admin endpoints (embedding providers) follow
-// the same direct-mount pattern. The endpoint still lives in doc/openapi.yaml
-// as the source of truth.
-func (s *Server) ResetUserPassword(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ResetUserPassword(w http.ResponseWriter, r *http.Request, id string) {
 	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
-	id := chi.URLParam(r, "id")
 	var body struct {
 		NewPassword string `json:"new_password"`
 	}

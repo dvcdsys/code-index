@@ -190,23 +190,12 @@ func NewRouter(d Deps) http.Handler {
 
 	// All API operations — chi.HandlerFromMux walks the spec and registers
 	// one chi route per OpenAPI operation, dispatching to Server methods.
+	// This includes the embedding-provider admin endpoints and the admin
+	// password-reset endpoint; both used to be mounted directly here while
+	// the committed openapi.gen.go lagged the spec, but the file is now
+	// regenerated so the generated mux owns them (a direct mount on top
+	// would double-register and panic).
 	openapi.HandlerFromMux(srv, r)
-
-	// Embedding-provider admin endpoints — mounted directly because
-	// they are not yet in openapi.yaml. The handlers each gate on
-	// mustBeAdmin; nothing reaches them without an admin session /
-	// API key.
-	r.Get("/api/v1/admin/embedding-providers", srv.ListEmbeddingProviders)
-	r.Get("/api/v1/admin/embedding-providers/active", srv.GetActiveEmbeddingProvider)
-	r.Put("/api/v1/admin/embedding-providers/active", srv.SwitchEmbeddingProvider)
-	r.Post("/api/v1/admin/embedding-providers/{kind}/test", srv.TestEmbeddingProvider)
-
-	// Admin password reset — mounted directly for the same reason as the
-	// embedding-provider routes above (the committed openapi.gen.go is stale
-	// vs the pinned oapi-codegen, so we don't regenerate it here). The
-	// endpoint is documented in doc/openapi.yaml. The handler gates on
-	// mustBeAdmin.
-	r.Post("/api/v1/admin/users/{id}/reset-password", srv.ResetUserPassword)
 
 	return r
 }

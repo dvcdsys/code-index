@@ -22,7 +22,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
-	"github.com/go-chi/chi/v5"
+	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 )
 
 // providerInfoPayload is the per-kind entry in GET /embedding-providers.
@@ -249,11 +249,11 @@ func (s *Server) SwitchEmbeddingProvider(w http.ResponseWriter, r *http.Request)
 // persisting it), Starts it, then Stops it. Returns the detected
 // dimension and a success flag, or a typed error message the
 // dashboard can render verbatim.
-func (s *Server) TestEmbeddingProvider(w http.ResponseWriter, r *http.Request) {
+func (s *Server) TestEmbeddingProvider(w http.ResponseWriter, r *http.Request, kindParam openapi.TestEmbeddingProviderParamsKind) {
 	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
-	kind := chi.URLParam(r, "kind")
+	kind := string(kindParam)
 	if kind == "" {
 		writeError(w, http.StatusBadRequest, "kind is required")
 		return
