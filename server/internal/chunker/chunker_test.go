@@ -475,6 +475,56 @@ end
 	}
 }
 
+func TestChunkFile_Solidity(t *testing.T) {
+	src := `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
+contract Token is IERC20 {
+    enum State { Active, Paused }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        return true;
+    }
+}
+`
+	chunks, _, err := ChunkFile("Token.sol", src, "solidity", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected chunks from Solidity source")
+	}
+	counts := chunkTypeCounts(chunks)
+	if counts["class"] == 0 {
+		t.Errorf("expected a class chunk for the contract, got: %v", counts)
+	}
+
+	var names []string
+	for _, c := range chunks {
+		if c.SymbolName != nil {
+			names = append(names, *c.SymbolName)
+		}
+	}
+	if len(names) == 0 {
+		t.Fatalf("expected named symbols from Solidity source, got none (chunk types: %v)", counts)
+	}
+	want := map[string]bool{"Token": false, "transfer": false}
+	for _, n := range names {
+		if _, ok := want[n]; ok {
+			want[n] = true
+		}
+	}
+	for sym, found := range want {
+		if !found {
+			t.Errorf("expected symbol %q among extracted symbols %v", sym, names)
+		}
+	}
+}
+
 // --- Configure() filtering ---
 
 func TestConfigure_FilterToSubset(t *testing.T) {
@@ -605,6 +655,7 @@ func TestRegistry_NodeNamesMatchAST(t *testing.T) {
 		"fortran":    "subroutine s\nend subroutine\n",
 		"haskell":    "module M where\n\nf :: Int -> Int\nf x = x\n",
 		"ocaml":      "let f x = x\n",
+		"solidity":   "contract C {\n    function f() public {}\n}\n",
 	}
 
 	for lang, src := range fixtures {

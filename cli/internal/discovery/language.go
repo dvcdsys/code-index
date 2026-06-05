@@ -27,6 +27,7 @@ var ExtensionMap = map[string]string{
 	".swift":  "swift",
 	".kt":     "kotlin",
 	".scala":  "scala",
+	".sol":    "solidity",
 	".r":      "r",
 	".lua":    "lua",
 	".sh":     "bash",
