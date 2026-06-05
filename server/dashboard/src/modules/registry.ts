@@ -2,6 +2,7 @@ import { ApiKeysModule } from './api-keys';
 import { GithubIntegrationModule } from './github-integration';
 import { GroupsModule } from './groups';
 import { HomeModule } from './home';
+import { LoginLocksModule } from './login-locks';
 import { ManagedTunnelsModule } from './managed-tunnels';
 import { ProjectsModule } from './projects';
 import { SearchModule } from './search';
@@ -28,6 +29,7 @@ export const MODULES: Module[] = [
   GithubIntegrationModule,
   ManagedTunnelsModule,
   UsersModule,
+  LoginLocksModule,
   GroupsModule,
   SettingsModule,
   ServerModule,

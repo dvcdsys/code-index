@@ -434,6 +434,55 @@ paths:
         "422":
           $ref: "#/components/responses/Unprocessable"
 
+  /api/v1/admin/login-locks:
+    get:
+      operationId: listLoginLocks
+      tags: [admin]
+      summary: List active login rate-limit locks (admin only)
+      description: |
+        Returns the in-memory login-limiter counters that are currently at or
+        over their threshold — the IPs and (IP, email) pairs a login would be
+        rejected for right now with 429. State is per-process and self-heals as
+        the sliding windows expire, so this is a point-in-time snapshot.
+      responses:
+        "200":
+          description: Active locks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginLockListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/login-locks/reset:
+    post:
+      operationId: resetLoginLock
+      tags: [admin]
+      summary: Clear a login rate-limit lock (admin only)
+      description: |
+        Lifts a single lock surfaced by `GET /admin/login-locks`. `type` picks
+        the counter: `ip` clears the per-IP horizontal-sweep counter; `ip_email`
+        clears the per-(IP, email) counter for one account. The admin selects
+        the exact row to clear — the server never clears across keys.
+        Idempotent: clearing a key that is no longer locked returns 204.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetLoginLockRequest"
+      responses:
+        "204":
+          description: Lock cleared (or already absent)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
   /api/v1/admin/runtime-config:
     get:
       operationId: getRuntimeConfig
@@ -3111,6 +3160,59 @@ components:
           description: |
             One-time password the user must change on next login.
             The admin shares this out-of-band.
+
+    LoginLock:
+      type: object
+      required: [type, ip, attempts, limit, expires_at]
+      properties:
+        type:
+          type: string
+          enum: [ip, ip_email]
+          description: |
+            `ip` — the per-IP horizontal-sweep counter (many emails from one
+            source). `ip_email` — the per-(IP, email) counter for one account.
+        ip:
+          type: string
+          description: Source IP the lock is keyed on.
+        email:
+          type: string
+          description: Lower-cased email; present only for type `ip_email`.
+        attempts:
+          type: integer
+          description: Attempts currently inside the sliding window.
+        limit:
+          type: integer
+          description: The cap that tripped the lock.
+        expires_at:
+          type: string
+          format: date-time
+          description: RFC3339 — when the oldest attempt ages out and a slot frees.
+
+    LoginLockListResponse:
+      type: object
+      required: [locks, total]
+      properties:
+        locks:
+          type: array
+          items:
+            $ref: "#/components/schemas/LoginLock"
+        total:
+          type: integer
+
+    ResetLoginLockRequest:
+      type: object
+      required: [type, ip]
+      properties:
+        type:
+          type: string
+          enum: [ip, ip_email]
+          description: Which counter to clear — matches the `type` from the list.
+        ip:
+          type: string
+          description: Source IP of the lock to clear.
+        email:
+          type: string
+          description: Required when `type` is `ip_email`; ignored otherwise.
 
     UpdateUserRequest:
       type: object
