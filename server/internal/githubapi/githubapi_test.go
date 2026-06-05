@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -464,6 +465,183 @@ func TestListReposForAccountUsesCorrectEndpoint(t *testing.T) {
 	}
 	if lastPath != "/orgs/acme/repos" {
 		t.Fatalf("org account → /orgs/{login}/repos, got %q", lastPath)
+	}
+}
+
+// hooksServer is a tiny stateful in-memory fake of GitHub's
+// /repos/{owner}/{repo}/hooks endpoints — enough to exercise the
+// list→match→create/update/delete dance EnsureWebhook performs. The map is
+// id → delivery (config.url). Counters let tests assert no duplicate POSTs.
+type hooksServer struct {
+	hooks   map[int64]string
+	nextID  int64
+	posts   int
+	patches int
+	deletes int
+}
+
+func newHooksServer(t *testing.T, seed map[int64]string) (*Client, *hooksServer) {
+	t.Helper()
+	st := &hooksServer{hooks: map[int64]string{}, nextID: 100}
+	for id, u := range seed {
+		st.hooks[id] = u
+		if id >= st.nextID {
+			st.nextID = id + 1
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Path is /repos/o/r/hooks or /repos/o/r/hooks/{id}.
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		var hookID int64
+		if len(parts) == 5 { // repos/o/r/hooks/{id}
+			hookID, _ = strconv.ParseInt(parts[4], 10, 64)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			type hook struct {
+				ID     int64      `json:"id"`
+				Active bool       `json:"active"`
+				Config HookConfig `json:"config"`
+			}
+			out := []hook{}
+			for id, u := range st.hooks {
+				out = append(out, hook{ID: id, Active: true, Config: HookConfig{URL: u}})
+			}
+			_ = json.NewEncoder(w).Encode(out)
+		case http.MethodPost:
+			st.posts++
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Config struct {
+					URL string `json:"url"`
+				} `json:"config"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			id := st.nextID
+			st.nextID++
+			st.hooks[id] = body.Config.URL
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":` + strconv.FormatInt(id, 10) + `,"active":true,"config":{"url":"` + body.Config.URL + `"}}`))
+		case http.MethodPatch:
+			st.patches++
+			if _, ok := st.hooks[hookID]; !ok {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+				return
+			}
+			raw, _ := io.ReadAll(r.Body)
+			var body struct {
+				Config struct {
+					URL string `json:"url"`
+				} `json:"config"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			st.hooks[hookID] = body.Config.URL
+			_, _ = w.Write([]byte(`{"id":` + strconv.FormatInt(hookID, 10) + `,"active":true,"config":{"url":"` + body.Config.URL + `"}}`))
+		case http.MethodDelete:
+			st.deletes++
+			delete(st.hooks, hookID)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := New()
+	c.BaseURL = srv.URL
+	return c, st
+}
+
+func TestEnsureWebhookCreatesWhenNoneExist(t *testing.T) {
+	c, st := newHooksServer(t, nil)
+	hr, created, err := c.EnsureWebhook(context.Background(), CreateWebhookOptions{
+		Owner: "o", Repo: "r", PAT: "ghp_x",
+		URL: "https://cix.test/api/v1/webhooks/github/abc", Secret: "s",
+	})
+	if err != nil {
+		t.Fatalf("EnsureWebhook: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected created=true on empty repo")
+	}
+	if st.posts != 1 {
+		t.Fatalf("expected 1 POST, got %d", st.posts)
+	}
+	if st.hooks[hr.ID] != "https://cix.test/api/v1/webhooks/github/abc" {
+		t.Fatalf("hook not registered with expected url: %v", st.hooks)
+	}
+}
+
+func TestEnsureWebhookReusesMatchingURL(t *testing.T) {
+	const url = "https://cix.test/api/v1/webhooks/github/abc"
+	c, st := newHooksServer(t, map[int64]string{55: url})
+	hr, created, err := c.EnsureWebhook(context.Background(), CreateWebhookOptions{
+		Owner: "o", Repo: "r", PAT: "ghp_x", URL: url, Secret: "s",
+	})
+	if err != nil {
+		t.Fatalf("EnsureWebhook: %v", err)
+	}
+	if created {
+		t.Fatalf("expected created=false (reuse), got true")
+	}
+	if hr.ID != 55 {
+		t.Fatalf("expected reused id 55, got %d", hr.ID)
+	}
+	if st.posts != 0 {
+		t.Fatalf("must not POST a duplicate, got %d POSTs", st.posts)
+	}
+	if st.patches != 1 {
+		t.Fatalf("expected 1 PATCH to refresh config, got %d", st.patches)
+	}
+	if len(st.hooks) != 1 {
+		t.Fatalf("expected exactly one hook to remain, got %d", len(st.hooks))
+	}
+}
+
+func TestEnsureWebhookPrunesDuplicates(t *testing.T) {
+	const url = "https://cix.test/api/v1/webhooks/github/abc"
+	// Three identical hooks already exist (the issue #68 state).
+	c, st := newHooksServer(t, map[int64]string{1: url, 2: url, 3: url})
+	_, created, err := c.EnsureWebhook(context.Background(), CreateWebhookOptions{
+		Owner: "o", Repo: "r", PAT: "ghp_x", URL: url, Secret: "s",
+	})
+	if err != nil {
+		t.Fatalf("EnsureWebhook: %v", err)
+	}
+	if created {
+		t.Fatalf("expected created=false, got true")
+	}
+	if st.posts != 0 {
+		t.Fatalf("must not POST, got %d", st.posts)
+	}
+	if st.deletes != 2 {
+		t.Fatalf("expected 2 duplicate deletes, got %d", st.deletes)
+	}
+	if len(st.hooks) != 1 {
+		t.Fatalf("repo should converge to a single hook, got %d", len(st.hooks))
+	}
+}
+
+func TestEnsureWebhookIgnoresNonMatchingURL(t *testing.T) {
+	// A hook for a *different* delivery URL must not be reused — that would
+	// hijack an unrelated webhook. EnsureWebhook creates a new one alongside.
+	c, st := newHooksServer(t, map[int64]string{9: "https://other.test/hook"})
+	_, created, err := c.EnsureWebhook(context.Background(), CreateWebhookOptions{
+		Owner: "o", Repo: "r", PAT: "ghp_x",
+		URL: "https://cix.test/api/v1/webhooks/github/abc", Secret: "s",
+	})
+	if err != nil {
+		t.Fatalf("EnsureWebhook: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected created=true for a non-matching existing hook")
+	}
+	if st.posts != 1 {
+		t.Fatalf("expected 1 POST, got %d", st.posts)
+	}
+	if len(st.hooks) != 2 {
+		t.Fatalf("expected both hooks to coexist, got %d", len(st.hooks))
 	}
 }
 

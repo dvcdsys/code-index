@@ -82,10 +82,17 @@ When `webhook_mode=auto` and the PAT scope check passes:
 
 1. Operator submits the add-repo form. The server clones the repo
    (`clone_repo` job) and starts indexing.
-2. In parallel, the server calls `POST /repos/{owner}/{repo}/hooks`
-   on GitHub via `server/internal/githubapi/`. The hook payload sets
-   `events: ["push"]`, `content_type: json`, and embeds the
-   server-generated `webhook_secret`.
+2. In parallel, the server registers the hook **idempotently** via
+   `server/internal/githubapi/` (`EnsureWebhook`): it first
+   `GET /repos/{owner}/{repo}/hooks` and looks for a hook whose
+   `config.url` already equals this server's delivery URL. If one
+   exists it is reused (PATCHed to refresh the secret/events) and any
+   extra duplicates pointing at the same URL are deleted; only when
+   none match does it `POST /repos/{owner}/{repo}/hooks`. The hook
+   payload sets `events: ["push"]`, `content_type: json`, and embeds
+   the server-generated `webhook_secret`. This is what prevents
+   duplicate hooks accumulating across re-adds, reindexes, and server
+   restarts (issue #68).
 3. GitHub responds with the hook id. The id is stored on the
    `git_repos` row so a later DELETE can call
    `DELETE /repos/{owner}/{repo}/hooks/{id}` cleanly.
@@ -154,7 +161,17 @@ On boot the server runs a one-shot audit
 
 This is also why rotating `CIX_PUBLIC_URL` should be paired with a
 "reregister all" sweep in the dashboard — there's no automatic
-follow-up.
+follow-up. The reconcile/reregister path is idempotent: a repo whose
+hook id is still known is PATCHed in place; a repo whose stored id was
+lost is matched by `config.url` and reused rather than re-created, so a
+sweep never leaves a repo with old **and** new hooks side by side.
+
+One caveat for repos that *already* accumulated same-URL duplicates
+before this fix: when the stored hook id is still valid, reconcile
+PATCHes that one hook and returns — it does **not** list and prune the
+sibling duplicates. Re-adding the repo (which routes through the
+`EnsureWebhook` list→match→prune path) collapses them back to a single
+hook; a plain reconcile sweep does not.
 
 ## 7. What gets re-indexed on a push
 
