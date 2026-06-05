@@ -89,6 +89,41 @@ func TestUpdatePassword_ClearsMustChange(t *testing.T) {
 	}
 }
 
+func TestAdminResetPassword_SetsMustChange(t *testing.T) {
+	s := newTestService(t)
+	u, _ := s.Create(context.Background(), "a@b.com", "initial-password", RoleUser, false)
+	if err := s.AdminResetPassword(context.Background(), u.ID, "freshpass123"); err != nil {
+		t.Fatalf("AdminResetPassword: %v", err)
+	}
+	got, err := s.GetByID(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if !got.MustChangePassword {
+		t.Errorf("MustChangePassword should be SET after AdminResetPassword")
+	}
+	if _, err := s.Authenticate(context.Background(), "a@b.com", "freshpass123"); err != nil {
+		t.Errorf("Authenticate with reset password: %v", err)
+	}
+	if _, err := s.Authenticate(context.Background(), "a@b.com", "initial-password"); !errors.Is(err, ErrInvalidLogin) {
+		t.Errorf("old password should no longer authenticate, got %v", err)
+	}
+}
+
+func TestAdminResetPassword_RejectsShort(t *testing.T) {
+	s := newTestService(t)
+	u, _ := s.Create(context.Background(), "a@b.com", "initial-password", RoleUser, false)
+	// Service-level defense-in-depth: too-short passwords are refused even
+	// when the HTTP edge check is bypassed.
+	if err := s.AdminResetPassword(context.Background(), u.ID, "short"); err == nil {
+		t.Errorf("AdminResetPassword accepted a %d-char password, want rejection", len("short"))
+	}
+	// The rejected reset must not have mutated the account.
+	if _, err := s.Authenticate(context.Background(), "a@b.com", "initial-password"); err != nil {
+		t.Errorf("original password should still authenticate after rejected reset: %v", err)
+	}
+}
+
 func TestSetRole_LastAdminBlock(t *testing.T) {
 	s := newTestService(t)
 	a, _ := s.Create(context.Background(), "a@b.com", "password1", RoleAdmin, false)

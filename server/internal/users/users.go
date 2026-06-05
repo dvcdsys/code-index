@@ -32,6 +32,11 @@ const (
 // mints a user per fixture crawl).
 const defaultBcryptCost = 12
 
+// MinPasswordLength is the minimum length for an admin-set / user-chosen
+// password. HTTP handlers enforce it at the edge; AdminResetPassword also
+// checks it at the service layer as defense-in-depth for non-HTTP callers.
+const MinPasswordLength = 8
+
 // BcryptCost is the work factor actually used by Create / UpdatePassword. It is
 // resolved once, at package init, from (highest precedence first):
 //
@@ -323,6 +328,33 @@ func (s *Service) UpdatePassword(ctx context.Context, id, newPassword string) er
 		string(hash), now, id)
 	if err != nil {
 		return fmt.Errorf("update password: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// AdminResetPassword sets a new password and FORCES must_change_password=1,
+// mirroring user creation. It is the admin-initiated counterpart to
+// UpdatePassword (which clears the flag for self-service changes): after a
+// reset the user is required to pick a new password on next login. The caller
+// is responsible for revoking the target user's existing sessions — see
+// internal/sessions DeleteAllForUser.
+func (s *Service) AdminResetPassword(ctx context.Context, id, newPassword string) error {
+	if len(newPassword) < MinPasswordLength {
+		return fmt.Errorf("new password must be at least %d characters", MinPasswordLength)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), BcryptCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, must_change_password = 1, updated_at = ? WHERE id = ?`,
+		string(hash), now, id)
+	if err != nil {
+		return fmt.Errorf("reset password: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound

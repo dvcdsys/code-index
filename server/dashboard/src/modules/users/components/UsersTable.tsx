@@ -12,6 +12,7 @@ import { cn } from '@/lib/cn';
 import { formatDateTime, formatRelative } from '@/lib/formatDate';
 import { DeleteUserDialog } from './DeleteUserDialog';
 import { DisableUserButton } from './DisableUserButton';
+import { ResetPasswordDialog } from './ResetPasswordDialog';
 import { UserRoleSelect } from './UserRoleSelect';
 import { UserLocalProjectToggle } from './UserLocalProjectToggle';
 
@@ -97,6 +98,7 @@ export function UsersTable({
                   <div className="flex items-center justify-end gap-1">
                     {isSelf ? null : (
                       <>
+                        <ResetPasswordDialog userId={u.id} email={u.email} />
                         <DisableUserButton userId={u.id} disabled={u.disabled} />
                         <DeleteUserDialog userId={u.id} email={u.email} />
                       </>

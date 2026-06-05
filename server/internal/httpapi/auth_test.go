@@ -318,6 +318,123 @@ func TestCreateUser_AdminOnly(t *testing.T) {
 	}
 }
 
+// resetPasswordRR POSTs to the admin reset-password endpoint as the caller
+// holding `cookie` and returns the recorder.
+func resetPasswordRR(t *testing.T, router http.Handler, cookie, userID, newPassword string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"new_password": newPassword})
+	req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/"+userID+"/reset-password", bytes.NewReader(body)), cookie)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestResetUserPassword_AdminFlow(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	// Seed a target user who is NOT flagged to change their password (so we
+	// can prove the reset sets the flag).
+	target, err := f.Deps.Users.Create(context.Background(), "target@example.com", "oldpassword1", users.RoleUser, false)
+	if err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	// The target logs in once — gives us a live session to prove revocation.
+	targetCookie := sessionCookie(loginRR(t, f.Router, "target@example.com", "oldpassword1"))
+	if targetCookie == "" {
+		t.Fatalf("target login did not set a cookie")
+	}
+
+	// Admin resets the target's password.
+	rr := resetPasswordRR(t, f.Router, adminCookie, target.ID, "freshpass123")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin reset status = %d (body=%s)", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		MustChangePassword bool `json:"must_change_password"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &payload)
+	if !payload.MustChangePassword {
+		t.Errorf("response must_change_password = false, want true")
+	}
+
+	// The old password no longer works; the new temp password does.
+	if rr := loginRR(t, f.Router, "target@example.com", "oldpassword1"); rr.Code == http.StatusOK {
+		t.Errorf("login with OLD password succeeded, want failure")
+	}
+	relogin := loginRR(t, f.Router, "target@example.com", "freshpass123")
+	if relogin.Code != http.StatusOK {
+		t.Fatalf("login with NEW password status = %d (body=%s)", relogin.Code, relogin.Body.String())
+	}
+	var loginBody struct {
+		User struct {
+			MustChangePassword bool `json:"must_change_password"`
+		} `json:"user"`
+	}
+	_ = json.Unmarshal(relogin.Body.Bytes(), &loginBody)
+	if !loginBody.User.MustChangePassword {
+		t.Errorf("login payload must_change_password = false, want true")
+	}
+
+	// The target's PRE-EXISTING session was revoked.
+	req := withCookie(httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil), targetCookie)
+	meRR := httptest.NewRecorder()
+	f.Router.ServeHTTP(meRR, req)
+	if meRR.Code != http.StatusUnauthorized {
+		t.Errorf("pre-reset session /auth/me status = %d, want 401", meRR.Code)
+	}
+}
+
+func TestResetUserPassword_AdminOnly(t *testing.T) {
+	f := newAuthFixture(t)
+
+	// Seed a non-admin who will both be the target and attempt the reset.
+	viewer, err := f.Deps.Users.Create(context.Background(), "viewer@example.com", "viewerpass1", users.RoleUser, false)
+	if err != nil {
+		t.Fatalf("seed viewer: %v", err)
+	}
+	viewerCookie := sessionCookie(loginRR(t, f.Router, "viewer@example.com", "viewerpass1"))
+
+	rr := resetPasswordRR(t, f.Router, viewerCookie, viewer.ID, "newpass12345")
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("viewer reset status = %d, want 403", rr.Code)
+	}
+}
+
+func TestResetUserPassword_CanResetAnotherAdmin(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	other, err := f.Deps.Users.Create(context.Background(), "other-admin@example.com", "otheradmin1", users.RoleAdmin, false)
+	if err != nil {
+		t.Fatalf("seed other admin: %v", err)
+	}
+	rr := resetPasswordRR(t, f.Router, adminCookie, other.ID, "resetadmin123")
+	if rr.Code != http.StatusOK {
+		t.Errorf("reset another admin status = %d (body=%s), want 200", rr.Code, rr.Body.String())
+	}
+}
+
+func TestResetUserPassword_Validation(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	// Unknown user id → 404.
+	if rr := resetPasswordRR(t, f.Router, adminCookie, "does-not-exist", "validpass123"); rr.Code != http.StatusNotFound {
+		t.Errorf("unknown id status = %d, want 404 (body=%s)", rr.Code, rr.Body.String())
+	}
+
+	// Seed a real target, then send a too-short password → 422.
+	target, err := f.Deps.Users.Create(context.Background(), "shortpw@example.com", "oldpassword1", users.RoleUser, false)
+	if err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	if rr := resetPasswordRR(t, f.Router, adminCookie, target.ID, "short"); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("short password status = %d, want 422 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
 // --- API key CRUD via HTTP ---
 
 func TestApiKey_CreateListRevokeFlow(t *testing.T) {
