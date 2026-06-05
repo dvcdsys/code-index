@@ -432,6 +432,15 @@ func defaultRegistry() map[string]languageEntry {
 			},
 			identifiers: idID("type_identifier"),
 		},
+		"solidity": {
+			factory: grammars.SolidityLanguage,
+			nodes: map[string][]string{
+				"function": {"function_definition", "modifier_definition", "constructor_definition", "fallback_receive_definition"},
+				"class":    {"contract_declaration", "library_declaration"},
+				"type":     {"interface_declaration", "struct_declaration", "enum_declaration", "event_definition"},
+			},
+			identifiers: idID(),
+		},
 	}
 }
 

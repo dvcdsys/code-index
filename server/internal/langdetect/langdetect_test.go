@@ -33,8 +33,9 @@ func TestDetect(t *testing.T) {
 		{"README.md", "markdown"},
 		{"unknown.xyz", ""},
 		{"/some/path/to/main.go", "go"},
-		{"script.R", "r"},  // uppercase .R
+		{"script.R", "r"}, // uppercase .R
 		{"script.sh", "bash"},
+		{"Token.sol", "solidity"},
 		{"build.gradle.kts", "kotlin"},
 		{"app.kts", "kotlin"},
 	}
