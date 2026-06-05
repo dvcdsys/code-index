@@ -11,6 +11,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
+	"github.com/go-chi/chi/v5"
 )
 
 // userPayload mirrors the OpenAPI `User` schema. Built by hand instead of
@@ -471,6 +472,53 @@ func (s *Server) DeleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ResetUserPassword — POST /api/v1/admin/users/{id}/reset-password (admin only).
+//
+// Sets a new admin-chosen temporary password and forces the user to change it
+// on next login (must_change_password=1), mirroring the invite flow. Any admin
+// may reset any user, including another admin — a reset neither demotes nor
+// disables anyone, so no last-admin guard applies. The target user's existing
+// sessions are revoked so they must log back in and pass the change-password
+// gate.
+//
+// Mounted directly in router.go (chi.URLParam for {id}) rather than through the
+// generated OpenAPI mux: the committed openapi.gen.go predates the pinned
+// oapi-codegen and several other admin endpoints (embedding providers) follow
+// the same direct-mount pattern. The endpoint still lives in doc/openapi.yaml
+// as the source of truth.
+func (s *Server) ResetUserPassword(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var body struct {
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
+		return
+	}
+	if len(body.NewPassword) < 8 {
+		writeError(w, http.StatusUnprocessableEntity, "new_password must be at least 8 characters")
+		return
+	}
+	if err := s.Deps.Users.AdminResetPassword(r.Context(), id, body.NewPassword); err != nil {
+		respondUserMutationError(w, err)
+		return
+	}
+	// Force re-login: best-effort revoke of all the target user's sessions.
+	// Failure here is non-fatal — the new password and flag are already set.
+	if s.Deps.Sessions != nil {
+		_ = s.Deps.Sessions.DeleteAllForUser(r.Context(), id)
+	}
+	u, err := s.Deps.Users.GetByID(r.Context(), id)
+	if err != nil {
+		respondUserMutationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, userToPayload(u))
 }
 
 func respondUserMutationError(w http.ResponseWriter, err error) {

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import type {
   CreateUserRequest,
+  ResetUserPasswordRequest,
   UpdateUserRequest,
   User,
   UserListResponse,
@@ -31,6 +32,15 @@ export function useUpdateUser() {
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: UpdateUserRequest }) =>
       api.patch<User>(`/admin/users/${id}`, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: userKeys.all }),
+  });
+}
+
+export function useResetUserPassword() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: ResetUserPasswordRequest }) =>
+      api.post<User>(`/admin/users/${id}/reset-password`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: userKeys.all }),
   });
 }

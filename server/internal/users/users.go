@@ -330,6 +330,33 @@ func (s *Service) UpdatePassword(ctx context.Context, id, newPassword string) er
 	return nil
 }
 
+// AdminResetPassword sets a new password and FORCES must_change_password=1,
+// mirroring user creation. It is the admin-initiated counterpart to
+// UpdatePassword (which clears the flag for self-service changes): after a
+// reset the user is required to pick a new password on next login. The caller
+// is responsible for revoking the target user's existing sessions — see
+// internal/sessions DeleteAllForUser.
+func (s *Service) AdminResetPassword(ctx context.Context, id, newPassword string) error {
+	if newPassword == "" {
+		return fmt.Errorf("new password required")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), BcryptCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, must_change_password = 1, updated_at = ? WHERE id = ?`,
+		string(hash), now, id)
+	if err != nil {
+		return fmt.Errorf("reset password: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetRole changes a user's role. Refuses to demote the last active admin
 // to keep the system reachable.
 func (s *Service) SetRole(ctx context.Context, id, role string) error {

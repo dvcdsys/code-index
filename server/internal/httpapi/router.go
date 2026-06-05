@@ -201,5 +201,12 @@ func NewRouter(d Deps) http.Handler {
 	r.Put("/api/v1/admin/embedding-providers/active", srv.SwitchEmbeddingProvider)
 	r.Post("/api/v1/admin/embedding-providers/{kind}/test", srv.TestEmbeddingProvider)
 
+	// Admin password reset — mounted directly for the same reason as the
+	// embedding-provider routes above (the committed openapi.gen.go is stale
+	// vs the pinned oapi-codegen, so we don't regenerate it here). The
+	// endpoint is documented in doc/openapi.yaml. The handler gates on
+	// mustBeAdmin.
+	r.Post("/api/v1/admin/users/{id}/reset-password", srv.ResetUserPassword)
+
 	return r
 }

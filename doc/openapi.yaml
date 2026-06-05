@@ -396,6 +396,44 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/admin/users/{id}/reset-password:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: resetUserPassword
+      tags: [admin]
+      summary: Reset a user's password (admin only)
+      description: |
+        Sets a new admin-chosen temporary password and forces the user to
+        change it on next login (must_change_password=true), mirroring the
+        invite flow. Any admin may reset any user, including another admin.
+        The target user's existing sessions are revoked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetUserPasswordRequest"
+      responses:
+        "200":
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
   /api/v1/admin/runtime-config:
     get:
       operationId: getRuntimeConfig
@@ -3062,6 +3100,17 @@ components:
         role:
           type: string
           enum: [admin, user]
+
+    ResetUserPasswordRequest:
+      type: object
+      required: [new_password]
+      properties:
+        new_password:
+          type: string
+          minLength: 8
+          description: |
+            One-time password the user must change on next login.
+            The admin shares this out-of-band.
 
     UpdateUserRequest:
       type: object

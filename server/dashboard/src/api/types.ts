@@ -19,6 +19,7 @@ export type CreateGroupRequest = components['schemas']['CreateGroupRequest'];
 export type UpdateGroupRequest = components['schemas']['UpdateGroupRequest'];
 export type GroupIdListResponse = components['schemas']['GroupIdListResponse'];
 export type UserWithStats = components['schemas']['UserWithStats'];
+export type ResetUserPasswordRequest = components['schemas']['ResetUserPasswordRequest'];
 export type Session = components['schemas']['Session'];
 export type ApiKey = components['schemas']['ApiKey'];
 export type ApiKeyCreated = components['schemas']['ApiKeyCreated'];
