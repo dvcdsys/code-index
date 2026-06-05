@@ -163,13 +163,12 @@ func (l *loginLimiter) clearIP(ip string) {
 	delete(l.perIP, ip)
 }
 
-// clearKey drops the per-(IP, email) counter. Same effect as reset but named
-// for the admin unlock path, which the admin invokes against a specific row
-// surfaced by locks() rather than as a success-side effect.
+// clearKey drops the per-(IP, email) counter for the admin unlock path, which
+// targets a specific row surfaced by locks() rather than reacting to a login
+// success. It delegates to reset so the key-derivation logic lives in exactly
+// one place — the only difference is the calling context, not the behaviour.
 func (l *loginLimiter) clearKey(ip, email string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.perKey, loginLimiterKey(ip, email))
+	l.reset(ip, email)
 }
 
 func checkSlidingWindow(ts []time.Time, now time.Time, window time.Duration, limit int) ([]time.Time, time.Duration, bool) {

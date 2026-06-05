@@ -64,7 +64,8 @@ func (s *Server) ListLoginLocks(w http.ResponseWriter, r *http.Request) {
 // for an email would need a map scan and could lift more than intended).
 // Idempotent — clearing a key that is no longer locked is a no-op 204.
 func (s *Server) ResetLoginLock(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.mustBeAdmin(w, r); !ok {
+	ac, ok := s.mustBeAdmin(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -97,6 +98,21 @@ func (s *Server) ResetLoginLock(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusUnprocessableEntity, `type must be "ip" or "ip_email"`)
 		return
+	}
+	// Clearing a lock weakens the brute-force defence, so record who did it
+	// to what, in an explicit audit line — not only the generic request log.
+	if s.Deps.Logger != nil {
+		actorID, actorEmail := "", ""
+		if ac != nil {
+			actorID, actorEmail = ac.User.ID, ac.User.Email
+		}
+		s.Deps.Logger.Info("admin cleared login rate-limit lock",
+			"actor_id", actorID,
+			"actor_email", actorEmail,
+			"lock_type", body.Type,
+			"lock_ip", body.IP,
+			"lock_email", body.Email,
+		)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
