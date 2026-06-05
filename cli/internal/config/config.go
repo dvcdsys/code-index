@@ -393,6 +393,82 @@ func validateHeader(name, value string) error {
 // getClient, after ${ENV} expansion). Same rules as the internal check.
 func ValidateHeader(name, value string) error { return validateHeader(name, value) }
 
+// ExpandEnvHeaderValue expands $VAR / ${VAR} references in a header value using
+// the environment, returning an error that NAMES the first referenced variable
+// that is not set. This is stricter than os.ExpandEnv on purpose:
+//
+//   - A reference to an UNSET variable is an error, not a silent empty string.
+//     The whole point of custom headers is to satisfy an authenticating proxy;
+//     a forgotten `export` or a typo'd var name must fail loudly here rather
+//     than send an empty `CF-Access-Client-Secret:` and bounce at the edge with
+//     an opaque 403. A variable that is SET but empty (`export X=`) is honored
+//     as an intentional empty value.
+//   - `$$` is an escape for a literal `$`, so a value that legitimately
+//     contains `$` (e.g. a token) can be written `pa$$word` without being
+//     mangled into `pa` + an env lookup.
+//
+// The error never contains the resolved value (only the variable name), so it
+// is safe to surface to the user / logs.
+func ExpandEnvHeaderValue(s string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '$' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		// `$$` → literal `$`.
+		if i+1 < len(s) && s[i+1] == '$' {
+			b.WriteByte('$')
+			i += 2
+			continue
+		}
+		name, width := envRefName(s[i+1:])
+		if name == "" {
+			// Lone `$` or unparseable reference: keep the `$` literal.
+			b.WriteByte('$')
+			i++
+			continue
+		}
+		val, ok := os.LookupEnv(name)
+		if !ok {
+			return "", fmt.Errorf("environment variable %q is not set", name)
+		}
+		b.WriteString(val)
+		i += 1 + width
+	}
+	return b.String(), nil
+}
+
+// envRefName parses the variable name immediately following a `$`. It accepts
+// `{VAR}` (braced) and bare `VAR` (a run of [A-Za-z0-9_]). It returns the name
+// and how many bytes it consumed (excluding the leading `$`); ("", 0) means the
+// `$` does not introduce a valid reference.
+func envRefName(s string) (name string, width int) {
+	if len(s) == 0 {
+		return "", 0
+	}
+	if s[0] == '{' {
+		end := strings.IndexByte(s, '}')
+		if end <= 1 { // no closing brace, or empty `${}`
+			return "", 0
+		}
+		return s[1:end], end + 1
+	}
+	var j int
+	for j < len(s) && isEnvNameByte(s[j]) {
+		j++
+	}
+	return s[:j], j
+}
+
+func isEnvNameByte(c byte) bool {
+	return c == '_' ||
+		('a' <= c && c <= 'z') ||
+		('A' <= c && c <= 'Z') ||
+		('0' <= c && c <= '9')
+}
+
 // SetDefaultServer marks an existing server as the default and persists.
 func SetDefaultServer(name string) error {
 	cfg, err := Load()

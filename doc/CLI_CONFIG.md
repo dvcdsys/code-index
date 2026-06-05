@@ -113,6 +113,18 @@ Notes:
   config file keeps the literal `${CIX_CF_ACCESS_SECRET}`, so no plaintext
   secret is persisted. Use `${VAR}` / `$VAR`; quote the value in your shell so
   it isn't expanded before cix sees it.
+- **Unset variable = hard error.** If a header references a variable that is
+  not set (a typo or a forgotten `export`), the command fails with a message
+  naming the variable instead of silently sending an empty header that bounces
+  at the proxy. A variable that is *set but empty* (`export X=`) is honored as
+  an intentional empty value.
+- **Literal `$`.** Expansion treats `$NAME` / `${NAME}` as references; to put a
+  literal `$` in a value, write `$$` (e.g. a token `pa$$word` is sent as
+  `pa$word`).
+- **Header-name case.** Names are canonicalized on the wire (Go's
+  `http.Header`), so `CF-Access-Client-Id` is sent as `Cf-Access-Client-Id`.
+  HTTP header names are case-insensitive (RFC 7230) and Cloudflare Access et al.
+  honor that, so this is normally invisible.
 - **Never printed.** Header values are sensitive: `cix config show` and
   `cix config edit` (TUI) surface only the **count** (`headers=N` / `headers N`),
   never names or values. Edit them via `cix config set` or by hand in

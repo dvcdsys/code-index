@@ -62,6 +62,32 @@ func TestGetClient_ExpandsHeaderEnvVars(t *testing.T) {
 	}
 }
 
+// TestGetClient_UnsetHeaderEnvVarErrors ensures a header referencing an unset
+// env var fails getClient loudly (naming the var) instead of silently sending
+// an empty header that would bounce at the proxy — finding #1.
+func TestGetClient_UnsetHeaderEnvVarErrors(t *testing.T) {
+	isolateConfig(t)
+	if err := config.SetServerURL(config.DefaultServerName, "http://localhost:21847"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SetServerKey(config.DefaultServerName, "k"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SetServerHeader(config.DefaultServerName, "CF-Access-Client-Secret", "${CIX_DEFINITELY_UNSET_VAR}"); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately do NOT set CIX_DEFINITELY_UNSET_VAR.
+	withFlags(t, "", "", "")
+
+	_, err := getClient()
+	if err == nil {
+		t.Fatal("expected getClient to fail on an unset header env var")
+	}
+	if !strings.Contains(err.Error(), "CIX_DEFINITELY_UNSET_VAR") {
+		t.Errorf("error should name the missing variable, got %v", err)
+	}
+}
+
 // TestGetClient_InvalidHeaderErrors ensures a malformed header (after env
 // expansion) fails getClient loudly and never echoes the value.
 func TestGetClient_InvalidHeaderErrors(t *testing.T) {

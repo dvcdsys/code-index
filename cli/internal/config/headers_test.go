@@ -113,6 +113,45 @@ func TestValidateHeader(t *testing.T) {
 	}
 }
 
+func TestExpandEnvHeaderValue(t *testing.T) {
+	t.Setenv("CIX_H_SET", "secret-val")
+	t.Setenv("CIX_H_EMPTY", "") // set-but-empty is honored
+
+	ok := []struct{ in, want string }{
+		{"plain", "plain"},
+		{"${CIX_H_SET}", "secret-val"},
+		{"$CIX_H_SET", "secret-val"},
+		{"pre-${CIX_H_SET}-post", "pre-secret-val-post"},
+		{"${CIX_H_EMPTY}", ""},        // set-but-empty → "" (no error)
+		{"pa$$word", "pa$word"},       // $$ escapes a literal $
+		{"$$CIX_H_SET", "$CIX_H_SET"}, // escaped $ then literal text, no lookup
+		{"100$$", "100$"},             // trailing $$
+		{"a$ b", "a$ b"},              // lone $ before non-name kept literal
+	}
+	for _, c := range ok {
+		got, err := ExpandEnvHeaderValue(c.in)
+		if err != nil {
+			t.Errorf("ExpandEnvHeaderValue(%q) unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("ExpandEnvHeaderValue(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// Unset variable → loud error that names the var but not (there is no) value.
+	for _, in := range []string{"${CIX_H_UNSET}", "$CIX_H_UNSET", "x${CIX_H_UNSET}y"} {
+		_, err := ExpandEnvHeaderValue(in)
+		if err == nil {
+			t.Errorf("ExpandEnvHeaderValue(%q) expected error for unset var", in)
+			continue
+		}
+		if !strings.Contains(err.Error(), "CIX_H_UNSET") {
+			t.Errorf("error should name the missing variable, got %v", err)
+		}
+	}
+}
+
 func TestSetServerHeaderRejectsInvalid(t *testing.T) {
 	withIsolatedHome(t)
 	if err := SetServerHeader("corp", "Bad Name", "v"); err == nil {
