@@ -32,6 +32,11 @@ const (
 // mints a user per fixture crawl).
 const defaultBcryptCost = 12
 
+// MinPasswordLength is the minimum length for an admin-set / user-chosen
+// password. HTTP handlers enforce it at the edge; AdminResetPassword also
+// checks it at the service layer as defense-in-depth for non-HTTP callers.
+const MinPasswordLength = 8
+
 // BcryptCost is the work factor actually used by Create / UpdatePassword. It is
 // resolved once, at package init, from (highest precedence first):
 //
@@ -337,8 +342,8 @@ func (s *Service) UpdatePassword(ctx context.Context, id, newPassword string) er
 // is responsible for revoking the target user's existing sessions — see
 // internal/sessions DeleteAllForUser.
 func (s *Service) AdminResetPassword(ctx context.Context, id, newPassword string) error {
-	if newPassword == "" {
-		return fmt.Errorf("new password required")
+	if len(newPassword) < MinPasswordLength {
+		return fmt.Errorf("new password must be at least %d characters", MinPasswordLength)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), BcryptCost)
 	if err != nil {

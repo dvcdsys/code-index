@@ -492,7 +492,7 @@ func (s *Server) ResetUserPassword(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
 		return
 	}
-	if len(body.NewPassword) < 8 {
+	if len(body.NewPassword) < users.MinPasswordLength {
 		writeError(w, http.StatusUnprocessableEntity, "new_password must be at least 8 characters")
 		return
 	}
