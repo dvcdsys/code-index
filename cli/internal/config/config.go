@@ -40,6 +40,14 @@ type ServerEntry struct {
 	Name string `yaml:"name" desc:"Server alias"`
 	URL  string `yaml:"url" desc:"Base URL of the cix server" validate:"omitempty,url"`
 	Key  string `yaml:"key" desc:"API key (bearer token)" sensitive:"true"`
+	// Headers are extra HTTP headers attached to every request the CLI makes
+	// to this server (in addition to the cix Bearer). They let the client
+	// satisfy an authenticating reverse proxy / Zero-Trust gateway in front
+	// of cix — e.g. a Cloudflare Access service token
+	// (CF-Access-Client-Id / CF-Access-Client-Secret). Values support
+	// ${ENV} expansion at request time so secrets stay out of the file.
+	// Opt-in: absent = current behavior.
+	Headers map[string]string `yaml:"headers,omitempty" sensitive:"true" desc:"Extra HTTP headers sent on every request (values support ${ENV} expansion)"`
 }
 
 type APIConfig struct {
@@ -304,6 +312,161 @@ func SetServerKey(name, key string) error {
 	}
 	upsertServer(cfg, name, func(s *ServerEntry) { s.Key = key })
 	return Save(cfg)
+}
+
+// SetServerHeader sets (or creates) a custom HTTP header on the named server
+// and persists. The header name must be a valid HTTP token and the value must
+// not contain CR/LF (header-injection guard). Creates the server entry if it
+// does not exist yet, mirroring SetServerURL/SetServerKey.
+func SetServerHeader(name, headerName, value string) error {
+	if err := validateServerName(name); err != nil {
+		return err
+	}
+	if err := validateHeader(headerName, value); err != nil {
+		return err
+	}
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	upsertServer(cfg, name, func(s *ServerEntry) {
+		if s.Headers == nil {
+			s.Headers = map[string]string{}
+		}
+		s.Headers[headerName] = value
+	})
+	return Save(cfg)
+}
+
+// UnsetServerHeader removes a custom header from the named server and persists.
+// Missing server or missing header is a no-op (the post-condition — header
+// absent — already holds).
+func UnsetServerHeader(name, headerName string) error {
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	s, ok := cfg.GetServer(name)
+	if !ok {
+		return fmt.Errorf("server %q not found", name)
+	}
+	if s.Headers == nil {
+		return nil
+	}
+	delete(s.Headers, headerName)
+	if len(s.Headers) == 0 {
+		// Drop the empty map so it round-trips out of the YAML (omitempty).
+		s.Headers = nil
+	}
+	return Save(cfg)
+}
+
+// isHeaderTokenChar reports whether r is allowed in an HTTP field-name per
+// RFC 7230 §3.2.6 (token). Used to reject malformed / injection-prone names.
+func isHeaderTokenChar(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	}
+	return strings.ContainsRune("!#$%&'*+-.^_`|~", r)
+}
+
+// validateHeader checks a custom header name/value pair. The name must be a
+// non-empty RFC 7230 token; the value must not embed CR or LF (which would let
+// a config value inject additional headers or split the request).
+func validateHeader(name, value string) error {
+	if name == "" {
+		return fmt.Errorf("header name must not be empty")
+	}
+	for _, r := range name {
+		if !isHeaderTokenChar(r) {
+			return fmt.Errorf("invalid character %q in header name %q (must be a valid HTTP token)", r, name)
+		}
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("header %q value must not contain CR or LF", name)
+	}
+	return nil
+}
+
+// ValidateHeader is the exported guard for callers outside this package (e.g.
+// getClient, after ${ENV} expansion). Same rules as the internal check.
+func ValidateHeader(name, value string) error { return validateHeader(name, value) }
+
+// ExpandEnvHeaderValue expands $VAR / ${VAR} references in a header value using
+// the environment, returning an error that NAMES the first referenced variable
+// that is not set. This is stricter than os.ExpandEnv on purpose:
+//
+//   - A reference to an UNSET variable is an error, not a silent empty string.
+//     The whole point of custom headers is to satisfy an authenticating proxy;
+//     a forgotten `export` or a typo'd var name must fail loudly here rather
+//     than send an empty `CF-Access-Client-Secret:` and bounce at the edge with
+//     an opaque 403. A variable that is SET but empty (`export X=`) is honored
+//     as an intentional empty value.
+//   - `$$` is an escape for a literal `$`, so a value that legitimately
+//     contains `$` (e.g. a token) can be written `pa$$word` without being
+//     mangled into `pa` + an env lookup.
+//
+// The error never contains the resolved value (only the variable name), so it
+// is safe to surface to the user / logs.
+func ExpandEnvHeaderValue(s string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '$' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		// `$$` → literal `$`.
+		if i+1 < len(s) && s[i+1] == '$' {
+			b.WriteByte('$')
+			i += 2
+			continue
+		}
+		name, width := envRefName(s[i+1:])
+		if name == "" {
+			// Lone `$` or unparseable reference: keep the `$` literal.
+			b.WriteByte('$')
+			i++
+			continue
+		}
+		val, ok := os.LookupEnv(name)
+		if !ok {
+			return "", fmt.Errorf("environment variable %q is not set", name)
+		}
+		b.WriteString(val)
+		i += 1 + width
+	}
+	return b.String(), nil
+}
+
+// envRefName parses the variable name immediately following a `$`. It accepts
+// `{VAR}` (braced) and bare `VAR` (a run of [A-Za-z0-9_]). It returns the name
+// and how many bytes it consumed (excluding the leading `$`); ("", 0) means the
+// `$` does not introduce a valid reference.
+func envRefName(s string) (name string, width int) {
+	if len(s) == 0 {
+		return "", 0
+	}
+	if s[0] == '{' {
+		end := strings.IndexByte(s, '}')
+		if end <= 1 { // no closing brace, or empty `${}`
+			return "", 0
+		}
+		return s[1:end], end + 1
+	}
+	var j int
+	for j < len(s) && isEnvNameByte(s[j]) {
+		j++
+	}
+	return s[:j], j
+}
+
+func isEnvNameByte(c byte) bool {
+	return c == '_' ||
+		('a' <= c && c <= 'z') ||
+		('A' <= c && c <= 'Z') ||
+		('0' <= c && c <= '9')
 }
 
 // SetDefaultServer marks an existing server as the default and persists.

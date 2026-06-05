@@ -35,10 +35,15 @@ Run 'cix config keys' to list every settable key with its description,
 default, and env-var override. Beyond those schema keys, three patterns
 manage the multi-server layout:
 
-  server.<name>.url      URL of a named server (creates the entry if absent)
-  server.<name>.key      API key of a named server
-  default_server         which server is used when --server is omitted
-  api.url / api.key      legacy aliases — operate on the default server
+  server.<name>.url            URL of a named server (creates the entry if absent)
+  server.<name>.key            API key of a named server
+  server.<name>.header.<Name>  custom HTTP header sent on every request
+  default_server               which server is used when --server is omitted
+  api.url / api.key            legacy aliases — operate on the default server
+
+Custom headers let the CLI pass an authenticating reverse proxy in front of
+cix (e.g. a Cloudflare Access service token). Values support ${ENV} expansion
+at request time, so secrets stay out of the config file.
 
 List-valued keys (e.g. watcher.exclude) use comma-separated input with
 REPLACE semantics: 'cix config set watcher.exclude "node_modules,vendor"'
@@ -48,6 +53,10 @@ Examples:
   cix config set server.corporate.url https://cix.corp.internal
   cix config set server.corporate.key cix_abc123...
   cix config set default_server corporate
+
+  # custom headers (e.g. Cloudflare Access service token):
+  cix config set server.corporate.header.CF-Access-Client-Id "<id>.access"
+  cix config set server.corporate.header.CF-Access-Client-Secret '${CIX_CF_ACCESS_SECRET}'
 
   cix config set api.url http://localhost:21847        # legacy alias
   cix config set api.key cix_abc123...                 # legacy alias
@@ -65,12 +74,14 @@ var configUnsetCmd = &cobra.Command{
 	Long: `Remove configuration entries.
 
 Supported keys:
-  server.<name>      - remove the named server entirely
-  server.<name>.key  - clear the named server's API key
+  server.<name>                - remove the named server entirely
+  server.<name>.key            - clear the named server's API key
+  server.<name>.header.<Name>  - remove a custom HTTP header
 
 Examples:
   cix config unset server.corporate
-  cix config unset server.corporate.key`,
+  cix config unset server.corporate.key
+  cix config unset server.corporate.header.CF-Access-Client-Id`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConfigUnset,
 }
@@ -159,7 +170,13 @@ func renderServersBlock(w io.Writer, cfg *config.Config) {
 		if s.Name == cfg.DefaultServer {
 			marker = "* "
 		}
-		fmt.Fprintf(w, "%s%-16s url=%s key=%s\n", marker, s.Name, s.URL, keyStatus)
+		fmt.Fprintf(w, "%s%-16s url=%s key=%s", marker, s.Name, s.URL, keyStatus)
+		// Surface custom headers by COUNT only — values may be secrets and must
+		// never be printed. Omitted entirely when none are set.
+		if n := len(s.Headers); n > 0 {
+			fmt.Fprintf(w, " headers=%d", n)
+		}
+		fmt.Fprintln(w)
 	}
 }
 
@@ -242,6 +259,16 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("✓ Set %s (server %q)\n", key, name)
 		return nil
 	case strings.HasPrefix(key, "server."):
+		// Header form: server.<name>.header.<HeaderName> (HeaderName may itself
+		// contain dots, so it is everything after the 3rd segment).
+		if name, headerName, ok := parseServerHeaderKey(key); ok {
+			if err := config.SetServerHeader(name, headerName, value); err != nil {
+				return err
+			}
+			// Never echo the value — header values may be secrets.
+			fmt.Printf("✓ Set server.%s.header.%s\n", name, headerName)
+			return nil
+		}
 		name, field, perr := parseServerKey(key)
 		if perr != nil {
 			return perr
@@ -282,6 +309,15 @@ func runConfigUnset(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unknown unset key: %s (supported: server.<name>, server.<name>.key)", key)
 	}
 
+	// Header form: server.<name>.header.<HeaderName>.
+	if name, headerName, ok := parseServerHeaderKey(key); ok {
+		if err := config.UnsetServerHeader(name, headerName); err != nil {
+			return err
+		}
+		fmt.Printf("✓ Removed header %q for server %q\n", headerName, name)
+		return nil
+	}
+
 	rest := strings.TrimPrefix(key, "server.")
 	switch {
 	case strings.HasSuffix(rest, ".key"):
@@ -317,6 +353,18 @@ func defaultServerName(cfg *config.Config) string {
 		return s.Name
 	}
 	return config.DefaultServerName
+}
+
+// parseServerHeaderKey recognises the `server.<name>.header.<HeaderName>` form
+// and splits it into the server name and header name. HeaderName is everything
+// after the literal `header.` segment, so it may itself contain dots. Returns
+// ok=false for any other shape (so callers fall through to parseServerKey).
+func parseServerHeaderKey(key string) (name, headerName string, ok bool) {
+	parts := strings.SplitN(key, ".", 4)
+	if len(parts) != 4 || parts[0] != "server" || parts[1] == "" || parts[2] != "header" || parts[3] == "" {
+		return "", "", false
+	}
+	return parts[1], parts[3], true
 }
 
 // parseServerKey splits a `server.<name>.<field>` config key into its name and

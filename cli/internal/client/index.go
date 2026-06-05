@@ -157,6 +157,8 @@ func (c *Client) SendFilesStreaming(
 			streamCancel()
 			return nil, fmt.Errorf("create request: %w", err)
 		}
+		// Custom headers first, then cix-managed headers — so the latter win.
+		c.applyCustomHeaders(req)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/x-ndjson")
 		if c.apiKey != "" {
