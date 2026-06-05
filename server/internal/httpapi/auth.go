@@ -473,6 +473,46 @@ func (s *Server) DeleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ResetUserPassword — POST /api/v1/admin/users/{id}/reset-password (admin only).
+//
+// Sets a new admin-chosen temporary password and forces the user to change it
+// on next login (must_change_password=1), mirroring the invite flow. Any admin
+// may reset any user, including another admin — a reset neither demotes nor
+// disables anyone, so no last-admin guard applies. The target user's existing
+// sessions are revoked so they must log back in and pass the change-password
+// gate.
+func (s *Server) ResetUserPassword(w http.ResponseWriter, r *http.Request, id string) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
+	var body struct {
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
+		return
+	}
+	if len(body.NewPassword) < users.MinPasswordLength {
+		writeError(w, http.StatusUnprocessableEntity, "new_password must be at least 8 characters")
+		return
+	}
+	if err := s.Deps.Users.AdminResetPassword(r.Context(), id, body.NewPassword); err != nil {
+		respondUserMutationError(w, err)
+		return
+	}
+	// Force re-login: best-effort revoke of all the target user's sessions.
+	// Failure here is non-fatal — the new password and flag are already set.
+	if s.Deps.Sessions != nil {
+		_ = s.Deps.Sessions.DeleteAllForUser(r.Context(), id)
+	}
+	u, err := s.Deps.Users.GetByID(r.Context(), id)
+	if err != nil {
+		respondUserMutationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, userToPayload(u))
+}
+
 func respondUserMutationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, users.ErrNotFound):

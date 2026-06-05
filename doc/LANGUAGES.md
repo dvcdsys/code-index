@@ -2,7 +2,7 @@
 
 cix uses tree-sitter (via `github.com/odvcencio/gotreesitter`) to extract semantic chunks (functions, classes, methods, types) from source code. Files in unsupported languages still get indexed via a sliding-window fallback — they're searchable, just without per-symbol granularity.
 
-## Default language set (30)
+## Default language set (31)
 
 | ID | gotreesitter factory | Function | Class | Method | Type |
 |---|---|:-:|:-:|:-:|:-:|
@@ -36,6 +36,7 @@ cix uses tree-sitter (via `github.com/odvcencio/gotreesitter`) to extract semant
 | `fortran` | `FortranLanguage` | ✓ | ✓ | | |
 | `haskell` | `HaskellLanguage` | ✓ | | | ✓ |
 | `ocaml` | `OcamlLanguage` | ✓ | ✓ | | ✓ |
+| `solidity` | `SolidityLanguage` | ✓ | ✓ | | ✓ |
 
 The exact AST node types per language live in `server/internal/chunker/chunker.go` (`defaultRegistry`). File-extension mapping lives in `server/internal/langdetect/langdetect.go`.
 
