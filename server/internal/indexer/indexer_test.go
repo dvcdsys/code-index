@@ -309,6 +309,55 @@ func TestBeginIndexing_ConflictOnConcurrent(t *testing.T) {
 	}
 }
 
+// TestFailIndexing_ReleasesSessionForRetry covers the regression where an
+// aborted in-process run (e.g. a transient "embedding queue saturated") left
+// its session active until the idle-timeout, so every retry bounced off
+// ErrSessionConflict. FailIndexing must release the session immediately so the
+// next BeginIndexing for the same project succeeds, and must be idempotent.
+func TestFailIndexing_ReleasesSessionForRetry(t *testing.T) {
+	d := openTestDB(t)
+	seedProject(t, d, "/proj")
+
+	ctx := context.Background()
+	vs := newStore(t)
+	svc := New(d, vs, &fakeEmbedder{dim: 8}, nil)
+
+	runID, _, err := svc.BeginIndexing(ctx, "/proj", false)
+	if err != nil {
+		t.Fatalf("BeginIndexing: %v", err)
+	}
+
+	// While the session is active a retry must conflict (the bug's symptom).
+	if _, _, err := svc.BeginIndexing(ctx, "/proj", false); !errors.Is(err, ErrSessionConflict) {
+		t.Fatalf("retry before release: want ErrSessionConflict, got %v", err)
+	}
+
+	// Releasing the failed run must unblock the retry.
+	svc.FailIndexing(ctx, "/proj", runID)
+	if _, _, err := svc.BeginIndexing(ctx, "/proj", false); err != nil {
+		t.Fatalf("BeginIndexing after FailIndexing: want success, got %v", err)
+	}
+
+	// The released run row must be marked failed (not left 'running').
+	var status string
+	if err := d.QueryRowContext(ctx,
+		`SELECT status FROM index_runs WHERE id = ?`, runID,
+	).Scan(&status); err != nil {
+		t.Fatalf("query index_runs: %v", err)
+	}
+	if status != "failed" {
+		t.Fatalf("index_runs status: want %q, got %q", "failed", status)
+	}
+
+	// Idempotent: a second release (or one for an unknown run) is a no-op and
+	// must not disturb the now-active retry session.
+	svc.FailIndexing(ctx, "/proj", runID)
+	svc.FailIndexing(ctx, "/proj", "no-such-run")
+	if _, _, err := svc.BeginIndexing(ctx, "/proj", false); !errors.Is(err, ErrSessionConflict) {
+		t.Fatalf("retry session disturbed by idempotent FailIndexing: got %v", err)
+	}
+}
+
 func TestProcessFiles_HappyPath(t *testing.T) {
 	d := openTestDB(t)
 	seedProject(t, d, "/proj")

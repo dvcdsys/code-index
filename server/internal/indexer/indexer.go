@@ -1104,6 +1104,45 @@ func (s *Service) CancelIndexing(ctx context.Context, projectPath string) (bool,
 	return true, nil
 }
 
+// FailIndexing releases the in-memory session for runID after the in-process
+// repo indexer (package repoindexer) aborts mid-run — e.g. a transient
+// "embedding queue saturated" backpressure error or a walk failure. Without
+// this, an aborted run leaves its session status="active" until ttlCleanup
+// reaps it (sessionTTL of idle), and every immediate retry / manual Sync
+// bounces off ErrSessionConflict in the meantime — the failure that triggers
+// the retry also blocks it. Releasing the session here lets the retry call
+// BeginIndexing again and resume via the reconcile path.
+//
+// Unlike CancelIndexing this is NOT a user cancellation: it does NOT flip
+// projects.status to 'indexed' (repojobs owns the project's terminal state and
+// will mark it 'error' / requeue) and it sets no "user-cancel" tombstone, so a
+// later ErrNoSession is correctly read as an involuntary loss (retry/resume)
+// rather than a deliberate stop. Idempotent and keyed by runID, so it no-ops
+// when the session was already removed (force-stop, idle reap, or success).
+func (s *Service) FailIndexing(ctx context.Context, projectPath, runID string) {
+	s.mu.Lock()
+	sess, ok := s.sessions[runID]
+	if !ok || sess.projectPath != projectPath {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.sessions, runID)
+	s.mu.Unlock()
+
+	// Detach from ctx for the bookkeeping write: the abort path is often a
+	// cancelled context (shutdown), but the run row should still be marked
+	// failed rather than left 'running'. The session release above — the part
+	// that unblocks retries — already happened and never touched ctx.
+	now := nowUTC()
+	if _, err := s.db.ExecContext(context.WithoutCancel(ctx),
+		`UPDATE index_runs SET status = 'failed', completed_at = ? WHERE id = ?`,
+		now, runID,
+	); err != nil {
+		s.logger.Warn("indexer: mark run failed", "run_id", runID, "project", projectPath, "err", err)
+	}
+	s.logger.Info("indexer: session released after failure", "run_id", runID, "project", projectPath)
+}
+
 // ---------------------------------------------------------------------------
 // Status + session helpers
 // ---------------------------------------------------------------------------

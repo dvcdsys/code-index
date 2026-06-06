@@ -118,6 +118,19 @@ func IndexDir(
 		return 0, 0, fmt.Errorf("begin indexing: %w", err)
 	}
 
+	// Release the session on any abort path. A mid-run error (e.g. a transient
+	// "embedding queue saturated" or a walk failure) otherwise leaves the
+	// session active until the idle-timeout reaps it, and every retry / manual
+	// Sync in that window bounces off ErrSessionConflict. FailIndexing is
+	// idempotent, so it no-ops on the success path (FinishIndexing already
+	// completed the session) and when a force-stop already removed it.
+	indexOK := false
+	defer func() {
+		if !indexOK {
+			idx.FailIndexing(ctx, projectPath, runID)
+		}
+	}()
+
 	// Incremental: the change set already tells us how many files we'll
 	// process, so publish the denominator up front for GET /index/status.
 	// Walk modes can't know the total until the walk completes (no
@@ -274,6 +287,7 @@ func IndexDir(
 	if _, _, _, ferr := idx.FinishIndexing(ctx, projectPath, runID, deletedPaths, totalFiles); ferr != nil {
 		return totalAccepted, totalChunks, fmt.Errorf("finish indexing: %w", ferr)
 	}
+	indexOK = true
 	return totalAccepted, totalChunks, nil
 }
 
