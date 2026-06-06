@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dvcdsys/code-index/server/internal/db"
+	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/repocloner"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
@@ -60,6 +61,32 @@ type countingEmbedder struct {
 func (f *countingEmbedder) EmbedTexts(_ context.Context, texts []string) ([][]float32, error) {
 	f.calls++
 	f.texts += len(texts)
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		v := make([]float32, f.dim)
+		for j := 0; j < f.dim && j < len(t); j++ {
+			v[j] = float32(t[j]) / 255.0
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+// busyThenOKEmbedder returns *embeddings.ErrBusy (the queue-saturated
+// backpressure signal) for its first `fails` EmbedTexts calls, then succeeds.
+// RetryAfter:0 keeps processBatch's backoff at its 1s floor so the test stays
+// fast while still exercising a real wait.
+type busyThenOKEmbedder struct {
+	dim   int
+	fails int
+	calls int
+}
+
+func (f *busyThenOKEmbedder) EmbedTexts(_ context.Context, texts []string) ([][]float32, error) {
+	f.calls++
+	if f.calls <= f.fails {
+		return nil, &embeddings.ErrBusy{RetryAfter: 0}
+	}
 	out := make([][]float32, len(texts))
 	for i, t := range texts {
 		v := make([]float32, f.dim)
@@ -209,6 +236,30 @@ func TestIndexDir_Full_WalksAllFiles(t *testing.T) {
 	}
 	if _, ok := got["vendor/skip.go"]; ok {
 		t.Error("file_hashes contains vendor/skip.go but DefaultFilter should have excluded it")
+	}
+}
+
+// TestIndexDir_RetriesEmbeddingQueueSaturation covers the regression where a
+// transient "embedding queue saturated" (ErrBusy) failed the whole run instead
+// of being treated as the retryable backpressure it is. The embedder reports
+// the queue busy on its first call, then succeeds; IndexDir must transparently
+// retry the batch and complete, leaving the file indexed.
+func TestIndexDir_RetriesEmbeddingQueueSaturation(t *testing.T) {
+	emb := &busyThenOKEmbedder{dim: 8, fails: 1}
+	d, idx := newIndexerForTestEmb(t, emb)
+	seedProjectForTest(t, d, "proj")
+
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"a.go": "package a\n"})
+
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, true, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("IndexDir should ride out transient ErrBusy, got: %v", err)
+	}
+	if emb.calls < 2 {
+		t.Fatalf("embedder calls = %d, want >= 2 (initial busy + retry)", emb.calls)
+	}
+	if _, ok := fileHashes(t, d, "proj")["a.go"]; !ok {
+		t.Error("file_hashes missing a.go — batch was not re-processed after backpressure")
 	}
 }
 

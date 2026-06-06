@@ -31,7 +31,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/langdetect"
 	"github.com/dvcdsys/code-index/server/internal/repocloner"
@@ -41,6 +43,64 @@ import (
 // call. A few hundred is typical CLI behaviour — keeps batch tx commits
 // tight and bounds memory.
 const BatchSize = 50
+
+// busyRetryCap bounds a single backpressure sleep so an over-large Retry-After
+// hint can't stall the walk for minutes between attempts.
+const busyRetryCap = 30 * time.Second
+
+// maxBusyWait bounds the TOTAL time spent waiting out embedding-queue
+// backpressure for ONE batch before giving up. Generous because saturation is
+// transient by design (slots free as in-flight embeds finish), but finite so a
+// genuinely wedged embedder surfaces as a failure — which, with the session now
+// released on abort, the job queue requeues to resume via reconcile.
+const maxBusyWait = 5 * time.Minute
+
+// processBatch sends one batch to the indexer, transparently waiting out
+// transient embedding-queue backpressure. ErrBusy ("embedding queue saturated,
+// retry after Ns") is the queue asking us to slow down, NOT a real failure: the
+// HTTP/CLI client honours it via 503 + Retry-After, and the in-process driver
+// must do the same instead of failing the whole run (which previously also
+// orphaned the indexer session and bounced every retry off ErrSessionConflict).
+// Retries the SAME batch after the hinted delay (capped), bounded by
+// maxBusyWait. ProcessFiles bumps the session's lastActivity in its prepare
+// stage before the embed stage that returns ErrBusy, so these waits don't trip
+// the idle reaper. Any non-busy error is returned immediately.
+func processBatch(ctx context.Context, idx *indexer.Service, projectPath, runID string, batch []indexer.FilePayload, logger *slog.Logger) (int, error) {
+	var waited time.Duration
+	for attempt := 1; ; attempt++ {
+		_, chunks, _, err := idx.ProcessFiles(ctx, projectPath, runID, batch)
+		if err == nil {
+			return chunks, nil
+		}
+		retryAfter, busy := embeddings.IsBusy(err)
+		if !busy {
+			return 0, err
+		}
+		delay := time.Duration(retryAfter) * time.Second
+		if delay <= 0 {
+			delay = time.Second
+		}
+		if delay > busyRetryCap {
+			delay = busyRetryCap
+		}
+		if waited+delay > maxBusyWait {
+			return 0, fmt.Errorf("embedding queue still saturated after %s and %d attempts: %w",
+				waited.Round(time.Second), attempt, err)
+		}
+		logger.Warn("repoindexer: embedding queue saturated — backing off",
+			"project", projectPath, "attempt", attempt,
+			"retry_after_s", int(delay.Seconds()), "waited_s", int(waited.Seconds()),
+			"batch", len(batch))
+		t := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return 0, ctx.Err()
+		case <-t.C:
+		}
+		waited += delay
+	}
+}
 
 // FileFilter decides whether a candidate file should be indexed. Returning
 // false skips it silently (no log noise). The default filter rejects
@@ -155,7 +215,7 @@ func IndexDir(
 		if len(batch) == 0 {
 			return nil
 		}
-		_, chunks, _, ferr := idx.ProcessFiles(ctx, projectPath, runID, batch)
+		chunks, ferr := processBatch(ctx, idx, projectPath, runID, batch, logger)
 		if ferr != nil {
 			return fmt.Errorf("process batch: %w", ferr)
 		}
