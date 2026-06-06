@@ -8,7 +8,7 @@ require (
 	github.com/go-git/go-git/v5 v5.19.0
 	github.com/google/uuid v1.6.0
 	github.com/oapi-codegen/runtime v1.4.0
-	github.com/odvcencio/gotreesitter v0.0.0-20260423084729-38e2b42712f2
+	github.com/odvcencio/gotreesitter v0.20.2
 	github.com/philippgille/chromem-go v0.7.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/sync v0.20.0

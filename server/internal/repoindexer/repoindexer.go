@@ -31,7 +31,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/langdetect"
 	"github.com/dvcdsys/code-index/server/internal/repocloner"
@@ -41,6 +43,64 @@ import (
 // call. A few hundred is typical CLI behaviour — keeps batch tx commits
 // tight and bounds memory.
 const BatchSize = 50
+
+// busyRetryCap bounds a single backpressure sleep so an over-large Retry-After
+// hint can't stall the walk for minutes between attempts.
+const busyRetryCap = 30 * time.Second
+
+// maxBusyWait bounds the TOTAL time spent waiting out embedding-queue
+// backpressure for ONE batch before giving up. Generous because saturation is
+// transient by design (slots free as in-flight embeds finish), but finite so a
+// genuinely wedged embedder surfaces as a failure — which, with the session now
+// released on abort, the job queue requeues to resume via reconcile.
+const maxBusyWait = 5 * time.Minute
+
+// processBatch sends one batch to the indexer, transparently waiting out
+// transient embedding-queue backpressure. ErrBusy ("embedding queue saturated,
+// retry after Ns") is the queue asking us to slow down, NOT a real failure: the
+// HTTP/CLI client honours it via 503 + Retry-After, and the in-process driver
+// must do the same instead of failing the whole run (which previously also
+// orphaned the indexer session and bounced every retry off ErrSessionConflict).
+// Retries the SAME batch after the hinted delay (capped), bounded by
+// maxBusyWait. ProcessFiles bumps the session's lastActivity in its prepare
+// stage before the embed stage that returns ErrBusy, so these waits don't trip
+// the idle reaper. Any non-busy error is returned immediately.
+func processBatch(ctx context.Context, idx *indexer.Service, projectPath, runID string, batch []indexer.FilePayload, logger *slog.Logger) (int, error) {
+	var waited time.Duration
+	for attempt := 1; ; attempt++ {
+		_, chunks, _, err := idx.ProcessFiles(ctx, projectPath, runID, batch)
+		if err == nil {
+			return chunks, nil
+		}
+		retryAfter, busy := embeddings.IsBusy(err)
+		if !busy {
+			return 0, err
+		}
+		delay := time.Duration(retryAfter) * time.Second
+		if delay <= 0 {
+			delay = time.Second
+		}
+		if delay > busyRetryCap {
+			delay = busyRetryCap
+		}
+		if waited+delay > maxBusyWait {
+			return 0, fmt.Errorf("embedding queue still saturated after %s and %d attempts: %w",
+				waited.Round(time.Second), attempt, err)
+		}
+		logger.Warn("repoindexer: embedding queue saturated — backing off",
+			"project", projectPath, "attempt", attempt,
+			"retry_after_s", int(delay.Seconds()), "waited_s", int(waited.Seconds()),
+			"batch", len(batch))
+		t := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return 0, ctx.Err()
+		case <-t.C:
+		}
+		waited += delay
+	}
+}
 
 // FileFilter decides whether a candidate file should be indexed. Returning
 // false skips it silently (no log noise). The default filter rejects
@@ -70,31 +130,35 @@ func DefaultFilter() FileFilter {
 	}
 }
 
-// IndexDir runs an end-to-end index pass against a local directory.
-// Two modes selected by the changes parameter:
+// IndexDir runs an end-to-end index pass against a local directory. Three
+// behaviours, selected by (wipe, changes):
 //
-//   - changes == nil → FULL: BeginIndexing(full=true) wipes the previous
-//     index state, WalkDir visits every file, FinishIndexing(deleted=nil)
-//     completes the run. Use for first-time clones, partial-failure
-//     recovery, and force-full reindex requests.
-//   - changes != nil → INCREMENTAL: BeginIndexing(full=false) preserves
-//     existing state, only files listed in changes.Modified+Added are
-//     read+processed, and changes.Deleted is fed to FinishIndexing for
-//     per-file cleanup of vectorstore + symbols + refs + chunks_fts +
-//     file_hashes. Use for normal webhook + manual reindex paths where
-//     tree.Diff already told us exactly what moved.
+//   - wipe=true (changes ignored) → FULL REBUILD: BeginIndexing(full=true)
+//     wipes the previous index state + collection, WalkDir visits every
+//     file and re-embeds it. Use only when existing vectors are no longer
+//     valid — embedding model/provider change — or an explicit force-rebuild.
+//   - wipe=false, changes == nil → RECONCILE / RESUME: BeginIndexing(full=
+//     false) preserves existing state; WalkDir visits every file but SKIPS
+//     those whose on-disk content hash already matches file_hashes, so a
+//     crashed/aborted run resumes for the cost of the un-embedded remainder
+//     only. Files gone from disk are deleted. Use for first-index and
+//     crash/abort recovery — cheap and idempotent.
+//   - wipe=false, changes != nil → INCREMENTAL: only changes.Modified+Added
+//     are read+processed and changes.Deleted is fed to FinishIndexing. Use
+//     for normal webhook + manual reindex paths where tree.Diff already told
+//     us exactly what moved.
 //
-// On any error mid-way the indexer's session timer cleans up after an
-// hour; we don't explicitly cancel since "best-effort retry" is the
-// expected pattern.
+// Resumability rests on file_hashes: ProcessFiles commits each file's hash
+// in the SAME per-file tx as its vectors/symbols/FTS, so every recorded file
+// is durably indexed — reconcile can trust a hash match to skip the work.
 //
-// Returns (filesIndexed, chunksCreated, err). In incremental mode the
-// counts only cover the changed batch — they don't include the
-// unchanged files that remained in the index untouched.
+// Returns (filesIndexed, chunksCreated, err). Counts cover only files
+// (re)embedded this pass — not unchanged files skipped or left untouched.
 func IndexDir(
 	ctx context.Context,
 	idx *indexer.Service,
 	projectPath, rootDir string,
+	wipe bool,
 	changes *repocloner.ChangeSet,
 	filter FileFilter,
 	logger *slog.Logger,
@@ -106,30 +170,52 @@ func IndexDir(
 		logger = slog.Default()
 	}
 
-	full := changes == nil
-	runID, _, err := idx.BeginIndexing(ctx, projectPath, full)
+	walkAll := changes == nil
+	reconcile := walkAll && !wipe
+
+	runID, storedHashes, err := idx.BeginIndexing(ctx, projectPath, wipe)
 	if err != nil {
 		return 0, 0, fmt.Errorf("begin indexing: %w", err)
 	}
 
+	// Release the session on any abort path. A mid-run error (e.g. a transient
+	// "embedding queue saturated" or a walk failure) otherwise leaves the
+	// session active until the idle-timeout reaps it, and every retry / manual
+	// Sync in that window bounces off ErrSessionConflict. FailIndexing is
+	// idempotent, so it no-ops on the success path (FinishIndexing already
+	// completed the session) and when a force-stop already removed it.
+	indexOK := false
+	defer func() {
+		if !indexOK {
+			idx.FailIndexing(ctx, projectPath, runID)
+		}
+	}()
+
 	// Incremental: the change set already tells us how many files we'll
 	// process, so publish the denominator up front for GET /index/status.
-	// Full reindex can't know the total until the walk completes (no
+	// Walk modes can't know the total until the walk completes (no
 	// pre-count), so the status endpoint reports progress without a total.
-	if !full {
+	if !walkAll {
 		idx.SetDiscoveredTotal(projectPath, len(changes.Modified)+len(changes.Added))
 	}
 
 	totalFiles := 0
 	totalChunks := 0
 	totalAccepted := 0
+	skipped := 0
 	batch := make([]indexer.FilePayload, 0, BatchSize)
+	// seen tracks every on-disk path visited in reconcile mode so the
+	// delete pass can reclaim file_hashes rows whose file vanished.
+	var seen map[string]struct{}
+	if reconcile {
+		seen = make(map[string]struct{}, len(storedHashes))
+	}
 
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
-		_, chunks, _, ferr := idx.ProcessFiles(ctx, projectPath, runID, batch)
+		chunks, ferr := processBatch(ctx, idx, projectPath, runID, batch, logger)
 		if ferr != nil {
 			return fmt.Errorf("process batch: %w", ferr)
 		}
@@ -158,12 +244,28 @@ func IndexDir(
 			// Incremental mode: tree.Diff lists a file that vanished
 			// between fetch+reset and our read. Rare but observable
 			// (very fast subsequent push). Log and skip — the next
-			// reindex will see it as Deleted.
+			// reindex will see it as Deleted. In reconcile mode treat a
+			// transient read error as "still present" so a one-off IO
+			// hiccup doesn't drop the file's existing index.
+			if reconcile {
+				seen[rel] = struct{}{}
+			}
 			logger.Warn("repoindexer: file dropped", "path", rel, "err", ferr)
 			return nil
 		}
 		if !ok {
+			// Not indexable (binary / too large / unknown language). Leaving
+			// it out of `seen` lets the reconcile delete pass reclaim any
+			// stale rows from when it WAS indexable.
 			return nil
+		}
+		if reconcile {
+			seen[rel] = struct{}{}
+			if h, found := storedHashes[rel]; found && h == fp.ContentHash {
+				// Already embedded under the current model — resume skip.
+				skipped++
+				return nil
+			}
 		}
 		batch = append(batch, fp)
 		if len(batch) >= BatchSize {
@@ -174,7 +276,7 @@ func IndexDir(
 		return nil
 	}
 
-	if full {
+	if walkAll {
 		err = filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				// Permission errors on a subtree shouldn't kill the whole index.
@@ -228,12 +330,24 @@ func IndexDir(
 	}
 
 	var deletedPaths []string
-	if !full {
+	switch {
+	case reconcile:
+		// Files recorded in file_hashes but no longer present on disk.
+		for stored := range storedHashes {
+			if _, ok := seen[stored]; !ok {
+				deletedPaths = append(deletedPaths, stored)
+			}
+		}
+		logger.Info("repoindexer: reconcile done",
+			"project", projectPath, "walked", totalFiles, "embedded", totalAccepted,
+			"skipped_unchanged", skipped, "deleted", len(deletedPaths))
+	case !walkAll:
 		deletedPaths = changes.Deleted
 	}
 	if _, _, _, ferr := idx.FinishIndexing(ctx, projectPath, runID, deletedPaths, totalFiles); ferr != nil {
 		return totalAccepted, totalChunks, fmt.Errorf("finish indexing: %w", ferr)
 	}
+	indexOK = true
 	return totalAccepted, totalChunks, nil
 }
 

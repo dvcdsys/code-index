@@ -26,8 +26,19 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
 
-// sessionTTL mirrors Python's 1-hour session garbage collector.
-const sessionTTL = time.Hour
+// sessionTTL bounds how long an indexing session may sit IDLE (no
+// ProcessFiles activity) before the housekeeping goroutine reaps it. It is a
+// leak guard for abandoned sessions (client called /index/begin then crashed
+// without /index/finish) — NOT a cap on total indexing time. ttlCleanup
+// measures against the session's lastActivity, which every ProcessFiles batch
+// bumps, so an actively-progressing index (including multi-hour in-process
+// repo indexing) is never reaped.
+//
+// 10 minutes: comfortably exceeds the worst-case gap between two files
+// finishing (a single huge file parse + slow remote embeddings), so a healthy
+// index never trips it, while still reclaiming a genuinely abandoned session
+// reasonably quickly.
+const sessionTTL = 10 * time.Minute
 
 // cleanupDelay mirrors Python's 60s post-finish cleanup window.
 const cleanupDelay = 60 * time.Second
@@ -43,15 +54,15 @@ type FilePayload struct {
 
 // Progress mirrors Python IndexProgress for GET /index/status.
 type Progress struct {
-	Status           string
-	Phase            string
-	FilesDiscovered  int
-	FilesProcessed   int
-	FilesTotal       int
-	ChunksCreated    int
-	ElapsedSeconds   float64
-	RunID            string
-	RecentFiles      []string // most recent files processed, newest first; up to recentFilesCap
+	Status          string
+	Phase           string
+	FilesDiscovered int
+	FilesProcessed  int
+	FilesTotal      int
+	ChunksCreated   int
+	ElapsedSeconds  float64
+	RunID           string
+	RecentFiles     []string // most recent files processed, newest first; up to recentFilesCap
 }
 
 // recentFilesCap bounds the per-session ring of recently-processed file paths
@@ -67,9 +78,16 @@ type session struct {
 	chunksCreated   int
 	languagesSeen   map[string]struct{}
 	startTime       time.Time
-	status          string   // active|completed
-	phase           string   // receiving|completed
-	recentFiles     []string // ring of last recentFilesCap processed paths, oldest first
+	lastActivity    time.Time // bumped each ProcessFiles file; drives idle-based reaping
+	status          string    // active|completed
+	phase           string    // receiving|completed
+	recentFiles     []string  // ring of last recentFilesCap processed paths, oldest first
+}
+
+// goneEntry is a tombstone for a removed session: why it went away and when.
+type goneEntry struct {
+	reason string // "user-cancel" | "idle-timeout"
+	at     time.Time
 }
 
 // Embedder is the minimal embeddings surface the indexer consumes. The real
@@ -97,6 +115,12 @@ type Service struct {
 	mu       sync.RWMutex
 	sessions map[string]*session // runID → state
 
+	// gone is a tombstone map keyed by projectPath recording why a session
+	// disappeared (user cancel vs idle reap). Lets a caller that hits
+	// ErrNoSession mid-run tell a deliberate force-stop from an involuntary
+	// loss. Consumed on read, pruned by age.
+	gone map[string]goneEntry
+
 	// stopCh is closed when Shutdown is called. Housekeeping goroutines
 	// (ttlCleanup, delayedCleanup) select on it so they unblock promptly
 	// instead of leaking for up to sessionTTL on server shutdown.
@@ -123,6 +147,27 @@ type Service struct {
 	// without requiring a process restart. Tests typically use the static
 	// SetEmbeddingModel API and leave this nil.
 	embeddingModelLookup func() string
+
+	// embedConcurrency caps how many embed calls ProcessFiles issues in
+	// parallel within one batch. The embeddings.Service queue independently
+	// throttles real provider calls to MaxEmbeddingConcurrency, so sizing
+	// this to the same value avoids spawning goroutines that only block on
+	// the queue. <=1 → sequential (legacy behaviour). Set via
+	// SetEmbedConcurrency from main, fed by runtimecfg.
+	embedConcurrency int
+
+	// embedBatchChunks packs chunks from consecutive files into a single
+	// embed call (cross-file batching) up to this many chunks, cutting the
+	// number of round-trips on repos full of small files. <=0 → one embed
+	// call per file (no cross-file batching). Set via SetEmbedBatchChunks.
+	embedBatchChunks int
+
+	// embedTuningLookup, when set, takes precedence over the static
+	// embedConcurrency / embedBatchChunks fields so a dashboard runtime-config
+	// change takes effect on the next ProcessFiles batch without a restart.
+	// main binds it to runtimecfg; tests use the static setters and leave it
+	// nil. Returns (concurrency, batchChunks).
+	embedTuningLookup func() (int, int)
 }
 
 // New constructs a Service. All deps are required except logger (falls back to
@@ -137,6 +182,7 @@ func New(db *sql.DB, vs vectorstore.Interface, emb Embedder, logger *slog.Logger
 		emb:      emb,
 		logger:   logger,
 		sessions: make(map[string]*session),
+		gone:     make(map[string]goneEntry),
 		stopCh:   make(chan struct{}),
 	}
 }
@@ -190,6 +236,36 @@ func (s *Service) EmbeddingModel() string {
 	return s.embeddingModel
 }
 
+// SetEmbedConcurrency sets how many embed calls ProcessFiles issues in
+// parallel within one batch. Fed from runtimecfg (mirrors
+// MaxEmbeddingConcurrency). <=1 keeps the legacy sequential behaviour.
+func (s *Service) SetEmbedConcurrency(n int) { s.embedConcurrency = n }
+
+// SetEmbedBatchChunks sets the cross-file embed-batch size (max chunks
+// packed into a single embed call). Fed from runtimecfg. <=0 disables
+// cross-file batching (one embed call per file).
+func (s *Service) SetEmbedBatchChunks(n int) { s.embedBatchChunks = n }
+
+// SetEmbedTuningLookup binds the indexer to a live function returning the
+// current (embedConcurrency, embedBatchChunks). When set it overrides the
+// static setters, so a dashboard runtime-config change is picked up on the
+// next ProcessFiles batch without a process restart.
+func (s *Service) SetEmbedTuningLookup(fn func() (int, int)) { s.embedTuningLookup = fn }
+
+// embedTuning resolves the effective (concurrency, batchChunks): the live
+// lookup when bound, else the static fields. Concurrency is floored at 1.
+func (s *Service) embedTuning() (concurrency, batchChunks int) {
+	if s.embedTuningLookup != nil {
+		concurrency, batchChunks = s.embedTuningLookup()
+	} else {
+		concurrency, batchChunks = s.embedConcurrency, s.embedBatchChunks
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	return concurrency, batchChunks
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1 — begin
 // ---------------------------------------------------------------------------
@@ -222,6 +298,7 @@ func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bo
 		projectPath:   projectPath,
 		languagesSeen: map[string]struct{}{},
 		startTime:     time.Now(),
+		lastActivity:  time.Now(),
 		status:        "active",
 		phase:         "receiving",
 	}
@@ -327,6 +404,164 @@ func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bo
 // Phase 2 — process files
 // ---------------------------------------------------------------------------
 
+// preparedFile is one file's fully-chunked state, carried between the
+// prepare → embed → write stages of ProcessFilesStreaming.
+type preparedFile struct {
+	fp       FilePayload
+	language string
+	texts    []string            // chunk texts to embed (len == len(vsChunks))
+	vsChunks []vectorstore.Chunk // chunk payloads for the vector store + FTS
+	symbols  []symbolindex.Symbol
+	refs     []symbolindex.Reference
+	embs     [][]float32 // filled by the embed stage; nil until then
+	embedErr error       // non-fatal embed failure → file skipped in write stage
+	embedMS  int64
+}
+
+// embedGroup is a set of consecutive prepared files whose chunks are embedded
+// in a single provider call (cross-file batching).
+type embedGroup struct {
+	fileIdx []int // indices into the prepared slice
+	nchunks int   // sum of len(texts) across fileIdx
+}
+
+// planEmbedGroups packs consecutive prepared files into embed groups of at
+// most maxChunks chunks each. maxChunks<=0 → one group per file (no cross-file
+// batching). A single file whose chunk count already exceeds maxChunks forms
+// its own group (the provider splits it internally).
+func planEmbedGroups(prep []*preparedFile, maxChunks int) []embedGroup {
+	var groups []embedGroup
+	if maxChunks <= 0 {
+		for i := range prep {
+			groups = append(groups, embedGroup{fileIdx: []int{i}, nchunks: len(prep[i].texts)})
+		}
+		return groups
+	}
+	cur := embedGroup{}
+	for i := range prep {
+		n := len(prep[i].texts)
+		if len(cur.fileIdx) > 0 && cur.nchunks+n > maxChunks {
+			groups = append(groups, cur)
+			cur = embedGroup{}
+		}
+		cur.fileIdx = append(cur.fileIdx, i)
+		cur.nchunks += n
+	}
+	if len(cur.fileIdx) > 0 {
+		groups = append(groups, cur)
+	}
+	return groups
+}
+
+// isFatalEmbedErr reports whether an embed error must abort the whole batch
+// (vs. skipping just the affected file). Mirrors the original sequential
+// loop's fatal set: queue-busy (→ 503 + Retry-After), provider disabled,
+// supervisor down, or not-yet-ready.
+func isFatalEmbedErr(err error) bool {
+	if _, busy := embeddings.IsBusy(err); busy {
+		return true
+	}
+	return errors.Is(err, embeddings.ErrDisabled) ||
+		errors.Is(err, embeddings.ErrSupervisor) ||
+		errors.Is(err, embeddings.ErrNotReady)
+}
+
+// embedPrepared runs the embed stage: it embeds every prepared file's chunks,
+// grouping chunks across files (planEmbedGroups) and running groups
+// concurrently up to effEmbedConcurrency(). On success each file's embs is
+// populated; a non-fatal error marks that group's files (embedErr) so the
+// write stage skips them; the first fatal error is returned so the caller
+// aborts the whole batch. sess.lastActivity is bumped as each group finishes
+// so a long embed phase never trips the idle reaper.
+//
+// Note: cross-file batching couples the fate of a group on a NON-fatal error
+// — one file's failed embed marks every file in its group (embedErr), so all
+// are skipped this pass rather than just the offender. This is acceptable
+// because skipped files don't get their file_hashes updated, so the next
+// reconcile pass retries them; the trade is that a persistently-failing file
+// can repeatedly poison its (deterministically-grouped) neighbours. Rare in
+// practice — the fatal set already covers the common transient causes
+// (queue-busy, provider down) and size-driven failures are handled inside the
+// provider (e.g. Voyage adaptive split).
+func (s *Service) embedPrepared(ctx context.Context, sess *session, prep []*preparedFile) error {
+	concurrency, batchChunks := s.embedTuning()
+	groups := planEmbedGroups(prep, batchChunks)
+	if len(groups) == 0 {
+		return nil
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	gctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var mu sync.Mutex
+	var fatal error
+
+	for _, g := range groups {
+		wg.Add(1)
+		go func(g embedGroup) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-gctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			if gctx.Err() != nil {
+				return
+			}
+			texts := make([]string, 0, g.nchunks)
+			for _, fi := range g.fileIdx {
+				texts = append(texts, prep[fi].texts...)
+			}
+			start := time.Now()
+			var (
+				embs [][]float32
+				err  error
+			)
+			if tae, ok := s.emb.(TokenAwareEmbedder); ok {
+				embs, err = tae.TokenizeAndEmbed(gctx, texts)
+			} else {
+				embs, err = s.emb.EmbedTexts(gctx, texts)
+			}
+			s.mu.Lock()
+			sess.lastActivity = time.Now()
+			s.mu.Unlock()
+			if err != nil {
+				if isFatalEmbedErr(err) {
+					mu.Lock()
+					if fatal == nil {
+						fatal = err
+					}
+					mu.Unlock()
+					cancel()
+					return
+				}
+				for _, fi := range g.fileIdx {
+					prep[fi].embedErr = err
+				}
+				return
+			}
+			if len(embs) != g.nchunks {
+				e := fmt.Errorf("embed returned %d vectors, want %d", len(embs), g.nchunks)
+				for _, fi := range g.fileIdx {
+					prep[fi].embedErr = e
+				}
+				return
+			}
+			ms := time.Since(start).Milliseconds()
+			off := 0
+			for _, fi := range g.fileIdx {
+				n := len(prep[fi].texts)
+				prep[fi].embs = embs[off : off+n]
+				prep[fi].embedMS = ms
+				off += n
+			}
+		}(g)
+	}
+	wg.Wait()
+	return fatal
+}
+
 // ProcessFiles chunks, embeds, and stores a batch of files. Returns
 // (filesAccepted, chunksCreated, filesProcessedTotal, err).
 //
@@ -400,6 +635,11 @@ func (s *Service) ProcessFilesStreaming(
 	// rolls back all of this batch's work — successfully-indexed files stay
 	// committed and the next batch resumes from where this one stopped.
 
+	// ---- Stage 1: PREPARE (sequential, local) ----------------------------
+	// Chunk every file and build its symbols/refs/texts/vector payloads. This
+	// is CPU-local and cheap, so it stays sequential to keep progress-event
+	// order; the expensive embed work is parallelised in stage 2.
+	prep := make([]*preparedFile, 0, len(files))
 	for fi, fp := range files {
 		// file_started — emit even for files we'll skip below, so the client
 		// counter advances monotonically and rendering stays aligned with N.
@@ -412,9 +652,9 @@ func (s *Service) ProcessFilesStreaming(
 		})
 
 		// Record the current file in the session ring so GET /index/status
-		// can surface live forward motion. Runs for every caller (CLI stream
-		// and in-process repo indexer alike) regardless of progress channel.
+		// can surface live forward motion, and bump idle activity.
 		s.mu.Lock()
+		sess.lastActivity = time.Now()
 		sess.recentFiles = append(sess.recentFiles, fp.Path)
 		if len(sess.recentFiles) > recentFilesCap {
 			sess.recentFiles = sess.recentFiles[len(sess.recentFiles)-recentFilesCap:]
@@ -460,6 +700,38 @@ func (s *Service) ProcessFilesStreaming(
 			Chunks: len(chunks),
 		})
 
+		// Relative path for the path-aware embedding preamble — computed once
+		// per file and reused for all its chunks.
+		relPath := fp.Path
+		if s.embedIncludePath {
+			if rp, rerr := filepath.Rel(projectPath, fp.Path); rerr == nil {
+				relPath = rp
+			}
+		}
+
+		// Build embed texts + vector-store payloads in a single pass over the
+		// chunks. Format depends on embedIncludePath: legacy Python-parity
+		// "{chunk_type}: {content}" when false, or path+language+symbol
+		// preamble + content when true (see embeddings.FormatChunkForEmbedding).
+		texts := make([]string, len(chunks))
+		vsChunks := make([]vectorstore.Chunk, len(chunks))
+		for i, c := range chunks {
+			texts[i] = embeddings.FormatChunkForEmbedding(c, relPath, s.embedIncludePath)
+			sym := ""
+			if c.SymbolName != nil {
+				sym = *c.SymbolName
+			}
+			vsChunks[i] = vectorstore.Chunk{
+				Content:    c.Content,
+				FilePath:   c.FilePath,
+				StartLine:  c.StartLine,
+				EndLine:    c.EndLine,
+				ChunkType:  c.ChunkType,
+				SymbolName: sym,
+				Language:   c.Language,
+			}
+		}
+
 		// Symbol extraction — mirrors Python: function|class|method|type with a name.
 		fileSymbols := make([]symbolindex.Symbol, 0, len(chunks))
 		for _, c := range chunks {
@@ -494,100 +766,76 @@ func (s *Service) ProcessFilesStreaming(
 			})
 		}
 
-		// Embed. Format depends on embedIncludePath: legacy Python-parity
-		// "{chunk_type}: {content}" when false, or path+language+symbol
-		// preamble + content when true (see embeddings.FormatChunkForEmbedding).
-		// Relative path is computed once per file and reused for all its chunks.
-		relPath := fp.Path
-		if s.embedIncludePath {
-			if rp, rerr := filepath.Rel(projectPath, fp.Path); rerr == nil {
-				relPath = rp
-			}
-		}
-		texts := make([]string, len(chunks))
-		for i, c := range chunks {
-			texts[i] = embeddings.FormatChunkForEmbedding(c, relPath, s.embedIncludePath)
-		}
-		var embs [][]float32
-		embedStart := time.Now()
-		if tae, ok := s.emb.(TokenAwareEmbedder); ok {
-			embs, err = tae.TokenizeAndEmbed(ctx, texts)
-		} else {
-			embs, err = s.emb.EmbedTexts(ctx, texts)
-		}
-		if err != nil {
-			// Propagate ErrBusy so handler can map to 503 + Retry-After.
-			if _, busy := embeddings.IsBusy(err); busy {
-				emitTerminal(progress, ProgressEvent{
-					Event:   EventError,
-					Message: err.Error(),
-					Fatal:   true,
-				})
-				return filesAccepted, batchChunks, sess.filesProcessed, err
-			}
-			if errors.Is(err, embeddings.ErrDisabled) ||
-				errors.Is(err, embeddings.ErrSupervisor) ||
-				errors.Is(err, embeddings.ErrNotReady) {
-				emitTerminal(progress, ProgressEvent{
-					Event:   EventError,
-					Message: err.Error(),
-					Fatal:   true,
-				})
-				return filesAccepted, batchChunks, sess.filesProcessed, err
-			}
-			s.logger.Error("indexer: embed texts failed", "path", fp.Path, "err", err)
+		prep = append(prep, &preparedFile{
+			fp:       fp,
+			language: language,
+			texts:    texts,
+			vsChunks: vsChunks,
+			symbols:  fileSymbols,
+			refs:     fileRefs,
+		})
+	}
+
+	// ---- Stage 2: EMBED (parallel + cross-file batched) ------------------
+	// embedPrepared fills each prepared file's embs, or returns a fatal error
+	// (queue-busy → 503, provider disabled/down) that aborts the whole batch.
+	// Non-fatal per-group failures are recorded on the file and skipped below.
+	if ferr := s.embedPrepared(ctx, sess, prep); ferr != nil {
+		emitTerminal(progress, ProgressEvent{
+			Event:   EventError,
+			Message: ferr.Error(),
+			Fatal:   true,
+		})
+		s.mu.RLock()
+		total := sess.filesProcessed
+		s.mu.RUnlock()
+		return 0, 0, total, ferr
+	}
+
+	// ---- Stage 3: WRITE (serial, ordered) --------------------------------
+	// Vector-store + per-file DB writes run on this single goroutine: chromem
+	// is thread-safe but serialising keeps SQLite's WAL writer uncontended and
+	// preserves deterministic progress-event ordering. Each write is local and
+	// sub-ms, so serialising costs nothing next to the (now parallel) embeds.
+	for _, p := range prep {
+		if p.embedErr != nil {
+			s.logger.Error("indexer: embed texts failed", "path", p.fp.Path, "err", p.embedErr)
 			progressSend(progress, ProgressEvent{
 				Event:   EventFileError,
-				Path:    fp.Path,
-				Message: "embed: " + err.Error(),
+				Path:    p.fp.Path,
+				Message: "embed: " + p.embedErr.Error(),
 				Fatal:   false,
 			})
 			continue
 		}
 		progressSend(progress, ProgressEvent{
 			Event:   EventFileEmbedded,
-			Path:    fp.Path,
-			Chunks:  len(chunks),
-			EmbedMS: time.Since(embedStart).Milliseconds(),
+			Path:    p.fp.Path,
+			Chunks:  len(p.vsChunks),
+			EmbedMS: p.embedMS,
 		})
 
-		// Vector store has no transactions — do its writes BEFORE opening
-		// the DB tx so the writer lock is acquired strictly for the DB part.
-		// If the DB tx fails we leave the new vectors in place; next reindex
-		// will see file_hashes was not updated and re-process the file,
-		// overwriting them. Acceptable for an infrequent failure mode.
-		vsChunks := make([]vectorstore.Chunk, len(chunks))
-		for i, c := range chunks {
-			sym := ""
-			if c.SymbolName != nil {
-				sym = *c.SymbolName
-			}
-			vsChunks[i] = vectorstore.Chunk{
-				Content:    c.Content,
-				FilePath:   c.FilePath,
-				StartLine:  c.StartLine,
-				EndLine:    c.EndLine,
-				ChunkType:  c.ChunkType,
-				SymbolName: sym,
-				Language:   c.Language,
-			}
-		}
+		// Vector store has no transactions — do its writes BEFORE opening the
+		// DB tx so the writer lock is held strictly for the DB part. If the DB
+		// tx fails we leave the new vectors in place; the next reindex sees
+		// file_hashes was not updated and re-processes the file, overwriting
+		// them. Acceptable for an infrequent failure mode.
 		if s.vs != nil {
-			if err := s.vs.DeleteByFile(ctx, projectPath, fp.Path); err != nil {
-				s.logger.Error("indexer: vectorstore delete by file", "path", fp.Path, "err", err)
+			if err := s.vs.DeleteByFile(ctx, projectPath, p.fp.Path); err != nil {
+				s.logger.Error("indexer: vectorstore delete by file", "path", p.fp.Path, "err", err)
 				progressSend(progress, ProgressEvent{
 					Event:   EventFileError,
-					Path:    fp.Path,
+					Path:    p.fp.Path,
 					Message: "vectorstore delete: " + err.Error(),
 					Fatal:   false,
 				})
 				continue
 			}
-			if err := s.vs.UpsertChunks(ctx, projectPath, vsChunks, embs); err != nil {
-				s.logger.Error("indexer: vectorstore upsert", "path", fp.Path, "err", err)
+			if err := s.vs.UpsertChunks(ctx, projectPath, p.vsChunks, p.embs); err != nil {
+				s.logger.Error("indexer: vectorstore upsert", "path", p.fp.Path, "err", err)
 				progressSend(progress, ProgressEvent{
 					Event:   EventFileError,
-					Path:    fp.Path,
+					Path:    p.fp.Path,
 					Message: "vectorstore upsert: " + err.Error(),
 					Fatal:   false,
 				})
@@ -595,11 +843,9 @@ func (s *Service) ProcessFilesStreaming(
 			}
 		}
 
-		// Build chunksfts payload from the same chunks we just pushed to
-		// chromem. The FTS side reuses content + metadata; embeddings stay
-		// on the vector side only.
-		ftsChunks := make([]chunksfts.Chunk, len(vsChunks))
-		for i, c := range vsChunks {
+		// Build chunksfts payload from the same chunks pushed to chromem.
+		ftsChunks := make([]chunksfts.Chunk, len(p.vsChunks))
+		for i, c := range p.vsChunks {
 			ftsChunks[i] = chunksfts.Chunk{
 				Content:    c.Content,
 				FilePath:   c.FilePath,
@@ -621,57 +867,57 @@ func (s *Service) ProcessFilesStreaming(
 			}
 			defer ftx.Rollback() //nolint:errcheck // no-op after commit
 
-			if err := symbolindex.DeleteByFileTx(ctx, ftx, projectPath, fp.Path); err != nil {
+			if err := symbolindex.DeleteByFileTx(ctx, ftx, projectPath, p.fp.Path); err != nil {
 				return fmt.Errorf("symbols delete: %w", err)
 			}
-			if err := symbolindex.DeleteRefsByFileTx(ctx, ftx, projectPath, fp.Path); err != nil {
+			if err := symbolindex.DeleteRefsByFileTx(ctx, ftx, projectPath, p.fp.Path); err != nil {
 				return fmt.Errorf("refs delete: %w", err)
 			}
-			if len(fileSymbols) > 0 {
-				if err := symbolindex.UpsertSymbolsTx(ctx, ftx, projectPath, fileSymbols); err != nil {
+			if len(p.symbols) > 0 {
+				if err := symbolindex.UpsertSymbolsTx(ctx, ftx, projectPath, p.symbols); err != nil {
 					return fmt.Errorf("upsert symbols: %w", err)
 				}
 			}
-			if len(fileRefs) > 0 {
-				if err := symbolindex.UpsertReferencesTx(ctx, ftx, projectPath, fileRefs); err != nil {
+			if len(p.refs) > 0 {
+				if err := symbolindex.UpsertReferencesTx(ctx, ftx, projectPath, p.refs); err != nil {
 					return fmt.Errorf("upsert refs: %w", err)
 				}
 			}
-			if err := chunksfts.UpsertByFileTx(ctx, ftx, projectPath, fp.Path, ftsChunks); err != nil {
+			if err := chunksfts.UpsertByFileTx(ctx, ftx, projectPath, p.fp.Path, ftsChunks); err != nil {
 				return fmt.Errorf("upsert chunks_fts: %w", err)
 			}
 			if _, err := ftx.ExecContext(ctx,
 				`INSERT OR REPLACE INTO file_hashes
 				 (project_path, file_path, content_hash, indexed_at)
 				 VALUES (?, ?, ?, ?)`,
-				projectPath, fp.Path, fp.ContentHash, now,
+				projectPath, p.fp.Path, p.fp.ContentHash, now,
 			); err != nil {
 				return fmt.Errorf("file_hashes upsert: %w", err)
 			}
 			return ftx.Commit()
 		}()
 		if fileErr != nil {
-			s.logger.Error("indexer: file tx failed", "path", fp.Path, "err", fileErr)
+			s.logger.Error("indexer: file tx failed", "path", p.fp.Path, "err", fileErr)
 			progressSend(progress, ProgressEvent{
 				Event:   EventFileError,
-				Path:    fp.Path,
+				Path:    p.fp.Path,
 				Message: fileErr.Error(),
 				Fatal:   false,
 			})
 			continue
 		}
 
-		batchChunks += len(chunks)
+		batchChunks += len(p.vsChunks)
 
 		s.mu.Lock()
-		sess.languagesSeen[language] = struct{}{}
+		sess.languagesSeen[p.language] = struct{}{}
 		s.mu.Unlock()
 		filesAccepted++
 
 		progressSend(progress, ProgressEvent{
 			Event:  EventFileDone,
-			Path:   fp.Path,
-			Chunks: len(chunks),
+			Path:   p.fp.Path,
+			Chunks: len(p.vsChunks),
 		})
 	}
 
@@ -846,6 +1092,8 @@ func (s *Service) CancelIndexing(ctx context.Context, projectPath string) (bool,
 		return false, nil
 	}
 	delete(s.sessions, cancelledRunID)
+	s.gone[projectPath] = goneEntry{reason: "user-cancel", at: time.Now()}
+	s.pruneGoneLocked()
 	s.mu.Unlock()
 
 	now := nowUTC()
@@ -864,6 +1112,45 @@ func (s *Service) CancelIndexing(ctx context.Context, projectPath string) (bool,
 
 	s.logger.Info("indexer: session cancelled", "run_id", cancelledRunID, "project", projectPath)
 	return true, nil
+}
+
+// FailIndexing releases the in-memory session for runID after the in-process
+// repo indexer (package repoindexer) aborts mid-run — e.g. a transient
+// "embedding queue saturated" backpressure error or a walk failure. Without
+// this, an aborted run leaves its session status="active" until ttlCleanup
+// reaps it (sessionTTL of idle), and every immediate retry / manual Sync
+// bounces off ErrSessionConflict in the meantime — the failure that triggers
+// the retry also blocks it. Releasing the session here lets the retry call
+// BeginIndexing again and resume via the reconcile path.
+//
+// Unlike CancelIndexing this is NOT a user cancellation: it does NOT flip
+// projects.status to 'indexed' (repojobs owns the project's terminal state and
+// will mark it 'error' / requeue) and it sets no "user-cancel" tombstone, so a
+// later ErrNoSession is correctly read as an involuntary loss (retry/resume)
+// rather than a deliberate stop. Idempotent and keyed by runID, so it no-ops
+// when the session was already removed (force-stop, idle reap, or success).
+func (s *Service) FailIndexing(ctx context.Context, projectPath, runID string) {
+	s.mu.Lock()
+	sess, ok := s.sessions[runID]
+	if !ok || sess.projectPath != projectPath {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.sessions, runID)
+	s.mu.Unlock()
+
+	// Detach from ctx for the bookkeeping write: the abort path is often a
+	// cancelled context (shutdown), but the run row should still be marked
+	// failed rather than left 'running'. The session release above — the part
+	// that unblocks retries — already happened and never touched ctx.
+	now := nowUTC()
+	if _, err := s.db.ExecContext(context.WithoutCancel(ctx),
+		`UPDATE index_runs SET status = 'failed', completed_at = ? WHERE id = ?`,
+		now, runID,
+	); err != nil {
+		s.logger.Warn("indexer: mark run failed", "run_id", runID, "project", projectPath, "err", err)
+	}
+	s.logger.Info("indexer: session released after failure", "run_id", runID, "project", projectPath)
 }
 
 // ---------------------------------------------------------------------------
@@ -929,6 +1216,37 @@ var ErrProjectMismatch = errors.New("indexer: run_id does not match project")
 // already has an active session. HTTP handlers should map this to 409 Conflict.
 var ErrSessionConflict = errors.New("indexer: session already active for project")
 
+// ConsumeGoneReason returns why a now-absent session for projectPath
+// disappeared ("user-cancel" | "idle-timeout") and removes the tombstone.
+// Returns "" when there is no record — which the caller should treat as an
+// involuntary loss (process crash / never existed), i.e. NOT a deliberate
+// force-stop. The in-process repo indexer uses this to decide whether an
+// ErrNoSession mid-run is a clean cancellation (swallow) or an abort to
+// surface so the queue retries and the resume path picks up where it stopped.
+func (s *Service) ConsumeGoneReason(projectPath string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.gone[projectPath]
+	if !ok {
+		return ""
+	}
+	delete(s.gone, projectPath)
+	return e.reason
+}
+
+// pruneGoneLocked drops tombstones older than sessionTTL. Caller holds s.mu.
+func (s *Service) pruneGoneLocked() {
+	if len(s.gone) == 0 {
+		return
+	}
+	cutoff := time.Now().Add(-sessionTTL)
+	for k, e := range s.gone {
+		if e.at.Before(cutoff) {
+			delete(s.gone, k)
+		}
+	}
+}
+
 func (s *Service) requireSession(runID, projectPath string) (*session, error) {
 	s.mu.RLock()
 	sess, ok := s.sessions[runID]
@@ -942,21 +1260,42 @@ func (s *Service) requireSession(runID, projectPath string) (*session, error) {
 	return sess, nil
 }
 
-// ttlCleanup drops the session after sessionTTL if it is still active.
-// Returns early without any DB work when Shutdown() is called.
+// ttlCleanup reaps the session only after it has been IDLE for sessionTTL —
+// i.e. no ProcessFiles batch bumped lastActivity within that window. This
+// makes the timeout an inactivity guard against abandoned sessions, NOT a cap
+// on total indexing time: an actively-progressing run (which bumps
+// lastActivity every file) is never reaped, however long it takes. Exits
+// early on Shutdown(), and once the session is gone or no longer active.
 func (s *Service) ttlCleanup(runID string) {
-	t := time.NewTimer(sessionTTL)
-	defer t.Stop()
-	select {
-	case <-t.C:
-	case <-s.stopCh:
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if sess, ok := s.sessions[runID]; ok && sess.status == "active" {
-		s.logger.Warn("indexer: session timed out", "run_id", runID)
-		delete(s.sessions, runID)
+	ticker := time.NewTicker(sessionTTL / 4)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+		}
+		s.mu.Lock()
+		sess, ok := s.sessions[runID]
+		if !ok {
+			s.mu.Unlock()
+			return // finished or cancelled — nothing to reap
+		}
+		if sess.status != "active" {
+			s.mu.Unlock()
+			return // delayedCleanup owns completed sessions
+		}
+		if time.Since(sess.lastActivity) > sessionTTL {
+			s.logger.Warn("indexer: session idle-timed-out",
+				"run_id", runID, "project", sess.projectPath,
+				"idle_seconds", time.Since(sess.lastActivity).Seconds())
+			delete(s.sessions, runID)
+			s.gone[sess.projectPath] = goneEntry{reason: "idle-timeout", at: time.Now()}
+			s.pruneGoneLocked()
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
 	}
 }
 
@@ -1071,4 +1410,3 @@ func deleteChunksFTSByFile(ctx context.Context, db *sql.DB, projectPath, filePat
 	}
 	return tx.Commit()
 }
-

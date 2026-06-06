@@ -35,6 +35,11 @@ type Config struct {
 	MaxEmbeddingConcurrency int
 	EmbeddingQueueTimeout   int
 	MaxChunkTokens          int
+	// IndexEmbedBatchChunks packs chunks from consecutive files into one
+	// embed call (cross-file batching) during repo indexing, cutting
+	// round-trips on repos full of small files. 0 → one embed call per file.
+	// Dashboard-overridable via runtimecfg. Env: CIX_INDEX_EMBED_BATCH_CHUNKS.
+	IndexEmbedBatchChunks int
 
 	// Phase 3 — llama-server sidecar configuration.
 	GGUFPath          string // CIX_GGUF_PATH; absolute path. Empty = auto-resolve via cache / dev-fallback / HF download.
@@ -259,6 +264,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.EmbeddingQueueTimeout = queueTO
+
+	idxBatch, err := getenvInt("CIX_INDEX_EMBED_BATCH_CHUNKS", 0)
+	if err != nil {
+		return nil, err
+	}
+	c.IndexEmbedBatchChunks = idxBatch
 
 	maxChunk, err := getenvInt("CIX_MAX_CHUNK_TOKENS", 1500)
 	if err != nil {

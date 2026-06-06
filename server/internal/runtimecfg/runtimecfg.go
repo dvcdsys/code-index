@@ -40,6 +40,7 @@ const (
 	FieldLlamaNThreads           = "llama_n_threads"
 	FieldMaxEmbeddingConcurrency = "max_embedding_concurrency"
 	FieldLlamaBatchSize          = "llama_batch_size"
+	FieldIndexEmbedBatchChunks   = "index_embed_batch_chunks"
 )
 
 // Snapshot is a fully-resolved runtime config — every field is populated, no
@@ -52,6 +53,7 @@ type Snapshot struct {
 	LlamaNThreads           int
 	MaxEmbeddingConcurrency int
 	LlamaBatchSize          int
+	IndexEmbedBatchChunks   int
 
 	// Source maps Field* constants to one of SourceDB/SourceEnv/SourceRecommended.
 	Source map[string]string
@@ -76,6 +78,7 @@ type Patch struct {
 	LlamaNThreads           *int
 	MaxEmbeddingConcurrency *int
 	LlamaBatchSize          *int
+	IndexEmbedBatchChunks   *int
 }
 
 // Service resolves runtime config from the DB, falling through to env-loaded
@@ -109,6 +112,7 @@ func (s *Service) Recommended() Snapshot {
 		LlamaNThreads:           runtime.NumCPU() / 2,
 		MaxEmbeddingConcurrency: 5,
 		LlamaBatchSize:          2048,
+		IndexEmbedBatchChunks:   64,
 		Source:                  map[string]string{},
 	}
 }
@@ -120,6 +124,7 @@ type dbRow struct {
 	llamaNThreads           sql.NullInt64
 	maxEmbeddingConcurrency sql.NullInt64
 	llamaBatchSize          sql.NullInt64
+	indexEmbedBatchChunks   sql.NullInt64
 	updatedAt               sql.NullString
 	updatedBy               sql.NullString
 }
@@ -129,12 +134,12 @@ func (s *Service) loadRow(ctx context.Context) (dbRow, bool, error) {
 	err := s.db.QueryRowContext(ctx, `
 		SELECT embedding_model, llama_ctx_size, llama_n_gpu_layers,
 		       llama_n_threads, max_embedding_concurrency, llama_batch_size,
-		       updated_at, updated_by
+		       index_embed_batch_chunks, updated_at, updated_by
 		FROM runtime_settings WHERE id = 1
 	`).Scan(
 		&r.embeddingModel, &r.llamaCtxSize, &r.llamaNGpuLayers,
 		&r.llamaNThreads, &r.maxEmbeddingConcurrency, &r.llamaBatchSize,
-		&r.updatedAt, &r.updatedBy,
+		&r.indexEmbedBatchChunks, &r.updatedAt, &r.updatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dbRow{}, false, nil
@@ -176,6 +181,7 @@ func (s *Service) Get(ctx context.Context) (Snapshot, error) {
 	out.LlamaNThreads = resolveInt(row.llamaNThreads, hasRow, envIntOrZero(s.env, "threads"), rec.LlamaNThreads, &out.Source, FieldLlamaNThreads)
 	out.MaxEmbeddingConcurrency = resolveInt(row.maxEmbeddingConcurrency, hasRow, envIntOrZero(s.env, "conc"), rec.MaxEmbeddingConcurrency, &out.Source, FieldMaxEmbeddingConcurrency)
 	out.LlamaBatchSize = resolveInt(row.llamaBatchSize, hasRow, envIntOrZero(s.env, "batch"), rec.LlamaBatchSize, &out.Source, FieldLlamaBatchSize)
+	out.IndexEmbedBatchChunks = resolveInt(row.indexEmbedBatchChunks, hasRow, envIntOrZero(s.env, "idxbatch"), rec.IndexEmbedBatchChunks, &out.Source, FieldIndexEmbedBatchChunks)
 
 	if hasRow {
 		if row.updatedAt.Valid {
@@ -239,6 +245,8 @@ func envIntOrZero(env *config.Config, which string) int {
 		return env.MaxEmbeddingConcurrency
 	case "batch":
 		return env.LlamaBatchSize
+	case "idxbatch":
+		return env.IndexEmbedBatchChunks
 	}
 	return 0
 }
@@ -278,6 +286,7 @@ func (s *Service) Set(ctx context.Context, patch Patch, updatedBy string) error 
 	mergeInt(&merged.llamaNThreads, patch.LlamaNThreads)
 	mergeInt(&merged.maxEmbeddingConcurrency, patch.MaxEmbeddingConcurrency)
 	mergeInt(&merged.llamaBatchSize, patch.LlamaBatchSize)
+	mergeInt(&merged.indexEmbedBatchChunks, patch.IndexEmbedBatchChunks)
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if hasRow {
@@ -285,26 +294,26 @@ func (s *Service) Set(ctx context.Context, patch Patch, updatedBy string) error 
 			UPDATE runtime_settings
 			SET embedding_model = ?, llama_ctx_size = ?, llama_n_gpu_layers = ?,
 			    llama_n_threads = ?, max_embedding_concurrency = ?, llama_batch_size = ?,
-			    updated_at = ?, updated_by = ?
+			    index_embed_batch_chunks = ?, updated_at = ?, updated_by = ?
 			WHERE id = 1
 		`,
 			nullStr(merged.embeddingModel), nullInt(merged.llamaCtxSize),
 			nullInt(merged.llamaNGpuLayers), nullInt(merged.llamaNThreads),
 			nullInt(merged.maxEmbeddingConcurrency), nullInt(merged.llamaBatchSize),
-			now, updatedBy,
+			nullInt(merged.indexEmbedBatchChunks), now, updatedBy,
 		)
 	} else {
 		_, err = s.db.ExecContext(ctx, `
 			INSERT INTO runtime_settings (
 				id, embedding_model, llama_ctx_size, llama_n_gpu_layers,
 				llama_n_threads, max_embedding_concurrency, llama_batch_size,
-				updated_at, updated_by
-			) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+				index_embed_batch_chunks, updated_at, updated_by
+			) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			nullStr(merged.embeddingModel), nullInt(merged.llamaCtxSize),
 			nullInt(merged.llamaNGpuLayers), nullInt(merged.llamaNThreads),
 			nullInt(merged.maxEmbeddingConcurrency), nullInt(merged.llamaBatchSize),
-			now, updatedBy,
+			nullInt(merged.indexEmbedBatchChunks), now, updatedBy,
 		)
 	}
 	if err != nil {
@@ -354,4 +363,5 @@ func (snap Snapshot) ApplyTo(env *config.Config) {
 	env.LlamaNThreads = snap.LlamaNThreads
 	env.MaxEmbeddingConcurrency = snap.MaxEmbeddingConcurrency
 	env.LlamaBatchSize = snap.LlamaBatchSize
+	env.IndexEmbedBatchChunks = snap.IndexEmbedBatchChunks
 }

@@ -135,6 +135,10 @@ func (s *Service) Register(jobType string, h Handler) {
 // once per Service. The returned function is a Stop alias for symmetry
 // with other supervisor patterns in the codebase.
 func (s *Service) Start(ctx context.Context) {
+	// Recover orphaned 'running' jobs synchronously BEFORE the pool spins up,
+	// so a caller that reconciles project state right after Start observes the
+	// requeued (or abandoned→failed) jobs rather than racing the goroutine.
+	s.recoverOrphanedJobs(ctx)
 	go s.runPool(ctx)
 }
 
@@ -160,7 +164,9 @@ func (s *Service) Stop(ctx context.Context) error {
 func (s *Service) runPool(ctx context.Context) {
 	defer close(s.done)
 
-	// Per-worker ticker is cheaper than a single ticker fanned out.
+	// Orphaned 'running' jobs are recovered in Start (synchronously, before
+	// the pool spins up). Per-worker ticker is cheaper than a single ticker
+	// fanned out.
 	wg := sync.WaitGroup{}
 	for i := 0; i < s.concurrency; i++ {
 		wg.Add(1)
@@ -183,11 +189,23 @@ func (s *Service) workerLoop(ctx context.Context, workerID int) {
 			return
 		case <-tick.C:
 		}
+		// select picks randomly among ready cases, so a tick can win even
+		// after ctx/stop fired. Re-check before touching the DB to avoid
+		// claiming against a cancelled ctx / closing DB — which otherwise
+		// floods the log with "interrupted (9)" every tick during shutdown.
+		if ctx.Err() != nil {
+			return
+		}
 		// Pull one job per tick. Higher throughput would benefit from a
 		// LIMIT batch, but the work is dominated by clone/index time,
 		// not queue overhead — keep this simple.
 		job, err := s.claimNext(ctx)
 		if err != nil {
+			// Shutdown in flight (ctx cancelled) or the DB is going away —
+			// exit quietly instead of busy-logging the same error per tick.
+			if ctx.Err() != nil || errors.Is(err, sql.ErrConnDone) {
+				return
+			}
 			s.logger.Error("jobs: claim failed", "worker", workerID, "err", err)
 			continue
 		}
@@ -195,6 +213,31 @@ func (s *Service) workerLoop(ctx context.Context, workerID int) {
 			continue
 		}
 		s.execute(ctx, workerID, *job)
+	}
+}
+
+// recoverOrphanedJobs requeues jobs stuck in 'running' from a previous
+// process that crashed or was killed mid-execute. The normal lifecycle
+// always moves running → completed/failed/pending, so any 'running' row at
+// startup is orphaned. Jobs with attempts left go back to 'pending' (work
+// resumes); jobs that already exhausted max_attempts become 'failed' so a
+// job that reliably kills the process (e.g. OOM) can't crash-loop forever.
+func (s *Service) recoverOrphanedJobs(ctx context.Context) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE jobs
+		   SET status       = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
+		       last_error   = CASE WHEN attempts >= max_attempts
+		                           THEN 'abandoned: process exited while job was running'
+		                           ELSE last_error END,
+		       completed_at = CASE WHEN attempts >= max_attempts THEN ? ELSE completed_at END
+		 WHERE status = 'running'`, now)
+	if err != nil {
+		s.logger.Error("jobs: recover orphaned 'running' jobs failed", "err", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		s.logger.Warn("jobs: requeued orphaned 'running' jobs on startup", "count", n)
 	}
 }
 

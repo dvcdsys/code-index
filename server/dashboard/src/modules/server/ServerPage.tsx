@@ -27,6 +27,7 @@ interface Draft {
   llama_n_threads: number;
   max_embedding_concurrency: number;
   llama_batch_size: number;
+  index_embed_batch_chunks: number;
 }
 
 function configToDraft(c: RuntimeConfig): Draft {
@@ -37,6 +38,7 @@ function configToDraft(c: RuntimeConfig): Draft {
     llama_n_threads: c.llama_n_threads,
     max_embedding_concurrency: c.max_embedding_concurrency,
     llama_batch_size: c.llama_batch_size,
+    index_embed_batch_chunks: c.index_embed_batch_chunks,
   };
 }
 
@@ -55,6 +57,7 @@ function diffPatch(c: RuntimeConfig, d: Draft): { patch: RuntimeConfigUpdate; ch
     'llama_n_threads',
     'max_embedding_concurrency',
     'llama_batch_size',
+    'index_embed_batch_chunks',
   ] as const) {
     if (d[k] !== c[k]) {
       patch[k] = d[k];
@@ -220,8 +223,10 @@ export default function ServerPage() {
         config={cfg.data}
         draftConcurrency={draft.max_embedding_concurrency}
         draftBatch={draft.llama_batch_size}
+        draftIndexBatch={draft.index_embed_batch_chunks}
         onDraftConcurrency={(n) => setDraft({ ...draft, max_embedding_concurrency: n })}
         onDraftBatch={(n) => setDraft({ ...draft, llama_batch_size: n })}
+        onDraftIndexBatch={(n) => setDraft({ ...draft, index_embed_batch_chunks: n })}
         isOllama={showOllamaSections}
       />
 
