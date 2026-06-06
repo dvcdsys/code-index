@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof" // opt-in heap/CPU profiling, exposed only when CIX_PPROF_ADDR is set
 	"os"
 	"os/signal"
 	"strings"
@@ -405,6 +406,19 @@ func run() error {
 		DefaultPollIntervalSeconds: int(cfg.DefaultPollInterval.Seconds()),
 		MinPollIntervalSeconds:     int(cfg.MinPollInterval.Seconds()),
 	})
+	// Opt-in profiling listener (memory-leak / CPU debugging). Off unless
+	// CIX_PPROF_ADDR is set; bind to localhost only. net/http/pprof registers
+	// its handlers on http.DefaultServeMux at import, so a plain
+	// ListenAndServe(addr, nil) serves /debug/pprof/*. Capture the heap with:
+	//   go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+	if pprofAddr := os.Getenv("CIX_PPROF_ADDR"); pprofAddr != "" {
+		go func() {
+			logger.Warn("pprof debug listener enabled (do NOT expose publicly)", "addr", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				logger.Error("pprof listener exited", "err", err)
+			}
+		}()
+	}
 
 	jobsCtx, jobsCancel := context.WithCancel(context.Background())
 	jobsSvc.Start(jobsCtx)
