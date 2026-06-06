@@ -473,6 +473,16 @@ func isFatalEmbedErr(err error) bool {
 // write stage skips them; the first fatal error is returned so the caller
 // aborts the whole batch. sess.lastActivity is bumped as each group finishes
 // so a long embed phase never trips the idle reaper.
+//
+// Note: cross-file batching couples the fate of a group on a NON-fatal error
+// — one file's failed embed marks every file in its group (embedErr), so all
+// are skipped this pass rather than just the offender. This is acceptable
+// because skipped files don't get their file_hashes updated, so the next
+// reconcile pass retries them; the trade is that a persistently-failing file
+// can repeatedly poison its (deterministically-grouped) neighbours. Rare in
+// practice — the fatal set already covers the common transient causes
+// (queue-busy, provider down) and size-driven failures are handled inside the
+// provider (e.g. Voyage adaptive split).
 func (s *Service) embedPrepared(ctx context.Context, sess *session, prep []*preparedFile) error {
 	concurrency, batchChunks := s.embedTuning()
 	groups := planEmbedGroups(prep, batchChunks)

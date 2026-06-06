@@ -444,11 +444,12 @@ func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash str
 		return
 	}
 
-	// Force-full path: drop indexed_sha BEFORE enqueueing so the
-	// clone_repo handler's mode-determination sees IndexedSHA="" and
-	// routes through the full-reindex branch. Doing the clear here
-	// (rather than inside the job) means a dashboard refetch
-	// immediately reflects the "uncommitted" state.
+	// Force-full path: what actually forces a full WIPE is ClonePayload.
+	// ForceFull, which handleClone checks first in its mode switch — an empty
+	// IndexedSHA on its own now routes to reconcile (resume), not full. We
+	// still drop indexed_sha here so a dashboard refetch immediately reflects
+	// the "uncommitted" state; doing the clear here (rather than inside the
+	// job) is purely for that UI immediacy, not for mode determination.
 	forceFull := params.Full != nil && *params.Full
 	if forceFull && g.IndexedSHA != "" {
 		if err := s.Deps.GitRepos.SetIndexedSHA(r.Context(), g.ProjectPath, ""); err != nil {
