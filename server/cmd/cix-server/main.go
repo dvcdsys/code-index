@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof" // opt-in heap/CPU profiling, exposed only when CIX_PPROF_ADDR is set
 	"os"
 	"os/signal"
 	"strings"
@@ -315,6 +316,17 @@ func run() error {
 	// Provider.ID() ("ollama:<model>" / "voyage:..."), matching what the
 	// drift-detector and dashboard compare against.
 	idx.SetEmbeddingModelLookup(embedSvc.EmbeddingModel)
+	// Parallel + cross-file-batched indexing. Concurrency reuses the
+	// embedding-queue cap (MaxEmbeddingConcurrency); the cross-file batch
+	// size is its own runtime knob. Bound as a live lookup so a dashboard
+	// runtime-config change takes effect on the next batch without a restart.
+	idx.SetEmbedTuningLookup(func() (int, int) {
+		snap, err := rcfg.Get(context.Background())
+		if err != nil {
+			return cfg.MaxEmbeddingConcurrency, cfg.IndexEmbedBatchChunks
+		}
+		return snap.MaxEmbeddingConcurrency, snap.IndexEmbedBatchChunks
+	})
 	if cfg.EmbedIncludePath {
 		logger.Info("embedding format: path-aware preamble enabled (CIX_EMBED_INCLUDE_PATH=true) — full reindex required if upgrading")
 	}
@@ -394,8 +406,36 @@ func run() error {
 		DefaultPollIntervalSeconds: int(cfg.DefaultPollInterval.Seconds()),
 		MinPollIntervalSeconds:     int(cfg.MinPollInterval.Seconds()),
 	})
-	jobsSvc.Start(context.Background())
+	// Opt-in profiling listener (memory-leak / CPU debugging). Off unless
+	// CIX_PPROF_ADDR is set; bind to localhost only. net/http/pprof registers
+	// its handlers on http.DefaultServeMux at import, so a plain
+	// ListenAndServe(addr, nil) serves /debug/pprof/*. Capture the heap with:
+	//   go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+	if pprofAddr := os.Getenv("CIX_PPROF_ADDR"); pprofAddr != "" {
+		go func() {
+			logger.Warn("pprof debug listener enabled (do NOT expose publicly)", "addr", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				logger.Error("pprof listener exited", "err", err)
+			}
+		}()
+	}
+
+	jobsCtx, jobsCancel := context.WithCancel(context.Background())
+	jobsSvc.Start(jobsCtx)
+	// Honest-state recovery: an external project a prior process left
+	// mid-pipeline (e.g. OOM-killed) whose job was abandoned + exhausted its
+	// retries is otherwise stuck showing 'indexing' with nothing driving it.
+	// Flip those to 'error' so the dashboard is honest and the operator can
+	// Sync (resume from file_hashes via reconcile). Runs after Start, which
+	// recovered orphaned 'running' jobs synchronously.
+	repojobs.ReconcileStuckProjects(context.Background(), database, logger)
 	defer func() {
+		// Cancel in-flight handlers (a long index run) FIRST so they abort
+		// promptly. Otherwise Stop blocks for its full budget while indexing
+		// keeps running, and the later database.Close() interrupts the
+		// worker's queries ("interrupted (9)" flood). The aborted index
+		// resumes via reconcile on next start.
+		jobsCancel()
 		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := jobsSvc.Stop(stopCtx); err != nil {

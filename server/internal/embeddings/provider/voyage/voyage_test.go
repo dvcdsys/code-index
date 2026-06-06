@@ -512,7 +512,7 @@ func TestRateLimitRPMThrottlesRequests(t *testing.T) {
 
 // TestRateLimitTPMThrottlesTokens verifies the token-budget bucket
 // also forces a wait when consumption exceeds the per-minute rate.
-// 600K TPM = 10K tokens/s, burst = maxTokensPerBatch (100K). Sending
+// 600K TPM = 10K tokens/s, burst = maxTokensPerBatch (80K). Sending
 // two batches of 60K tokens each should make the second wait while
 // the bucket refills.
 func TestRateLimitTPMThrottlesTokens(t *testing.T) {
@@ -524,7 +524,7 @@ func TestRateLimitTPMThrottlesTokens(t *testing.T) {
 
 	p := New(Config{
 		BaseURL: srv.URL, APIKeyEnv: "K", Model: "voyage-3", OutputDtype: DtypeFloat,
-		// burst = maxTokensPerBatch (100K), refill rate 600K/min = 10K/s.
+		// burst = maxTokensPerBatch (80K), refill rate 600K/min = 10K/s.
 		RateLimitTPM: 600_000,
 		// Disable the per-input byte-window split for this test —
 		// we want to send the full 180K-byte input in one POST so
@@ -538,12 +538,12 @@ func TestRateLimitTPMThrottlesTokens(t *testing.T) {
 	// 120K bytes ≈ 60K est tokens (bytesPerToken=2) — half the burst budget.
 	big := strings.Repeat("x", 120_000)
 
-	// First call drains 60K of the 100K-burst bucket: instant.
+	// First call drains 60K of the 80K-burst bucket: instant.
 	if _, err := p.EmbedQuery(ctx, big); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	// Second call wants another 60K but only 40K is left; needs to
-	// wait for 20K to refill at 10K/s = ~2s.
+	// Second call wants another 60K but only 20K is left; needs to
+	// wait for 40K to refill at 10K/s = ~4s.
 	start := time.Now()
 	if _, err := p.EmbedQuery(ctx, big); err != nil {
 		t.Fatalf("second: %v", err)

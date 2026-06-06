@@ -3244,6 +3244,7 @@ components:
         - llama_n_threads
         - max_embedding_concurrency
         - llama_batch_size
+        - index_embed_batch_chunks
         - source
       properties:
         embedding_model:
@@ -3265,6 +3266,10 @@ components:
         llama_batch_size:
           type: integer
           minimum: 1
+        index_embed_batch_chunks:
+          type: integer
+          minimum: 0
+          description: Cross-file embed-batch size for repo indexing (chunks per embed call). 0 = one call per file.
         source:
           type: object
           additionalProperties:
@@ -3295,6 +3300,7 @@ components:
         - llama_n_threads
         - max_embedding_concurrency
         - llama_batch_size
+        - index_embed_batch_chunks
       properties:
         embedding_model: { type: string }
         llama_ctx_size: { type: integer }
@@ -3302,6 +3308,7 @@ components:
         llama_n_threads: { type: integer }
         max_embedding_concurrency: { type: integer }
         llama_batch_size: { type: integer }
+        index_embed_batch_chunks: { type: integer }
 
     RuntimeConfigUpdate:
       type: object
@@ -3327,6 +3334,9 @@ components:
           type: integer
           nullable: true
         llama_batch_size:
+          type: integer
+          nullable: true
+        index_embed_batch_chunks:
           type: integer
           nullable: true
 

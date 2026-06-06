@@ -86,9 +86,19 @@ const defaultMaxBatchSize = 128
 // defaultMaxTokensPerBatch is the static safe default for total
 // estimated tokens per POST when the operator has not configured an
 // explicit MaxTokensPerRequest. Voyage's hard limit (observed in 400
-// responses) is 120K; we target 100K to leave 17% headroom for the
-// byte→token estimation error.
-const defaultMaxTokensPerBatch = 100_000
+// responses) is 120K.
+//
+// The headroom has to cover the estimator's worst-case UNDERCOUNT, not a
+// nominal few percent. estimateTokens divides bytes by bytesPerToken=2, but
+// dense code runs as hot as ~1.4 bytes/token (see bytesPerToken), so a real
+// POST can carry up to 2/1.4 ≈ 1.43× the estimated tokens. An earlier 100K
+// target left only 17% headroom — far short of that ~43% undercount — so
+// estimated-95K batches shipped as real-122K POSTs and tripped the 120K cap,
+// forcing embedWithAdaptiveSplit to bisect and retry on hot TS/Go files.
+// 80K keeps the worst case (80K × 1.43 ≈ 114K) under 120K, so bisecting drops
+// back to a true outlier safety net. Cost is ~20% smaller batches (more
+// round-trips) on prose, which is well within Voyage's rate limits.
+const defaultMaxTokensPerBatch = 80_000
 
 // defaultMaxInputBytes caps the byte-length of any SINGLE input
 // (one chunk) before it goes to Voyage. When a chunk exceeds this

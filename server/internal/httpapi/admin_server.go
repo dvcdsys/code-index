@@ -30,16 +30,17 @@ import (
 // project-wide RFC3339Nano stamp and source values stay raw strings (the
 // generated enum type would force a layer of conversion at no benefit).
 type runtimeConfigPayload struct {
-	EmbeddingModel          string                  `json:"embedding_model"`
-	LlamaCtxSize            int                     `json:"llama_ctx_size"`
-	LlamaNGpuLayers         int                     `json:"llama_n_gpu_layers"`
-	LlamaNThreads           int                     `json:"llama_n_threads"`
-	MaxEmbeddingConcurrency int                     `json:"max_embedding_concurrency"`
-	LlamaBatchSize          int                     `json:"llama_batch_size"`
-	Source                  map[string]string       `json:"source"`
+	EmbeddingModel          string                      `json:"embedding_model"`
+	LlamaCtxSize            int                         `json:"llama_ctx_size"`
+	LlamaNGpuLayers         int                         `json:"llama_n_gpu_layers"`
+	LlamaNThreads           int                         `json:"llama_n_threads"`
+	MaxEmbeddingConcurrency int                         `json:"max_embedding_concurrency"`
+	LlamaBatchSize          int                         `json:"llama_batch_size"`
+	IndexEmbedBatchChunks   int                         `json:"index_embed_batch_chunks"`
+	Source                  map[string]string           `json:"source"`
 	Recommended             *recommendedSnapshotPayload `json:"recommended,omitempty"`
-	UpdatedAt               *string                 `json:"updated_at,omitempty"`
-	UpdatedBy               *string                 `json:"updated_by,omitempty"`
+	UpdatedAt               *string                     `json:"updated_at,omitempty"`
+	UpdatedBy               *string                     `json:"updated_by,omitempty"`
 }
 
 type recommendedSnapshotPayload struct {
@@ -49,6 +50,7 @@ type recommendedSnapshotPayload struct {
 	LlamaNThreads           int    `json:"llama_n_threads"`
 	MaxEmbeddingConcurrency int    `json:"max_embedding_concurrency"`
 	LlamaBatchSize          int    `json:"llama_batch_size"`
+	IndexEmbedBatchChunks   int    `json:"index_embed_batch_chunks"`
 }
 
 func snapshotToPayload(snap runtimecfg.Snapshot, rec runtimecfg.Snapshot) runtimeConfigPayload {
@@ -59,6 +61,7 @@ func snapshotToPayload(snap runtimecfg.Snapshot, rec runtimecfg.Snapshot) runtim
 		LlamaNThreads:           snap.LlamaNThreads,
 		MaxEmbeddingConcurrency: snap.MaxEmbeddingConcurrency,
 		LlamaBatchSize:          snap.LlamaBatchSize,
+		IndexEmbedBatchChunks:   snap.IndexEmbedBatchChunks,
 		Source:                  snap.Source,
 		Recommended: &recommendedSnapshotPayload{
 			EmbeddingModel:          rec.EmbeddingModel,
@@ -67,6 +70,7 @@ func snapshotToPayload(snap runtimecfg.Snapshot, rec runtimecfg.Snapshot) runtim
 			LlamaNThreads:           rec.LlamaNThreads,
 			MaxEmbeddingConcurrency: rec.MaxEmbeddingConcurrency,
 			LlamaBatchSize:          rec.LlamaBatchSize,
+			IndexEmbedBatchChunks:   rec.IndexEmbedBatchChunks,
 		},
 	}
 	if !snap.UpdatedAt.IsZero() {
@@ -119,6 +123,7 @@ func (s *Server) PutRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 		LlamaNThreads           *int    `json:"llama_n_threads"`
 		MaxEmbeddingConcurrency *int    `json:"max_embedding_concurrency"`
 		LlamaBatchSize          *int    `json:"llama_batch_size"`
+		IndexEmbedBatchChunks   *int    `json:"index_embed_batch_chunks"`
 	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -147,6 +152,10 @@ func (s *Server) PutRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "llama_batch_size must be >= 0")
 		return
 	}
+	if body.IndexEmbedBatchChunks != nil && *body.IndexEmbedBatchChunks < 0 {
+		writeError(w, http.StatusUnprocessableEntity, "index_embed_batch_chunks must be >= 0")
+		return
+	}
 
 	patch := runtimecfg.Patch{
 		EmbeddingModel:          body.EmbeddingModel,
@@ -155,6 +164,7 @@ func (s *Server) PutRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 		LlamaNThreads:           body.LlamaNThreads,
 		MaxEmbeddingConcurrency: body.MaxEmbeddingConcurrency,
 		LlamaBatchSize:          body.LlamaBatchSize,
+		IndexEmbedBatchChunks:   body.IndexEmbedBatchChunks,
 	}
 	updatedBy := ""
 	if ac != nil {

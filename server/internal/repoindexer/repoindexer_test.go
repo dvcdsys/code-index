@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dvcdsys/code-index/server/internal/db"
+	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/repocloner"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
@@ -31,6 +32,10 @@ func (f *fakeEmbedder) EmbedTexts(_ context.Context, texts []string) ([][]float3
 }
 
 func newIndexerForTest(t *testing.T) (*sql.DB, *indexer.Service) {
+	return newIndexerForTestEmb(t, &fakeEmbedder{dim: 8})
+}
+
+func newIndexerForTestEmb(t *testing.T, emb indexer.Embedder) (*sql.DB, *indexer.Service) {
 	t.Helper()
 	d, err := db.Open(":memory:")
 	if err != nil {
@@ -41,7 +46,56 @@ func newIndexerForTest(t *testing.T) (*sql.DB, *indexer.Service) {
 	if err != nil {
 		t.Fatalf("vectorstore: %v", err)
 	}
-	return d, indexer.New(d, vs, &fakeEmbedder{dim: 8}, nil)
+	return d, indexer.New(d, vs, emb, nil)
+}
+
+// countingEmbedder is a fakeEmbedder that records how many EmbedTexts calls
+// (≈ files embedded) it served, so reconcile tests can prove unchanged files
+// were SKIPPED rather than re-embedded.
+type countingEmbedder struct {
+	dim   int
+	calls int
+	texts int
+}
+
+func (f *countingEmbedder) EmbedTexts(_ context.Context, texts []string) ([][]float32, error) {
+	f.calls++
+	f.texts += len(texts)
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		v := make([]float32, f.dim)
+		for j := 0; j < f.dim && j < len(t); j++ {
+			v[j] = float32(t[j]) / 255.0
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+// busyThenOKEmbedder returns *embeddings.ErrBusy (the queue-saturated
+// backpressure signal) for its first `fails` EmbedTexts calls, then succeeds.
+// RetryAfter:0 keeps processBatch's backoff at its 1s floor so the test stays
+// fast while still exercising a real wait.
+type busyThenOKEmbedder struct {
+	dim   int
+	fails int
+	calls int
+}
+
+func (f *busyThenOKEmbedder) EmbedTexts(_ context.Context, texts []string) ([][]float32, error) {
+	f.calls++
+	if f.calls <= f.fails {
+		return nil, &embeddings.ErrBusy{RetryAfter: 0}
+	}
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		v := make([]float32, f.dim)
+		for j := 0; j < f.dim && j < len(t); j++ {
+			v[j] = float32(t[j]) / 255.0
+		}
+		out[i] = v
+	}
+	return out, nil
 }
 
 func seedProjectForTest(t *testing.T, d *sql.DB, hostPath string) {
@@ -169,7 +223,7 @@ func TestIndexDir_Full_WalksAllFiles(t *testing.T) {
 	}
 	writeTree(t, root, files)
 
-	if _, _, err := IndexDir(context.Background(), idx, "proj", root, nil, DefaultFilter(), nil); err != nil {
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, true, nil, DefaultFilter(), nil); err != nil {
 		t.Fatalf("IndexDir(full): %v", err)
 	}
 
@@ -182,6 +236,30 @@ func TestIndexDir_Full_WalksAllFiles(t *testing.T) {
 	}
 	if _, ok := got["vendor/skip.go"]; ok {
 		t.Error("file_hashes contains vendor/skip.go but DefaultFilter should have excluded it")
+	}
+}
+
+// TestIndexDir_RetriesEmbeddingQueueSaturation covers the regression where a
+// transient "embedding queue saturated" (ErrBusy) failed the whole run instead
+// of being treated as the retryable backpressure it is. The embedder reports
+// the queue busy on its first call, then succeeds; IndexDir must transparently
+// retry the batch and complete, leaving the file indexed.
+func TestIndexDir_RetriesEmbeddingQueueSaturation(t *testing.T) {
+	emb := &busyThenOKEmbedder{dim: 8, fails: 1}
+	d, idx := newIndexerForTestEmb(t, emb)
+	seedProjectForTest(t, d, "proj")
+
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"a.go": "package a\n"})
+
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, true, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("IndexDir should ride out transient ErrBusy, got: %v", err)
+	}
+	if emb.calls < 2 {
+		t.Fatalf("embedder calls = %d, want >= 2 (initial busy + retry)", emb.calls)
+	}
+	if _, ok := fileHashes(t, d, "proj")["a.go"]; !ok {
+		t.Error("file_hashes missing a.go — batch was not re-processed after backpressure")
 	}
 }
 
@@ -204,7 +282,7 @@ func TestIndexDir_Incremental_OnlyTouchesChangedPaths(t *testing.T) {
 		"modify.go": "package m\n// v1\n",
 		"delete.go": "package del\n",
 	})
-	if _, _, err := IndexDir(context.Background(), idx, "proj", root, nil, DefaultFilter(), nil); err != nil {
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, true, nil, DefaultFilter(), nil); err != nil {
 		t.Fatalf("IndexDir(full) round1: %v", err)
 	}
 	round1 := fileHashes(t, d, "proj")
@@ -228,7 +306,7 @@ func TestIndexDir_Incremental_OnlyTouchesChangedPaths(t *testing.T) {
 		Added:    []string{"new.go"},
 		Deleted:  []string{"delete.go"},
 	}
-	if _, _, err := IndexDir(context.Background(), idx, "proj", root, cs, DefaultFilter(), nil); err != nil {
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, cs, DefaultFilter(), nil); err != nil {
 		t.Fatalf("IndexDir(incremental): %v", err)
 	}
 
@@ -264,12 +342,12 @@ func TestIndexDir_Incremental_EmptyChangeSet(t *testing.T) {
 
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{"a.go": "package a\n"})
-	if _, _, err := IndexDir(context.Background(), idx, "proj", root, nil, DefaultFilter(), nil); err != nil {
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, true, nil, DefaultFilter(), nil); err != nil {
 		t.Fatalf("round 1 full: %v", err)
 	}
 	before := fileHashes(t, d, "proj")
 
-	if _, _, err := IndexDir(context.Background(), idx, "proj", root, &repocloner.ChangeSet{}, DefaultFilter(), nil); err != nil {
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, &repocloner.ChangeSet{}, DefaultFilter(), nil); err != nil {
 		t.Fatalf("IndexDir(empty changeset): %v", err)
 	}
 	after := fileHashes(t, d, "proj")
@@ -296,7 +374,7 @@ func TestIndexDir_Incremental_FilteredOutPaths(t *testing.T) {
 	writeTree(t, root, map[string]string{
 		"a.go": "package a\n",
 	})
-	if _, _, err := IndexDir(context.Background(), idx, "proj", root, nil, DefaultFilter(), nil); err != nil {
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, true, nil, DefaultFilter(), nil); err != nil {
 		t.Fatalf("round1 full: %v", err)
 	}
 
@@ -309,13 +387,87 @@ func TestIndexDir_Incremental_FilteredOutPaths(t *testing.T) {
 		"vendor/dep.go": "package dep\n",
 	})
 	cs := &repocloner.ChangeSet{Added: []string{"vendor/dep.go"}}
-	if _, _, err := IndexDir(context.Background(), idx, "proj", root, cs, DefaultFilter(), nil); err != nil {
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, cs, DefaultFilter(), nil); err != nil {
 		t.Fatalf("IndexDir(vendor change): %v", err)
 	}
 
 	hashes := fileHashes(t, d, "proj")
 	if _, ok := hashes["vendor/dep.go"]; ok {
 		t.Error("vendor/dep.go ended up in file_hashes despite DefaultFilter; vendor handling regressed")
+	}
+}
+
+// TestIndexDir_Reconcile_ResumesAndSkipsUnchanged covers the resume path:
+// wipe=false + changes=nil walks the whole tree but must skip files whose
+// on-disk hash already matches file_hashes, re-embed changed/new files, and
+// delete files gone from disk — all WITHOUT a changeset. The countingEmbedder
+// proves the skip is real (unchanged files are not re-embedded), which is the
+// whole point: a crashed/aborted index resumes for the cost of the remainder,
+// not the whole repo.
+func TestIndexDir_Reconcile_ResumesAndSkipsUnchanged(t *testing.T) {
+	emb := &countingEmbedder{dim: 8}
+	d, idx := newIndexerForTestEmb(t, emb)
+	seedProjectForTest(t, d, "proj")
+
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"a.go": "package a\n",
+		"b.go": "package b\n// v1\n",
+		"c.go": "package c\n",
+	})
+
+	// Round 1: reconcile on a fresh project embeds every file.
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("IndexDir(reconcile) round1: %v", err)
+	}
+	round1 := fileHashes(t, d, "proj")
+	for _, p := range []string{"a.go", "b.go", "c.go"} {
+		if _, ok := round1[p]; !ok {
+			t.Fatalf("round1: %q missing from file_hashes", p)
+		}
+	}
+	if emb.calls == 0 {
+		t.Fatalf("round1 embedded nothing")
+	}
+
+	// Mutate on disk: b.go changes, d.go appears, c.go removed.
+	if err := os.Remove(filepath.Join(root, "c.go")); err != nil {
+		t.Fatalf("rm c.go: %v", err)
+	}
+	writeTree(t, root, map[string]string{
+		"b.go": "package b\n// v2 changed\n",
+		"d.go": "package d\n",
+	})
+
+	emb.calls = 0 // count only round-2 embeds
+
+	// Round 2: reconcile with NO changeset (nil).
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("IndexDir(reconcile) round2: %v", err)
+	}
+	round2 := fileHashes(t, d, "proj")
+
+	// a.go: untouched (resume skip) — same hash.
+	if round2["a.go"] != round1["a.go"] {
+		t.Errorf("a.go hash changed; reconcile should have skipped it")
+	}
+	// b.go: changed — new hash.
+	if round2["b.go"] == round1["b.go"] {
+		t.Errorf("b.go hash unchanged after edit; reconcile should have re-embedded it")
+	}
+	// d.go: new file indexed.
+	if _, ok := round2["d.go"]; !ok {
+		t.Errorf("d.go missing; reconcile should have indexed the new file")
+	}
+	// c.go: deleted by reconcile's delete pass — even with a nil changeset.
+	if _, ok := round2["c.go"]; ok {
+		t.Errorf("c.go still present; reconcile should have deleted the vanished file")
+	}
+	// The crux: round 2 re-embedded ONLY b.go (changed) + d.go (new) = 2
+	// files. a.go was skipped. A full wipe would have re-embedded all 3
+	// surviving files — that's the expensive behaviour this fix removes.
+	if emb.calls != 2 {
+		t.Errorf("round2 embedded %d files; want 2 (b.go changed + d.go new; a.go skipped)", emb.calls)
 	}
 }
 

@@ -9,8 +9,10 @@ interface Props {
   config?: RuntimeConfig;
   draftConcurrency: number;
   draftBatch: number;
+  draftIndexBatch: number;
   onDraftConcurrency: (n: number) => void;
   onDraftBatch: (n: number) => void;
+  onDraftIndexBatch: (n: number) => void;
   // isOllama controls whether the llama-only batch-size field is
   // rendered. Concurrency (the Service-level queue depth) applies to
   // every provider — caps how many parallel /v1/embeddings POSTs go
@@ -26,12 +28,15 @@ export function AdvancedSection({
   config,
   draftConcurrency,
   draftBatch,
+  draftIndexBatch,
   onDraftConcurrency,
   onDraftBatch,
+  onDraftIndexBatch,
   isOllama,
 }: Props) {
   const concId = useId();
   const batchId = useId();
+  const idxBatchId = useId();
   const rec = config?.recommended;
   const src = config?.source;
 
@@ -40,10 +45,12 @@ export function AdvancedSection({
       <CardHeader>
         <CardTitle>Throughput</CardTitle>
         <CardDescription>
-          The indexer sends all chunks of one file in a single batched POST
-          (<code>{'{"input": [chunk1, chunk2, ...]}'}</code>). Concurrency
-          here caps how many such batched POSTs run in parallel — applies
-          to every backend. Llama batch (below) is sidecar-only.
+          During repo indexing the embedder packs chunks (across files) into
+          batched <code>/v1/embeddings</code> POSTs and runs several in
+          parallel. Embed batch size sets how many chunks per POST;
+          concurrency caps how many POSTs run at once. Both apply to every
+          backend and together govern indexing speed. Llama batch (below) is
+          sidecar-only.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -83,6 +90,35 @@ export function AdvancedSection({
                 under one queue slot, so oversized files are safe.
                 Recommended:{' '}
                 <code>{rec?.max_embedding_concurrency ?? 1}</code>.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor={idxBatchId} className="font-medium">
+                  Embed batch size (indexing)
+                  <span className="ml-2 font-normal text-muted-foreground text-xs">(index_embed_batch_chunks)</span>
+                </Label>
+                <SourcePill source={src?.index_embed_batch_chunks} />
+              </div>
+              <Input
+                id={idxBatchId}
+                type="number"
+                min={0}
+                value={Number.isFinite(draftIndexBatch) ? draftIndexBatch : 0}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  onDraftIndexBatch(Number.isFinite(n) ? n : 0);
+                }}
+                className="max-w-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                Max chunks packed into a single embed POST during repo
+                indexing — chunks from consecutive small files are merged so
+                each POST carries a full payload instead of one tiny file.
+                Combined with concurrency above, this is what makes large
+                repos index fast. 0 = one POST per file. Recommended:{' '}
+                <code>{rec?.index_embed_batch_chunks ?? 64}</code>.
               </p>
             </div>
 
