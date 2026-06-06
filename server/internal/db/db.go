@@ -67,6 +67,7 @@ var registeredMigrations = []migration{
 	{12, "embedding_provider", func(db *sql.DB, _ OpenOptions) error { return migrateEmbeddingProvider(db) }},
 	{13, "indexed_with_model_provider_prefix", func(db *sql.DB, _ OpenOptions) error { return migrateIndexedWithModelProviderPrefix(db) }},
 	{14, "user_local_project_disabled", func(db *sql.DB, _ OpenOptions) error { return migrateUserLocalProjectDisabled(db) }},
+	{15, "index_embed_batch_chunks", func(db *sql.DB, _ OpenOptions) error { return migrateIndexEmbedBatchChunks(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -803,6 +804,37 @@ func migrateEmbeddingProvider(db *sql.DB) error {
 	if !have["embedding_provider_config"] {
 		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN embedding_provider_config TEXT`); err != nil {
 			return fmt.Errorf("add embedding_provider_config column: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateIndexEmbedBatchChunks adds runtime_settings.index_embed_batch_chunks
+// (cross-file embed-batch size for repo indexing, dashboard-overridable).
+// Idempotent: skips the ALTER when the column already exists.
+func migrateIndexEmbedBatchChunks(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(runtime_settings)`)
+	if err != nil {
+		return fmt.Errorf("table_info runtime_settings: %w", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if !have["index_embed_batch_chunks"] {
+		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN index_embed_batch_chunks INTEGER`); err != nil {
+			return fmt.Errorf("add index_embed_batch_chunks column: %w", err)
 		}
 	}
 	return nil

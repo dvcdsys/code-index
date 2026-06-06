@@ -181,7 +181,10 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
     -- embedding_provider_config holds the provider-specific config as
     -- a JSON blob (shape varies by provider). API keys are NEVER stored
     -- here — providers read them live from env vars named in this blob.
-    embedding_provider_config TEXT
+    embedding_provider_config TEXT,
+    -- Cross-file embed-batch size for repo indexing (added in migration 15).
+    -- NULL → fall through to env / recommended.
+    index_embed_batch_chunks INTEGER
 );
 
 -- Workspaces group indexed projects (rows in the projects table,
