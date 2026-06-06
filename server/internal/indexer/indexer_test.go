@@ -6,8 +6,11 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
@@ -35,6 +38,145 @@ func (f *fakeEmbedder) EmbedTexts(ctx context.Context, texts []string) ([][]floa
 		out[i] = v
 	}
 	return out, nil
+}
+
+// recordingEmbedder records peak in-flight concurrency and total call count so
+// the parallel/batched embed pipeline can be asserted. Implements
+// TokenAwareEmbedder so ProcessFiles routes through TokenizeAndEmbed — the
+// production (voyage/ollama) path.
+type recordingEmbedder struct {
+	dim         int
+	delay       time.Duration
+	mu          sync.Mutex
+	inFlight    int
+	maxInFlight int
+	calls       int
+}
+
+func (r *recordingEmbedder) embed(_ context.Context, texts []string) ([][]float32, error) {
+	r.mu.Lock()
+	r.inFlight++
+	r.calls++
+	if r.inFlight > r.maxInFlight {
+		r.maxInFlight = r.inFlight
+	}
+	r.mu.Unlock()
+	if r.delay > 0 {
+		time.Sleep(r.delay)
+	}
+	r.mu.Lock()
+	r.inFlight--
+	r.mu.Unlock()
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = make([]float32, r.dim)
+	}
+	return out, nil
+}
+
+func (r *recordingEmbedder) EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
+	return r.embed(ctx, texts)
+}
+
+func (r *recordingEmbedder) TokenizeAndEmbed(ctx context.Context, texts []string) ([][]float32, error) {
+	return r.embed(ctx, texts)
+}
+
+// TestEmbedPrepared_ParallelAndBatched proves Lever 1 (concurrent embed calls
+// across files) and Lever 2 (cross-file chunk batching): 12 files × 3 chunks
+// with batchChunks=10 → groups of 3 files (9 chunks each), run concurrently
+// at concurrency=4.
+func TestEmbedPrepared_ParallelAndBatched(t *testing.T) {
+	rec := &recordingEmbedder{dim: 8, delay: 25 * time.Millisecond}
+	svc := New(nil, nil, rec, nil)
+	svc.SetEmbedConcurrency(4)
+	svc.SetEmbedBatchChunks(10)
+
+	const nFiles, perFile = 12, 3
+	prep := make([]*preparedFile, nFiles)
+	for i := range prep {
+		texts := make([]string, perFile)
+		for j := range texts {
+			texts[j] = fmt.Sprintf("file%d-chunk%d", i, j)
+		}
+		prep[i] = &preparedFile{texts: texts}
+	}
+
+	if err := svc.embedPrepared(context.Background(), &session{}, prep); err != nil {
+		t.Fatalf("embedPrepared: %v", err)
+	}
+
+	for i, p := range prep {
+		if p.embedErr != nil {
+			t.Fatalf("file %d embedErr: %v", i, p.embedErr)
+		}
+		if len(p.embs) != perFile {
+			t.Fatalf("file %d: got %d embs, want %d", i, len(p.embs), perFile)
+		}
+		for _, v := range p.embs {
+			if len(v) != 8 {
+				t.Fatalf("file %d: embedding dim %d, want 8", i, len(v))
+			}
+		}
+	}
+	// Lever 2: cross-file batching → fewer embed calls than files.
+	if rec.calls >= nFiles {
+		t.Errorf("batching: %d embed calls for %d files; expected cross-file grouping to reduce it", rec.calls, nFiles)
+	}
+	// Lever 1: groups ran concurrently (would peak at 1 if sequential).
+	if rec.maxInFlight < 2 {
+		t.Errorf("parallelism: peak in-flight embeds was %d; expected >1 at concurrency=4", rec.maxInFlight)
+	}
+}
+
+// TestEmbedPrepared_Sequential confirms concurrency<=1 + batchChunks=0 keeps
+// the legacy behaviour: one embed call per file, never overlapping.
+func TestEmbedPrepared_Sequential(t *testing.T) {
+	rec := &recordingEmbedder{dim: 8, delay: 10 * time.Millisecond}
+	svc := New(nil, nil, rec, nil)
+	svc.SetEmbedConcurrency(1)
+	svc.SetEmbedBatchChunks(0)
+
+	prep := make([]*preparedFile, 5)
+	for i := range prep {
+		prep[i] = &preparedFile{texts: []string{fmt.Sprintf("f%d", i)}}
+	}
+	if err := svc.embedPrepared(context.Background(), &session{}, prep); err != nil {
+		t.Fatalf("embedPrepared: %v", err)
+	}
+	if rec.maxInFlight != 1 {
+		t.Errorf("sequential: peak in-flight was %d, want 1", rec.maxInFlight)
+	}
+	if rec.calls != 5 {
+		t.Errorf("no batching: want 5 calls (one per file), got %d", rec.calls)
+	}
+}
+
+func TestPlanEmbedGroups(t *testing.T) {
+	mk := func(counts ...int) []*preparedFile {
+		out := make([]*preparedFile, len(counts))
+		for i, n := range counts {
+			out[i] = &preparedFile{texts: make([]string, n)}
+		}
+		return out
+	}
+	// maxChunks=0 → one group per file.
+	if g := planEmbedGroups(mk(3, 3, 3), 0); len(g) != 3 {
+		t.Errorf("maxChunks=0: want 3 groups, got %d", len(g))
+	}
+	// maxChunks=10, files 3,3,3,3,3 → [0,1,2]=9 then [3,4]=6 → 2 groups.
+	g := planEmbedGroups(mk(3, 3, 3, 3, 3), 10)
+	if len(g) != 2 {
+		t.Fatalf("want 2 groups, got %d", len(g))
+	}
+	if len(g[0].fileIdx) != 3 || g[0].nchunks != 9 {
+		t.Errorf("group0 = %+v, want 3 files / 9 chunks", g[0])
+	}
+	// A single oversized file forms its own group.
+	g2 := planEmbedGroups(mk(15, 2), 10)
+	if len(g2) != 2 || len(g2[0].fileIdx) != 1 {
+		t.Errorf("oversized file should be its own group; got %+v", g2)
+	}
 }
 
 func openTestDB(t *testing.T) *sql.DB {

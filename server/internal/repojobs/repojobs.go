@@ -35,11 +35,13 @@
 //     can diff against this point
 //
 // Mode determination (in handleClone):
-//   - first clone (no prior on-disk repo) → full
-//   - g.IndexedSHA empty (never indexed with the incremental pipeline) → full
-//   - pre-fetch HEAD != g.IndexedSHA (previous index job died mid-way) → full
-//   - projects.indexed_with_model != currentModel → full (embedding drift)
-//   - tree.Diff failed (old commit gone) → full
+//   - ClonePayload.ForceFull (dashboard "force full reindex") → full WIPE
+//   - projects.indexed_with_model != currentModel → full WIPE (embedding drift)
+//   - g.IndexedSHA empty (first index, OR a run that crashed / was
+//     force-stopped before writing indexed_sha) → reconcile RESUME: walk
+//     every file but skip those whose on-disk hash already matches
+//     file_hashes, so recovery costs only the un-embedded remainder — no wipe
+//   - tree.Diff unavailable (old commit gone) → reconcile
 //   - otherwise → incremental with the computed ChangeSet
 //
 // Workspace-level search (when workspaces are in use) is served from
@@ -79,6 +81,14 @@ const (
 // the on-disk clone directory name).
 type ClonePayload struct {
 	ProjectPath string `json:"project_path"`
+	// ForceFull requests a full wipe + rebuild. Set by the dashboard's
+	// "force full reindex" (POST /reindex?full=true). It is the ONLY way to
+	// deliberately discard existing vectors short of an embedding-model
+	// change: without it a project with no indexed_sha (first index OR a
+	// run that crashed/was force-stopped before finishing) RESUMES via
+	// reconcile instead of wiping. omitempty so older queued payloads decode
+	// to false (reconcile/incremental) — the safe, non-destructive default.
+	ForceFull bool `json:"force_full,omitempty"`
 }
 
 // Index modes — what flavour of indexing the index_repo handler should
@@ -88,6 +98,12 @@ type ClonePayload struct {
 const (
 	ModeFull        = "full"
 	ModeIncremental = "incremental"
+	// ModeReconcile walks the whole tree but skips files whose on-disk
+	// content hash already matches file_hashes (no wipe), so a crashed or
+	// aborted index resumes from where it stopped instead of re-embedding
+	// from zero. It is the default for first-index and recovery; only an
+	// embedding model/provider change still uses ModeFull (which wipes).
+	ModeReconcile = "reconcile"
 )
 
 // IndexPayload carries the mode and (for incremental) the exact change
@@ -237,17 +253,29 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 	mode := ModeIncremental
 	reason := "tree-diff"
 	switch {
+	case p.ForceFull:
+		// Operator explicitly asked for a full wipe + rebuild
+		// (POST /reindex?full=true). This is the only non-model-change
+		// path that discards existing vectors — everything else resumes.
+		mode, reason = ModeFull, "force-full"
 	case g.IndexedSHA == "":
-		mode, reason = ModeFull, "first-index"
+		// First index, OR a prior run that crashed / was force-stopped
+		// before writing indexed_sha. Reconcile (not wipe) so recovery
+		// resumes from whatever file_hashes already holds instead of
+		// re-embedding the whole repo from zero. On a genuinely first
+		// index file_hashes is empty, so reconcile embeds everything —
+		// same result, no wipe.
+		mode, reason = ModeReconcile, "first-or-resume"
 	case result.Changes == nil:
 		// Either no PrevIndexedSHA was effective (handled above) or
-		// tree.Diff failed (old commit not in objects). Either way: full.
-		mode, reason = ModeFull, "no-changeset"
+		// tree.Diff failed (old commit not in objects). Walk everything,
+		// but reconcile still skips unchanged files by hash.
+		mode, reason = ModeReconcile, "no-changeset"
 	case d.Indexer != nil && d.Indexer.EmbeddingModel() != "" &&
 		d.Indexer.EmbeddingModel() != projectIndexedWithModel(ctx, d.DB, g.ProjectPath):
 		// Embedding model changed since the last index — vectors in
-		// chromem are no longer comparable to fresh queries. Force
-		// full so the whole index uses the current model.
+		// chromem are no longer comparable to fresh queries. Force a
+		// full wipe so the whole index uses the current model.
 		mode, reason = ModeFull, "model-change"
 	}
 
@@ -298,18 +326,29 @@ func handleIndex(ctx context.Context, d Deps, job jobs.Job) error {
 	}
 	cloneDir := repocloner.LocalDirFor(d.DataDir, projects.HashPath(g.ProjectPath))
 
-	// ModeIncremental → reconstruct ChangeSet from payload. Anything
-	// else (ModeFull, empty Mode from legacy payloads, unknown values)
-	// → changes=nil → IndexDir runs the full walk path.
+	// Map the payload mode to IndexDir's (wipe, changes) behaviour:
+	//   ModeIncremental → wipe=false + changeset (process only the diff).
+	//   ModeReconcile   → wipe=false + nil       (walk all, hash-skip, resume).
+	//   ModeFull        → wipe=true              (model/provider change).
+	//   empty/legacy    → wipe=true              (safe full rebuild).
 	var changes *repocloner.ChangeSet
-	if p.Mode == ModeIncremental {
+	wipe := false
+	switch p.Mode {
+	case ModeIncremental:
 		changes = &repocloner.ChangeSet{
 			Modified: p.ChangedPaths,
 			Deleted:  p.DeletedPaths,
 		}
+	case ModeReconcile:
+		// walk all, skip unchanged by hash, no wipe — resumes a crashed run.
+	case ModeFull:
+		wipe = true
+	default:
+		// empty Mode from legacy payloads / unknown values: full rebuild.
+		wipe = true
 	}
 
-	_, _, err = repoindexer.IndexDir(ctx, d.Indexer, g.ProjectPath, cloneDir, changes, repoindexer.DefaultFilter(), d.Logger)
+	_, _, err = repoindexer.IndexDir(ctx, d.Indexer, g.ProjectPath, cloneDir, wipe, changes, repoindexer.DefaultFilter(), d.Logger)
 	if err != nil {
 		// A force-stop deletes the active indexer session out from under
 		// IndexDir; the next ProcessFiles/FinishIndexing then returns
@@ -318,10 +357,30 @@ func handleIndex(ctx context.Context, d Deps, job jobs.Job) error {
 		// already flipped status back to a terminal state). Return nil so
 		// the queue marks the (likely already-deleted) job done instead of
 		// retrying it, which would just re-index what we asked to stop.
+		if errors.Is(err, context.Canceled) {
+			// Server shutting down mid-index (jobsCancel fired). Do NOT mark
+			// the project 'error' — return the error so the queue requeues the
+			// job; the next start resumes from file_hashes via reconcile.
+			d.Logger.Info("repojobs: index interrupted by shutdown — will resume on restart", "project", g.ProjectPath)
+			return err
+		}
 		if errors.Is(err, indexer.ErrNoSession) {
-			d.Logger.Info("repojobs: index cancelled (session gone — force-stop)", "project", g.ProjectPath)
-			d.reschedulePoll(ctx, g)
-			return nil
+			// The session vanished mid-run. Distinguish a deliberate
+			// force-stop (user cancel) — which we swallow as before — from
+			// an involuntary loss (idle reap / crash). The latter MUST
+			// surface as a failure so the queue retries and the reconcile
+			// path resumes, instead of silently leaving the project stuck
+			// in 'indexing' with a partial index.
+			reason := d.Indexer.ConsumeGoneReason(g.ProjectPath)
+			if reason == "user-cancel" {
+				d.Logger.Info("repojobs: index cancelled (force-stop)", "project", g.ProjectPath)
+				d.reschedulePoll(ctx, g)
+				return nil
+			}
+			d.Logger.Warn("repojobs: index session lost mid-run — will retry/resume",
+				"project", g.ProjectPath, "reason", reason)
+			d.recordFailure(ctx, g, fmt.Errorf("index: session lost mid-run (reason=%q): %w", reason, err))
+			return err
 		}
 		d.recordFailure(ctx, g, fmt.Errorf("index: %w", err))
 		return err
@@ -414,6 +473,81 @@ func (d Deps) reschedulePoll(ctx context.Context, g gitrepos.GitRepo) {
 	next := time.Now().UTC().Add(time.Duration(secs) * time.Second)
 	if err := d.GitRepos.RescheduleNextPoll(ctx, g.ProjectPath, next); err != nil {
 		d.Logger.Warn("repojobs: reschedule next poll failed", "project", g.ProjectPath, "err", err)
+	}
+}
+
+// ReconcileStuckProjects fixes external projects left in a non-terminal status
+// ('indexing'/'cloning') by a process killed mid-pipeline (e.g. OOM) when no
+// job remains to drive them — recoverOrphanedJobs may have marked the
+// abandoned job 'failed' after exhausting retries, and a 'failed' job is never
+// re-claimed. Without this the dashboard shows "indexing" forever. We flip
+// such projects to 'error' so the state is honest; the operator can then Sync,
+// which resumes from file_hashes via reconcile. Call once at startup, AFTER
+// jobs.Service.Start (which runs orphan recovery synchronously).
+func ReconcileStuckProjects(ctx context.Context, db *sql.DB, logger *slog.Logger) {
+	if db == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT p.host_path, p.path_hash
+		FROM projects p
+		JOIN git_repos g ON g.project_path = p.host_path
+		WHERE p.status IN ('indexing', 'cloning')`)
+	if err != nil {
+		logger.Error("repojobs: reconcile stuck projects — query failed", "err", err)
+		return
+	}
+	type stuck struct{ path, hash string }
+	var candidates []stuck
+	for rows.Next() {
+		var s stuck
+		if err := rows.Scan(&s.path, &s.hash); err != nil {
+			rows.Close()
+			logger.Error("repojobs: reconcile stuck projects — scan failed", "err", err)
+			return
+		}
+		candidates = append(candidates, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		logger.Error("repojobs: reconcile stuck projects — iterate failed", "err", err)
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	fixed := 0
+	for _, s := range candidates {
+		// Leave projects that still have a live (pending/running) pipeline job
+		// — those WILL run (or were just requeued by orphan recovery).
+		var active int
+		if err := db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM jobs
+			WHERE status IN ('pending', 'running')
+			  AND dedupe_key IN (?, ?)`,
+			"clone:"+s.hash, "index:"+s.hash,
+		).Scan(&active); err != nil {
+			logger.Warn("repojobs: reconcile — active-job check failed", "project", s.path, "err", err)
+			continue
+		}
+		if active > 0 {
+			continue
+		}
+		if _, err := db.ExecContext(ctx,
+			`UPDATE projects SET status = 'error', updated_at = ? WHERE host_path = ?`,
+			now, s.path,
+		); err != nil {
+			logger.Warn("repojobs: reconcile — set error failed", "project", s.path, "err", err)
+			continue
+		}
+		fixed++
+		logger.Warn("repojobs: project stuck mid-index with no active job after restart; marked 'error' — Sync to resume",
+			"project", s.path)
+	}
+	if fixed > 0 {
+		logger.Info("repojobs: reconciled stuck projects on startup", "count", fixed)
 	}
 }
 

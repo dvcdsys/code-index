@@ -461,7 +461,7 @@ func (s *Server) ReindexProject(w http.ResponseWriter, r *http.Request, hash str
 	if _, eerr := s.Deps.Jobs.Enqueue(r.Context(), jobs.EnqueueRequest{
 		Type:      repojobs.TypeCloneRepo,
 		DedupeKey: "clone:" + g.PathHash,
-		Payload:   repojobs.ClonePayload{ProjectPath: g.ProjectPath},
+		Payload:   repojobs.ClonePayload{ProjectPath: g.ProjectPath, ForceFull: forceFull},
 	}); eerr != nil {
 		if errors.Is(eerr, jobs.ErrDuplicate) {
 			enqueued = false
