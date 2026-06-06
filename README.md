@@ -27,6 +27,14 @@ cix symbols "UserService" --kind class
 
 Or open `http://localhost:21847/dashboard` in your browser.
 
+> [!IMPORTANT]
+> **Reindex your projects after upgrading the server.** Until the approach to
+> optimal file-structure parsing (tree-sitter), chunking, and related indexing
+> internals stabilizes, each server upgrade may change how code is parsed and
+> embedded. A reindex brings every project onto the new pipeline. Within a given
+> version, search is guaranteed to be consistent and complete once you have
+> reindexed.
+
 ---
 
 ## Why
