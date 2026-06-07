@@ -1,4 +1,4 @@
-// Package chunker ports api/app/services/chunker.py to Go using gotreesitter.
+// Package chunker ports api/app/services/chunker.py to Go using the official tree-sitter (cgo).
 // The public surface is ChunkFile, which returns ([]Chunk, []Reference, error).
 // Sliding-window fallback is used when a language is not supported by the
 // tree-sitter grammars bundle or when parsing fails.
@@ -13,12 +13,29 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	sitter "github.com/odvcencio/gotreesitter"
-	"github.com/odvcencio/gotreesitter/grammars"
+	ts "github.com/tree-sitter/go-tree-sitter"
+
+	"github.com/dvcdsys/code-index/server/internal/chunker/tsgrammars"
 )
+
+// grammarFactories maps language id -> C TSLanguage pointer factory for every
+// vendored official tree-sitter grammar (see tsgrammars/vendor.sh).
+var grammarFactories = tsgrammars.Factories()
+
+// tsLang returns a factory that wraps the vendored C grammar for id as a
+// *ts.Language, or nil if no grammar is vendored for that id (the language then
+// falls back to sliding-window chunking instead of erroring). The underlying C
+// TSLanguage is a process-static singleton, so wrapping it repeatedly is safe
+// and ts.Language carries no finalizer.
+func tsLang(id string) languageFunc {
+	f, ok := grammarFactories[id]
+	if !ok {
+		return nil
+	}
+	return func() *ts.Language { return ts.NewLanguage(f()) }
+}
 
 // maxChunkSize is the default maximum chunk size in bytes (chars).
 // Python uses max_chunk_tokens * 4 (prose heuristic), but code tokenizers are
@@ -36,21 +53,12 @@ const (
 const minRefNameLength = 2
 
 // parseBudget caps wall-clock time spent in tree-sitter for a single file.
-// Some grammars (notably bash) have catastrophic-backtracking pathologies on
-// specific inputs — install.sh in this very repo took 31s to parse before
-// this guard. The parser's own SetTimeoutMicros checkpoint is best-effort
-// and overshoots by 3-4×, so we set the hint generously and rely on the
-// post-parse wall-clock check to decide whether to keep the tree.
-//
-// On overshoot we fall back to sliding-window chunks. We accept the wasted
-// CPU (parser keeps running until its next checkpoint) because killing a
-// pure-Go parse from outside is not safe — the only practical levers are
-// SetTimeoutMicros and the cancellation flag, both with the same overshoot
-// characteristic.
-const (
-	parseBudget = 2 * time.Second
-	parseHint   = uint64(parseBudget / time.Microsecond)
-)
+// The official tree-sitter parses well-formed code in milliseconds, but a
+// pathological grammar/input could still backtrack; the parse is cancelled via
+// a periodic progress callback when this deadline is exceeded (see
+// chunkWithTreesitter), after which we fall back to sliding-window chunks so
+// the indexer stays responsive and the content is still indexed.
+const parseBudget = 2 * time.Second
 
 // ---------------------------------------------------------------------------
 // Language registry — built from defaultRegistry() at init() and reduced by
@@ -61,12 +69,12 @@ const (
 // languageEntry bundles the three pieces of state a language needs.
 type languageEntry struct {
 	factory     languageFunc
-	nodes       map[string][]string  // function|class|method|type → AST node types
-	identifiers map[string]struct{}  // identifier leaf-node types for ref extraction
+	nodes       map[string][]string // function|class|method|type → AST node types
+	identifiers map[string]struct{} // identifier leaf-node types for ref extraction
 }
 
-// languageFunc is a factory for sitter.Language.
-type languageFunc func() *sitter.Language
+// languageFunc is a factory for a tree-sitter Language.
+type languageFunc func() *ts.Language
 
 var (
 	registryMu       sync.RWMutex
@@ -111,6 +119,12 @@ func Configure(enabled []string) {
 			if _, ok := wanted[lang]; !ok {
 				continue
 			}
+		}
+		// Skip languages whose grammar is not vendored (factory == nil). They
+		// fall back to sliding-window chunking rather than erroring, so a
+		// partial grammar set degrades gracefully.
+		if entry.factory == nil {
+			continue
 		}
 		reg[lang] = entry.factory
 		if entry.nodes != nil {
@@ -163,7 +177,7 @@ func defaultRegistry() map[string]languageEntry {
 	return map[string]languageEntry{
 		// --- Tier 1: original 6, kept as-is for parity with legacy Python ---
 		"python": {
-			factory: grammars.PythonLanguage,
+			factory: tsLang("python"),
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_definition"},
@@ -171,7 +185,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID(),
 		},
 		"typescript": {
-			factory: grammars.TypescriptLanguage,
+			factory: tsLang("typescript"),
 			nodes: map[string][]string{
 				"function": {"function_declaration", "arrow_function"},
 				"class":    {"class_declaration"},
@@ -181,7 +195,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "property_identifier"),
 		},
 		"javascript": {
-			factory: grammars.JavascriptLanguage,
+			factory: tsLang("javascript"),
 			nodes: map[string][]string{
 				"function": {"function_declaration", "arrow_function"},
 				"class":    {"class_declaration"},
@@ -190,7 +204,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("property_identifier"),
 		},
 		"go": {
-			factory: grammars.GoLanguage,
+			factory: tsLang("go"),
 			nodes: map[string][]string{
 				"function": {"function_declaration"},
 				"method":   {"method_declaration"},
@@ -199,7 +213,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "field_identifier"),
 		},
 		"rust": {
-			factory: grammars.RustLanguage,
+			factory: tsLang("rust"),
 			nodes: map[string][]string{
 				"function": {"function_item"},
 				"class":    {"struct_item", "enum_item"},
@@ -208,7 +222,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "field_identifier"),
 		},
 		"java": {
-			factory: grammars.JavaLanguage,
+			factory: tsLang("java"),
 			nodes: map[string][]string{
 				"function": {"method_declaration"},
 				"class":    {"class_declaration"},
@@ -219,7 +233,7 @@ func defaultRegistry() map[string]languageEntry {
 
 		// --- Tier 2: bug-fix — grammars were registered, node maps were not ---
 		"tsx": {
-			factory: grammars.TsxLanguage,
+			factory: tsLang("tsx"),
 			nodes: map[string][]string{
 				"function": {"function_declaration", "arrow_function"},
 				"class":    {"class_declaration"},
@@ -229,7 +243,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "property_identifier"),
 		},
 		"c": {
-			factory: grammars.CLanguage,
+			factory: tsLang("c"),
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"struct_specifier"},
@@ -238,7 +252,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "field_identifier"),
 		},
 		"cpp": {
-			factory: grammars.CppLanguage,
+			factory: tsLang("cpp"),
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_specifier", "struct_specifier"},
@@ -247,7 +261,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "field_identifier"),
 		},
 		"ruby": {
-			factory: grammars.RubyLanguage,
+			factory: tsLang("ruby"),
 			nodes: map[string][]string{
 				"function": {"method", "singleton_method"},
 				"class":    {"class", "module"},
@@ -257,7 +271,7 @@ func defaultRegistry() map[string]languageEntry {
 
 		// --- Tier 3: mainstream additions, high confidence in node names ---
 		"c_sharp": {
-			factory: grammars.CSharpLanguage,
+			factory: tsLang("c_sharp"),
 			nodes: map[string][]string{
 				"function": {"local_function_statement"},
 				"class":    {"class_declaration"},
@@ -267,7 +281,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier"),
 		},
 		"php": {
-			factory: grammars.PhpLanguage,
+			factory: tsLang("php"),
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_declaration"},
@@ -277,7 +291,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("name", "variable_name"),
 		},
 		"swift": {
-			factory: grammars.SwiftLanguage,
+			factory: tsLang("swift"),
 			nodes: map[string][]string{
 				"function": {"function_declaration"},
 				"class":    {"class_declaration"},
@@ -286,7 +300,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("simple_identifier", "type_identifier"),
 		},
 		"kotlin": {
-			factory: grammars.KotlinLanguage,
+			factory: tsLang("kotlin"),
 			nodes: map[string][]string{
 				"function": {"function_declaration"},
 				"class":    {"class_declaration", "object_declaration"},
@@ -294,7 +308,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "simple_identifier"),
 		},
 		"scala": {
-			factory: grammars.ScalaLanguage,
+			factory: tsLang("scala"),
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_definition", "object_definition"},
@@ -303,21 +317,21 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier"),
 		},
 		"bash": {
-			factory: grammars.BashLanguage,
+			factory: tsLang("bash"),
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 			},
 			identifiers: idID("variable_name", "word"),
 		},
 		"lua": {
-			factory: grammars.LuaLanguage,
+			factory: tsLang("lua"),
 			nodes: map[string][]string{
 				"function": {"function_declaration", "function_definition"},
 			},
 			identifiers: idID(),
 		},
 		"dart": {
-			factory: grammars.DartLanguage,
+			factory: tsLang("dart"),
 			nodes: map[string][]string{
 				"function": {"function_signature"},
 				"class":    {"class_definition"},
@@ -327,14 +341,14 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier"),
 		},
 		"r": {
-			factory: grammars.RLanguage,
+			factory: tsLang("r"),
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 			},
 			identifiers: idID(),
 		},
 		"objc": {
-			factory: grammars.ObjcLanguage,
+			factory: tsLang("objc"),
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_interface", "class_implementation"},
@@ -346,21 +360,21 @@ func defaultRegistry() map[string]languageEntry {
 
 		// --- Tier 4: markup / data / config with structural nodes ---
 		"html": {
-			factory: grammars.HtmlLanguage,
+			factory: tsLang("html"),
 			nodes: map[string][]string{
 				"type": {"doctype"},
 			},
 			identifiers: nil,
 		},
 		"css": {
-			factory: grammars.CssLanguage,
+			factory: tsLang("css"),
 			nodes: map[string][]string{
 				"class": {"rule_set"},
 			},
 			identifiers: nil,
 		},
 		"scss": {
-			factory: grammars.ScssLanguage,
+			factory: tsLang("scss"),
 			nodes: map[string][]string{
 				"function": {"mixin_statement"},
 				"class":    {"rule_set"},
@@ -368,15 +382,18 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: nil,
 		},
 		"sql": {
-			factory: grammars.SqlLanguage,
+			factory: tsLang("sql"),
+			// Node names follow DerekStride/tree-sitter-sql (the official-via-cgo
+			// grammar), which uses create_table / create_function rather than the
+			// *_statement names the previous pure-Go grammar exposed.
 			nodes: map[string][]string{
-				"function": {"create_function_statement"},
-				"type":     {"create_table_statement"},
+				"function": {"create_function"},
+				"type":     {"create_table", "create_view", "create_type", "create_index", "create_materialized_view"},
 			},
 			identifiers: nil,
 		},
 		"markdown": {
-			factory: grammars.MarkdownLanguage,
+			factory: tsLang("markdown"),
 			nodes: map[string][]string{
 				// `section` already wraps the heading + body in
 				// tree-sitter-markdown — adding `atx_heading` would emit
@@ -388,7 +405,7 @@ func defaultRegistry() map[string]languageEntry {
 
 		// --- Tier 5: medium-confidence additions ---
 		"zig": {
-			factory: grammars.ZigLanguage,
+			factory: tsLang("zig"),
 			nodes: map[string][]string{
 				"function": {"function_declaration"},
 				"class":    {"struct_declaration"},
@@ -396,14 +413,14 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID(),
 		},
 		"julia": {
-			factory: grammars.JuliaLanguage,
+			factory: tsLang("julia"),
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 			},
 			identifiers: idID(),
 		},
 		"fortran": {
-			factory: grammars.FortranLanguage,
+			factory: tsLang("fortran"),
 			nodes: map[string][]string{
 				"function": {"subroutine", "function"},
 				"class":    {"module"},
@@ -411,7 +428,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID(),
 		},
 		"haskell": {
-			factory: grammars.HaskellLanguage,
+			factory: tsLang("haskell"),
 			nodes: map[string][]string{
 				// `function` = untyped top-level def; `bind` = typed binding
 				// (signature + match together); `signature` is loose stand-alone
@@ -424,7 +441,7 @@ func defaultRegistry() map[string]languageEntry {
 			},
 		},
 		"ocaml": {
-			factory: grammars.OcamlLanguage,
+			factory: tsLang("ocaml"),
 			nodes: map[string][]string{
 				"function": {"value_definition"},
 				"class":    {"module_definition"},
@@ -433,7 +450,7 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier"),
 		},
 		"solidity": {
-			factory: grammars.SolidityLanguage,
+			factory: tsLang("solidity"),
 			nodes: map[string][]string{
 				"function": {"function_definition", "modifier_definition", "constructor_definition", "fallback_receive_definition"},
 				"class":    {"contract_declaration", "library_declaration"},
@@ -562,45 +579,43 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	}
 
 	src := []byte(content)
-	parser := sitter.NewParser(lang)
-
-	// Twin guards: SetTimeoutMicros is the parser's own checkpoint-based
-	// budget; the cancellation flag is set by an external timer when the
-	// wall-clock deadline expires. The parser checks both at the same
-	// granularity, so they overshoot together — we still rely on the
-	// post-parse wall-clock check below to decide whether the tree is
-	// trustworthy.
-	parser.SetTimeoutMicros(parseHint)
-	var cancelFlag uint32
-	parser.SetCancellationFlag(&cancelFlag)
-	deadline := time.AfterFunc(parseBudget, func() {
-		atomic.StoreUint32(&cancelFlag, 1)
-	})
-
-	parseStart := time.Now()
-	tree, err := parser.Parse(src)
-	parseElapsed := time.Since(parseStart)
-	deadline.Stop()
-
-	// Hard wall-clock check — even if parser claims success, a tree that
-	// took >2× the budget is the result of a backtracking pathology and
-	// the structure is not trustworthy enough to chunk on. Falling back to
-	// sliding window keeps the indexer responsive.
-	if parseElapsed > 2*parseBudget {
-		slog.Warn("chunker: parse exceeded budget, falling back to sliding window",
-			"path", filePath, "language", language, "elapsed", parseElapsed,
-			"budget", parseBudget)
+	parser := ts.NewParser()
+	defer parser.Close()
+	if err := parser.SetLanguage(lang); err != nil {
 		return chunkFallback(filePath, content, language), nil, nil
 	}
-	if atomic.LoadUint32(&cancelFlag) == 1 {
+
+	// Wall-clock deadline guard. The official tree-sitter parses correct code
+	// in milliseconds, but a pathological grammar/input could still backtrack.
+	// The progress callback is invoked periodically by the C parser; returning
+	// true cancels the parse (Parse then returns nil). This is the supported
+	// cancellation mechanism in tree-sitter 0.25 (SetTimeoutMicros/
+	// SetCancellationFlag are deprecated).
+	deadline := time.Now().Add(parseBudget)
+	read := func(offset int, _ ts.Point) []byte {
+		if offset >= len(src) {
+			return nil
+		}
+		return src[offset:]
+	}
+	opts := &ts.ParseOptions{
+		ProgressCallback: func(ts.ParseState) bool { return time.Now().After(deadline) },
+	}
+
+	parseStart := time.Now()
+	tree := parser.ParseWithOptions(read, nil, opts)
+	parseElapsed := time.Since(parseStart)
+
+	// A nil tree means the parse was cancelled by the deadline (or failed).
+	// Fall back to sliding window so the indexer stays responsive and the
+	// content is still indexed.
+	if tree == nil {
 		slog.Warn("chunker: parse cancelled by deadline, falling back to sliding window",
 			"path", filePath, "language", language, "elapsed", parseElapsed)
 		return chunkFallback(filePath, content, language), nil, nil
 	}
+	defer tree.Close()
 
-	if err != nil {
-		return nil, nil, err
-	}
 	root := tree.RootNode()
 	if root == nil {
 		return nil, nil, nil
@@ -610,10 +625,10 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	var chunks []Chunk
 	var coveredRanges [][2]int
 
-	extractNodes(root, lang, src, targetTypes, lines, filePath, language, &chunks, &coveredRanges, nil)
+	extractNodes(root, src, targetTypes, lines, filePath, language, &chunks, &coveredRanges, nil)
 
 	// Extract references using the snapshotted identifier set.
-	refs := extractReferences(root, lang, src, targetTypes, idTypes, filePath, language)
+	refs := extractReferences(root, src, targetTypes, idTypes, filePath, language)
 
 	// Fill gaps between extracted symbol nodes with "module" chunks.
 	sortRanges(coveredRanges)
@@ -651,8 +666,7 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 
 // extractNodes walks the AST and appends symbol chunks.
 func extractNodes(
-	node *sitter.Node,
-	lang *sitter.Language,
+	node *ts.Node,
 	src []byte,
 	targetTypes map[string]string,
 	lines []string,
@@ -664,11 +678,11 @@ func extractNodes(
 	if node == nil {
 		return
 	}
-	nodeType := node.Type(lang)
+	nodeType := node.Kind()
 
 	if kind, ok := targetTypes[nodeType]; ok {
-		startLine := int(node.StartPoint().Row)
-		endLine := int(node.EndPoint().Row)
+		startLine := int(node.StartPosition().Row)
+		endLine := int(node.EndPosition().Row)
 
 		content := joinLines(lines[startLine : endLine+1])
 
@@ -678,7 +692,7 @@ func extractNodes(
 			actualKind = "method"
 		}
 
-		symName := extractName(node, lang, src)
+		symName := extractName(node, src)
 		var sig *string
 		if startLine < len(lines) {
 			s := trimSpace(lines[startLine])
@@ -705,16 +719,16 @@ func extractNodes(
 				currentParent = parentName
 			}
 			cnt := node.ChildCount()
-			for i := 0; i < cnt; i++ {
-				extractNodes(node.Child(i), lang, src, targetTypes, lines, filePath, language, chunks, coveredRanges, currentParent)
+			for i := uint(0); i < cnt; i++ {
+				extractNodes(node.Child(i), src, targetTypes, lines, filePath, language, chunks, coveredRanges, currentParent)
 			}
 			return
 		}
 	}
 
 	cnt := node.ChildCount()
-	for i := 0; i < cnt; i++ {
-		extractNodes(node.Child(i), lang, src, targetTypes, lines, filePath, language, chunks, coveredRanges, parentName)
+	for i := uint(0); i < cnt; i++ {
+		extractNodes(node.Child(i), src, targetTypes, lines, filePath, language, chunks, coveredRanges, parentName)
 	}
 }
 
@@ -722,8 +736,7 @@ func extractNodes(
 // idNodeTypes is passed in (rather than read from the global map) so callers
 // can snapshot once and stay consistent if Configure() is called concurrently.
 func extractReferences(
-	root *sitter.Node,
-	lang *sitter.Language,
+	root *ts.Node,
 	src []byte,
 	targetTypes map[string]string,
 	idNodeTypes map[string]struct{},
@@ -736,30 +749,30 @@ func extractReferences(
 	var refs []Reference
 	seen := map[[3]any]struct{}{}
 
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
+	var walk func(n *ts.Node)
+	walk = func(n *ts.Node) {
 		if n == nil {
 			return
 		}
-		nt := n.Type(lang)
+		nt := n.Kind()
 		if _, isID := idNodeTypes[nt]; isID {
-			name := n.Text(src)
+			name := n.Utf8Text(src)
 			if len(name) >= minRefNameLength {
 				if _, skip := skipNames[name]; !skip {
 					// Skip if this identifier is the name child of a definition node.
 					parent := n.Parent()
 					if parent != nil {
-						if _, isTarget := targetTypes[parent.Type(lang)]; isTarget {
+						if _, isTarget := targetTypes[parent.Kind()]; isTarget {
 							// Check if this is the first identifier child.
 							// We use StartByte as a stable node identity (within one parse).
 							nStart := n.StartByte()
 							cnt := parent.ChildCount()
-							for i := 0; i < cnt; i++ {
+							for i := uint(0); i < cnt; i++ {
 								child := parent.Child(i)
 								if child == nil {
 									continue
 								}
-								if _, childIsID := idNodeTypes[child.Type(lang)]; childIsID {
+								if _, childIsID := idNodeTypes[child.Kind()]; childIsID {
 									if child.StartByte() == nStart {
 										return // skip — it's a definition name
 									}
@@ -769,8 +782,8 @@ func extractReferences(
 						}
 					}
 
-					line := int(n.StartPoint().Row) + 1
-					col := int(n.StartPoint().Column)
+					line := int(n.StartPosition().Row) + 1
+					col := int(n.StartPosition().Column)
 					key := [3]any{name, line, col}
 					if _, dup := seen[key]; !dup {
 						seen[key] = struct{}{}
@@ -788,7 +801,7 @@ func extractReferences(
 		}
 
 		cnt := n.ChildCount()
-		for i := 0; i < cnt; i++ {
+		for i := uint(0); i < cnt; i++ {
 			walk(n.Child(i))
 		}
 	}
@@ -808,7 +821,7 @@ func extractReferences(
 // Without these, the symbol_name field on the resulting chunk was nil and
 // the CLI's `cix summary` rendered weird placeholders (`[method] bool`,
 // `[function] <nil>`).
-func extractName(node *sitter.Node, lang *sitter.Language, src []byte) *string {
+func extractName(node *ts.Node, src []byte) *string {
 	nameTypes := map[string]struct{}{
 		"identifier":          {},
 		"name":                {},
@@ -820,13 +833,13 @@ func extractName(node *sitter.Node, lang *sitter.Language, src []byte) *string {
 		"constant":            {},
 	}
 	cnt := node.ChildCount()
-	for i := 0; i < cnt; i++ {
+	for i := uint(0); i < cnt; i++ {
 		child := node.Child(i)
 		if child == nil {
 			continue
 		}
-		if _, ok := nameTypes[child.Type(lang)]; ok {
-			s := child.Text(src)
+		if _, ok := nameTypes[child.Kind()]; ok {
+			s := child.Utf8Text(src)
 			return &s
 		}
 	}

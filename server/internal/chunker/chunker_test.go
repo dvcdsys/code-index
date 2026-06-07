@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	sitter "github.com/odvcencio/gotreesitter"
+	ts "github.com/tree-sitter/go-tree-sitter"
 )
 
 func TestChunkFile_Python(t *testing.T) {
@@ -426,14 +426,12 @@ int main(void) {
 	}
 }
 
-// TestChunkFile_C_EnumRegression documents a gotreesitter >= v0.19.0 regression:
-// a C file containing an `enum` (plain or typedef) parses to an ERROR tree, so
-// functions in that file are no longer chunked as `function` (they fall into
-// generic `module` chunks instead). v0.18.0 and earlier parsed this correctly.
-// Skipped until fixed upstream; re-enable (and fold back into TestChunkFile_C)
-// once C enum parsing is restored.
+// TestChunkFile_C_EnumRegression guards a bug that affected the previous
+// pure-Go gotreesitter parser (>= v0.19.0), where a C file containing an `enum`
+// (plain or typedef) parsed to an ERROR tree, so functions in that file were no
+// longer chunked as `function`. The official tree-sitter (cgo) parses this
+// correctly, so the test now runs unskipped and must keep passing.
 func TestChunkFile_C_EnumRegression(t *testing.T) {
-	t.Skip("blocked on upstream gotreesitter C enum GLR regression (>= v0.19.0)")
 	src := `typedef enum { RED, GREEN, BLUE } Color;
 
 int add(int a, int b) {
@@ -599,18 +597,23 @@ contract C {
 		t.Fatal("nil solidity grammar")
 	}
 
-	parser := sitter.NewParser(grammar)
-	tree, err := parser.Parse([]byte(src))
-	if err != nil {
-		t.Fatalf("parse error: %v", err)
+	parser := ts.NewParser()
+	defer parser.Close()
+	if err := parser.SetLanguage(grammar); err != nil {
+		t.Fatalf("set language: %v", err)
 	}
+	tree := parser.Parse([]byte(src), nil)
+	if tree == nil {
+		t.Fatal("nil tree")
+	}
+	defer tree.Close()
 	root := tree.RootNode()
 	if root == nil {
 		t.Fatal("nil root")
 	}
 
 	seen := map[string]struct{}{}
-	collectNodeTypes(root, grammar, seen)
+	collectNodeTypes(root, seen)
 
 	for _, types := range nodes {
 		for _, ty := range types {
@@ -689,7 +692,7 @@ func chunkTypeCounts(chunks []Chunk) map[string]int {
 }
 
 // TestRegistry_AllFactoriesNonNil ensures every default-registered language
-// resolves to a usable *sitter.Language. A nil factory return would mean
+// resolves to a usable *ts.Language. A nil factory return would mean
 // gotreesitter renamed/removed a grammar between updates and we silently lost
 // support — better to fail loud here than at runtime in production.
 func TestRegistry_AllFactoriesNonNil(t *testing.T) {
@@ -788,11 +791,16 @@ func TestRegistry_NodeNamesMatchAST(t *testing.T) {
 				t.Fatalf("nil grammar for %q", lang)
 			}
 
-			parser := sitter.NewParser(grammar)
-			tree, err := parser.Parse([]byte(src))
-			if err != nil {
-				t.Fatalf("parse error for %q: %v", lang, err)
+			parser := ts.NewParser()
+			defer parser.Close()
+			if err := parser.SetLanguage(grammar); err != nil {
+				t.Fatalf("set language for %q: %v", lang, err)
 			}
+			tree := parser.Parse([]byte(src), nil)
+			if tree == nil {
+				t.Fatalf("nil tree for %q", lang)
+			}
+			defer tree.Close()
 			root := tree.RootNode()
 			if root == nil {
 				t.Fatalf("nil root for %q", lang)
@@ -806,7 +814,7 @@ func TestRegistry_NodeNamesMatchAST(t *testing.T) {
 			}
 
 			seen := map[string]struct{}{}
-			collectNodeTypes(root, grammar, seen)
+			collectNodeTypes(root, seen)
 
 			matched := false
 			for ty := range want {
@@ -827,13 +835,13 @@ func TestRegistry_NodeNamesMatchAST(t *testing.T) {
 	}
 }
 
-func collectNodeTypes(n *sitter.Node, lang *sitter.Language, out map[string]struct{}) {
+func collectNodeTypes(n *ts.Node, out map[string]struct{}) {
 	if n == nil {
 		return
 	}
-	out[n.Type(lang)] = struct{}{}
-	for i := 0; i < int(n.ChildCount()); i++ {
-		collectNodeTypes(n.Child(i), lang, out)
+	out[n.Kind()] = struct{}{}
+	for i := uint(0); i < n.ChildCount(); i++ {
+		collectNodeTypes(n.Child(i), out)
 	}
 }
 

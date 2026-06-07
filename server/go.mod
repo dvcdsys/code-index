@@ -3,13 +3,37 @@ module github.com/dvcdsys/code-index/server
 go 1.25.11
 
 require (
+	github.com/UserNobody14/tree-sitter-dart v0.0.0-20260520003023-a9bdfa3db2fb
+	github.com/alex-pinkus/tree-sitter-swift v0.0.0-20260601004120-31d17fe7e818
 	github.com/getkin/kin-openapi v0.135.0
 	github.com/go-chi/chi/v5 v5.2.4
 	github.com/go-git/go-git/v5 v5.19.0
 	github.com/google/uuid v1.6.0
 	github.com/oapi-codegen/runtime v1.4.0
-	github.com/odvcencio/gotreesitter v0.20.2
 	github.com/philippgille/chromem-go v0.7.0
+	github.com/stadelmanma/tree-sitter-fortran v0.6.0
+	github.com/tree-sitter-grammars/tree-sitter-kotlin v1.1.0
+	github.com/tree-sitter-grammars/tree-sitter-lua v0.5.0
+	github.com/tree-sitter-grammars/tree-sitter-zig v1.1.2
+	github.com/tree-sitter/go-tree-sitter v0.25.0
+	github.com/tree-sitter/tree-sitter-bash v0.25.1
+	github.com/tree-sitter/tree-sitter-c v0.24.2
+	github.com/tree-sitter/tree-sitter-c-sharp v0.23.5
+	github.com/tree-sitter/tree-sitter-cpp v0.23.4
+	github.com/tree-sitter/tree-sitter-css v0.25.0
+	github.com/tree-sitter/tree-sitter-go v0.25.0
+	github.com/tree-sitter/tree-sitter-haskell v0.23.1
+	github.com/tree-sitter/tree-sitter-html v0.23.2
+	github.com/tree-sitter/tree-sitter-java v0.23.5
+	github.com/tree-sitter/tree-sitter-javascript v0.25.0
+	github.com/tree-sitter/tree-sitter-julia v0.25.0
+	github.com/tree-sitter/tree-sitter-ocaml v0.25.0
+	github.com/tree-sitter/tree-sitter-php v0.24.2
+	github.com/tree-sitter/tree-sitter-python v0.25.0
+	github.com/tree-sitter/tree-sitter-ruby v0.23.1
+	github.com/tree-sitter/tree-sitter-rust v0.24.2
+	github.com/tree-sitter/tree-sitter-scala v0.26.0
+	github.com/tree-sitter/tree-sitter-typescript v0.23.2
 	golang.org/x/crypto v0.52.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/time v0.15.0
@@ -38,6 +62,7 @@ require (
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/mailru/easyjson v0.9.1 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/oapi-codegen/oapi-codegen/v2 v2.7.0 // indirect
