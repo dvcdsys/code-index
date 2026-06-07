@@ -2,7 +2,7 @@
 # Phase 7 CUDA Dockerfile — distroless runtime, glibc + CUDA libs only.
 #
 # Stage 0: build the React dashboard (node:20-alpine)
-# Stage 1: compile Go binary (pure static, no CGO) — embeds the dashboard
+# Stage 1: compile Go binary (cgo for tree-sitter, musl-static) — embeds dashboard
 # Stage 2: pull llama.cpp CUDA binaries
 # Stage 3: install CUDA shared libs in nvidia/cuda → extract individual .so
 # Stage 4: distroless/cc runtime — no shell, no apt, no tar/dpkg
@@ -40,7 +40,11 @@ RUN cd dashboard && \
 # ── Stage 1: compile the Go binary ─────────────────────────────────────────
 FROM --platform=linux/amd64 golang:1.25-alpine AS builder
 ARG VERSION
-RUN apk upgrade --no-cache
+# gcc + musl-dev: C toolchain for cgo (tree-sitter grammars are C). Linking
+# statically against musl keeps cix-server loader-free, so it runs unchanged on
+# the distroless/cc runtime (whose glibc is there only for the llama-server
+# sidecar, not for this binary).
+RUN apk upgrade --no-cache && apk add --no-cache gcc musl-dev
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -49,9 +53,10 @@ RUN go mod download
 COPY . .
 # Drop the built dashboard into the embed root so `go build` includes it.
 COPY --from=dashboard /src/internal/httpapi/dashboard/dist/ ./internal/httpapi/dashboard/dist/
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
     -trimpath \
-    -ldflags "-s -w -X main.version=${VERSION}" \
+    -tags "osusergo netgo" \
+    -ldflags "-s -w -X main.version=${VERSION} -linkmode external -extldflags '-static'" \
     -o /out/cix-server \
     ./cmd/cix-server
 

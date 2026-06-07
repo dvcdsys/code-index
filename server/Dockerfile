@@ -64,7 +64,10 @@ RUN curl -fsSL \
 FROM golang:1.25-alpine AS builder
 ARG VERSION
 # Patch Alpine base packages before building to avoid CVEs in the builder layer.
-RUN apk upgrade --no-cache
+# gcc + musl-dev provide the C toolchain for cgo (the tree-sitter grammars are C);
+# linking against musl statically keeps the binary self-contained so it still
+# runs on distroless/static (no glibc, no .so loader).
+RUN apk upgrade --no-cache && apk add --no-cache gcc musl-dev
 WORKDIR /src
 
 # Copy go.mod / go.sum first for a warm module cache layer.
@@ -74,9 +77,13 @@ RUN go mod download
 COPY . .
 # Drop the built dashboard into the embed root so `go build` includes it.
 COPY --from=dashboard /src/internal/httpapi/dashboard/dist/ ./internal/httpapi/dashboard/dist/
-RUN CGO_ENABLED=0 GOOS=linux go build \
+# cgo on (tree-sitter C grammars), statically linked against musl so the binary
+# stays loader-free for distroless/static. osusergo/netgo avoid pulling glibc
+# NSS into the static link. -extldflags -static forces full static linkage.
+RUN CGO_ENABLED=1 GOOS=linux go build \
     -trimpath \
-    -ldflags "-s -w -X main.version=${VERSION}" \
+    -tags "osusergo netgo" \
+    -ldflags "-s -w -X main.version=${VERSION} -linkmode external -extldflags '-static'" \
     -o /out/cix-server \
     ./cmd/cix-server
 
