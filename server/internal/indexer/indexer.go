@@ -43,6 +43,12 @@ const sessionTTL = 10 * time.Minute
 // cleanupDelay mirrors Python's 60s post-finish cleanup window.
 const cleanupDelay = 60 * time.Second
 
+// wipeBatchSize bounds one full-reindex DELETE batch on symbols/refs. Sized so
+// each implicit transaction stays in the low-milliseconds (these are plain
+// b-tree deletes, much cheaper than FTS), keeping the SQLite writer available
+// for concurrent transactions during a big project wipe.
+const wipeBatchSize = 20000
+
 // FilePayload matches api/app/schemas/indexing.py FilePayload.
 type FilePayload struct {
 	Path        string
@@ -341,28 +347,45 @@ func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bo
 	storedHashes := map[string]string{}
 
 	if full {
-		// M1 — commit the DB wipe first; DeleteCollection is irreversible and
+		// M1 — run the DB wipe first; DeleteCollection is irreversible and
 		// must run last so a DB failure does not leave file_hashes pointing at
 		// already-deleted vectors (would skip re-indexing on next incremental).
-		tx2, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return "", nil, fmt.Errorf("begin tx (full): %w", err)
+		//
+		// The wipe is BATCHED, not one transaction. SQLite has a single writer,
+		// and a monolithic wipe of a big project (vscode: ~445k refs + tens of
+		// thousands of trigram-FTS rows) held the write lock for minutes —
+		// starving every concurrent writer past busy_timeout (prod symptom:
+		// jobs-worker `claim failed: SQLITE_BUSY` on every poll tick until the
+		// wipe committed). Batches release the writer between transactions.
+		//
+		// Crash-safety without whole-wipe atomicity: file_hashes goes FIRST in
+		// its own statement. Once it's gone every file looks dirty, so a crash
+		// midway just means the restarted full run re-deletes the survivors
+		// (per-file DeleteByFileTx during reindex, or the next wipe attempt).
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM file_hashes WHERE project_path = ?`, projectPath,
+		); err != nil {
+			return "", nil, fmt.Errorf("full wipe file_hashes: %w", err)
 		}
-		defer tx2.Rollback() //nolint:errcheck
-		for _, q := range []string{
-			`DELETE FROM file_hashes WHERE project_path = ?`,
-			`DELETE FROM symbols WHERE project_path = ?`,
-			`DELETE FROM refs WHERE project_path = ?`,
-		} {
-			if _, err := tx2.ExecContext(ctx, q, projectPath); err != nil {
-				return "", nil, fmt.Errorf("full wipe: %w", err)
+		for _, table := range []string{"symbols", "refs"} {
+			// The rowid subselect rides the (project_path, …) index; each
+			// DELETE statement is its own implicit transaction.
+			q := fmt.Sprintf(
+				`DELETE FROM %s WHERE rowid IN
+				   (SELECT rowid FROM %s WHERE project_path = ? LIMIT %d)`,
+				table, table, wipeBatchSize)
+			for {
+				res, err := s.db.ExecContext(ctx, q, projectPath)
+				if err != nil {
+					return "", nil, fmt.Errorf("full wipe %s: %w", table, err)
+				}
+				if n, _ := res.RowsAffected(); n < wipeBatchSize {
+					break
+				}
 			}
 		}
-		if err := chunksfts.DeleteByProjectTx(ctx, tx2, projectPath); err != nil {
+		if err := chunksfts.DeleteByProject(ctx, s.db, projectPath); err != nil {
 			return "", nil, fmt.Errorf("full wipe chunks_fts: %w", err)
-		}
-		if err := tx2.Commit(); err != nil {
-			return "", nil, fmt.Errorf("commit (full): %w", err)
 		}
 		if s.vs != nil {
 			if err := s.vs.DeleteCollection(projectPath); err != nil {

@@ -138,38 +138,60 @@ func DeleteByFileTx(ctx context.Context, tx *sql.Tx, projectPath, filePath strin
 	return nil
 }
 
-// DeleteByProjectTx wipes every BM25 row for a project. Used by the
-// indexer's full-reindex wipe path and by projects.Delete so removing a
-// project leaves no stranded FTS rows.
-func DeleteByProjectTx(ctx context.Context, tx *sql.Tx, projectPath string) error {
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM chunks_fts
-		 WHERE rowid IN (SELECT rowid FROM chunks_meta WHERE project_path = ?)`,
-		projectPath,
-	); err != nil {
-		return fmt.Errorf("delete chunks_fts by project: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM chunks_meta WHERE project_path = ?`,
-		projectPath,
-	); err != nil {
-		return fmt.Errorf("delete chunks_meta by project: %w", err)
-	}
-	return nil
-}
+// deleteBatchSize bounds one wipe batch. FTS5 deletes re-tokenize each row's
+// content to remove its postings — with the trigram tokenizer and ~4.5 KB
+// chunks that is by far the most expensive delete in the schema, so the batch
+// is sized to keep each transaction well under a second. The point of
+// batching: SQLite has ONE writer, and a monolithic project wipe (vscode-sized
+// projects: tens of thousands of FTS rows) held the write lock for minutes,
+// starving every other writer past busy_timeout (the prod symptom: jobs-worker
+// `claim failed: SQLITE_BUSY` every poll tick for the whole wipe).
+const deleteBatchSize = 500
 
-// DeleteByProject is the non-tx form for callers that don't already hold
-// one (admin DeleteProject handler, manual cleanup).
+// DeleteByProject wipes a project's BM25 rows in bounded batches, one
+// transaction per batch, releasing the SQLite writer between batches so
+// concurrent writers (jobs queue, dashboard, other indexing runs) interleave.
+//
+// NOT atomic as a whole: a crash mid-wipe leaves the tail in place. Callers
+// (full-reindex wipe, project delete) tolerate that — the next wipe attempt
+// resumes where this one stopped, and orphaned rows are invisible to search
+// once the project row / file_hashes are gone.
+//
+// Both subselects inside a batch tx see the same snapshot and use
+// ORDER BY rowid, so the fts and meta deletes target the identical row set.
 func DeleteByProject(ctx context.Context, db *sql.DB, projectPath string) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	for {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM chunks_fts
+			 WHERE rowid IN (SELECT rowid FROM chunks_meta
+			                  WHERE project_path = ? ORDER BY rowid LIMIT ?)`,
+			projectPath, deleteBatchSize,
+		); err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("delete chunks_fts batch: %w", err)
+		}
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM chunks_meta
+			 WHERE rowid IN (SELECT rowid FROM chunks_meta
+			                  WHERE project_path = ? ORDER BY rowid LIMIT ?)`,
+			projectPath, deleteBatchSize,
+		)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("delete chunks_meta batch: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		if n < deleteBatchSize {
+			return nil
+		}
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after commit
-	if err := DeleteByProjectTx(ctx, tx, projectPath); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 // SearchProject runs an OR-joined trigram FTS5 query restricted to a

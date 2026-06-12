@@ -340,24 +340,22 @@ func SetStatus(ctx context.Context, db *sql.DB, hostPath, status string) error {
 //
 // chunks_meta and chunks_fts are not bound to projects via FK because
 // chunks_fts is a virtual table and cannot participate in foreign keys.
-// We wipe them in the same tx that drops the projects row so a failure
-// rolls back the partial state.
+// The FTS wipe runs FIRST, in bounded batches (its own short transactions),
+// because a big project's trigram-FTS delete can take minutes and SQLite has a
+// single writer — one monolithic tx here starved every concurrent writer (see
+// chunksfts.DeleteByProject). Failure midway leaves the projects row intact, so
+// a retried Delete resumes the wipe; FTS rows never outlive the project row.
 func Delete(ctx context.Context, db *sql.DB, hostPath string) error {
 	if _, err := Get(ctx, db, hostPath); err != nil {
 		return err
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin delete tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op after commit
-	if err := chunksfts.DeleteByProjectTx(ctx, tx, hostPath); err != nil {
+	if err := chunksfts.DeleteByProject(ctx, db, hostPath); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE host_path = ?`, hostPath); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM projects WHERE host_path = ?`, hostPath); err != nil {
 		return fmt.Errorf("delete project: %w", err)
 	}
-	return tx.Commit()
+	return nil
 }
 
 // ---------------------------------------------------------------------------
