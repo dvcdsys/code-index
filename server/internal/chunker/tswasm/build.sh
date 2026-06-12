@@ -106,3 +106,8 @@ zig cc --target=wasm32-wasi-musl -mexec-model=reactor \
 echo "built $OUT ($(du -h "$OUT" | cut -f1)) — runtime $TS_VERSION, ${#BUILT[@]} grammars"
 [ ${#FAILED[@]} -gt 0 ] && echo "FAILED: ${FAILED[*]}"
 echo "grammars: ${BUILT[*]}"
+
+# Brotli-compress to the committed artifact the package embeds. The raw .wasm is
+# a gitignored intermediate; only ts-core.wasm.br (~3 MB) goes into git.
+echo "→ brotli-compressing → ${OUT}.br"
+go run compress.go

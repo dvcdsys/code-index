@@ -1,0 +1,4 @@
+# Raw wasm is a build intermediate produced by build.sh; only the brotli-
+# compressed ts-core.wasm.br (~3 MB) is committed and embedded. Regenerate the
+# raw blob with ./build.sh (needs zig).
+ts-core.wasm

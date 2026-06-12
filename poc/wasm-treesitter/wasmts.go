@@ -1,20 +1,18 @@
-// Package wasmts is a proof-of-concept pure-Go tree-sitter backend: the official
-// tree-sitter C runtime + a grammar, compiled to a standalone wasm32-wasi
-// reactor module (see build.sh) and driven from Go via wazero — no cgo, no JS.
+// Package wasmts is a pure-Go tree-sitter backend: the official tree-sitter C
+// runtime + N grammars + our host_extra.c (batched ts_dump_tree walk), compiled
+// to a standalone wasm32-wasi reactor module (see build.sh) and driven from Go
+// via wazero — no cgo, no JS.
 //
-// It exists to compare the WASM approach against the cgo backend on
-// feat/chunker-cgo-treesitter (speed + crash-isolation). It is NOT wired into
-// the chunker; see README.md for the benchmark/stability results.
-//
-// The wasm module exports the tree-sitter C API. TSNode is a 24-byte struct
-// passed/returned by value; over the wasm C ABI clang lowers a by-value struct
-// return to a hidden "sret" pointer first argument, and a by-value struct
-// argument to a pointer into linear memory. So every node is a 24-byte slot in
-// guest memory and we pass/receive pointers to those slots.
+// Production path: Parse the source, then ts_dump_tree walks the WHOLE tree
+// inside the guest and writes a flat pre-order []NodeRec into linear memory; the
+// host does ONE Memory.Read and decodes it. kind_id (TSSymbol) is resolved to a
+// kind name once per language via ts_language_symbol_name (cached). This replaces
+// the naive ~3-wazero-calls-per-node walk that made the PoC ~2x slower than cgo.
 package wasmts
 
 import (
 	"context"
+	"encoding/binary"
 	_ "embed"
 	"fmt"
 
@@ -23,12 +21,26 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
-//go:embed ts-ts.wasm
+//go:embed ts-core.wasm
 var wasmBinary []byte
 
-const nodeSize = 24 // sizeof(TSNode) on wasm32: uint32[4] + ptr + ptr
+// recSize must match sizeof(NodeRec) in host_extra.c (9 × uint32). Asserted
+// against ts_dump_rec_size() at New().
+const recSize = 36
+
+// Node is a decoded tree-sitter node from the batched dump.
+type Node struct {
+	KindID                       uint32
+	Kind                         string // resolved from KindID via the per-language symbol table
+	StartByte, EndByte           uint32
+	StartRow, StartCol           uint32
+	EndRow, EndCol               uint32
+	Depth                        uint32
+	Named, Error, Missing, Extra bool
+}
 
 // Engine is a single wazero instance hosting the tree-sitter runtime + grammars.
+// NOT safe for concurrent use — one Engine per worker (see plan §8).
 type Engine struct {
 	ctx context.Context
 	rt  wazero.Runtime
@@ -36,11 +48,13 @@ type Engine struct {
 	mem api.Memory
 
 	malloc, free                          api.Function
-	parserNew, setLang, parse, treeDelete api.Function
-	rootNode, childCount, child           api.Function
-	nodeType, hasError                    api.Function
+	parserNew, parserDelete, parserReset  api.Function
+	setLang, parse, treeDelete            api.Function
+	dumpTree                              api.Function
+	langSymCount, langSymName             api.Function
 
-	pool []uint32 // reused node slots, indexed by tree depth
+	langPtr map[string]uint32            // langExport -> TSLanguage*
+	symName map[string]map[uint32]string // langExport -> (symbol id -> kind name)
 }
 
 // New compiles and instantiates the wasm module. memLimitPages caps guest linear
@@ -61,25 +75,31 @@ func New(ctx context.Context, memLimitPages uint32) (*Engine, error) {
 	}
 	e := &Engine{
 		ctx: ctx, rt: rt, mod: mod, mem: mod.Memory(),
-		malloc:     mod.ExportedFunction("malloc"),
-		free:       mod.ExportedFunction("free"),
-		parserNew:  mod.ExportedFunction("ts_parser_new"),
-		setLang:    mod.ExportedFunction("ts_parser_set_language"),
-		parse:      mod.ExportedFunction("ts_parser_parse_string"),
-		treeDelete: mod.ExportedFunction("ts_tree_delete"),
-		rootNode:   mod.ExportedFunction("ts_tree_root_node"),
-		childCount: mod.ExportedFunction("ts_node_child_count"),
-		child:      mod.ExportedFunction("ts_node_child"),
-		nodeType:   mod.ExportedFunction("ts_node_type"),
-		hasError:   mod.ExportedFunction("ts_node_has_error"),
+		malloc:       mod.ExportedFunction("malloc"),
+		free:         mod.ExportedFunction("free"),
+		parserNew:    mod.ExportedFunction("ts_parser_new"),
+		parserDelete: mod.ExportedFunction("ts_parser_delete"),
+		parserReset:  mod.ExportedFunction("ts_parser_reset"),
+		setLang:      mod.ExportedFunction("ts_parser_set_language"),
+		parse:        mod.ExportedFunction("ts_parser_parse_string"),
+		treeDelete:   mod.ExportedFunction("ts_tree_delete"),
+		dumpTree:     mod.ExportedFunction("ts_dump_tree"),
+		langSymCount: mod.ExportedFunction("ts_language_symbol_count"),
+		langSymName:  mod.ExportedFunction("ts_language_symbol_name"),
+		langPtr:      map[string]uint32{},
+		symName:      map[string]map[uint32]string{},
+	}
+	if rs := e.call(mod.ExportedFunction("ts_dump_rec_size")); rs != recSize {
+		rt.Close(ctx)
+		return nil, fmt.Errorf("NodeRec size mismatch: guest=%d host=%d", rs, recSize)
 	}
 	return e, nil
 }
 
 func (e *Engine) Close() { e.rt.Close(e.ctx) }
 
-// call invokes a wasm export, surfacing a guest trap as a Go error (panic) so
-// the caller's recover() can contain it.
+// call invokes a wasm export, surfacing a guest trap as a Go panic so the
+// caller's recover() can contain it.
 func (e *Engine) call(f api.Function, args ...uint64) uint64 {
 	r, err := f.Call(e.ctx, args...)
 	if err != nil {
@@ -91,33 +111,46 @@ func (e *Engine) call(f api.Function, args ...uint64) uint64 {
 	return r[0]
 }
 
-// Language returns the TSLanguage pointer for an exported grammar (e.g.
-// "tree_sitter_typescript").
-func (e *Engine) Language(export string) uint32 {
-	return uint32(e.call(e.mod.ExportedFunction(export)))
+// language resolves (and caches) the TSLanguage* for a grammar export.
+func (e *Engine) language(export string) uint32 {
+	if p, ok := e.langPtr[export]; ok {
+		return p
+	}
+	p := uint32(e.call(e.mod.ExportedFunction(export)))
+	e.langPtr[export] = p
+	return p
 }
 
-// ParseResult holds the counts from a parse + full tree walk.
-type ParseResult struct {
-	HasError bool
-	Nodes    int
-	Errors   int
+// symbolNames builds (once per language) the symbol-id -> kind-name table so the
+// per-node kind lookup happens in pure Go, never across the wazero boundary.
+func (e *Engine) symbolNames(export string, lang uint32) map[uint32]string {
+	if m, ok := e.symName[export]; ok {
+		return m
+	}
+	count := uint32(e.call(e.langSymCount, uint64(lang)))
+	m := make(map[uint32]string, count)
+	for id := range count {
+		ptr := uint32(e.call(e.langSymName, uint64(lang), uint64(id)))
+		m[id] = e.readCStr(ptr)
+	}
+	e.symName[export] = m
+	return m
 }
 
-// Parse parses src under the given grammar export and walks the whole tree,
-// counting nodes and ERROR nodes. A guest-side trap is returned as an error;
-// the Engine (and the host process) stay alive.
-func (e *Engine) Parse(langExport string, src []byte) (res ParseResult, err error) {
+// ParseNodes parses src under the given grammar export and returns the whole tree
+// as a flat pre-order slice (batched via ts_dump_tree). A guest-side trap is
+// returned as an error; the Engine and host process stay alive.
+func (e *Engine) ParseNodes(langExport string, src []byte) (nodes []Node, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("wasm trap (contained): %v", r)
 		}
 	}()
 
+	lang := e.language(langExport)
 	parser := e.call(e.parserNew)
-	lang := e.call(e.mod.ExportedFunction(langExport))
-	e.call(e.setLang, parser, lang)
-	defer e.call(e.mod.ExportedFunction("ts_parser_delete"), parser)
+	defer e.call(e.parserDelete, parser)
+	e.call(e.setLang, parser, uint64(lang))
 
 	sp := uint32(e.call(e.malloc, uint64(len(src)+1)))
 	e.mem.Write(sp, src)
@@ -125,37 +158,51 @@ func (e *Engine) Parse(langExport string, src []byte) (res ParseResult, err erro
 	defer e.call(e.free, uint64(sp))
 
 	tree := e.call(e.parse, parser, 0, uint64(sp), uint64(len(src)))
+	if tree == 0 {
+		return nil, fmt.Errorf("parse returned null tree")
+	}
 	defer e.call(e.treeDelete, tree)
 
-	root := uint32(e.call(e.malloc, nodeSize))
-	defer e.call(e.free, uint64(root))
-	e.call(e.rootNode, uint64(root), tree)
-
-	res.HasError = e.call(e.hasError, uint64(root)) != 0
-	e.walk(root, 0, &res)
-	return res, nil
-}
-
-// walk recurses the tree, reusing one node slot per depth (no per-node malloc).
-// Each node costs ~3 host<->guest calls (type, child_count, child) — the
-// dominant WASM overhead vs cgo.
-func (e *Engine) walk(nodePtr uint32, depth int, res *ParseResult) {
-	res.Nodes++
-	if e.readCStr(uint32(e.call(e.nodeType, uint64(nodePtr)))) == "ERROR" {
-		res.Errors++
-	}
-	n := uint32(e.call(e.childCount, uint64(nodePtr)))
+	// Pass 1: count nodes (no writes). Pass 2: dump into an exact buffer.
+	n := uint32(e.call(e.dumpTree, tree, 0, 0))
 	if n == 0 {
-		return
+		return nil, nil
 	}
-	for len(e.pool) <= depth {
-		e.pool = append(e.pool, uint32(e.call(e.malloc, nodeSize)))
+	buf := uint32(e.call(e.malloc, uint64(n)*recSize))
+	defer e.call(e.free, uint64(buf))
+	got := uint32(e.call(e.dumpTree, tree, uint64(buf), uint64(n)))
+	if got != n {
+		return nil, fmt.Errorf("dump count changed between passes: %d vs %d", n, got)
 	}
-	slot := e.pool[depth]
-	for i := uint32(0); i < n; i++ {
-		e.call(e.child, uint64(slot), uint64(nodePtr), uint64(i))
-		e.walk(slot, depth+1, res)
+
+	raw, ok := e.mem.Read(buf, n*recSize)
+	if !ok {
+		return nil, fmt.Errorf("read dump buffer failed (ptr=%d len=%d)", buf, n*recSize)
 	}
+	names := e.symbolNames(langExport, lang)
+
+	nodes = make([]Node, n)
+	for i := range n {
+		o := i * recSize
+		kindID := binary.LittleEndian.Uint32(raw[o:])
+		flags := binary.LittleEndian.Uint32(raw[o+32:])
+		nodes[i] = Node{
+			KindID:    kindID,
+			Kind:      names[kindID],
+			StartByte: binary.LittleEndian.Uint32(raw[o+4:]),
+			EndByte:   binary.LittleEndian.Uint32(raw[o+8:]),
+			StartRow:  binary.LittleEndian.Uint32(raw[o+12:]),
+			StartCol:  binary.LittleEndian.Uint32(raw[o+16:]),
+			EndRow:    binary.LittleEndian.Uint32(raw[o+20:]),
+			EndCol:    binary.LittleEndian.Uint32(raw[o+24:]),
+			Depth:     binary.LittleEndian.Uint32(raw[o+28:]),
+			Named:     flags&1 != 0,
+			Error:     flags&2 != 0,
+			Missing:   flags&4 != 0,
+			Extra:     flags&8 != 0,
+		}
+	}
+	return nodes, nil
 }
 
 func (e *Engine) readCStr(ptr uint32) string {
@@ -171,4 +218,30 @@ func (e *Engine) readCStr(ptr uint32) string {
 		b = append(b, c)
 	}
 	return string(b)
+}
+
+// ParseResult holds summary counts from a parse (back-compat for cmd/bench and
+// cmd/stability).
+type ParseResult struct {
+	HasError bool
+	Nodes    int
+	Errors   int
+}
+
+// Parse is a thin summary wrapper over ParseNodes.
+func (e *Engine) Parse(langExport string, src []byte) (ParseResult, error) {
+	nodes, err := e.ParseNodes(langExport, src)
+	if err != nil {
+		return ParseResult{}, err
+	}
+	res := ParseResult{Nodes: len(nodes)}
+	for _, n := range nodes {
+		if n.Error {
+			res.Errors++
+		}
+		if n.Error || n.Missing {
+			res.HasError = true
+		}
+	}
+	return res, nil
 }

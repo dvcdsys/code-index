@@ -11,13 +11,11 @@ package chunker
 
 import (
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 
-	sitter "github.com/odvcencio/gotreesitter"
-	"github.com/odvcencio/gotreesitter/grammars"
+	"github.com/dvcdsys/code-index/server/internal/chunker/tswasm"
 )
 
 // maxChunkSize is the default maximum chunk size in bytes (chars).
@@ -35,22 +33,12 @@ const (
 // minRefNameLength mirrors MIN_REF_NAME_LENGTH in chunker.py.
 const minRefNameLength = 2
 
-// parseBudget caps wall-clock time spent in tree-sitter for a single file.
-// Some grammars (notably bash) have catastrophic-backtracking pathologies on
-// specific inputs — install.sh in this very repo took 31s to parse before
-// this guard. The parser's own SetTimeoutMicros checkpoint is best-effort
-// and overshoots by 3-4×, so we set the hint generously and rely on the
-// post-parse wall-clock check to decide whether to keep the tree.
-//
-// On overshoot we fall back to sliding-window chunks. We accept the wasted
-// CPU (parser keeps running until its next checkpoint) because killing a
-// pure-Go parse from outside is not safe — the only practical levers are
-// SetTimeoutMicros and the cancellation flag, both with the same overshoot
-// characteristic.
-const (
-	parseBudget = 2 * time.Second
-	parseHint   = uint64(parseBudget / time.Microsecond)
-)
+// NOTE: the official tree-sitter (via tswasm) does not have gotreesitter's
+// catastrophic-backtracking pathology, so the old SetTimeoutMicros +
+// cancellation-flag wall-clock guard is gone. A watchdog-that-recycles-the-
+// instance on a hard deadline is the Phase-4 equivalent (plan §7.4); until then
+// a guest trap (e.g. memory cap) is caught by tswasm and falls back to the
+// sliding window.
 
 // ---------------------------------------------------------------------------
 // Language registry — built from defaultRegistry() at init() and reduced by
@@ -58,19 +46,17 @@ const (
 // stay package-private; the engine reads them directly.
 // ---------------------------------------------------------------------------
 
-// languageEntry bundles the three pieces of state a language needs.
+// languageEntry bundles the per-language chunker state. The grammar itself lives
+// in the tswasm module, addressed by the export name "tree_sitter_<id>" derived
+// from the registry key — so no factory field is needed.
 type languageEntry struct {
-	factory     languageFunc
-	nodes       map[string][]string  // function|class|method|type → AST node types
-	identifiers map[string]struct{}  // identifier leaf-node types for ref extraction
+	nodes       map[string][]string // function|class|method|type → AST node types
+	identifiers map[string]struct{} // identifier leaf-node types for ref extraction
 }
-
-// languageFunc is a factory for sitter.Language.
-type languageFunc func() *sitter.Language
 
 var (
 	registryMu       sync.RWMutex
-	languageRegistry map[string]languageFunc
+	languageRegistry map[string]string // lang id → tswasm export ("tree_sitter_<id>")
 	languageNodes    map[string]map[string][]string
 	identifierNodes  map[string]map[string]struct{}
 )
@@ -102,7 +88,7 @@ func Configure(enabled []string) {
 		}
 	}
 
-	reg := make(map[string]languageFunc, len(defaults))
+	reg := make(map[string]string, len(defaults))
 	nodes := make(map[string]map[string][]string, len(defaults))
 	idents := make(map[string]map[string]struct{}, len(defaults))
 
@@ -112,7 +98,7 @@ func Configure(enabled []string) {
 				continue
 			}
 		}
-		reg[lang] = entry.factory
+		reg[lang] = "tree_sitter_" + lang
 		if entry.nodes != nil {
 			nodes[lang] = entry.nodes
 		}
@@ -163,7 +149,6 @@ func defaultRegistry() map[string]languageEntry {
 	return map[string]languageEntry{
 		// --- Tier 1: original 6, kept as-is for parity with legacy Python ---
 		"python": {
-			factory: grammars.PythonLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_definition"},
@@ -171,7 +156,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID(),
 		},
 		"typescript": {
-			factory: grammars.TypescriptLanguage,
 			nodes: map[string][]string{
 				"function": {"function_declaration", "arrow_function"},
 				"class":    {"class_declaration"},
@@ -181,7 +165,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "property_identifier"),
 		},
 		"javascript": {
-			factory: grammars.JavascriptLanguage,
 			nodes: map[string][]string{
 				"function": {"function_declaration", "arrow_function"},
 				"class":    {"class_declaration"},
@@ -190,7 +173,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("property_identifier"),
 		},
 		"go": {
-			factory: grammars.GoLanguage,
 			nodes: map[string][]string{
 				"function": {"function_declaration"},
 				"method":   {"method_declaration"},
@@ -199,7 +181,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "field_identifier"),
 		},
 		"rust": {
-			factory: grammars.RustLanguage,
 			nodes: map[string][]string{
 				"function": {"function_item"},
 				"class":    {"struct_item", "enum_item"},
@@ -208,7 +189,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "field_identifier"),
 		},
 		"java": {
-			factory: grammars.JavaLanguage,
 			nodes: map[string][]string{
 				"function": {"method_declaration"},
 				"class":    {"class_declaration"},
@@ -219,7 +199,6 @@ func defaultRegistry() map[string]languageEntry {
 
 		// --- Tier 2: bug-fix — grammars were registered, node maps were not ---
 		"tsx": {
-			factory: grammars.TsxLanguage,
 			nodes: map[string][]string{
 				"function": {"function_declaration", "arrow_function"},
 				"class":    {"class_declaration"},
@@ -229,7 +208,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "property_identifier"),
 		},
 		"c": {
-			factory: grammars.CLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"struct_specifier"},
@@ -238,7 +216,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "field_identifier"),
 		},
 		"cpp": {
-			factory: grammars.CppLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_specifier", "struct_specifier"},
@@ -247,7 +224,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "field_identifier"),
 		},
 		"ruby": {
-			factory: grammars.RubyLanguage,
 			nodes: map[string][]string{
 				"function": {"method", "singleton_method"},
 				"class":    {"class", "module"},
@@ -257,7 +233,6 @@ func defaultRegistry() map[string]languageEntry {
 
 		// --- Tier 3: mainstream additions, high confidence in node names ---
 		"c_sharp": {
-			factory: grammars.CSharpLanguage,
 			nodes: map[string][]string{
 				"function": {"local_function_statement"},
 				"class":    {"class_declaration"},
@@ -267,7 +242,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier"),
 		},
 		"php": {
-			factory: grammars.PhpLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_declaration"},
@@ -277,7 +251,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("name", "variable_name"),
 		},
 		"swift": {
-			factory: grammars.SwiftLanguage,
 			nodes: map[string][]string{
 				"function": {"function_declaration"},
 				"class":    {"class_declaration"},
@@ -286,7 +259,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("simple_identifier", "type_identifier"),
 		},
 		"kotlin": {
-			factory: grammars.KotlinLanguage,
 			nodes: map[string][]string{
 				"function": {"function_declaration"},
 				"class":    {"class_declaration", "object_declaration"},
@@ -294,7 +266,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier", "simple_identifier"),
 		},
 		"scala": {
-			factory: grammars.ScalaLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_definition", "object_definition"},
@@ -303,21 +274,18 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier"),
 		},
 		"bash": {
-			factory: grammars.BashLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 			},
 			identifiers: idID("variable_name", "word"),
 		},
 		"lua": {
-			factory: grammars.LuaLanguage,
 			nodes: map[string][]string{
 				"function": {"function_declaration", "function_definition"},
 			},
 			identifiers: idID(),
 		},
 		"dart": {
-			factory: grammars.DartLanguage,
 			nodes: map[string][]string{
 				"function": {"function_signature"},
 				"class":    {"class_definition"},
@@ -327,14 +295,12 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier"),
 		},
 		"r": {
-			factory: grammars.RLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 			},
 			identifiers: idID(),
 		},
 		"objc": {
-			factory: grammars.ObjcLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 				"class":    {"class_interface", "class_implementation"},
@@ -346,21 +312,18 @@ func defaultRegistry() map[string]languageEntry {
 
 		// --- Tier 4: markup / data / config with structural nodes ---
 		"html": {
-			factory: grammars.HtmlLanguage,
 			nodes: map[string][]string{
 				"type": {"doctype"},
 			},
 			identifiers: nil,
 		},
 		"css": {
-			factory: grammars.CssLanguage,
 			nodes: map[string][]string{
 				"class": {"rule_set"},
 			},
 			identifiers: nil,
 		},
 		"scss": {
-			factory: grammars.ScssLanguage,
 			nodes: map[string][]string{
 				"function": {"mixin_statement"},
 				"class":    {"rule_set"},
@@ -368,15 +331,15 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: nil,
 		},
 		"sql": {
-			factory: grammars.SqlLanguage,
+			// DerekStride/tree-sitter-sql node names (verified against the
+			// grammar; differ from the gotreesitter bundle's *_statement names).
 			nodes: map[string][]string{
-				"function": {"create_function_statement"},
-				"type":     {"create_table_statement"},
+				"function": {"create_function"},
+				"type":     {"create_table", "create_view", "create_type", "create_index", "create_materialized_view"},
 			},
 			identifiers: nil,
 		},
 		"markdown": {
-			factory: grammars.MarkdownLanguage,
 			nodes: map[string][]string{
 				// `section` already wraps the heading + body in
 				// tree-sitter-markdown — adding `atx_heading` would emit
@@ -388,7 +351,6 @@ func defaultRegistry() map[string]languageEntry {
 
 		// --- Tier 5: medium-confidence additions ---
 		"zig": {
-			factory: grammars.ZigLanguage,
 			nodes: map[string][]string{
 				"function": {"function_declaration"},
 				"class":    {"struct_declaration"},
@@ -396,14 +358,12 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID(),
 		},
 		"julia": {
-			factory: grammars.JuliaLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition"},
 			},
 			identifiers: idID(),
 		},
 		"fortran": {
-			factory: grammars.FortranLanguage,
 			nodes: map[string][]string{
 				"function": {"subroutine", "function"},
 				"class":    {"module"},
@@ -411,7 +371,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID(),
 		},
 		"haskell": {
-			factory: grammars.HaskellLanguage,
 			nodes: map[string][]string{
 				// `function` = untyped top-level def; `bind` = typed binding
 				// (signature + match together); `signature` is loose stand-alone
@@ -424,7 +383,6 @@ func defaultRegistry() map[string]languageEntry {
 			},
 		},
 		"ocaml": {
-			factory: grammars.OcamlLanguage,
 			nodes: map[string][]string{
 				"function": {"value_definition"},
 				"class":    {"module_definition"},
@@ -433,7 +391,6 @@ func defaultRegistry() map[string]languageEntry {
 			identifiers: idID("type_identifier"),
 		},
 		"solidity": {
-			factory: grammars.SolidityLanguage,
 			nodes: map[string][]string{
 				"function": {"function_definition", "modifier_definition", "constructor_definition", "fallback_receive_definition"},
 				"class":    {"contract_declaration", "library_declaration"},
@@ -532,10 +489,41 @@ func chunkFallback(filePath, content, language string) []Chunk {
 // Tree-sitter path
 // ---------------------------------------------------------------------------
 
+// minifiedMaxLineLen flags a file as minified when any single line exceeds it.
+// Hand-written code essentially never has 2 KB lines; minified/bundled JS and
+// CSS routinely pack the whole file into one. Applied only to the web-asset
+// languages where minification exists — long lines in other languages (e.g.
+// generated Go with embedded literals) still parse fine and stay on the AST path.
+const minifiedMaxLineLen = 2048
+
+// looksMinified reports whether a JS/TS/CSS-family file is minified or bundled
+// output: a ".min."-style name, or any line longer than minifiedMaxLineLen.
+func looksMinified(path, content, language string) bool {
+	switch language {
+	case "javascript", "typescript", "tsx", "css", "scss":
+	default:
+		return false
+	}
+	base := strings.ToLower(filepath.Base(path))
+	if strings.Contains(base, ".min.") || strings.HasSuffix(base, ".bundle.js") {
+		return true
+	}
+	lineStart := 0
+	for i := 0; i < len(content); i++ {
+		if content[i] == '\n' {
+			if i-lineStart > minifiedMaxLineLen {
+				return true
+			}
+			lineStart = i + 1
+		}
+	}
+	return len(content)-lineStart > minifiedMaxLineLen
+}
+
 func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chunk, []Reference, error) {
 	// Snapshot under RLock so a concurrent Configure() call does not race the read.
 	registryMu.RLock()
-	langFn, ok := languageRegistry[language]
+	export, ok := languageRegistry[language]
 	nodeKinds := languageNodes[language]
 	idTypes := identifierNodes[language]
 	registryMu.RUnlock()
@@ -543,13 +531,16 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	if !ok {
 		return chunkFallback(filePath, content, language), nil, nil
 	}
-	lang := langFn()
-	if lang == nil {
-		return chunkFallback(filePath, content, language), nil, nil
-	}
-
 	if nodeKinds == nil {
 		// Grammar exists but we don't have node definitions → sliding window.
+		return chunkFallback(filePath, content, language), nil, nil
+	}
+	if looksMinified(filePath, content, language) {
+		// Minified/bundled sources are the parser's pathological case: a
+		// 500 KB single-line bundle yields a huge tree, balloons the wasm
+		// instance to its memory cap, and forces a pool recycle — all to
+		// produce AST chunks with near-zero semantic-search value. Skip
+		// straight to the sliding window.
 		return chunkFallback(filePath, content, language), nil, nil
 	}
 
@@ -562,58 +553,27 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	}
 
 	src := []byte(content)
-	parser := sitter.NewParser(lang)
-
-	// Twin guards: SetTimeoutMicros is the parser's own checkpoint-based
-	// budget; the cancellation flag is set by an external timer when the
-	// wall-clock deadline expires. The parser checks both at the same
-	// granularity, so they overshoot together — we still rely on the
-	// post-parse wall-clock check below to decide whether the tree is
-	// trustworthy.
-	parser.SetTimeoutMicros(parseHint)
-	var cancelFlag uint32
-	parser.SetCancellationFlag(&cancelFlag)
-	deadline := time.AfterFunc(parseBudget, func() {
-		atomic.StoreUint32(&cancelFlag, 1)
-	})
-
-	parseStart := time.Now()
-	tree, err := parser.Parse(src)
-	parseElapsed := time.Since(parseStart)
-	deadline.Stop()
-
-	// Hard wall-clock check — even if parser claims success, a tree that
-	// took >2× the budget is the result of a backtracking pathology and
-	// the structure is not trustworthy enough to chunk on. Falling back to
-	// sliding window keeps the indexer responsive.
-	if parseElapsed > 2*parseBudget {
-		slog.Warn("chunker: parse exceeded budget, falling back to sliding window",
-			"path", filePath, "language", language, "elapsed", parseElapsed,
-			"budget", parseBudget)
-		return chunkFallback(filePath, content, language), nil, nil
-	}
-	if atomic.LoadUint32(&cancelFlag) == 1 {
-		slog.Warn("chunker: parse cancelled by deadline, falling back to sliding window",
-			"path", filePath, "language", language, "elapsed", parseElapsed)
-		return chunkFallback(filePath, content, language), nil, nil
-	}
-
+	nodes, err := tswasm.ParseNodes(export, src)
 	if err != nil {
-		return nil, nil, err
+		// Unknown grammar export or a contained guest trap (e.g. memory cap) →
+		// fall back to sliding window so the file is still indexed.
+		slog.Warn("chunker: wasm parse failed, falling back to sliding window",
+			"path", filePath, "language", language, "err", err)
+		return chunkFallback(filePath, content, language), nil, nil
 	}
-	root := tree.RootNode()
-	if root == nil {
-		return nil, nil, nil
+	if len(nodes) == 0 {
+		return chunkFallback(filePath, content, language), nil, nil
 	}
+	tree := buildFlatTree(nodes)
 
 	lines := splitLines(content)
 	var chunks []Chunk
 	var coveredRanges [][2]int
 
-	extractNodes(root, lang, src, targetTypes, lines, filePath, language, &chunks, &coveredRanges, nil)
+	extractNodes(tree, 0, src, targetTypes, lines, filePath, language, &chunks, &coveredRanges, nil)
 
 	// Extract references using the snapshotted identifier set.
-	refs := extractReferences(root, lang, src, targetTypes, idTypes, filePath, language)
+	refs := extractReferences(tree, src, targetTypes, idTypes, filePath, language)
 
 	// Fill gaps between extracted symbol nodes with "module" chunks.
 	sortRanges(coveredRanges)
@@ -649,10 +609,43 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	return finalChunks, refs, nil
 }
 
+// flatTree is a lightweight tree over the flat pre-order []tswasm.Node from the
+// batched walk. children/parents are reconstructed once from each node's depth
+// so the extraction below can navigate like the old *sitter.Node tree.
+type flatTree struct {
+	nodes    []tswasm.Node
+	children [][]int32
+	parents  []int32
+}
+
+func buildFlatTree(nodes []tswasm.Node) *flatTree {
+	ft := &flatTree{
+		nodes:    nodes,
+		children: make([][]int32, len(nodes)),
+		parents:  make([]int32, len(nodes)),
+	}
+	stack := make([]int32, 0, 32) // current ancestor chain (pre-order DFS)
+	for i := range nodes {
+		d := nodes[i].Depth
+		for len(stack) > 0 && ft.nodes[stack[len(stack)-1]].Depth >= d {
+			stack = stack[:len(stack)-1]
+		}
+		if len(stack) > 0 {
+			p := stack[len(stack)-1]
+			ft.children[p] = append(ft.children[p], int32(i))
+			ft.parents[i] = p
+		} else {
+			ft.parents[i] = -1
+		}
+		stack = append(stack, int32(i))
+	}
+	return ft
+}
+
 // extractNodes walks the AST and appends symbol chunks.
 func extractNodes(
-	node *sitter.Node,
-	lang *sitter.Language,
+	ft *flatTree,
+	idx int,
 	src []byte,
 	targetTypes map[string]string,
 	lines []string,
@@ -661,14 +654,18 @@ func extractNodes(
 	coveredRanges *[][2]int,
 	parentName *string,
 ) {
-	if node == nil {
-		return
-	}
-	nodeType := node.Type(lang)
+	node := ft.nodes[idx]
 
-	if kind, ok := targetTypes[nodeType]; ok {
-		startLine := int(node.StartPoint().Row)
-		endLine := int(node.EndPoint().Row)
+	if kind, ok := targetTypes[node.Kind]; ok {
+		// Pull the declaration's doc comment into its chunk. Without this,
+		// the comment lands in the gap BETWEEN symbol chunks and the gap
+		// filler emits it as a standalone micro "module" chunk — a generated
+		// file like openapi.gen.go produced 377 comment-only chunks of ~60 B
+		// each. Attached, the comment both disappears as noise and improves
+		// the chunk's embedding (the "what is this" prose sits with its code).
+		startLine := int(leadingCommentStart(ft, idx))
+		declLine := int(node.StartRow)
+		endLine := int(node.EndRow)
 
 		content := joinLines(lines[startLine : endLine+1])
 
@@ -678,10 +675,12 @@ func extractNodes(
 			actualKind = "method"
 		}
 
-		symName := extractName(node, lang, src)
+		symName := extractName(ft, idx, src)
 		var sig *string
-		if startLine < len(lines) {
-			s := trimSpace(lines[startLine])
+		if declLine < len(lines) {
+			// Signature is the DECLARATION line, not the comment the chunk
+			// may now start with.
+			s := trimSpace(lines[declLine])
 			sig = &s
 		}
 
@@ -704,26 +703,77 @@ func extractNodes(
 			if currentParent == nil {
 				currentParent = parentName
 			}
-			cnt := node.ChildCount()
-			for i := 0; i < cnt; i++ {
-				extractNodes(node.Child(i), lang, src, targetTypes, lines, filePath, language, chunks, coveredRanges, currentParent)
+			for _, c := range ft.children[idx] {
+				extractNodes(ft, int(c), src, targetTypes, lines, filePath, language, chunks, coveredRanges, currentParent)
 			}
 			return
 		}
 	}
 
-	cnt := node.ChildCount()
-	for i := 0; i < cnt; i++ {
-		extractNodes(node.Child(i), lang, src, targetTypes, lines, filePath, language, chunks, coveredRanges, parentName)
+	for _, c := range ft.children[idx] {
+		extractNodes(ft, int(c), src, targetTypes, lines, filePath, language, chunks, coveredRanges, parentName)
 	}
 }
 
-// extractReferences walks AST collecting identifier usages (not definitions).
-// idNodeTypes is passed in (rather than read from the global map) so callers
-// can snapshot once and stay consistent if Configure() is called concurrently.
+// leadingCommentStart returns the chunk start row for the node at idx,
+// extended upward over any directly-adjacent leading comment siblings — the
+// doc comment(s) of the declaration. Tree-sitter marks comments as "extra"
+// nodes (the Extra flag survives the flat dump), so this is language-agnostic:
+// Go doc comments, JSDoc blocks, Rust ///, Python # headers all qualify.
+//
+// Adjacency is strict: each comment must END on the line directly above
+// where the chunk currently starts. A blank line between the comment and the
+// declaration breaks the chain — that comment is free-standing prose and
+// stays in the surrounding module gap (e.g. a section banner).
+// The comment usually neighbours a WRAPPER of the target node rather than the
+// node itself — Go's type_spec sits inside type_declaration, and the doc
+// comment is the declaration's sibling. So when no comment is found among the
+// node's own siblings, climb through ancestors that start on the same row
+// (such single-row wrappers are pure syntax shells) and look again.
+func leadingCommentStart(ft *flatTree, idx int) uint32 {
+	declRow := ft.nodes[idx].StartRow
+	start := declRow
+	n := idx
+	for {
+		p := ft.parents[n]
+		if p < 0 {
+			return start
+		}
+		sibs := ft.children[p]
+		pos := -1
+		for i, c := range sibs {
+			if int(c) == n {
+				pos = i
+				break
+			}
+		}
+		for i := pos - 1; i >= 0; i-- {
+			s := ft.nodes[sibs[i]]
+			// Adjacent = the comment ends on the line directly above the
+			// current start, OR on the start line itself — some grammars
+			// (tree-sitter-rust line_comment) consume the trailing newline,
+			// so a `/// doc` above `fn foo` ends ON foo's row.
+			if !s.Extra || (s.EndRow+1 != start && s.EndRow != start) {
+				break
+			}
+			start = s.StartRow
+		}
+		if start != declRow {
+			return start // found the doc comment chain at this level
+		}
+		if ft.nodes[p].StartRow != declRow {
+			return start // parent is not a same-row wrapper — stop climbing
+		}
+		n = int(p)
+	}
+}
+
+// extractReferences walks the tree collecting identifier usages (not
+// definitions). idNodeTypes is passed in (rather than read from the global map)
+// so callers can snapshot once and stay consistent if Configure() is called
+// concurrently.
 func extractReferences(
-	root *sitter.Node,
-	lang *sitter.Language,
+	ft *flatTree,
 	src []byte,
 	targetTypes map[string]string,
 	idNodeTypes map[string]struct{},
@@ -736,63 +786,49 @@ func extractReferences(
 	var refs []Reference
 	seen := map[[3]any]struct{}{}
 
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
-			return
+	for i := range ft.nodes {
+		n := ft.nodes[i]
+		if _, isID := idNodeTypes[n.Kind]; !isID {
+			continue
 		}
-		nt := n.Type(lang)
-		if _, isID := idNodeTypes[nt]; isID {
-			name := n.Text(src)
-			if len(name) >= minRefNameLength {
-				if _, skip := skipNames[name]; !skip {
-					// Skip if this identifier is the name child of a definition node.
-					parent := n.Parent()
-					if parent != nil {
-						if _, isTarget := targetTypes[parent.Type(lang)]; isTarget {
-							// Check if this is the first identifier child.
-							// We use StartByte as a stable node identity (within one parse).
-							nStart := n.StartByte()
-							cnt := parent.ChildCount()
-							for i := 0; i < cnt; i++ {
-								child := parent.Child(i)
-								if child == nil {
-									continue
-								}
-								if _, childIsID := idNodeTypes[child.Type(lang)]; childIsID {
-									if child.StartByte() == nStart {
-										return // skip — it's a definition name
-									}
-									break
-								}
-							}
-						}
-					}
-
-					line := int(n.StartPoint().Row) + 1
-					col := int(n.StartPoint().Column)
-					key := [3]any{name, line, col}
-					if _, dup := seen[key]; !dup {
-						seen[key] = struct{}{}
-						refs = append(refs, Reference{
-							Name:     name,
-							FilePath: filePath,
-							Line:     line,
-							Col:      col,
-							Language: language,
-						})
+		name := string(src[n.StartByte:n.EndByte])
+		if len(name) < minRefNameLength {
+			continue
+		}
+		if _, skip := skipNames[name]; skip {
+			continue
+		}
+		// Skip if this identifier is the name child of a definition node — i.e.
+		// the FIRST identifier child of a target (definition) parent.
+		if p := ft.parents[i]; p >= 0 {
+			if _, isTarget := targetTypes[ft.nodes[p].Kind]; isTarget {
+				isDefName := false
+				for _, c := range ft.children[p] {
+					if _, childIsID := idNodeTypes[ft.nodes[c].Kind]; childIsID {
+						isDefName = int(c) == i
+						break
 					}
 				}
+				if isDefName {
+					continue
+				}
 			}
-			return // leaf — no children to recurse
 		}
 
-		cnt := n.ChildCount()
-		for i := 0; i < cnt; i++ {
-			walk(n.Child(i))
+		line := int(n.StartRow) + 1
+		col := int(n.StartCol)
+		key := [3]any{name, line, col}
+		if _, dup := seen[key]; !dup {
+			seen[key] = struct{}{}
+			refs = append(refs, Reference{
+				Name:     name,
+				FilePath: filePath,
+				Line:     line,
+				Col:      col,
+				Language: language,
+			})
 		}
 	}
-	walk(root)
 	return refs
 }
 
@@ -808,7 +844,7 @@ func extractReferences(
 // Without these, the symbol_name field on the resulting chunk was nil and
 // the CLI's `cix summary` rendered weird placeholders (`[method] bool`,
 // `[function] <nil>`).
-func extractName(node *sitter.Node, lang *sitter.Language, src []byte) *string {
+func extractName(ft *flatTree, idx int, src []byte) *string {
 	nameTypes := map[string]struct{}{
 		"identifier":          {},
 		"name":                {},
@@ -819,14 +855,10 @@ func extractName(node *sitter.Node, lang *sitter.Language, src []byte) *string {
 		"simple_identifier":   {},
 		"constant":            {},
 	}
-	cnt := node.ChildCount()
-	for i := 0; i < cnt; i++ {
-		child := node.Child(i)
-		if child == nil {
-			continue
-		}
-		if _, ok := nameTypes[child.Type(lang)]; ok {
-			s := child.Text(src)
+	for _, c := range ft.children[idx] {
+		child := ft.nodes[c]
+		if _, ok := nameTypes[child.Kind]; ok {
+			s := string(src[child.StartByte:child.EndByte])
 			return &s
 		}
 	}
