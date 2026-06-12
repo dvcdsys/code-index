@@ -68,6 +68,8 @@ var registeredMigrations = []migration{
 	{13, "indexed_with_model_provider_prefix", func(db *sql.DB, _ OpenOptions) error { return migrateIndexedWithModelProviderPrefix(db) }},
 	{14, "user_local_project_disabled", func(db *sql.DB, _ OpenOptions) error { return migrateUserLocalProjectDisabled(db) }},
 	{15, "index_embed_batch_chunks", func(db *sql.DB, _ OpenOptions) error { return migrateIndexEmbedBatchChunks(db) }},
+	{16, "chunk_max_concurrent", func(db *sql.DB, _ OpenOptions) error { return migrateChunkMaxConcurrent(db) }},
+	{17, "llama_cache_ram_mib", func(db *sql.DB, _ OpenOptions) error { return migrateAddRuntimeSettingsColumn(db, "llama_cache_ram_mib") }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -835,6 +837,69 @@ func migrateIndexEmbedBatchChunks(db *sql.DB) error {
 	if !have["index_embed_batch_chunks"] {
 		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN index_embed_batch_chunks INTEGER`); err != nil {
 			return fmt.Errorf("add index_embed_batch_chunks column: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateAddRuntimeSettingsColumn adds an INTEGER column to runtime_settings.
+// Idempotent: skips the ALTER when the column already exists. Used by
+// migration 17 (llama_cache_ram_mib — the llama-server host prompt-cache cap,
+// dashboard-overridable) and any future single-column runtime_settings adds.
+func migrateAddRuntimeSettingsColumn(db *sql.DB, column string) error {
+	rows, err := db.Query(`PRAGMA table_info(runtime_settings)`)
+	if err != nil {
+		return fmt.Errorf("table_info runtime_settings: %w", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if !have[column] {
+		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN ` + column + ` INTEGER`); err != nil {
+			return fmt.Errorf("add %s column: %w", column, err)
+		}
+	}
+	return nil
+}
+
+// migrateChunkMaxConcurrent adds runtime_settings.chunk_max_concurrent (the
+// tree-sitter wasm chunker's instance-concurrency cap, dashboard-overridable).
+// Idempotent: skips the ALTER when the column already exists.
+func migrateChunkMaxConcurrent(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(runtime_settings)`)
+	if err != nil {
+		return fmt.Errorf("table_info runtime_settings: %w", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid         int
+			name, typ   string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if !have["chunk_max_concurrent"] {
+		if _, err := db.Exec(`ALTER TABLE runtime_settings ADD COLUMN chunk_max_concurrent INTEGER`); err != nil {
+			return fmt.Errorf("add chunk_max_concurrent column: %w", err)
 		}
 	}
 	return nil

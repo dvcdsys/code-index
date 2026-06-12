@@ -183,6 +183,7 @@ func BuildOllamaConfigFromEnv(cfg *config.Config) ([]byte, error) {
 		NGpuLayers:    cfg.LlamaNGpuLayers,
 		NThreads:      cfg.LlamaNThreads,
 		BatchSize:     cfg.LlamaBatchSize,
+		CacheRAMMiB:   cfg.LlamaCacheRAMMiB,
 		StartupSec:    cfg.LlamaStartupSec,
 	}
 	return json.Marshal(c)
@@ -330,6 +331,7 @@ func buildOllamaFromConfig(cfg *config.Config, logger *slog.Logger) (provider.Pr
 		NGpuLayers:    cfg.LlamaNGpuLayers,
 		NThreads:      cfg.LlamaNThreads,
 		BatchSize:     cfg.LlamaBatchSize,
+		CacheRAMMiB:   cfg.LlamaCacheRAMMiB,
 		StartupSec:    cfg.LlamaStartupSec,
 	}
 	b, err := json.Marshal(c)

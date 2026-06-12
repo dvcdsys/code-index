@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dvcdsys/code-index/server/internal/chunker/tswasm"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
@@ -37,6 +38,8 @@ type runtimeConfigPayload struct {
 	MaxEmbeddingConcurrency int                         `json:"max_embedding_concurrency"`
 	LlamaBatchSize          int                         `json:"llama_batch_size"`
 	IndexEmbedBatchChunks   int                         `json:"index_embed_batch_chunks"`
+	ChunkMaxConcurrent      int                         `json:"chunk_max_concurrent"`
+	LlamaCacheRAMMiB        int                         `json:"llama_cache_ram_mib"`
 	Source                  map[string]string           `json:"source"`
 	Recommended             *recommendedSnapshotPayload `json:"recommended,omitempty"`
 	UpdatedAt               *string                     `json:"updated_at,omitempty"`
@@ -51,6 +54,8 @@ type recommendedSnapshotPayload struct {
 	MaxEmbeddingConcurrency int    `json:"max_embedding_concurrency"`
 	LlamaBatchSize          int    `json:"llama_batch_size"`
 	IndexEmbedBatchChunks   int    `json:"index_embed_batch_chunks"`
+	ChunkMaxConcurrent      int    `json:"chunk_max_concurrent"`
+	LlamaCacheRAMMiB        int    `json:"llama_cache_ram_mib"`
 }
 
 func snapshotToPayload(snap runtimecfg.Snapshot, rec runtimecfg.Snapshot) runtimeConfigPayload {
@@ -62,6 +67,8 @@ func snapshotToPayload(snap runtimecfg.Snapshot, rec runtimecfg.Snapshot) runtim
 		MaxEmbeddingConcurrency: snap.MaxEmbeddingConcurrency,
 		LlamaBatchSize:          snap.LlamaBatchSize,
 		IndexEmbedBatchChunks:   snap.IndexEmbedBatchChunks,
+		ChunkMaxConcurrent:      snap.ChunkMaxConcurrent,
+		LlamaCacheRAMMiB:        snap.LlamaCacheRAMMiB,
 		Source:                  snap.Source,
 		Recommended: &recommendedSnapshotPayload{
 			EmbeddingModel:          rec.EmbeddingModel,
@@ -71,6 +78,8 @@ func snapshotToPayload(snap runtimecfg.Snapshot, rec runtimecfg.Snapshot) runtim
 			MaxEmbeddingConcurrency: rec.MaxEmbeddingConcurrency,
 			LlamaBatchSize:          rec.LlamaBatchSize,
 			IndexEmbedBatchChunks:   rec.IndexEmbedBatchChunks,
+			ChunkMaxConcurrent:      rec.ChunkMaxConcurrent,
+			LlamaCacheRAMMiB:        rec.LlamaCacheRAMMiB,
 		},
 	}
 	if !snap.UpdatedAt.IsZero() {
@@ -124,6 +133,8 @@ func (s *Server) PutRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 		MaxEmbeddingConcurrency *int    `json:"max_embedding_concurrency"`
 		LlamaBatchSize          *int    `json:"llama_batch_size"`
 		IndexEmbedBatchChunks   *int    `json:"index_embed_batch_chunks"`
+		ChunkMaxConcurrent      *int    `json:"chunk_max_concurrent"`
+		LlamaCacheRAMMiB        *int    `json:"llama_cache_ram_mib"`
 	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -156,6 +167,14 @@ func (s *Server) PutRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "index_embed_batch_chunks must be >= 0")
 		return
 	}
+	if body.ChunkMaxConcurrent != nil && *body.ChunkMaxConcurrent < 0 {
+		writeError(w, http.StatusUnprocessableEntity, "chunk_max_concurrent must be >= 0")
+		return
+	}
+	if body.LlamaCacheRAMMiB != nil && *body.LlamaCacheRAMMiB < -1 {
+		writeError(w, http.StatusUnprocessableEntity, "llama_cache_ram_mib must be >= -1 (-1 = unlimited, 0 = disabled)")
+		return
+	}
 
 	patch := runtimecfg.Patch{
 		EmbeddingModel:          body.EmbeddingModel,
@@ -165,6 +184,8 @@ func (s *Server) PutRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 		MaxEmbeddingConcurrency: body.MaxEmbeddingConcurrency,
 		LlamaBatchSize:          body.LlamaBatchSize,
 		IndexEmbedBatchChunks:   body.IndexEmbedBatchChunks,
+		ChunkMaxConcurrent:      body.ChunkMaxConcurrent,
+		LlamaCacheRAMMiB:        body.LlamaCacheRAMMiB,
 	}
 	updatedBy := ""
 	if ac != nil {
@@ -179,6 +200,10 @@ func (s *Server) PutRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "saved but could not reload runtime config")
 		return
 	}
+	// Apply the chunker concurrency live (resizes the wasm instance limiter
+	// without a restart). Embedding-side fields are read dynamically by the
+	// indexer, so they need no explicit apply here.
+	tswasm.SetMaxConcurrent(snap.ChunkMaxConcurrent)
 	writeJSON(w, http.StatusOK, snapshotToPayload(snap, s.Deps.RuntimeCfg.Recommended()))
 }
 

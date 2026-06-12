@@ -184,7 +184,15 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
     embedding_provider_config TEXT,
     -- Cross-file embed-batch size for repo indexing (added in migration 15).
     -- NULL → fall through to env / recommended.
-    index_embed_batch_chunks INTEGER
+    index_embed_batch_chunks INTEGER,
+    -- Chunker (tree-sitter wasm) instance-concurrency cap (added in migration 16).
+    -- NULL → fall through to env / recommended (3).
+    chunk_max_concurrent INTEGER,
+    -- llama-server host prompt-cache cap in MiB, --cache-ram (added in
+    -- migration 17). NULL → fall through to env / recommended (0 = disabled:
+    -- embeddings never reuse prompts, and llama's own 8 GiB default
+    -- OOM-killed the prod container). -1 = unlimited.
+    llama_cache_ram_mib INTEGER
 );
 
 -- Workspaces group indexed projects (rows in the projects table,

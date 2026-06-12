@@ -28,6 +28,8 @@ interface Draft {
   max_embedding_concurrency: number;
   llama_batch_size: number;
   index_embed_batch_chunks: number;
+  chunk_max_concurrent: number;
+  llama_cache_ram_mib: number;
 }
 
 function configToDraft(c: RuntimeConfig): Draft {
@@ -39,6 +41,8 @@ function configToDraft(c: RuntimeConfig): Draft {
     max_embedding_concurrency: c.max_embedding_concurrency,
     llama_batch_size: c.llama_batch_size,
     index_embed_batch_chunks: c.index_embed_batch_chunks,
+    chunk_max_concurrent: c.chunk_max_concurrent,
+    llama_cache_ram_mib: c.llama_cache_ram_mib,
   };
 }
 
@@ -58,6 +62,8 @@ function diffPatch(c: RuntimeConfig, d: Draft): { patch: RuntimeConfigUpdate; ch
     'max_embedding_concurrency',
     'llama_batch_size',
     'index_embed_batch_chunks',
+    'chunk_max_concurrent',
+    'llama_cache_ram_mib',
   ] as const) {
     if (d[k] !== c[k]) {
       patch[k] = d[k];
@@ -203,9 +209,11 @@ export default function ServerPage() {
             draftCtx={draft.llama_ctx_size}
             draftGpuLayers={draft.llama_n_gpu_layers}
             draftThreads={draft.llama_n_threads}
+            draftCacheRAM={draft.llama_cache_ram_mib}
             onDraftCtx={(n) => setDraft({ ...draft, llama_ctx_size: n })}
             onDraftGpuLayers={(n) => setDraft({ ...draft, llama_n_gpu_layers: n })}
             onDraftThreads={(n) => setDraft({ ...draft, llama_n_threads: n })}
+            onDraftCacheRAM={(n) => setDraft({ ...draft, llama_cache_ram_mib: n })}
           />
 
           <SidecarSection />
@@ -224,9 +232,11 @@ export default function ServerPage() {
         draftConcurrency={draft.max_embedding_concurrency}
         draftBatch={draft.llama_batch_size}
         draftIndexBatch={draft.index_embed_batch_chunks}
+        draftChunkConc={draft.chunk_max_concurrent}
         onDraftConcurrency={(n) => setDraft({ ...draft, max_embedding_concurrency: n })}
         onDraftBatch={(n) => setDraft({ ...draft, llama_batch_size: n })}
         onDraftIndexBatch={(n) => setDraft({ ...draft, index_embed_batch_chunks: n })}
+        onDraftChunkConc={(n) => setDraft({ ...draft, chunk_max_concurrent: n })}
         isOllama={showOllamaSections}
       />
 
