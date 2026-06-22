@@ -1,7 +1,16 @@
 import { useMemo, useState } from 'react';
-import { AlertCircle, FolderPlus, LayoutGrid, List, Search } from 'lucide-react';
+import { AlertCircle, ChevronDown, FolderPlus, LayoutGrid, List, Search } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/ui/dropdown-menu';
 import { Input } from '@/ui/input';
 import {
   Select,
@@ -13,11 +22,14 @@ import {
 import { Skeleton } from '@/ui/skeleton';
 import { ApiError } from '@/api/client';
 import { useAuth } from '@/auth/useAuth';
+import { useRuntimeModel } from '@/lib/useServerStatus';
 import { AddRepoDialog } from '@/modules/workspaces/components/AddRepoDialog';
 import { ProjectCard } from './components/ProjectCard';
 import { ProjectsTable } from './components/ProjectsTable';
 import { useProjects } from './hooks';
 import {
+  collectLanguages,
+  collectStatuses,
   filterProjects,
   sortProjects,
   type ProjectSort,
@@ -33,25 +45,46 @@ export function ProjectsListPage() {
   const [view, setView] = useState<ProjectView>(getProjectView);
   const [search, setSearch] = useState('');
   const [type, setType] = useState<TypeFilter>('all');
+  const [statuses, setStatuses] = useState<string[]>([]);
+  const [language, setLanguage] = useState('all');
   // Sorting is a table-only affordance, defaulting to most-recently-indexed.
   const [sort, setSort] = useState<ProjectSort>({ key: 'last_indexed', dir: 'desc' });
+
+  // Sidecar embedding model — resolves the "Stale model" status the same way
+  // the badges do, so the status filter options/predicate match the column.
+  const currentModel = useRuntimeModel();
 
   function changeView(v: ProjectView) {
     setView(v);
     setProjectView(v);
   }
 
+  function toggleStatus(s: string) {
+    setStatuses((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  }
+
   const projects = data?.projects;
+  // Filter options come from the full list so they don't vanish as the user
+  // narrows the view with the other filters.
+  const languages = useMemo(() => (projects ? collectLanguages(projects) : []), [projects]);
+  const statusOptions = useMemo(
+    () => (projects ? collectStatuses(projects, currentModel) : []),
+    [projects, currentModel],
+  );
   const filtered = useMemo(
-    () => (projects ? filterProjects(projects, { search, type }) : []),
-    [projects, search, type],
+    () =>
+      projects
+        ? filterProjects(projects, { search, type, statuses, currentModel, language })
+        : [],
+    [projects, search, type, statuses, currentModel, language],
   );
   const rows = useMemo(
     () => (view === 'table' ? sortProjects(filtered, sort) : filtered),
     [filtered, sort, view],
   );
 
-  const filterActive = search.trim() !== '' || type !== 'all';
+  const filterActive =
+    search.trim() !== '' || type !== 'all' || statuses.length > 0 || language !== 'all';
 
   return (
     <div className="space-y-6">
@@ -79,8 +112,9 @@ export function ProjectsListPage() {
         {isAdmin && <AddRepoDialog onAdded={() => void refetch()} />}
       </header>
 
-      {/* Toolbar: name search + type filter + view toggle. Search and type
-          filter apply to both views; sorting is handled inside the table. */}
+      {/* Toolbar: name search + type/status/language filters + view toggle.
+          All filters apply to both views; column sorting is handled inside
+          the table. */}
       {data && data.projects.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative min-w-[14rem] flex-1">
@@ -102,6 +136,66 @@ export function ProjectsListPage() {
               <SelectItem value="local">Local</SelectItem>
             </SelectContent>
           </Select>
+          {statusOptions.length > 0 ? (
+            // Inclusive multi-select: pick any of the status badges that appear
+            // in the data; a project is kept only if it carries ALL the ticked
+            // ones. Options are derived from the current projects, not the raw
+            // server enum, so they mirror what the Status column shows.
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" className="w-[11rem] justify-between font-normal">
+                  <span className="truncate">
+                    {statuses.length === 0
+                      ? 'All statuses'
+                      : statuses.length === 1
+                        ? statuses[0]
+                        : `${statuses.length} statuses`}
+                  </span>
+                  <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-[11rem]">
+                <DropdownMenuLabel>Status</DropdownMenuLabel>
+                {statusOptions.map((s) => (
+                  <DropdownMenuCheckboxItem
+                    key={s}
+                    checked={statuses.includes(s)}
+                    // Keep the menu open so several can be ticked in one go.
+                    onSelect={(e) => e.preventDefault()}
+                    onCheckedChange={() => toggleStatus(s)}
+                  >
+                    {s}
+                  </DropdownMenuCheckboxItem>
+                ))}
+                {statuses.length > 0 ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onSelect={() => setStatuses([])}
+                      className="justify-center text-muted-foreground"
+                    >
+                      Clear
+                    </DropdownMenuItem>
+                  </>
+                ) : null}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+          {languages.length > 0 ? (
+            <Select value={language} onValueChange={setLanguage}>
+              <SelectTrigger className="w-[10rem]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All languages</SelectItem>
+                {languages.map((l) => (
+                  <SelectItem key={l} value={l}>
+                    {l}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
           <div className="flex items-center rounded-md border p-0.5">
             <Button
               type="button"

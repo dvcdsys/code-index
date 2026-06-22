@@ -22,6 +22,7 @@ import { formatDate, formatDateTime, formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
 import {
   defaultDirFor,
+  isDrifted,
   isExternal,
   projectLabel,
   projectPath,
@@ -29,6 +30,7 @@ import {
   type ProjectSort,
   type ProjectSortKey,
 } from '../lib/projectList';
+import { ReindexProjectButton } from './ReindexProjectButton';
 import { SyncProjectButton } from './SyncProjectButton';
 
 interface SortHeaderProps {
@@ -82,11 +84,23 @@ export function ProjectsTable({
         <TableHeader>
           <TableRow className="hover:bg-transparent">
             <SortHeader label="Name" sortKey="name" sort={sort} onSortChange={onSortChange} />
-            <TableHead>Type</TableHead>
+            <SortHeader label="Type" sortKey="type" sort={sort} onSortChange={onSortChange} />
             <TableHead>Status</TableHead>
             <TableHead>Languages</TableHead>
-            <TableHead className="text-right">Files</TableHead>
-            <TableHead className="text-right">Symbols</TableHead>
+            <SortHeader
+              label="Files"
+              sortKey="files"
+              sort={sort}
+              onSortChange={onSortChange}
+              className="text-right"
+            />
+            <SortHeader
+              label="Symbols"
+              sortKey="symbols"
+              sort={sort}
+              onSortChange={onSortChange}
+              className="text-right"
+            />
             <SortHeader
               label="Last indexed"
               sortKey="last_indexed"
@@ -100,10 +114,7 @@ export function ProjectsTable({
         <TableBody>
           {projects.map((p) => {
             const external = isExternal(p);
-            const drift =
-              !!p.indexed_with_model &&
-              !!currentModel &&
-              p.indexed_with_model !== currentModel;
+            const drift = isDrifted(p, currentModel);
             const fullSyncRequired = !!p.full_sync_required;
             return (
               <TableRow
@@ -127,7 +138,7 @@ export function ProjectsTable({
                 }}
                 className="cursor-pointer"
               >
-                <TableCell className="max-w-[22rem]">
+                <TableCell className="max-w-[22rem] 2xl:max-w-[34rem]">
                   <Link
                     to={`/projects/${p.path_hash}`}
                     className="block truncate font-medium hover:underline focus-visible:underline focus-visible:outline-none"
@@ -206,16 +217,25 @@ export function ProjectsTable({
                 </TableCell>
                 <TableCell className="text-right">
                   {external ? (
-                    // The row navigates on click — intercept here so syncing
-                    // doesn't also open the detail page.
+                    // The row navigates on click — intercept here so the
+                    // sync/reindex actions don't also open the detail page.
+                    // (Reindex opens a confirm dialog in a portal, so its
+                    // clicks land outside the row anyway.)
                     <div
-                      className="flex justify-end"
+                      className="flex justify-end gap-1.5"
                       onClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
                       }}
                     >
                       <SyncProjectButton
+                        hash={p.path_hash}
+                        hostPath={projectPath(p)}
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2.5 text-xs"
+                      />
+                      <ReindexProjectButton
                         hash={p.path_hash}
                         hostPath={projectPath(p)}
                         variant="outline"
