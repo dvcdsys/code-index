@@ -3,6 +3,7 @@ import { useAuth } from '@/auth/useAuth';
 import { useServerStatus } from '@/lib/useServerStatus';
 import { Card, CardDescription, CardHeader, CardTitle } from '@/ui/card';
 import { cn } from '@/lib/cn';
+import { formatVersion } from '@/lib/version';
 import { MODULES } from '../registry';
 import { ConnectClaudeCodeCard } from './ConnectClaudeCodeCard';
 
@@ -45,10 +46,10 @@ export default function HomePage() {
 
       {status && (
         <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-3">
-          <StatusStat label="Server" value={`v${status.server_version}`} />
+          <StatusStat label="Server" value={formatVersion(status.server_version)} />
           <StatusStat label="Embedding model" value={status.embedding_model || '—'} mono />
           <StatusStat
-            label="Sidecar"
+            label="Provider"
             value={status.model_loaded ? 'Ready' : 'Loading…'}
             tone={status.model_loaded ? 'ok' : 'warn'}
           />
@@ -86,8 +87,9 @@ export default function HomePage() {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Prefer the terminal? <code className="rounded bg-muted px-1 py-0.5">cix --help</code>{' '}
-        does everything the dashboard does, plus reindex, watch, and bulk operations.
+        Prefer the terminal? <code className="rounded bg-muted px-1 py-0.5">cix</code> does code
+        search and navigation from your shell, and manages local project indexing (init, reindex,
+        watch). Administration — users, API keys, and runtime config — lives here in the dashboard.
       </p>
     </div>
   );

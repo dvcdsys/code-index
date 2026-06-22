@@ -1,42 +1,58 @@
 version: 2
 
+# Tracks the post-migration layout: Go server (/server), Go CLI (/cli), the
+# dashboard npm app (/server/dashboard), the server Docker images, and the
+# workflows. The Python backend under legacy/python-api is ARCHIVED
+# (read-only, not built or deployed) so it is intentionally NOT scanned —
+# version bumps there are pure noise. Security updates still run repo-wide
+# regardless of this config.
+
 updates:
-  # Python — pip (api/requirements.txt)
-  - package-ecosystem: "pip"
-    directory: "/api"
+  # Go — server (cix-server)
+  - package-ecosystem: "gomod"
+    directory: "/server"
     schedule:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    groups:
+      go:
+        patterns: ["*"]
     labels:
       - "dependencies"
-      - "python"
+      - "go"
 
-  # Python — uv / pyproject.toml
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "python"
-
-  # Go — cli/go.mod
+  # Go — CLI (cix)
   - package-ecosystem: "gomod"
     directory: "/cli"
     schedule:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    groups:
+      go:
+        patterns: ["*"]
     labels:
       - "dependencies"
       - "go"
 
-  # Docker — api/Dockerfile
+  # npm — dashboard (server/dashboard)
+  - package-ecosystem: "npm"
+    directory: "/server/dashboard"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns: ["*"]
+    labels:
+      - "dependencies"
+      - "javascript"
+
+  # Docker — server images (server/Dockerfile + server/Dockerfile.cuda)
   - package-ecosystem: "docker"
-    directory: "/api"
+    directory: "/server"
     schedule:
       interval: "weekly"
       day: "monday"

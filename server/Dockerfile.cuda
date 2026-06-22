@@ -91,7 +91,7 @@ RUN curl -fsSL \
 # missing libllama-server-impl.so). Bump this digest deliberately and re-run
 # `make scout-cuda` to validate. Resolve a new digest with:
 #   docker buildx imagetools inspect ghcr.io/ggml-org/llama.cpp:server-cuda
-FROM ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:67bf4625a2f788864cecfabb30c33f4cee97f055326e008e1d608c2ba44a1c94 AS llama-source
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:2ea4be99dab097e84527ec552b8e5a552095cee3625b2cce8c052eb816a6c941 AS llama-source
 
 # ── Stage 3: extract CUDA shared libraries ─────────────────────────────────
 # Install the CUDA libs here, then COPY individual .so files into the
