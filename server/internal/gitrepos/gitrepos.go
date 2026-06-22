@@ -353,6 +353,24 @@ func (s *Service) ClearWebhookID(ctx context.Context, projectPath string) error 
 	return rowsAffectedOrNotFound(res)
 }
 
+// SetTokenID re-points a repo at a different stored GitHub PAT (or detaches it
+// when tokenID is empty → token_id NULL → public clone). Used by the project
+// settings page so an operator can switch the credential without deleting and
+// re-creating the project — the next clone/fetch and any future webhook
+// re-register/delete pick up the new token. Does NOT touch webhook_id: a hook
+// already registered on GitHub keeps delivering regardless of which PAT we hold.
+// ErrNotFound when the row is gone.
+func (s *Service) SetTokenID(ctx context.Context, projectPath, tokenID string) error {
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE git_repos SET token_id = ?, updated_at = ?
+		 WHERE project_path = ?`,
+		nullableString(tokenID), time.Now().UTC().Format(time.RFC3339Nano), projectPath)
+	if err != nil {
+		return fmt.Errorf("set token_id: %w", err)
+	}
+	return rowsAffectedOrNotFound(res)
+}
+
 // EnablePollingFallback atomically switches a repo from a failed
 // webhook-auto-register into polling sync: webhook_mode='disabled',
 // auto_webhook=0, polling_enabled=1, and next_poll_at=now (poll promptly).

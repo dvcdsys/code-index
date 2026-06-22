@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Github, Plus, Trash2 } from 'lucide-react';
+import { AlertCircle, Github, KeyRound, Plus, Trash2 } from 'lucide-react';
 import { ApiError, api } from '@/api/client';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
 import { Button } from '@/ui/button';
@@ -99,7 +99,7 @@ export default function TokensTab() {
       ) : (
         <ul className="divide-y rounded-md border">
           {list.map((t) => (
-            <TokenRow key={t.id} token={t} onDeleted={reload} />
+            <TokenRow key={t.id} token={t} onChanged={reload} />
           ))}
         </ul>
       )}
@@ -119,7 +119,7 @@ function EmptyState() {
   );
 }
 
-function TokenRow({ token, onDeleted }: { token: GithubToken; onDeleted: () => void }) {
+function TokenRow({ token, onChanged }: { token: GithubToken; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
 
   async function handleDelete() {
@@ -127,7 +127,7 @@ function TokenRow({ token, onDeleted }: { token: GithubToken; onDeleted: () => v
     setBusy(true);
     try {
       await api.delete<void>(`/github-tokens/${token.id}`);
-      onDeleted();
+      onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));
     } finally {
@@ -147,10 +147,115 @@ function TokenRow({ token, onDeleted }: { token: GithubToken; onDeleted: () => v
           )}
         </div>
       </div>
-      <Button variant="ghost" size="sm" disabled={busy} onClick={handleDelete}>
-        <Trash2 className="size-4" />
-      </Button>
+      <div className="flex shrink-0 items-center gap-1">
+        <RotateTokenDialog token={token} onRotated={onChanged} disabled={busy} />
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onClick={handleDelete}
+          aria-label={`Delete token ${token.name}`}
+        >
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
     </li>
+  );
+}
+
+// RotateTokenDialog updates the secret value of an existing token in place
+// (PUT /github-tokens/{id}). The id and name are unchanged, so every external
+// project bound to this token keeps working — no re-binding. The new value is
+// re-validated against GitHub and the displayed scopes refresh on success.
+function RotateTokenDialog({
+  token,
+  onRotated,
+  disabled,
+}: {
+  token: GithubToken;
+  onRotated: () => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function submit() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.put(`/github-tokens/${token.id}`, { token: value });
+      setValue('');
+      setOpen(false);
+      onRotated();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        if (!o) {
+          setValue('');
+          setErr(null);
+        }
+      }}
+    >
+      <DialogTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={disabled}
+          aria-label={`Update token ${token.name}`}
+        >
+          <KeyRound className="size-4" />
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Update “{token.name}”</DialogTitle>
+          <DialogDescription>
+            Replace the secret value of this token. The id and name stay the
+            same, so projects already using it keep working — no need to
+            re-attach them. The new value is validated against GitHub and the
+            scopes are refreshed on save.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <Label htmlFor="rotate-value">New token value</Label>
+            <Input
+              id="rotate-value"
+              autoFocus
+              type="password"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder="ghp_... or github_pat_..."
+              className="font-mono"
+            />
+          </div>
+          {err && (
+            <Alert variant="destructive">
+              <AlertDescription>{err}</AlertDescription>
+            </Alert>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={busy || value.trim() === ''}>
+            Update
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

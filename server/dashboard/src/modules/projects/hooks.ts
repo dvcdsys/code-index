@@ -20,6 +20,7 @@ export const projectKeys = {
 // Defined locally so the project page doesn't depend on a regen of
 // generated.ts. Only the fields the sync UI reads are typed.
 export type GitRepo = {
+  token_id: string | null;
   webhook_mode: 'manual' | 'auto' | 'disabled';
   polling_enabled: boolean;
   poll_interval_seconds: number | null;
@@ -170,6 +171,23 @@ export function useUpdateProjectSync() {
       qc.invalidateQueries({ queryKey: projectKeys.gitRepo(vars.hash) });
       qc.invalidateQueries({ queryKey: projectKeys.detail(vars.hash) });
       qc.invalidateQueries({ queryKey: ['projects', vars.hash, 'webhook-info'] });
+    },
+  });
+}
+
+// useUpdateProjectToken re-points an external project at a different stored
+// GitHub PAT (or detaches it: token_id=null → public clone). Invalidates the
+// git-repo + detail queries so the settings card and header reflect the change.
+export type UpdateTokenArgs = { hash: string; token_id: string | null };
+
+export function useUpdateProjectToken() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ hash, token_id }: UpdateTokenArgs) =>
+      api.put<GitRepo>(`/projects/${hash}/git-repo/token`, { token_id }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: projectKeys.gitRepo(vars.hash) });
+      qc.invalidateQueries({ queryKey: projectKeys.detail(vars.hash) });
     },
   });
 }

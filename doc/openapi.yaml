@@ -2164,6 +2164,50 @@ paths:
         "503":
           $ref: "#/components/responses/WorkspacesDisabled"
 
+  /api/v1/projects/{hash}/git-repo/token:
+    parameters:
+      - name: hash
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      operationId: updateProjectGitRepoToken
+      tags: [projects]
+      summary: Re-point an external project at a different stored GitHub PAT
+      description: |
+        Changes which stored token (`git_repos.token_id`) an external project
+        uses to clone/fetch and to register webhooks, without deleting and
+        re-creating the project. Pass `token_id: null` (or omit) to detach the
+        token and clone the repo as public. 422 when the supplied token id does
+        not exist; 404 when the project is local (no git_repos row).
+
+        The webhook is left as-is: a hook already registered on GitHub keeps
+        delivering regardless of which PAT the server holds. The new token is
+        used by the next clone/fetch and by any later webhook re-register or
+        delete (re-save the sync method to re-register under the new token).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGitRepoTokenRequest"
+      responses:
+        "200":
+          description: Updated git_repos row
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GitRepo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
+
   /api/v1/projects/{hash}/webhook-info:
     parameters:
       - name: hash
@@ -2471,6 +2515,44 @@ paths:
         required: true
         schema:
           type: string
+    put:
+      operationId: updateGithubToken
+      tags: [github-tokens]
+      summary: Rotate the secret of a stored GitHub PAT
+      description: |
+        Replaces the encrypted secret value of an existing token in place,
+        keeping the same id and name. The new plaintext is validated against
+        GitHub (GET /user) exactly like creation, and the stored scopes are
+        refreshed from the X-OAuth-Scopes response header. Because the id is
+        unchanged, every external project bound to this token keeps working —
+        no re-binding required. Use this when a PAT expires or is regenerated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGithubTokenRequest"
+      responses:
+        "200":
+          description: Token rotated (metadata only — plaintext is never echoed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GithubToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "502":
+          description: Could not reach GitHub to validate the token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/WorkspacesDisabled"
     delete:
       operationId: deleteGithubToken
       tags: [github-tokens]
@@ -4653,6 +4735,18 @@ components:
             consulted. Kept for backwards compatibility with older
             clients that still send it.
 
+    UpdateGithubTokenRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 1
+          description: |
+            The new plaintext PAT. Validated against GitHub and encrypted at
+            rest exactly like creation; the stored scopes are refreshed from
+            the X-OAuth-Scopes header. The token's id and name are unchanged.
+
     GitRepo:
       type: object
       required:
@@ -4778,6 +4872,17 @@ components:
           description: |
             Human-readable note about the outcome — e.g. that webhook
             auto-registration failed and the server fell back to polling.
+
+    UpdateGitRepoTokenRequest:
+      type: object
+      properties:
+        token_id:
+          type: string
+          nullable: true
+          description: |
+            Id of the stored GitHub PAT this project should use. Null or
+            omitted detaches the token (token_id → NULL) and clones the repo
+            as public. 422 when the id does not match a stored token.
 
     GithubRepo:
       type: object

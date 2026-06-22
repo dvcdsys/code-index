@@ -41,7 +41,7 @@ var (
 type Token struct {
 	ID         string
 	Name       string
-	Scopes     []string  // best-effort; empty until validated by the GitHub API in PR2
+	Scopes     []string // best-effort; empty until validated by the GitHub API in PR2
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
 }
@@ -96,6 +96,47 @@ func (s *Service) Create(ctx context.Context, name, plaintext string, scopes []s
 			return Token{}, ErrNameTaken
 		}
 		return Token{}, fmt.Errorf("insert github token: %w", err)
+	}
+	return s.GetByID(ctx, id)
+}
+
+// Update rotates the secret value of an existing token in place. The id and
+// name stay the same, so every git_repos row that references this token keeps
+// working — the caller does NOT have to re-bind projects. Only the encrypted
+// blob and the scopes are rewritten (scopes are re-derived from GitHub by the
+// handler, exactly like Create). created_at / last_used_at are preserved.
+// ErrEmpty when plaintext is blank; ErrNotFound when the row is absent.
+func (s *Service) Update(ctx context.Context, id, plaintext string, scopes []string) (Token, error) {
+	if strings.TrimSpace(plaintext) == "" {
+		return Token{}, ErrEmpty
+	}
+	if s.Secrets == nil {
+		return Token{}, fmt.Errorf("secrets service not configured")
+	}
+
+	encrypted, err := s.Secrets.Encrypt([]byte(plaintext))
+	if err != nil {
+		return Token{}, fmt.Errorf("encrypt: %w", err)
+	}
+
+	scopesJSON, err := encodeScopes(scopes)
+	if err != nil {
+		return Token{}, err
+	}
+
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE github_tokens SET encrypted = ?, scopes = ? WHERE id = ?`,
+		encrypted, nullableString(scopesJSON), id,
+	)
+	if err != nil {
+		return Token{}, fmt.Errorf("update github token: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return Token{}, fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return Token{}, ErrNotFound
 	}
 	return s.GetByID(ctx, id)
 }
