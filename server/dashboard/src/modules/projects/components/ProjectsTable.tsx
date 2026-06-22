@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
   ArrowDown,
@@ -108,11 +108,32 @@ export function ProjectsTable({
             return (
               <TableRow
                 key={p.path_hash}
-                onClick={() => navigate(`/projects/${p.path_hash}`)}
+                // Whole-row click is a convenience affordance on top of the real
+                // <Link> in the name cell (which carries keyboard focus and
+                // modifier-click → open-in-new-tab). Bail out when the name
+                // link already handled it (defaultPrevented) or the user wants a
+                // new tab/window, so we don't double-navigate or hijack it.
+                onClick={(e) => {
+                  if (
+                    e.defaultPrevented ||
+                    e.button !== 0 ||
+                    e.metaKey ||
+                    e.ctrlKey ||
+                    e.shiftKey ||
+                    e.altKey
+                  )
+                    return;
+                  navigate(`/projects/${p.path_hash}`);
+                }}
                 className="cursor-pointer"
               >
                 <TableCell className="max-w-[22rem]">
-                  <div className="truncate font-medium">{projectLabel(p)}</div>
+                  <Link
+                    to={`/projects/${p.path_hash}`}
+                    className="block truncate font-medium hover:underline focus-visible:underline focus-visible:outline-none"
+                  >
+                    {projectLabel(p)}
+                  </Link>
                   <div className="truncate text-xs text-muted-foreground" title={projectPath(p)}>
                     {projectPath(p)}
                   </div>

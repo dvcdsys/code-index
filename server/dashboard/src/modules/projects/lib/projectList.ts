@@ -22,10 +22,16 @@ export const STATUS_VARIANT: Record<
 };
 
 // External = GitHub-cloned project the server can pull + incrementally index.
-// We classify on the host_path prefix (matches the long-standing convention in
-// ProjectCard) rather than owner_user_id so the UI stays consistent with the
-// existing Sync-button gating.
-export function isExternal(p: Project): boolean {
+// We classify on the host_path prefix rather than owner_user_id to stay
+// consistent with the existing Sync-button gating. This is safe because local
+// host_paths are absolute filesystem paths (or `local:`-namespaced) and can
+// never begin with `github.com/`.
+//
+// This is the single source of truth for the whole dashboard — ProjectCard,
+// ProjectsTable, ProjectDetailPage and WorkspaceProjectRow all call it, so the
+// definition can't drift. The param is structural (anything with host_path) so
+// the leaner WorkspaceProject.project shape can use it too.
+export function isExternal(p: { host_path: string }): boolean {
   return p.host_path.startsWith('github.com/');
 }
 
@@ -73,25 +79,40 @@ function timeMs(iso: string | null | undefined): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
+// Compare two nullable timestamps. Missing/invalid values always sink to the
+// bottom irrespective of `factor` — they have no meaningful position in the
+// order (e.g. a never-indexed project under the "Last indexed" sort). Used for
+// both date columns so they behave identically.
+function compareTimes(
+  a: string | null | undefined,
+  b: string | null | undefined,
+  factor: number,
+): number {
+  const ta = timeMs(a);
+  const tb = timeMs(b);
+  if (ta === null && tb === null) return 0;
+  if (ta === null) return 1;
+  if (tb === null) return -1;
+  return (ta - tb) * factor;
+}
+
 export function sortProjects(projects: Project[], sort: ProjectSort): Project[] {
   const factor = sort.dir === 'asc' ? 1 : -1;
   // Copy first — never mutate the React Query cache array in place.
   return [...projects].sort((a, b) => {
     switch (sort.key) {
       case 'name':
-        return projectLabel(a).localeCompare(projectLabel(b)) * factor;
+        // sensitivity:'base' → case- and accent-insensitive, so "Zebra" and
+        // "apple" order by letter rather than by ASCII case.
+        return (
+          projectLabel(a).localeCompare(projectLabel(b), undefined, {
+            sensitivity: 'base',
+          }) * factor
+        );
       case 'created':
-        return ((timeMs(a.created_at) ?? 0) - (timeMs(b.created_at) ?? 0)) * factor;
-      case 'last_indexed': {
-        const ta = timeMs(a.last_indexed_at);
-        const tb = timeMs(b.last_indexed_at);
-        // Never-indexed rows (null) always sink to the bottom, irrespective of
-        // the chosen direction — they have no meaningful position in the order.
-        if (ta === null && tb === null) return 0;
-        if (ta === null) return 1;
-        if (tb === null) return -1;
-        return (ta - tb) * factor;
-      }
+        return compareTimes(a.created_at, b.created_at, factor);
+      case 'last_indexed':
+        return compareTimes(a.last_indexed_at, b.last_indexed_at, factor);
       default:
         return 0;
     }
