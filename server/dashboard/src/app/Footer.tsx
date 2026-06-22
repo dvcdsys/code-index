@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { useServerStatus } from '@/lib/useServerStatus';
 import { useAuth } from '@/auth/useAuth';
 import { cn } from '@/lib/cn';
+import { formatVersion } from '@/lib/version';
 
 // Footer spans the full width below the sidebar + main pane. Reads
 // from the shared /status query (polled every 30 s) — server version
@@ -63,7 +64,7 @@ export function Footer() {
           className="rounded-md px-1 py-0.5 hover:bg-accent/60 hover:text-foreground"
           title="Source on GitHub"
         >
-          cix v{version}
+          cix ({formatVersion(version)})
         </a>
         <a
           href="/docs"
