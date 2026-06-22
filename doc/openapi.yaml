@@ -2201,6 +2201,8 @@ paths:
                 $ref: "#/components/schemas/GitRepo"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "422":
@@ -2541,6 +2543,8 @@ paths:
                 $ref: "#/components/schemas/GithubToken"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "422":
