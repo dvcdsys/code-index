@@ -97,7 +97,7 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#cli/}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "CLI ${{ steps.ver.outputs.version }}"
           files: |
