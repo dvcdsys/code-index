@@ -70,6 +70,7 @@ var registeredMigrations = []migration{
 	{15, "index_embed_batch_chunks", func(db *sql.DB, _ OpenOptions) error { return migrateIndexEmbedBatchChunks(db) }},
 	{16, "chunk_max_concurrent", func(db *sql.DB, _ OpenOptions) error { return migrateChunkMaxConcurrent(db) }},
 	{17, "llama_cache_ram_mib", func(db *sql.DB, _ OpenOptions) error { return migrateAddRuntimeSettingsColumn(db, "llama_cache_ram_mib") }},
+	{18, "projects_full_sync_required", func(db *sql.DB, _ OpenOptions) error { return migrateProjectsFullSyncRequired(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -421,6 +422,49 @@ func migrateProjectMachineIdentity(db *sql.DB) error {
 		`UPDATE projects SET display_path = host_path WHERE display_path IS NULL`,
 	); err != nil {
 		return fmt.Errorf("backfill display_path: %w", err)
+	}
+	return nil
+}
+
+// migrateProjectsFullSyncRequired adds full_sync_required / full_sync_reason to
+// projects and flags every EXISTING project as needing a full resync. This runs
+// once when upgrading to the WASM tree-sitter chunker: the new chunker emits
+// different chunks/symbols/signatures (hence different embedding vectors), so an
+// index built by the old chunker is format-stale. The flag is informational —
+// it drives the dashboard "out of sync" badge but does not trigger anything; an
+// admin starts the full resync, which clears the flag on success (FinishIndexing).
+// Idempotent via columnExists. On a fresh DB schema.go already created the
+// columns, the ALTERs are skipped, and the backfill is a no-op (default rows are
+// already 0 = in sync), so new installs start clean.
+func migrateProjectsFullSyncRequired(db *sql.DB) error {
+	adds := []struct{ col, ddl string }{
+		{"full_sync_required", `ALTER TABLE projects ADD COLUMN full_sync_required INTEGER NOT NULL DEFAULT 0`},
+		{"full_sync_reason", `ALTER TABLE projects ADD COLUMN full_sync_reason TEXT`},
+	}
+	for _, a := range adds {
+		have, err := columnExists(db, "projects", a.col)
+		if err != nil {
+			return err
+		}
+		if have {
+			continue
+		}
+		if _, err := db.Exec(a.ddl); err != nil {
+			return fmt.Errorf("add projects.%s: %w", a.col, err)
+		}
+	}
+	// Flag every pre-existing project. Guarded by full_sync_required = 0 so a
+	// re-run (or a fresh DB where rows are already 0 but legitimately in sync)
+	// is harmless: on upgrade these rows were just created with the column
+	// default and have a real prior index to invalidate; on a fresh DB there
+	// are no rows yet, so this matches nothing.
+	if _, err := db.Exec(
+		`UPDATE projects
+		    SET full_sync_required = 1,
+		        full_sync_reason = 'Chunker backend migrated to WASM tree-sitter — full reindex required for consistent chunks/symbols/signatures'
+		  WHERE full_sync_required = 0`,
+	); err != nil {
+		return fmt.Errorf("backfill full_sync_required: %w", err)
 	}
 	return nil
 }

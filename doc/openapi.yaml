@@ -3830,6 +3830,20 @@ components:
           type: string
           nullable: true
           description: os.Hostname() of the indexing machine — display only.
+        full_sync_required:
+          type: boolean
+          description: |
+            True when this project's index is format-stale (e.g. the
+            chunker/embedding format changed under it) and needs a complete
+            rebuild. Informational only — it drives the dashboard "out of sync"
+            badge; the admin triggers the resync, which clears the flag on the
+            next successful full run. Absent/false means in sync.
+        full_sync_reason:
+          type: string
+          nullable: true
+          description: |
+            Human-readable explanation shown with the out-of-sync badge.
+            NULL when full_sync_required is false.
         sqlite_path:
           type: string
           nullable: true

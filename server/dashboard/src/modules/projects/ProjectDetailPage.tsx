@@ -61,6 +61,7 @@ export function ProjectDetailPage() {
   const p = project.data;
   const s = summary.data;
   const drift = !!p.indexed_with_model && !!currentModel && p.indexed_with_model !== currentModel;
+  const fullSyncRequired = !!p.full_sync_required;
   const isExternal = p.host_path.startsWith('github.com/');
   const displayPath = p.display_path ?? p.host_path;
 
@@ -156,6 +157,33 @@ export function ProjectDetailPage() {
             <div className="text-xs">
               Reindex from your terminal:{' '}
               <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {displayPath}</code>
+            </div>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {fullSyncRequired ? (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Out of sync — full resync required</AlertTitle>
+          <AlertDescription className="space-y-2">
+            <div>
+              {p.full_sync_reason ??
+                'This project’s index is format-stale and must be rebuilt from scratch.'}{' '}
+              A full reindex is needed for consistent results; an incremental sync
+              will not clear this. The flag clears automatically once a full
+              reindex completes.
+            </div>
+            <div className="text-xs">
+              {isExternal
+                ? 'Use the Reindex button above (force full rebuild).'
+                : null}
+              {!isExternal ? (
+                <>
+                  Reindex from your terminal:{' '}
+                  <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {displayPath}</code>
+                </>
+              ) : null}
             </div>
           </AlertDescription>
         </Alert>

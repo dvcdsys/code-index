@@ -88,6 +88,7 @@ type session struct {
 	status          string    // active|completed
 	phase           string    // receiving|completed
 	recentFiles     []string  // ring of last recentFilesCap processed paths, oldest first
+	full            bool      // this run wiped the index (full rebuild); drives full_sync_required clear on finish
 }
 
 // goneEntry is a tombstone for a removed session: why it went away and when.
@@ -307,6 +308,7 @@ func (s *Service) BeginIndexing(ctx context.Context, projectPath string, full bo
 		lastActivity:  time.Now(),
 		status:        "active",
 		phase:         "receiving",
+		full:          full,
 	}
 	s.mu.Unlock()
 
@@ -1064,6 +1066,21 @@ func (s *Service) FinishIndexing(
 		statsJSON, langsJSON, now, now, s.EmbeddingModel(), projectPath,
 	); err != nil {
 		return "", 0, 0, fmt.Errorf("update project stats: %w", err)
+	}
+
+	// Clear the "full sync required" flag iff this run was a full rebuild. The
+	// flag is informational (it drives the dashboard "out of sync" badge, set by
+	// migration 18 / format changes) and is satisfied only by a completed full
+	// run — incremental/reconcile runs leave it set. We only reach here on
+	// success, so a full run that crashed mid-way keeps the flag (crash-safe).
+	// sess.full is set once at BeginIndexing and never mutated, so no lock.
+	if sess.full {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE projects SET full_sync_required = 0, full_sync_reason = NULL WHERE host_path = ?`,
+			projectPath,
+		); err != nil {
+			return "", 0, 0, fmt.Errorf("clear full_sync_required: %w", err)
+		}
 	}
 
 	if _, err := s.db.ExecContext(ctx,

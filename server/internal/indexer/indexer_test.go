@@ -630,6 +630,70 @@ func TestFinishIndexing_UpdatesProject(t *testing.T) {
 	}
 }
 
+// TestFinishIndexing_FullSyncFlag verifies that a completed FULL run clears
+// projects.full_sync_required (the format-staleness flag migration 18 sets),
+// while an incremental run leaves it set — the flag is satisfied only by a
+// full rebuild, regardless of where the run was triggered.
+func TestFinishIndexing_FullSyncFlag(t *testing.T) {
+	cases := []struct {
+		name     string
+		full     bool
+		wantFlag int
+	}{
+		{"full run clears the flag", true, 0},
+		{"incremental run keeps the flag", false, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDB(t)
+			seedProject(t, d, "/proj")
+			ctx := context.Background()
+
+			// Flag the project as needing a full resync (as migration 18 does).
+			if _, err := d.ExecContext(ctx,
+				`UPDATE projects SET full_sync_required = 1, full_sync_reason = 'migrated' WHERE host_path = ?`,
+				"/proj",
+			); err != nil {
+				t.Fatalf("set flag: %v", err)
+			}
+
+			vs := newStore(t)
+			svc := New(d, vs, &fakeEmbedder{dim: 8}, nil)
+
+			runID, _, err := svc.BeginIndexing(ctx, "/proj", tc.full)
+			if err != nil {
+				t.Fatalf("BeginIndexing: %v", err)
+			}
+			goFile := "package main\nfunc X() {}\n"
+			if _, _, _, err := svc.ProcessFiles(ctx, "/proj", runID, []FilePayload{
+				{Path: "/proj/a.go", Content: goFile, ContentHash: sha256hex(goFile), Language: "go"},
+			}); err != nil {
+				t.Fatalf("ProcessFiles: %v", err)
+			}
+			if _, _, _, err := svc.FinishIndexing(ctx, "/proj", runID, nil, 1); err != nil {
+				t.Fatalf("FinishIndexing: %v", err)
+			}
+
+			var flag int
+			var reason sql.NullString
+			if err := d.QueryRowContext(ctx,
+				`SELECT full_sync_required, full_sync_reason FROM projects WHERE host_path = ?`, "/proj",
+			).Scan(&flag, &reason); err != nil {
+				t.Fatalf("select flag: %v", err)
+			}
+			if flag != tc.wantFlag {
+				t.Errorf("full_sync_required = %d, want %d", flag, tc.wantFlag)
+			}
+			if tc.full && reason.Valid {
+				t.Errorf("full_sync_reason = %q, want NULL after full run", reason.String)
+			}
+			if !tc.full && !reason.Valid {
+				t.Error("full_sync_reason cleared by an incremental run, want it to persist")
+			}
+		})
+	}
+}
+
 // TestFinishIndexing_CapturesEmbeddingModel ensures FinishIndexing writes the
 // model identifier set via SetEmbeddingModel into projects.indexed_with_model.
 // Empty model (default for tests that don't call the setter) keeps the column
