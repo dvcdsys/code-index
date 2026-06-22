@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ArrowUpCircle, X } from 'lucide-react';
 import { useServerStatus } from '@/lib/useServerStatus';
 import { cn } from '@/lib/cn';
+import { formatVersion } from '@/lib/version';
 
 const dismissKey = (version: string) => `cix.update-dismissed.${version}`;
 
@@ -44,9 +45,9 @@ export function UpdateBanner() {
     >
       <ArrowUpCircle className="h-4 w-4 shrink-0" aria-hidden />
       <div className="flex-1">
-        cix-server <strong>v{latest}</strong> is available
+        cix-server <strong>{formatVersion(latest)}</strong> is available
         {data?.server_version ? (
-          <> (you're running v{data.server_version})</>
+          <> (you're running {formatVersion(data.server_version)})</>
         ) : null}
         {data?.release_url ? (
           <>
