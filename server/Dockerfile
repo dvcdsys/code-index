@@ -15,7 +15,7 @@ ARG VERSION=0.0.0-dev
 # ── Stage 1: build the React dashboard ─────────────────────────────────────
 # Output lands inside the Go embed.FS root (internal/httpapi/dashboard/dist)
 # so the Go build picks it up automatically.
-FROM node:20-alpine AS dashboard
+FROM node:26-alpine AS dashboard
 WORKDIR /src
 RUN apk upgrade --no-cache
 # Install deps first for warm cache.

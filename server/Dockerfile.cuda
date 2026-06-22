@@ -24,7 +24,7 @@
 ARG VERSION=0.0.0-dev
 
 # ── Stage 0: build the React dashboard ─────────────────────────────────────
-FROM --platform=linux/amd64 node:20-alpine AS dashboard
+FROM --platform=linux/amd64 node:26-alpine AS dashboard
 WORKDIR /src
 RUN apk upgrade --no-cache
 # Install deps first for warm cache.
