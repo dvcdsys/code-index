@@ -140,6 +140,58 @@ func (s *Server) CreateGithubToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, githubTokenToPayload(tok))
 }
 
+// UpdateGithubToken — PUT /api/v1/github-tokens/{id}.
+//
+// Rotates the secret value of an existing token in place. The plaintext is
+// re-validated against GitHub (GET /user) exactly like CreateGithubToken and
+// the stored scopes are refreshed from X-OAuth-Scopes; the id and name are
+// unchanged so every external project bound to this token keeps working with
+// no re-binding. The new plaintext, like on create, is dropped after
+// encryption — only metadata comes back.
+func (s *Server) UpdateGithubToken(w http.ResponseWriter, r *http.Request, id string) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
+	if s.githubTokensUnavailable(w) {
+		return
+	}
+	var body openapi.UpdateGithubTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
+		return
+	}
+	if body.Token == "" {
+		writeError(w, http.StatusUnprocessableEntity, "token value is required")
+		return
+	}
+
+	info, verr := s.githubAPI().ValidateToken(r.Context(), body.Token)
+	if verr != nil {
+		if errors.Is(verr, githubapi.ErrUnauthorized) {
+			writeError(w, http.StatusUnprocessableEntity,
+				"GitHub rejected the token: "+verr.Error())
+			return
+		}
+		writeError(w, http.StatusBadGateway,
+			"could not validate token with GitHub: "+verr.Error())
+		return
+	}
+
+	tok, err := s.Deps.GithubTokens.Update(r.Context(), id, body.Token, info.Scopes)
+	if err != nil {
+		switch {
+		case errors.Is(err, githubtokens.ErrNotFound):
+			writeError(w, http.StatusNotFound, "github token not found")
+		case errors.Is(err, githubtokens.ErrEmpty):
+			writeError(w, http.StatusUnprocessableEntity, "token value is required")
+		default:
+			writeError(w, http.StatusInternalServerError, "could not update github token")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, githubTokenToPayload(tok))
+}
+
 // ListTokenAccounts — GET /api/v1/github-tokens/{id}/accounts.
 //
 // Returns the PAT owner plus every org the PAT can see (/user/orgs).

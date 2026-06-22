@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
@@ -252,17 +253,17 @@ func TestGithubTokens_RejectInvalidToken(t *testing.T) {
 	t.Cleanup(stub.Close)
 
 	router := NewRouter(Deps{
-		DB:                d,
-		ServerVersion:     "test",
-		APIVersion:        "v1",
-		Backend:           "go",
-		AuthDisabled:      true,
-		Users:             seedlessUsers(d),
-		Sessions:          seedlessSessions(d),
-		APIKeys:           seedlessAPIKeys(d),
-		Workspaces:        workspaces.New(d),
-		GithubTokens:      githubtokens.New(d, sec),
-		GithubAPIBaseURL:  stub.URL,
+		DB:               d,
+		ServerVersion:    "test",
+		APIVersion:       "v1",
+		Backend:          "go",
+		AuthDisabled:     true,
+		Users:            seedlessUsers(d),
+		Sessions:         seedlessSessions(d),
+		APIKeys:          seedlessAPIKeys(d),
+		Workspaces:       workspaces.New(d),
+		GithubTokens:     githubtokens.New(d, sec),
+		GithubAPIBaseURL: stub.URL,
 	})
 
 	rr := doJSON(t, router, http.MethodPost, "/api/v1/github-tokens", map[string]any{
@@ -274,6 +275,157 @@ func TestGithubTokens_RejectInvalidToken(t *testing.T) {
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte("Bad credentials")) {
 		t.Fatalf("error body should surface GitHub message, got %s", rr.Body.String())
+	}
+}
+
+// githubStubRouter builds an auth-disabled router whose GitHub API stub is the
+// supplied handler, so a test can vary the validate-token response (scopes or
+// status) by the inbound Authorization token. GithubTokens is wired against an
+// in-memory DB + secrets.
+func githubStubRouter(t *testing.T, stub http.HandlerFunc) http.Handler {
+	t.Helper()
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Setenv("CIX_SECRET_KEY", "")
+	t.Setenv("CIX_SECRET_KEYFILE", "")
+	sec, err := secrets.Open(secrets.OpenOptions{DataDir: t.TempDir(), AllowGenerate: true})
+	if err != nil {
+		t.Fatalf("open secrets: %v", err)
+	}
+	srv := httptest.NewServer(stub)
+	t.Cleanup(srv.Close)
+	return NewRouter(Deps{
+		DB:               d,
+		ServerVersion:    "test",
+		APIVersion:       "v1",
+		Backend:          "go",
+		AuthDisabled:     true,
+		Users:            seedlessUsers(d),
+		Sessions:         seedlessSessions(d),
+		APIKeys:          seedlessAPIKeys(d),
+		Workspaces:       workspaces.New(d),
+		GithubTokens:     githubtokens.New(d, sec),
+		GithubAPIBaseURL: srv.URL,
+	})
+}
+
+// scopeByTokenStub answers GET /user, deriving X-OAuth-Scopes from the PAT in
+// the Authorization header so a test can prove the rotate handler re-reads
+// scopes from GitHub: a token containing "v2" advertises an extra scope, and a
+// token containing "bad" is rejected 401.
+func scopeByTokenStub(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/user" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	auth := r.Header.Get("Authorization")
+	if strings.Contains(auth, "bad") {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message": "Bad credentials"}`))
+		return
+	}
+	scopes := "repo"
+	if strings.Contains(auth, "v2") {
+		scopes = "repo, workflow"
+	}
+	w.Header().Set("X-OAuth-Scopes", scopes)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"login": "test-user"}`))
+}
+
+// TestUpdateGithubToken_RotatesAndRefreshesScopes: PUT replaces the secret in
+// place, keeps id + name, re-validates against GitHub, refreshes scopes, and
+// never echoes the new plaintext.
+func TestUpdateGithubToken_RotatesAndRefreshesScopes(t *testing.T) {
+	router := githubStubRouter(t, scopeByTokenStub)
+
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/github-tokens", map[string]any{
+		"name":  "personal",
+		"token": "ghp_v1_value",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created githubTokenPayload
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+	if len(created.Scopes) != 1 || created.Scopes[0] != "repo" {
+		t.Fatalf("create scopes = %v, want [repo]", created.Scopes)
+	}
+
+	const newSecret = "ghp_v2_value_donotleak"
+	rr = doJSON(t, router, http.MethodPut, "/api/v1/github-tokens/"+created.ID, map[string]any{
+		"token": newSecret,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update: %d (%s)", rr.Code, rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(newSecret)) {
+		t.Fatalf("CRITICAL: plaintext leaked in PUT response: %s", rr.Body.String())
+	}
+	var updated githubTokenPayload
+	_ = json.Unmarshal(rr.Body.Bytes(), &updated)
+	if updated.ID != created.ID {
+		t.Fatalf("id changed on rotate: %q -> %q", created.ID, updated.ID)
+	}
+	if updated.Name != "personal" {
+		t.Fatalf("name changed on rotate: %q", updated.Name)
+	}
+	if len(updated.Scopes) != 2 || updated.Scopes[1] != "workflow" {
+		t.Fatalf("scopes not refreshed from GitHub: %v", updated.Scopes)
+	}
+}
+
+// TestUpdateGithubToken_RejectInvalid: a rotate to a PAT GitHub rejects returns
+// 422 and leaves the stored token untouched.
+func TestUpdateGithubToken_RejectInvalid(t *testing.T) {
+	router := githubStubRouter(t, scopeByTokenStub)
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/github-tokens", map[string]any{
+		"name":  "personal",
+		"token": "ghp_good_value",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created githubTokenPayload
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+
+	rr = doJSON(t, router, http.MethodPut, "/api/v1/github-tokens/"+created.ID, map[string]any{
+		"token": "ghp_bad_value",
+	})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 on invalid rotate, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestUpdateGithubToken_NotFound: rotating an id that doesn't exist is 404
+// (the PAT validates fine; the row is simply absent).
+func TestUpdateGithubToken_NotFound(t *testing.T) {
+	router := githubStubRouter(t, scopeByTokenStub)
+	rr := doJSON(t, router, http.MethodPut, "/api/v1/github-tokens/no-such-id", map[string]any{
+		"token": "ghp_valid_value",
+	})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestNewTokenEndpoints_AdminOnly: both new endpoints gate on mustBeAdmin
+// (which runs first), so a regular user is forbidden before any service work.
+func TestNewTokenEndpoints_AdminOnly(t *testing.T) {
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	userCookie := seedUser(t, f, adminCookie, "bob@example.com", "bobpass1234")
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPut, "/api/v1/github-tokens/some-id"},
+		{http.MethodPut, "/api/v1/projects/somehash0000000/git-repo/token"},
+	} {
+		rr, _ := doReq(t, f, userCookie, c.method, c.path, map[string]any{"token": "x", "token_id": "y"})
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("user %s %s = %d, want 403", c.method, c.path, rr.Code)
+		}
 	}
 }
 
@@ -314,17 +466,17 @@ func TestGithubTokens_ListRepos(t *testing.T) {
 	t.Cleanup(stub.Close)
 
 	router := NewRouter(Deps{
-		DB:                d,
-		ServerVersion:     "test",
-		APIVersion:        "v1",
-		Backend:           "go",
-		AuthDisabled:      true,
-		Users:             seedlessUsers(d),
-		Sessions:          seedlessSessions(d),
-		APIKeys:           seedlessAPIKeys(d),
-		Workspaces:        workspaces.New(d),
-		GithubTokens:      githubtokens.New(d, sec),
-		GithubAPIBaseURL:  stub.URL,
+		DB:               d,
+		ServerVersion:    "test",
+		APIVersion:       "v1",
+		Backend:          "go",
+		AuthDisabled:     true,
+		Users:            seedlessUsers(d),
+		Sessions:         seedlessSessions(d),
+		APIKeys:          seedlessAPIKeys(d),
+		Workspaces:       workspaces.New(d),
+		GithubTokens:     githubtokens.New(d, sec),
+		GithubAPIBaseURL: stub.URL,
 	})
 
 	// Create the token so we have an id to address.
@@ -413,17 +565,17 @@ func TestGithubTokens_ListAccountsAndScopedRepos(t *testing.T) {
 	t.Cleanup(stub.Close)
 
 	router := NewRouter(Deps{
-		DB:                d,
-		ServerVersion:     "test",
-		APIVersion:        "v1",
-		Backend:           "go",
-		AuthDisabled:      true,
-		Users:             seedlessUsers(d),
-		Sessions:          seedlessSessions(d),
-		APIKeys:           seedlessAPIKeys(d),
-		Workspaces:        workspaces.New(d),
-		GithubTokens:      githubtokens.New(d, sec),
-		GithubAPIBaseURL:  stub.URL,
+		DB:               d,
+		ServerVersion:    "test",
+		APIVersion:       "v1",
+		Backend:          "go",
+		AuthDisabled:     true,
+		Users:            seedlessUsers(d),
+		Sessions:         seedlessSessions(d),
+		APIKeys:          seedlessAPIKeys(d),
+		Workspaces:       workspaces.New(d),
+		GithubTokens:     githubtokens.New(d, sec),
+		GithubAPIBaseURL: stub.URL,
 	})
 
 	// Create token.

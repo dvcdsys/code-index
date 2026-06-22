@@ -299,6 +299,78 @@ func TestUpdateProjectGitRepoSync(t *testing.T) {
 	}
 }
 
+// TestUpdateProjectGitRepoToken exercises the project-page token selector:
+// attach a stored token, detach it (→ public), and the two error cases.
+func TestUpdateProjectGitRepoToken(t *testing.T) {
+	router, _, d := reposRouterDB(t)
+	ctx := context.Background()
+
+	// Seed a github_tokens row directly — the handler only reads metadata
+	// (GetByID), so a dummy encrypted blob is fine; nothing decrypts it here.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := d.ExecContext(ctx,
+		`INSERT INTO github_tokens (id, name, encrypted, scopes, created_at) VALUES (?, ?, ?, ?, ?)`,
+		"tok-1", "ci-token", []byte("enc"), `["repo"]`, now); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+
+	// External project, no token initially (public).
+	rr := doJSON(t, router, http.MethodPost, "/api/v1/git-repos", map[string]any{
+		"github_url": "https://github.com/spf13/cobra",
+		"branch":     "main",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("add repo: %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created struct {
+		GitRepo struct {
+			PathHash string `json:"path_hash"`
+		} `json:"git_repo"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
+	base := "/api/v1/projects/" + created.GitRepo.PathHash + "/git-repo/token"
+
+	decodeTokenID := func(rr *httptest.ResponseRecorder) *string {
+		t.Helper()
+		var out struct {
+			TokenID *string `json:"token_id"`
+		}
+		_ = json.Unmarshal(rr.Body.Bytes(), &out)
+		return out.TokenID
+	}
+
+	// Attach the token.
+	rr = doJSON(t, router, http.MethodPut, base, map[string]any{"token_id": "tok-1"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("attach: %d (%s)", rr.Code, rr.Body.String())
+	}
+	if got := decodeTokenID(rr); got == nil || *got != "tok-1" {
+		t.Fatalf("token_id = %v, want tok-1", got)
+	}
+
+	// Detach (token_id: null) → public.
+	rr = doJSON(t, router, http.MethodPut, base, map[string]any{"token_id": nil})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("detach: %d (%s)", rr.Code, rr.Body.String())
+	}
+	if got := decodeTokenID(rr); got != nil {
+		t.Fatalf("token_id = %q, want null after detach", *got)
+	}
+
+	// Unknown token id → 422.
+	rr = doJSON(t, router, http.MethodPut, base, map[string]any{"token_id": "nope"})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown token id: %d (%s), want 422", rr.Code, rr.Body.String())
+	}
+
+	// Unknown project hash → 404.
+	rr = doJSON(t, router, http.MethodPut, "/api/v1/projects/deadbeefdeadbeef/git-repo/token",
+		map[string]any{"token_id": "tok-1"})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown hash: %d (%s), want 404", rr.Code, rr.Body.String())
+	}
+}
+
 // TestWebhookReceiverIgnoresDisabledRepo: a repo switched to polling/manual
 // (webhook_mode='disabled') ignores any lingering webhook delivery so it
 // doesn't double-sync with the poll scheduler.

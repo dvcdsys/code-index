@@ -1,21 +1,35 @@
 import { useEffect, useState } from 'react';
 import { Check, Copy, Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
-import { ApiError } from '@/api/client';
+import { ApiError, api } from '@/api/client';
 import { Button } from '@/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
 import { Input } from '@/ui/input';
 import { Label } from '@/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/ui/radio-group';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/ui/select';
 import { Skeleton } from '@/ui/skeleton';
 import { formatDateTime, formatRelative } from '@/lib/formatDate';
 import {
   useProjectGitRepo,
   useProjectWebhookInfo,
   useUpdateProjectSync,
+  useUpdateProjectToken,
   type GitRepo,
   type SyncMethod,
 } from '../hooks';
+
+// Sentinel for "no token (public repo)" — Radix Select forbids an empty-string
+// value, so the detached state needs its own non-empty marker.
+const NO_TOKEN = '__none__';
+
+type GithubTokenLite = { id: string; name: string; scopes: string[] };
 
 const METHODS: ReadonlyArray<{ value: SyncMethod; label: string; hint: string }> = [
   {
@@ -48,18 +62,40 @@ const DEFAULT_INTERVAL_SEC = 300;
 export function SyncSettingsCard({ hash, isAdmin }: { hash: string; isAdmin: boolean }) {
   const gitRepo = useProjectGitRepo(hash, true);
   const update = useUpdateProjectSync();
+  const updateToken = useUpdateProjectToken();
   const data = gitRepo.data;
 
   const [method, setMethod] = useState<SyncMethod | null>(null);
   const [intervalSec, setIntervalSec] = useState<string>('');
   const [showSecret, setShowSecret] = useState(false);
+  const [tokens, setTokens] = useState<GithubTokenLite[] | null>(null);
+  const [tokenSel, setTokenSel] = useState<string>(NO_TOKEN);
 
   useEffect(() => {
     if (data) {
       setMethod(deriveMethod(data));
       setIntervalSec(String(data.poll_interval_seconds ?? DEFAULT_INTERVAL_SEC));
+      setTokenSel(data.token_id ?? NO_TOKEN);
     }
   }, [data]);
+
+  // Token list is admin-only (GET /github-tokens returns 403 otherwise), so
+  // only fetch it for admins — non-admins see the read-only summary below.
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    api
+      .get<{ tokens: GithubTokenLite[] }>('/github-tokens')
+      .then((r) => {
+        if (!cancelled) setTokens(r.tokens);
+      })
+      .catch(() => {
+        if (!cancelled) setTokens([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
 
   const selectedIsWebhook = (method ?? (data ? deriveMethod(data) : 'manual')) === 'webhook';
   // Webhook URL + secret for manual GitHub setup. Only fetched for admins
@@ -104,6 +140,23 @@ export function SyncSettingsCard({ hash, isAdmin }: { hash: string; isAdmin: boo
     }
   }
 
+  async function saveToken() {
+    try {
+      await updateToken.mutateAsync({
+        hash,
+        token_id: tokenSel === NO_TOKEN ? null : tokenSel,
+      });
+      toast.success('Token updated');
+    } catch (err) {
+      const detail = err instanceof ApiError ? err.detail : String(err);
+      toast.error('Failed to update token', { description: detail });
+    }
+  }
+
+  const currentToken = data.token_id ?? NO_TOKEN;
+  const tokenName = data.token_id ? tokens?.find((t) => t.id === data.token_id)?.name : null;
+  const tokenLabel = data.token_id ? (tokenName ?? 'configured') : 'none (public)';
+
   return (
     <Card>
       <CardHeader>
@@ -131,6 +184,59 @@ export function SyncSettingsCard({ hash, isAdmin }: { hash: string; isAdmin: boo
             </div>
           ))}
         </RadioGroup>
+
+        {isAdmin && (
+          <div className="space-y-1.5">
+            <Label htmlFor="repo-token">GitHub token</Label>
+            <div className="flex items-center gap-2">
+              <Select
+                value={tokenSel}
+                onValueChange={setTokenSel}
+                disabled={updateToken.isPending}
+              >
+                <SelectTrigger id="repo-token" className="flex-1">
+                  <SelectValue placeholder="Choose a token…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_TOKEN}>(public repo · no token)</SelectItem>
+                  {tokens?.map((t) => (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.name}
+                      {t.scopes.length > 0 && (
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          {t.scopes.join(', ')}
+                        </span>
+                      )}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void saveToken()}
+                disabled={updateToken.isPending || tokenSel === currentToken}
+              >
+                {updateToken.isPending ? (
+                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                ) : null}
+                Update token
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Which stored PAT clones/fetches this repo and manages its webhook.
+              The id stays bound to the project — rotating the token under{' '}
+              <strong>GitHub Integration → Tokens</strong> keeps this working
+              without re-selecting it here.
+            </p>
+            {tokens?.length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                No tokens stored yet. Add one under{' '}
+                <strong>GitHub Integration → Tokens</strong>.
+              </p>
+            )}
+          </div>
+        )}
 
         {selected === 'webhook' && isAdmin && (
           <div className="space-y-3 rounded-md border bg-muted/30 p-3">
@@ -232,6 +338,8 @@ export function SyncSettingsCard({ hash, isAdmin }: { hash: string; isAdmin: boo
         )}
 
         <dl className="grid gap-x-6 gap-y-1 text-sm sm:grid-cols-[auto_1fr]">
+          <dt className="text-muted-foreground">GitHub token</dt>
+          <dd>{tokenLabel}</dd>
           <dt className="text-muted-foreground">Webhook mode</dt>
           <dd className="font-mono">{data.webhook_mode}</dd>
           <dt className="text-muted-foreground">Polling</dt>
