@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	_ "net/http/pprof" // opt-in heap/CPU profiling, exposed only when CIX_PPROF_ADDR is set
 	"os"
@@ -136,7 +137,7 @@ func run() error {
 	// the chunker's instance-concurrency cap — is dashboard-overridable, so it's
 	// applied below from the resolved runtime-config snapshot (not here). These
 	// per-instance memory knobs stay ENV-only (rarely tuned).
-	if v := envPositiveInt("CIX_CHUNK_MEM_LIMIT_PAGES"); v > 0 {
+	if v := envPositiveInt("CIX_CHUNK_MEM_LIMIT_PAGES"); v > 0 && v <= math.MaxUint32 {
 		tswasm.MemLimitPages = uint32(v)
 	}
 	if v := envPositiveInt("CIX_CHUNK_RECYCLE_GROWTH_MB"); v > 0 {
