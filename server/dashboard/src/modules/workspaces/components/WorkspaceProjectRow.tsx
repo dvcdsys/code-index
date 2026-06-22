@@ -13,6 +13,7 @@ import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
 import { Card, CardContent } from '@/ui/card';
 import { formatRelative } from '@/lib/formatDate';
+import { isExternal as isExternalProject } from '@/modules/projects/lib/projectList';
 import type { ProjectStatus, WorkspaceProject } from '../types';
 import { isInFlight } from '../types';
 
@@ -33,7 +34,7 @@ export function WorkspaceProjectRow({
 }) {
   const [busy, setBusy] = useState(false);
   const inFlight = isInFlight(wp.project.status);
-  const isExternal = wp.project.host_path.startsWith('github.com/');
+  const isExternal = isExternalProject(wp.project);
   const hash = wp.project.path_hash ?? '';
 
   async function handleUnlink(e: React.MouseEvent) {

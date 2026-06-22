@@ -21,6 +21,7 @@ import { ReassignOwnerDialog } from './components/ReassignOwnerDialog';
 import { ReindexProjectButton } from './components/ReindexProjectButton';
 import { SyncProjectButton } from './components/SyncProjectButton';
 import { SyncSettingsCard } from './components/SyncSettingsCard';
+import { isExternal as isExternalProject } from './lib/projectList';
 import { useProject, useProjectGitRepo, useProjectSummary, useProjectWorkspaces } from './hooks';
 
 const STATUS_VARIANT: Record<Project['status'], 'default' | 'secondary' | 'destructive' | 'outline'> = {
@@ -44,7 +45,7 @@ export function ProjectDetailPage() {
   // returned 200 ("enqueued") so the operator otherwise sees nothing. Watch the
   // git-repo row for external projects (poll while a job is in flight / errored)
   // and toast on the live transition into error.
-  const isExternal = !!project.data?.host_path?.startsWith('github.com/');
+  const isExternal = !!project.data && isExternalProject(project.data);
   const jobInFlight = project.data?.status === 'indexing' || project.data?.status === 'error';
   const gitRepo = useProjectGitRepo(id, isExternal, isExternal && jobInFlight);
 
