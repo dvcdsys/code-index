@@ -1420,3 +1420,50 @@ func TestOpenMigratesPreM11DB(t *testing.T) {
 		t.Errorf("legacy machine_id = %q, want NULL", machineID.String)
 	}
 }
+
+// TestOpenMigratesPreM18DB verifies migration 18 adds full_sync_required /
+// full_sync_reason and backfills every existing project to require a full
+// resync (the chunker-format-change trigger). A fresh DB has no rows, so the
+// backfill is a no-op there — covered separately by the default-0 column.
+func TestOpenMigratesPreM18DB(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "pre-m18.db")
+	seed, err := sql.Open(DriverName, "file:"+tmp)
+	if err != nil {
+		t.Fatalf("seed Open: %v", err)
+	}
+	if _, err := seed.Exec(`CREATE TABLE projects (
+		host_path TEXT PRIMARY KEY, container_path TEXT NOT NULL,
+		languages TEXT DEFAULT '[]', settings TEXT DEFAULT '{}', stats TEXT DEFAULT '{}',
+		status TEXT DEFAULT 'created', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+		last_indexed_at TEXT, path_hash TEXT)`); err != nil {
+		t.Fatalf("seed projects: %v", err)
+	}
+	if _, err := seed.Exec(
+		`INSERT INTO projects (host_path, container_path, created_at, updated_at, path_hash)
+		 VALUES ('/Users/dev/legacy', '/Users/dev/legacy', '2024-01-01', '2024-01-01', 'cafef00dcafef00d')`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	seed.Close()
+
+	database, err := Open(tmp)
+	if err != nil {
+		t.Fatalf("Open migrates pre-m18 DB: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(tmp)
+
+	var fullSyncRequired int
+	var reason sql.NullString
+	if err := database.QueryRow(
+		`SELECT full_sync_required, full_sync_reason FROM projects WHERE host_path = '/Users/dev/legacy'`,
+	).Scan(&fullSyncRequired, &reason); err != nil {
+		t.Fatalf("select new columns: %v", err)
+	}
+	if fullSyncRequired != 1 {
+		t.Errorf("full_sync_required = %d, want 1 (existing project flagged for resync)", fullSyncRequired)
+	}
+	if !reason.Valid || reason.String == "" {
+		t.Errorf("full_sync_reason = %v, want non-empty explanation", reason)
+	}
+}

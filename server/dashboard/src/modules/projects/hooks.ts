@@ -20,6 +20,7 @@ export const projectKeys = {
 // Defined locally so the project page doesn't depend on a regen of
 // generated.ts. Only the fields the sync UI reads are typed.
 export type GitRepo = {
+  token_id: string | null;
   webhook_mode: 'manual' | 'auto' | 'disabled';
   polling_enabled: boolean;
   poll_interval_seconds: number | null;
@@ -74,9 +75,17 @@ export function useProject(hash: string | undefined) {
     queryKey: hash ? projectKeys.detail(hash) : ['projects', 'unknown'],
     queryFn: ({ signal }) => api.get<Project>(`/projects/${hash}`, { signal }),
     enabled: Boolean(hash),
-    // Poll while the project is mid-index so the page reflects completion
-    // without a manual refresh. Stops as soon as status flips to indexed/error.
-    refetchInterval: (q) => (q.state.data?.status === 'indexing' ? 3000 : false),
+    // Poll while the project is mid-index OR sitting in error so the page
+    // reflects completion/failure without a manual refresh. Keeping the poll
+    // alive on 'error' means a retry's outcome (indexing → indexed/error) shows
+    // up live, and the failure reason (git_repos.last_error) stays current.
+    // Stops once the project settles into created/indexed. react-query pauses
+    // the interval when the tab is unfocused and on unmount, so it's bounded to
+    // the open page.
+    refetchInterval: (q) => {
+      const status = q.state.data?.status;
+      return status === 'indexing' || status === 'error' ? 3000 : false;
+    },
   });
 }
 
@@ -117,12 +126,15 @@ export function useProjectWorkspaces(hash: string | undefined) {
 
 // useProjectGitRepo fetches the git_repos metadata for an external project.
 // 404 for local projects — the caller gates on host_path starting with
-// "github.com/". Polls while a poll is pending so next_poll_at stays fresh.
-export function useProjectGitRepo(hash: string | undefined, enabled: boolean) {
+// "github.com/". When `poll` is set (e.g. a clone/index job is in flight or the
+// project is in error) it refetches every few seconds so last_error / last_sha /
+// next_poll_at stay fresh and a failed job's reason surfaces without a reload.
+export function useProjectGitRepo(hash: string | undefined, enabled: boolean, poll = false) {
   return useQuery({
     queryKey: hash ? projectKeys.gitRepo(hash) : ['projects', 'unknown', 'git-repo'],
     queryFn: ({ signal }) => api.get<GitRepo>(`/projects/${hash}/git-repo`, { signal }),
     enabled: Boolean(hash) && enabled,
+    refetchInterval: poll ? 4000 : false,
   });
 }
 
@@ -159,6 +171,23 @@ export function useUpdateProjectSync() {
       qc.invalidateQueries({ queryKey: projectKeys.gitRepo(vars.hash) });
       qc.invalidateQueries({ queryKey: projectKeys.detail(vars.hash) });
       qc.invalidateQueries({ queryKey: ['projects', vars.hash, 'webhook-info'] });
+    },
+  });
+}
+
+// useUpdateProjectToken re-points an external project at a different stored
+// GitHub PAT (or detaches it: token_id=null → public clone). Invalidates the
+// git-repo + detail queries so the settings card and header reflect the change.
+export type UpdateTokenArgs = { hash: string; token_id: string | null };
+
+export function useUpdateProjectToken() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ hash, token_id }: UpdateTokenArgs) =>
+      api.put<GitRepo>(`/projects/${hash}/git-repo/token`, { token_id }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: projectKeys.gitRepo(vars.hash) });
+      qc.invalidateQueries({ queryKey: projectKeys.detail(vars.hash) });
     },
   });
 }

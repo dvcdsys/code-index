@@ -44,6 +44,7 @@ type supervisorConfig struct {
 	NGpuLayers int
 	NThreads   int // 0 = let llama-server auto-detect via hardware_concurrency
 	BatchSize  int // 0 = match CtxSize (preserves prior --ubatch-size behaviour)
+	CacheRAM   int // --cache-ram MiB; 0 = disabled, -1 = unlimited
 	StartupSec int
 	TCPPort    int // 0 = auto-pick, only relevant for tcp transport
 	// Model is the human-readable identifier (HF repo id or absolute path)
@@ -190,6 +191,14 @@ func (s *supervisor) spawn(ctx context.Context) error {
 		// any chunk larger than 512 tokens.
 		"--ubatch-size", strconv.Itoa(s.cfg.CtxSize),
 		"--n-gpu-layers", strconv.Itoa(s.cfg.NGpuLayers),
+		// llama-server ships a HOST-RAM prompt cache that defaults to 8 GiB
+		// (--cache-ram, since ggml-org/llama.cpp#16391). For an embedding
+		// server it is pure waste — every chunk is a unique prompt, reuse is
+		// zero — but the cache still fills, growing llama-server's RSS
+		// monotonically (observed: 365 MB → 11.3 GB during one vscode index)
+		// until the container's cgroup OOM-kills it. Default 0 disables it;
+		// dashboard-overridable via runtime-config llama_cache_ram_mib.
+		"--cache-ram", strconv.Itoa(s.cfg.CacheRAM),
 	}
 	// PR-E — only pass --threads when the operator explicitly set one. With
 	// 0 we let llama-server pick via std::thread::hardware_concurrency, which

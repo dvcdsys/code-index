@@ -53,6 +53,56 @@ func TestCreateAndReveal(t *testing.T) {
 	}
 }
 
+func TestUpdate(t *testing.T) {
+	svc := mustOpen(t)
+	ctx := context.Background()
+
+	tok, err := svc.Create(ctx, "personal", "ghp_old_value", []string{"repo"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Rotate the secret + scopes; id and name must be preserved so bound
+	// projects keep working.
+	updated, err := svc.Update(ctx, tok.ID, "ghp_new_value", []string{"repo", "admin:repo_hook"})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if updated.ID != tok.ID {
+		t.Fatalf("id changed on update: %q -> %q", tok.ID, updated.ID)
+	}
+	if updated.Name != "personal" {
+		t.Fatalf("name changed on update: %q", updated.Name)
+	}
+	if len(updated.Scopes) != 2 || updated.Scopes[1] != "admin:repo_hook" {
+		t.Fatalf("scopes not refreshed: %+v", updated.Scopes)
+	}
+
+	plain, err := svc.Reveal(ctx, tok.ID)
+	if err != nil {
+		t.Fatalf("Reveal: %v", err)
+	}
+	if plain != "ghp_new_value" {
+		t.Fatalf("Reveal returned %q, want rotated plaintext", plain)
+	}
+}
+
+func TestUpdateRejectsEmpty(t *testing.T) {
+	svc := mustOpen(t)
+	ctx := context.Background()
+	tok, _ := svc.Create(ctx, "personal", "v1", nil)
+	if _, err := svc.Update(ctx, tok.ID, "  ", nil); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("expected ErrEmpty, got %v", err)
+	}
+}
+
+func TestUpdateNotFound(t *testing.T) {
+	svc := mustOpen(t)
+	if _, err := svc.Update(context.Background(), "no-such-id", "v", nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
 func TestCreateRejectsEmpty(t *testing.T) {
 	svc := mustOpen(t)
 	ctx := context.Background()

@@ -3,13 +3,14 @@ module github.com/dvcdsys/code-index/server
 go 1.25.11
 
 require (
+	github.com/andybalholm/brotli v1.2.1
 	github.com/getkin/kin-openapi v0.135.0
 	github.com/go-chi/chi/v5 v5.2.4
 	github.com/go-git/go-git/v5 v5.19.0
 	github.com/google/uuid v1.6.0
 	github.com/oapi-codegen/runtime v1.4.0
-	github.com/odvcencio/gotreesitter v0.20.2
 	github.com/philippgille/chromem-go v0.7.0
+	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/time v0.15.0

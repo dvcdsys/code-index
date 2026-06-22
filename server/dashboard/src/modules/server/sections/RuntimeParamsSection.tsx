@@ -51,9 +51,11 @@ interface Props {
   draftCtx: number;
   draftGpuLayers: number;
   draftThreads: number;
+  draftCacheRAM: number;
   onDraftCtx: (n: number) => void;
   onDraftGpuLayers: (n: number) => void;
   onDraftThreads: (n: number) => void;
+  onDraftCacheRAM: (n: number) => void;
 }
 
 // RuntimeParamsSection: ctx, n_gpu_layers, n_threads form. n_gpu_layers
@@ -64,9 +66,11 @@ export function RuntimeParamsSection({
   draftCtx,
   draftGpuLayers,
   draftThreads,
+  draftCacheRAM,
   onDraftCtx,
   onDraftGpuLayers,
   onDraftThreads,
+  onDraftCacheRAM,
 }: Props) {
   const rec = config?.recommended;
   const src = config?.source;
@@ -108,6 +112,16 @@ export function RuntimeParamsSection({
           recommended={rec?.llama_n_threads}
           source={src?.llama_n_threads}
           onChange={onDraftThreads}
+        />
+        <NumberField
+          field="llama_cache_ram_mib"
+          label="Host prompt cache (MiB)"
+          hint="llama-server's in-RAM prompt cache (--cache-ram). Embeddings never reuse prompts, so 0 (disabled) is right for cix — llama's own 8192 MiB default only inflates RSS until the container hits its memory limit. -1 = unlimited."
+          value={draftCacheRAM}
+          recommended={rec?.llama_cache_ram_mib}
+          source={src?.llama_cache_ram_mib}
+          onChange={onDraftCacheRAM}
+          min={-1}
         />
       </CardContent>
     </Card>

@@ -43,7 +43,17 @@ CREATE TABLE IF NOT EXISTS projects (
     -- for display only.
     display_path TEXT,
     machine_id TEXT,
-    machine_label TEXT
+    machine_label TEXT,
+    -- full_sync_required signals that this project's index is stale at the
+    -- FORMAT level (not just content) and needs a complete rebuild — e.g. the
+    -- chunker/embedding format changed under it (added in migration 18). It is
+    -- purely INFORMATIONAL: it drives the dashboard "out of sync" badge but does
+    -- NOT trigger a reindex. An admin starts the full resync manually; the flag
+    -- is cleared on the next successful FULL run (FinishIndexing). 0 = in sync.
+    full_sync_required INTEGER NOT NULL DEFAULT 0,
+    -- full_sync_reason is the human-readable explanation shown next to the
+    -- badge (added in migration 18). NULL when full_sync_required = 0.
+    full_sync_reason TEXT
 );
 
 -- NOTE: CREATE INDEX on path_hash is intentionally NOT here. Pre-m7 databases
@@ -184,7 +194,15 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
     embedding_provider_config TEXT,
     -- Cross-file embed-batch size for repo indexing (added in migration 15).
     -- NULL → fall through to env / recommended.
-    index_embed_batch_chunks INTEGER
+    index_embed_batch_chunks INTEGER,
+    -- Chunker (tree-sitter wasm) instance-concurrency cap (added in migration 16).
+    -- NULL → fall through to env / recommended (3).
+    chunk_max_concurrent INTEGER,
+    -- llama-server host prompt-cache cap in MiB, --cache-ram (added in
+    -- migration 17). NULL → fall through to env / recommended (0 = disabled:
+    -- embeddings never reuse prompts, and llama's own 8 GiB default
+    -- OOM-killed the prod container). -1 = unlimited.
+    llama_cache_ram_mib INTEGER
 );
 
 -- Workspaces group indexed projects (rows in the projects table,

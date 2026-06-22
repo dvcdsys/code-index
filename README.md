@@ -86,7 +86,7 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 │  └── embedded Swagger UI                                        │
 │                                                                 │
 │  Indexing pipeline                                              │
-│  ├── gotreesitter (AST chunking, 200+ languages)                │
+│  ├── tree-sitter/wasm (AST chunking, 31 langs)  (wazero)        │
 │  ├── llama-server sidecar (Unix socket → CodeRankEmbed Q8 GGUF) │
 │  ├── chromem-go (cosine similarity vector store)                │
 │  ├── SQLite FTS5 chunk mirror (BM25 — powers hybrid workspace)  │

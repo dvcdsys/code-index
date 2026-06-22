@@ -10,9 +10,11 @@ interface Props {
   draftConcurrency: number;
   draftBatch: number;
   draftIndexBatch: number;
+  draftChunkConc: number;
   onDraftConcurrency: (n: number) => void;
   onDraftBatch: (n: number) => void;
   onDraftIndexBatch: (n: number) => void;
+  onDraftChunkConc: (n: number) => void;
   // isOllama controls whether the llama-only batch-size field is
   // rendered. Concurrency (the Service-level queue depth) applies to
   // every provider — caps how many parallel /v1/embeddings POSTs go
@@ -29,14 +31,17 @@ export function AdvancedSection({
   draftConcurrency,
   draftBatch,
   draftIndexBatch,
+  draftChunkConc,
   onDraftConcurrency,
   onDraftBatch,
   onDraftIndexBatch,
+  onDraftChunkConc,
   isOllama,
 }: Props) {
   const concId = useId();
   const batchId = useId();
   const idxBatchId = useId();
+  const chunkConcId = useId();
   const rec = config?.recommended;
   const src = config?.source;
 
@@ -119,6 +124,37 @@ export function AdvancedSection({
                 Combined with concurrency above, this is what makes large
                 repos index fast. 0 = one POST per file. Recommended:{' '}
                 <code>{rec?.index_embed_batch_chunks ?? 64}</code>.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor={chunkConcId} className="font-medium">
+                  Chunker concurrency
+                  <span className="ml-2 font-normal text-muted-foreground text-xs">(chunk_max_concurrent)</span>
+                </Label>
+                <SourcePill source={src?.chunk_max_concurrent} />
+              </div>
+              <Input
+                id={chunkConcId}
+                type="number"
+                min={0}
+                value={Number.isFinite(draftChunkConc) ? draftChunkConc : 0}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  onDraftChunkConc(Number.isFinite(n) ? n : 0);
+                }}
+                className="max-w-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                How many tree-sitter (wasm) parser instances run at once —
+                the chunker's OWN concurrency, decoupled from embedding
+                concurrency above. Each instance holds ~69&nbsp;MiB, so this
+                bounds peak chunker memory regardless of how many files embed
+                in parallel. Raise it on big multi-core boxes; lower it if the
+                indexer is memory-pressured. Applies live (no restart).
+                0 = recommended:{' '}
+                <code>{rec?.chunk_max_concurrent ?? 3}</code>.
               </p>
             </div>
 

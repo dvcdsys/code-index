@@ -66,6 +66,12 @@ type Config struct {
 	// BatchSize: 0 = match CtxSize.
 	BatchSize int `json:"batch_size,omitempty"`
 
+	// CacheRAMMiB caps llama-server's host prompt cache (--cache-ram).
+	// 0 = disabled (the right call for embeddings: prompts are never
+	// reused, and llama's own 8 GiB default OOM-killed the prod
+	// container); -1 = unlimited; N > 0 = cap in MiB.
+	CacheRAMMiB int `json:"cache_ram_mib,omitempty"`
+
 	// StartupSec bounds the readiness probe.
 	StartupSec int `json:"startup_sec,omitempty"`
 }
@@ -151,6 +157,7 @@ func (p *Provider) Start(ctx context.Context) error {
 		NGpuLayers: p.cfg.NGpuLayers,
 		NThreads:   p.cfg.NThreads,
 		BatchSize:  p.cfg.BatchSize,
+		CacheRAM:   p.cfg.CacheRAMMiB,
 		StartupSec: p.cfg.StartupSec,
 		Model:      p.cfg.Model,
 	}

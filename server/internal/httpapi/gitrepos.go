@@ -377,6 +377,79 @@ func (s *Server) UpdateProjectGitRepoSync(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// UpdateProjectGitRepoToken — PUT /api/v1/projects/{hash}/git-repo/token.
+//
+// Re-points an external project at a different stored GitHub PAT (or detaches
+// it — token_id=null → public clone) without delete + recreate, so the index
+// and workspace memberships survive. Admin-only, matching the other
+// external-project endpoints. A non-empty token_id is validated to exist first
+// (422 otherwise). The webhook is intentionally left as-is: a hook already
+// registered on GitHub keeps delivering regardless of which PAT we hold; the
+// new token is picked up by the next clone/fetch and by any later webhook
+// re-register/delete (re-save the sync method to re-register under it).
+func (s *Server) UpdateProjectGitRepoToken(w http.ResponseWriter, r *http.Request, hash string) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
+	if s.gitReposUnavailable(w) {
+		return
+	}
+	g, err := s.Deps.GitRepos.GetByHash(r.Context(), hash)
+	if err != nil {
+		if errors.Is(err, gitrepos.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "no git_repos row for this project (likely a local project)")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load git_repo: "+err.Error())
+		return
+	}
+
+	var body openapi.UpdateGitRepoTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
+		return
+	}
+	tokenID := ""
+	if body.TokenId != nil {
+		tokenID = strings.TrimSpace(*body.TokenId)
+	}
+
+	// Validate the target token exists before binding — the FK would also
+	// reject an unknown id, but checking up front yields a clean 422 instead
+	// of a generic 500, and guards against the github_tokens service being
+	// unwired (encryption-key boot failure).
+	if tokenID != "" {
+		if s.Deps.GithubTokens == nil {
+			writeError(w, http.StatusServiceUnavailable, "GitHub tokens service is not configured on this server")
+			return
+		}
+		if _, terr := s.Deps.GithubTokens.GetByID(r.Context(), tokenID); terr != nil {
+			if errors.Is(terr, githubtokens.ErrNotFound) {
+				writeError(w, http.StatusUnprocessableEntity, "unknown token id")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "could not load github token: "+terr.Error())
+			return
+		}
+	}
+
+	if err := s.Deps.GitRepos.SetTokenID(r.Context(), g.ProjectPath, tokenID); err != nil {
+		if errors.Is(err, gitrepos.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "no git_repos row for this project")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not update token: "+err.Error())
+		return
+	}
+
+	fresh, err := s.Deps.GitRepos.GetByPath(r.Context(), g.ProjectPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "token updated but reload failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, gitRepoToPayload(fresh))
+}
+
 // writeSyncError maps gitrepos errors from a sync update to HTTP statuses.
 func (s *Server) writeSyncError(w http.ResponseWriter, err error) {
 	switch {

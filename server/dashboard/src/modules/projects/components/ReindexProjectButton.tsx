@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Hammer, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Button } from '@/ui/button';
+import { Button, type ButtonProps } from '@/ui/button';
 import {
   Dialog,
   DialogContent,
@@ -20,7 +20,23 @@ import { useReindexProject } from '../hooks';
 // for the cheap "pull + incremental" path use the Sync button instead.
 // Gated behind a confirmation dialog because it's an expensive operation
 // that's easy to trigger by accident.
-export function ReindexProjectButton({ hash, hostPath }: { hash: string; hostPath: string }) {
+//
+// variant/size/className are forwarded to the trigger Button so callers can
+// render it prominently (project detail header) or compact (projects list
+// row / card), mirroring SyncProjectButton.
+export function ReindexProjectButton({
+  hash,
+  hostPath,
+  variant = 'outline',
+  size = 'sm',
+  className,
+}: {
+  hash: string;
+  hostPath: string;
+  variant?: ButtonProps['variant'];
+  size?: ButtonProps['size'];
+  className?: string;
+}) {
   const [open, setOpen] = useState(false);
   const reindex = useReindexProject();
 
@@ -43,8 +59,9 @@ export function ReindexProjectButton({ hash, hostPath }: { hash: string; hostPat
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <Button
-          variant="outline"
-          size="sm"
+          variant={variant}
+          size={size}
+          className={className}
           title="Full reindex — clears the index and re-embeds every file. For a quick pull + incremental update, use Sync."
         >
           <Hammer className="mr-1 h-4 w-4" />

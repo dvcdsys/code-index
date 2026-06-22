@@ -5,38 +5,27 @@ import { Badge } from '@/ui/badge';
 import { Card, CardContent } from '@/ui/card';
 import { formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
+import { basename, isDrifted, isExternal, STATUS_VARIANT } from '../lib/projectList';
+import { ReindexProjectButton } from './ReindexProjectButton';
 import { SyncProjectButton } from './SyncProjectButton';
-
-function basename(p: string): string {
-  const parts = p.replace(/\/+$/, '').split('/');
-  return parts[parts.length - 1] || p;
-}
-
-const STATUS_VARIANT: Record<Project['status'], 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  created: 'outline',
-  indexing: 'secondary',
-  indexed: 'default',
-  error: 'destructive',
-};
 
 export function ProjectCard({ project }: { project: Project }) {
   const currentModel = useRuntimeModel();
-  // Drift = the project was indexed under a different model than the one
-  // the sidecar is running right now. NULL indexed_with_model is a legacy
-  // row from before drift tracking landed — not drift, just unknown.
-  const drift =
-    !!project.indexed_with_model &&
-    !!currentModel &&
-    project.indexed_with_model !== currentModel;
+  // Drift = indexed under a different model than the sidecar runs now. Shared
+  // predicate so the badge and the Projects status filter never disagree.
+  const drift = isDrifted(project, currentModel);
+  // Format-staleness flag set server-side (e.g. chunker format changed under
+  // the index). Informational — the admin triggers the full resync.
+  const fullSyncRequired = !!project.full_sync_required;
   // Sync only makes sense for GitHub-cloned projects — the server can pull +
   // incrementally index those. Local projects are driven by the CLI.
-  const isExternal = project.host_path.startsWith('github.com/');
+  const external = isExternal(project);
 
   return (
     <Link to={`/projects/${project.path_hash}`} className="group">
       <Card
         className={`h-full transition-colors ${
-          drift
+          drift || fullSyncRequired
             ? 'border-destructive/60 hover:border-destructive'
             : 'hover:border-foreground/30'
         }`}
@@ -66,6 +55,16 @@ export function ProjectCard({ project }: { project: Project }) {
                 Stale model
               </Badge>
             ) : null}
+            {fullSyncRequired ? (
+              <Badge
+                variant="destructive"
+                className="gap-1"
+                title={project.full_sync_reason ?? undefined}
+              >
+                <AlertTriangle className="h-3 w-3" />
+                Out of sync
+              </Badge>
+            ) : null}
             {project.languages.slice(0, 4).map((l) => (
               <Badge key={l} variant="outline" className="font-normal text-xs">
                 {l}
@@ -90,18 +89,25 @@ export function ProjectCard({ project }: { project: Project }) {
                 : 'Never indexed'}
             </span>
           </div>
-          {isExternal ? (
+          {external ? (
             // Dedicated action area for GitHub-synced projects. The card is a
             // <Link>, so intercept the click here to run the mutation instead
             // of navigating to the detail page.
             <div
-              className="flex justify-end border-t pt-3"
+              className="flex justify-end gap-1.5 border-t pt-3"
               onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
               }}
             >
               <SyncProjectButton
+                hash={project.path_hash}
+                hostPath={project.display_path ?? project.host_path}
+                variant="outline"
+                size="sm"
+                className="h-7 px-2.5 text-xs"
+              />
+              <ReindexProjectButton
                 hash={project.path_hash}
                 hostPath={project.display_path ?? project.host_path}
                 variant="outline"

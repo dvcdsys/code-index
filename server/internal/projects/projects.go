@@ -89,6 +89,14 @@ type Project struct {
 	// indexed on. nil for external (and legacy) projects.
 	MachineID    *string
 	MachineLabel *string
+	// FullSyncRequired flags that this project's index is format-stale and
+	// needs a complete rebuild (e.g. chunker/embedding format changed under
+	// it). Informational only — it drives the dashboard "out of sync" badge;
+	// an admin triggers the resync, which clears the flag on success.
+	FullSyncRequired bool
+	// FullSyncReason is the human-readable explanation shown with the badge.
+	// nil when FullSyncRequired is false.
+	FullSyncReason *string
 }
 
 // CreateRequest mirrors Python ProjectCreate.
@@ -250,7 +258,7 @@ func findOverlap(ctx context.Context, db *sql.DB, candidate string) (string, err
 // Get retrieves a project by its host_path. Returns ErrNotFound if absent.
 func Get(ctx context.Context, db *sql.DB, hostPath string) (*Project, error) {
 	row := db.QueryRowContext(ctx,
-		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label, path_hash
+		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label, path_hash, full_sync_required, full_sync_reason
 		 FROM projects WHERE host_path = ?`, hostPath,
 	)
 	return scanProject(hostPath, row)
@@ -278,7 +286,7 @@ func GetByHash(ctx context.Context, db *sql.DB, pathHash string) (*Project, erro
 // List returns all projects ordered by created_at descending.
 func List(ctx context.Context, db *sql.DB) ([]Project, error) {
 	rows, err := db.QueryContext(ctx,
-		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label, path_hash
+		`SELECT host_path, container_path, languages, settings, stats, status, created_at, updated_at, last_indexed_at, indexed_with_model, owner_user_id, display_path, machine_id, machine_label, path_hash, full_sync_required, full_sync_reason
 		 FROM projects ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -340,24 +348,22 @@ func SetStatus(ctx context.Context, db *sql.DB, hostPath, status string) error {
 //
 // chunks_meta and chunks_fts are not bound to projects via FK because
 // chunks_fts is a virtual table and cannot participate in foreign keys.
-// We wipe them in the same tx that drops the projects row so a failure
-// rolls back the partial state.
+// The FTS wipe runs FIRST, in bounded batches (its own short transactions),
+// because a big project's trigram-FTS delete can take minutes and SQLite has a
+// single writer — one monolithic tx here starved every concurrent writer (see
+// chunksfts.DeleteByProject). Failure midway leaves the projects row intact, so
+// a retried Delete resumes the wipe; FTS rows never outlive the project row.
 func Delete(ctx context.Context, db *sql.DB, hostPath string) error {
 	if _, err := Get(ctx, db, hostPath); err != nil {
 		return err
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin delete tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op after commit
-	if err := chunksfts.DeleteByProjectTx(ctx, tx, hostPath); err != nil {
+	if err := chunksfts.DeleteByProject(ctx, db, hostPath); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE host_path = ?`, hostPath); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM projects WHERE host_path = ?`, hostPath); err != nil {
 		return fmt.Errorf("delete project: %w", err)
 	}
-	return tx.Commit()
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -377,12 +383,14 @@ func scanProject(hostPath string, row *sql.Row) (*Project, error) {
 		machineID               *string
 		machineLabel            *string
 		pathHash                *string
+		fullSyncRequired        bool
+		fullSyncReason          *string
 	)
 	err := row.Scan(
 		&hp, &containerPath,
 		&langsJSON, &settingsJSON, &statsJSON,
 		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel, &ownerUserID,
-		&displayPath, &machineID, &machineLabel, &pathHash,
+		&displayPath, &machineID, &machineLabel, &pathHash, &fullSyncRequired, &fullSyncReason,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, hostPath)
@@ -390,7 +398,7 @@ func scanProject(hostPath string, row *sql.Row) (*Project, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan project row: %w", err)
 	}
-	return buildProject(hp, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel, pathHash)
+	return buildProject(hp, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel, pathHash, fullSyncRequired, fullSyncReason)
 }
 
 func scanProjectRow(rows *sql.Rows) (*Project, error) {
@@ -406,19 +414,21 @@ func scanProjectRow(rows *sql.Rows) (*Project, error) {
 		machineID               *string
 		machineLabel            *string
 		pathHash                *string
+		fullSyncRequired        bool
+		fullSyncReason          *string
 	)
 	if err := rows.Scan(
 		&hostPath, &containerPath,
 		&langsJSON, &settingsJSON, &statsJSON,
 		&status, &createdAt, &updatedAt, &lastIndexedAt, &indexedWithModel, &ownerUserID,
-		&displayPath, &machineID, &machineLabel, &pathHash,
+		&displayPath, &machineID, &machineLabel, &pathHash, &fullSyncRequired, &fullSyncReason,
 	); err != nil {
 		return nil, fmt.Errorf("scan project: %w", err)
 	}
-	return buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel, pathHash)
+	return buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel, pathHash, fullSyncRequired, fullSyncReason)
 }
 
-func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt string, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel, pathHash *string) (*Project, error) {
+func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, status, createdAt, updatedAt string, lastIndexedAt, indexedWithModel, ownerUserID, displayPath, machineID, machineLabel, pathHash *string, fullSyncRequired bool, fullSyncReason *string) (*Project, error) {
 	var langs []string
 	if err := json.Unmarshal([]byte(langsJSON), &langs); err != nil {
 		langs = nil
@@ -462,6 +472,8 @@ func buildProject(hostPath, containerPath, langsJSON, settingsJSON, statsJSON, s
 		DisplayPath:      dp,
 		MachineID:        machineID,
 		MachineLabel:     machineLabel,
+		FullSyncRequired: fullSyncRequired,
+		FullSyncReason:   fullSyncReason,
 	}, nil
 }
 

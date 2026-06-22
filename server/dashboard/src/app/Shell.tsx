@@ -15,7 +15,14 @@ export function Shell({ children }: { children: ReactNode }) {
       <div className="flex min-h-0 flex-1">
         <Sidebar />
         <main className="flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-5xl px-8 py-8">{children}</div>
+          {/* Content width scales with the viewport: comfortable reading
+              width on laptops (max-w-5xl), more room on large monitors so
+              wide layouts like the Projects table aren't boxed into the
+              middle with the columns squeezed. Capped at the 2xl screen
+              width so it never sprawls edge-to-edge on ultrawides. */}
+          <div className="mx-auto w-full max-w-5xl px-8 py-8 xl:max-w-6xl 2xl:max-w-screen-2xl">
+            {children}
+          </div>
         </main>
       </div>
       <Footer />
