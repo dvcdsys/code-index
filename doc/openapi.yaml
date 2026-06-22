@@ -3245,6 +3245,8 @@ components:
         - max_embedding_concurrency
         - llama_batch_size
         - index_embed_batch_chunks
+        - chunk_max_concurrent
+        - llama_cache_ram_mib
         - source
       properties:
         embedding_model:
@@ -3270,6 +3272,14 @@ components:
           type: integer
           minimum: 0
           description: Cross-file embed-batch size for repo indexing (chunks per embed call). 0 = one call per file.
+        chunk_max_concurrent:
+          type: integer
+          minimum: 0
+          description: Chunker (tree-sitter wasm) instance-concurrency cap, decoupled from embedding concurrency. Each instance holds ~69 MiB. 0 = recommended (3).
+        llama_cache_ram_mib:
+          type: integer
+          minimum: -1
+          description: llama-server host prompt-cache cap in MiB (--cache-ram). 0 = disabled (recommended for embeddings — prompts are never reused, and llama's upstream 8 GiB default grows RSS until the container OOMs), -1 = unlimited.
         source:
           type: object
           additionalProperties:
@@ -3301,6 +3311,8 @@ components:
         - max_embedding_concurrency
         - llama_batch_size
         - index_embed_batch_chunks
+        - chunk_max_concurrent
+        - llama_cache_ram_mib
       properties:
         embedding_model: { type: string }
         llama_ctx_size: { type: integer }
@@ -3309,6 +3321,8 @@ components:
         max_embedding_concurrency: { type: integer }
         llama_batch_size: { type: integer }
         index_embed_batch_chunks: { type: integer }
+        chunk_max_concurrent: { type: integer }
+        llama_cache_ram_mib: { type: integer }
 
     RuntimeConfigUpdate:
       type: object
@@ -3339,6 +3353,13 @@ components:
         index_embed_batch_chunks:
           type: integer
           nullable: true
+        chunk_max_concurrent:
+          type: integer
+          nullable: true
+        llama_cache_ram_mib:
+          type: integer
+          nullable: true
+          description: MiB; 0 clears the override (falls back to env / recommended = disabled), -1 = unlimited.
 
     SidecarStatus:
       type: object
@@ -3809,6 +3830,20 @@ components:
           type: string
           nullable: true
           description: os.Hostname() of the indexing machine — display only.
+        full_sync_required:
+          type: boolean
+          description: |
+            True when this project's index is format-stale (e.g. the
+            chunker/embedding format changed under it) and needs a complete
+            rebuild. Informational only — it drives the dashboard "out of sync"
+            badge; the admin triggers the resync, which clears the flag on the
+            next successful full run. Absent/false means in sync.
+        full_sync_reason:
+          type: string
+          nullable: true
+          description: |
+            Human-readable explanation shown with the out-of-sync badge.
+            NULL when full_sync_required is false.
         sqlite_path:
           type: string
           nullable: true

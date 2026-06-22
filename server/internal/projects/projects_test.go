@@ -47,6 +47,53 @@ func TestCreateAndGet(t *testing.T) {
 	}
 }
 
+// TestFullSyncFields_RoundTrip checks the full_sync_required / full_sync_reason
+// columns flow through Get and List: a fresh project is in sync, and once the
+// flag is set (as migration 18 / a format change does) both loaders surface it.
+func TestFullSyncFields_RoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := Create(ctx, d, CreateRequest{HostPath: "/proj"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := Get(ctx, d, "/proj")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.FullSyncRequired || got.FullSyncReason != nil {
+		t.Errorf("fresh project: FullSyncRequired=%v reason=%v, want false/nil",
+			got.FullSyncRequired, got.FullSyncReason)
+	}
+
+	if _, err := d.ExecContext(ctx,
+		`UPDATE projects SET full_sync_required = 1, full_sync_reason = 'chunker change' WHERE host_path = ?`,
+		"/proj",
+	); err != nil {
+		t.Fatalf("flag project: %v", err)
+	}
+
+	got, err = Get(ctx, d, "/proj")
+	if err != nil {
+		t.Fatalf("Get after flag: %v", err)
+	}
+	if !got.FullSyncRequired {
+		t.Error("FullSyncRequired = false after flagging, want true")
+	}
+	if got.FullSyncReason == nil || *got.FullSyncReason != "chunker change" {
+		t.Errorf("FullSyncReason = %v, want \"chunker change\"", got.FullSyncReason)
+	}
+
+	list, err := List(ctx, d)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || !list[0].FullSyncRequired {
+		t.Errorf("List did not surface full_sync_required: %+v", list)
+	}
+}
+
 // TestGet_ReturnsStoredPathHashNotRecomputed guards the dashboard 404
 // regression: a project whose host_path and stored path_hash legitimately
 // diverge — e.g. a local project keyed as sha1("local:{machine}:{path}")

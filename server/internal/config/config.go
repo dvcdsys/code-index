@@ -41,6 +41,13 @@ type Config struct {
 	// Dashboard-overridable via runtimecfg. Env: CIX_INDEX_EMBED_BATCH_CHUNKS.
 	IndexEmbedBatchChunks int
 
+	// ChunkMaxConcurrent caps how many tree-sitter (wasm) parser instances run
+	// at once — the chunker's OWN concurrency, decoupled from embedding
+	// concurrency. Each instance holds ~69 MiB, so this bounds peak chunker
+	// memory regardless of how many files embed in parallel. 0 → recommended (3).
+	// Dashboard-overridable via runtimecfg. Env: CIX_CHUNK_MAX_CONCURRENT.
+	ChunkMaxConcurrent int
+
 	// Phase 3 — llama-server sidecar configuration.
 	GGUFPath          string // CIX_GGUF_PATH; absolute path. Empty = auto-resolve via cache / dev-fallback / HF download.
 	GGUFCacheDir      string // CIX_GGUF_CACHE_DIR; where HF downloads land.
@@ -51,6 +58,7 @@ type Config struct {
 	LlamaNGpuLayers   int    // CIX_N_GPU_LAYERS; -1 on darwin (Metal all layers), 0 elsewhere.
 	LlamaNThreads     int    // CIX_LLAMA_THREADS; CPU thread count for llama-server (--threads). 0 = auto.
 	LlamaBatchSize    int    // CIX_LLAMA_BATCH; llama-server logical batch size (-b). 0 = match LlamaCtxSize.
+	LlamaCacheRAMMiB  int    // CIX_LLAMA_CACHE_RAM; llama-server host prompt-cache cap in MiB (--cache-ram). 0 = disabled (embeddings get zero prompt reuse; upstream default 8192 caused OOM kills), -1 = unlimited.
 	LlamaStartupSec   int    // CIX_LLAMA_STARTUP_TIMEOUT; readiness probe ceiling in seconds.
 	EmbeddingsEnabled bool   // CIX_EMBEDDINGS_ENABLED; test hook to bypass sidecar entirely.
 
@@ -271,6 +279,12 @@ func Load() (*Config, error) {
 	}
 	c.IndexEmbedBatchChunks = idxBatch
 
+	chunkConc, err := getenvInt("CIX_CHUNK_MAX_CONCURRENT", 0)
+	if err != nil {
+		return nil, err
+	}
+	c.ChunkMaxConcurrent = chunkConc
+
 	maxChunk, err := getenvInt("CIX_MAX_CHUNK_TOKENS", 1500)
 	if err != nil {
 		return nil, err
@@ -329,6 +343,16 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.LlamaBatchSize = batch
+
+	// CIX_LLAMA_CACHE_RAM: llama-server's host prompt cache, in MiB. The
+	// upstream default (8192) is pure host-RAM waste for an embeddings-only
+	// sidecar — prompts are never reused — and grew llama-server's RSS until
+	// the container OOM-killed it. 0 (our default) disables it; -1 = unlimited.
+	cacheRAM, err := getenvInt("CIX_LLAMA_CACHE_RAM", 0)
+	if err != nil {
+		return nil, err
+	}
+	c.LlamaCacheRAMMiB = cacheRAM
 
 	startup, err := getenvInt("CIX_LLAMA_STARTUP_TIMEOUT", 60)
 	if err != nil {

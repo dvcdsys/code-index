@@ -1,0 +1,3 @@
+# build artifact — rebuilt by build.sh; the committed module lives as
+# server/internal/chunker/tswasm/ts-core.wasm.br (brotli)
+ts-core.wasm

@@ -5,8 +5,24 @@ import (
 	"testing"
 	"time"
 
-	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/dvcdsys/code-index/server/internal/chunker/tswasm"
 )
+
+// kindsOf parses src under the given language's grammar via the wasm backend and
+// returns the set of AST node-kind names present — the test helper that replaced
+// the old gotreesitter walk.
+func kindsOf(t *testing.T, lang, src string) map[string]struct{} {
+	t.Helper()
+	nodes, err := tswasm.ParseNodes("tree_sitter_"+lang, []byte(src))
+	if err != nil {
+		t.Fatalf("parse %q: %v", lang, err)
+	}
+	out := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		out[n.Kind] = struct{}{}
+	}
+	return out
+}
 
 func TestChunkFile_Python(t *testing.T) {
 	src := `def hello(name):
@@ -300,12 +316,12 @@ esac
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Whether or not the guard fired on this synthetic input, total time
-	// must stay under 2× parseBudget — otherwise the parser is running
-	// uncapped.
-	if elapsed > 2*parseBudget+500*time.Millisecond {
-		t.Errorf("ChunkFile elapsed %s, expected < ~2× parseBudget (%s)",
-			elapsed, parseBudget)
+	// The official tree-sitter (via wasm) has no catastrophic-backtracking
+	// pathology, so this gnarly bash should parse in well under a second; a
+	// generous absolute bound guards against any regression that hangs the
+	// indexer.
+	if elapsed > 5*time.Second {
+		t.Errorf("ChunkFile elapsed %s, expected well under 5s for official parser", elapsed)
 	}
 	if len(chunks) == 0 {
 		t.Error("expected at least one chunk (block or function), got 0")
@@ -584,7 +600,7 @@ contract C {
 `
 
 	registryMu.RLock()
-	fn, ok := languageRegistry["solidity"]
+	_, ok := languageRegistry["solidity"]
 	nodes := languageNodes["solidity"]
 	registryMu.RUnlock()
 	if !ok {
@@ -594,23 +610,7 @@ contract C {
 		t.Fatal("solidity has no node map")
 	}
 
-	grammar := fn()
-	if grammar == nil {
-		t.Fatal("nil solidity grammar")
-	}
-
-	parser := sitter.NewParser(grammar)
-	tree, err := parser.Parse([]byte(src))
-	if err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-	root := tree.RootNode()
-	if root == nil {
-		t.Fatal("nil root")
-	}
-
-	seen := map[string]struct{}{}
-	collectNodeTypes(root, grammar, seen)
+	seen := kindsOf(t, "solidity", src)
 
 	for _, types := range nodes {
 		for _, ty := range types {
@@ -688,24 +688,24 @@ func chunkTypeCounts(chunks []Chunk) map[string]int {
 	return out
 }
 
-// TestRegistry_AllFactoriesNonNil ensures every default-registered language
-// resolves to a usable *sitter.Language. A nil factory return would mean
-// gotreesitter renamed/removed a grammar between updates and we silently lost
-// support — better to fail loud here than at runtime in production.
-func TestRegistry_AllFactoriesNonNil(t *testing.T) {
+// TestRegistry_AllGrammarsPresent ensures every default-registered language has
+// its grammar exported by the wasm module. A missing export would mean a build
+// regression (grammar dropped from build.sh) and silent loss of support — better
+// to fail loud here than at runtime in production.
+func TestRegistry_AllGrammarsPresent(t *testing.T) {
 	defer Configure(nil)
 	Configure(nil)
 
 	for _, lang := range SupportedLanguages() {
 		t.Run(lang, func(t *testing.T) {
 			registryMu.RLock()
-			fn := languageRegistry[lang]
+			export := languageRegistry[lang]
 			registryMu.RUnlock()
-			if fn == nil {
-				t.Fatalf("nil factory for %q", lang)
+			if export == "" {
+				t.Fatalf("no export mapping for %q", lang)
 			}
-			if g := fn(); g == nil {
-				t.Fatalf("factory returned nil grammar for %q", lang)
+			if !tswasm.HasLanguage(export) {
+				t.Fatalf("wasm module does not export %q for language %q", export, lang)
 			}
 		})
 	}
@@ -772,7 +772,7 @@ func TestRegistry_NodeNamesMatchAST(t *testing.T) {
 	for lang, src := range fixtures {
 		t.Run(lang, func(t *testing.T) {
 			registryMu.RLock()
-			fn, regOK := languageRegistry[lang]
+			_, regOK := languageRegistry[lang]
 			nodes := languageNodes[lang]
 			registryMu.RUnlock()
 
@@ -783,21 +783,6 @@ func TestRegistry_NodeNamesMatchAST(t *testing.T) {
 				t.Skipf("%q has no node map (sliding-window only — by design)", lang)
 			}
 
-			grammar := fn()
-			if grammar == nil {
-				t.Fatalf("nil grammar for %q", lang)
-			}
-
-			parser := sitter.NewParser(grammar)
-			tree, err := parser.Parse([]byte(src))
-			if err != nil {
-				t.Fatalf("parse error for %q: %v", lang, err)
-			}
-			root := tree.RootNode()
-			if root == nil {
-				t.Fatalf("nil root for %q", lang)
-			}
-
 			want := map[string]struct{}{}
 			for _, types := range nodes {
 				for _, ty := range types {
@@ -805,8 +790,7 @@ func TestRegistry_NodeNamesMatchAST(t *testing.T) {
 				}
 			}
 
-			seen := map[string]struct{}{}
-			collectNodeTypes(root, grammar, seen)
+			seen := kindsOf(t, lang, src)
 
 			matched := false
 			for ty := range want {
@@ -824,16 +808,6 @@ func TestRegistry_NodeNamesMatchAST(t *testing.T) {
 					keys, lang, sampleKeys(seen, 12))
 			}
 		})
-	}
-}
-
-func collectNodeTypes(n *sitter.Node, lang *sitter.Language, out map[string]struct{}) {
-	if n == nil {
-		return
-	}
-	out[n.Type(lang)] = struct{}{}
-	for i := 0; i < int(n.ChildCount()); i++ {
-		collectNodeTypes(n.Child(i), lang, out)
 	}
 }
 

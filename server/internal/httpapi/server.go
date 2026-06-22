@@ -1091,6 +1091,15 @@ func projectToOpenAPI(p *projects.Project) openapi.Project {
 		v := *p.MachineLabel
 		out.MachineLabel = &v
 	}
+	// Format-staleness flag: surfaces the dashboard "out of sync — full resync
+	// required" badge. Always emitted so the client can distinguish false from
+	// "field absent"; the reason is only present when the flag is set.
+	fsr := p.FullSyncRequired
+	out.FullSyncRequired = &fsr
+	if p.FullSyncReason != nil {
+		v := *p.FullSyncReason
+		out.FullSyncReason = &v
+	}
 	// Expose the owner so the dashboard can render "owned by X" / "external"
 	// badges. NULL means ownerless (the canonical state for external GitHub
 	// projects); a populated value identifies the personal owner of a local

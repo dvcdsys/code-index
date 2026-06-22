@@ -13,12 +13,14 @@ import (
 	_ "net/http/pprof" // opt-in heap/CPU profiling, exposed only when CIX_PPROF_ADDR is set
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	"github.com/dvcdsys/code-index/server/internal/chunker"
+	"github.com/dvcdsys/code-index/server/internal/chunker/tswasm"
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
@@ -82,6 +84,17 @@ func main() {
 
 // parseLogLevel maps CIX_LOG_LEVEL (debug|info|warn|error, case-insensitive)
 // to a slog level. Unset or unrecognised values fall back to info.
+// envPositiveInt returns the positive integer value of an env var, or 0 if unset
+// or unparsable. Used for optional numeric tuning knobs.
+func envPositiveInt(key string) int {
+	if s := os.Getenv(key); s != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
 func parseLogLevel(s string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "debug":
@@ -117,6 +130,21 @@ func run() error {
 
 	chunker.Configure(cfg.Languages)
 	logger.Info("chunker languages configured", "active", chunker.SupportedLanguages())
+
+	// tree-sitter (wasm) memory knobs. Each parser instance loads all grammar
+	// tables into its own linear memory (~69 MiB baseline). ChunkMaxConcurrent —
+	// the chunker's instance-concurrency cap — is dashboard-overridable, so it's
+	// applied below from the resolved runtime-config snapshot (not here). These
+	// per-instance memory knobs stay ENV-only (rarely tuned).
+	if v := envPositiveInt("CIX_CHUNK_MEM_LIMIT_PAGES"); v > 0 {
+		tswasm.MemLimitPages = uint32(v)
+	}
+	if v := envPositiveInt("CIX_CHUNK_RECYCLE_GROWTH_MB"); v > 0 {
+		tswasm.RecycleGrowthBytes = uint64(v) << 20
+	}
+	if v := envPositiveInt("CIX_CHUNK_MAX_IDLE"); v > 0 {
+		tswasm.MaxIdleInstances = v
+	}
 
 	// The system DB is model-INDEPENDENT (one permanent file at
 	// cfg.SQLitePath holding accounts + catalog + parsed code). Older
@@ -158,6 +186,10 @@ func run() error {
 		return fmt.Errorf("load runtime_settings: %w", err)
 	}
 	snap.ApplyTo(cfg)
+	// Apply the chunker instance-concurrency cap from the resolved snapshot
+	// (DB > env > recommended). Live changes from the dashboard re-apply via
+	// PutRuntimeConfig → tswasm.SetMaxConcurrent.
+	tswasm.SetMaxConcurrent(snap.ChunkMaxConcurrent)
 	logger.Info("runtime config resolved",
 		"embedding_model", cfg.EmbeddingModel,
 		"llama_ctx", cfg.LlamaCtxSize,
@@ -165,6 +197,7 @@ func run() error {
 		"n_threads", cfg.LlamaNThreads,
 		"max_concurrency", cfg.MaxEmbeddingConcurrency,
 		"batch", cfg.LlamaBatchSize,
+		"chunk_max_concurrent", snap.ChunkMaxConcurrent,
 		"sources", snap.Source,
 	)
 	// The system DB is model-independent (opened above at cfg.SQLitePath).

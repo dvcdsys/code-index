@@ -1,5 +1,7 @@
+import { useEffect, useRef } from 'react';
 import { AlertCircle, AlertTriangle, ArrowLeft, Loader2, Search } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
 import type { Project } from '@/api/types';
 import { useAuth } from '@/auth/useAuth';
@@ -19,7 +21,7 @@ import { ReassignOwnerDialog } from './components/ReassignOwnerDialog';
 import { ReindexProjectButton } from './components/ReindexProjectButton';
 import { SyncProjectButton } from './components/SyncProjectButton';
 import { SyncSettingsCard } from './components/SyncSettingsCard';
-import { useProject, useProjectSummary, useProjectWorkspaces } from './hooks';
+import { useProject, useProjectGitRepo, useProjectSummary, useProjectWorkspaces } from './hooks';
 
 const STATUS_VARIANT: Record<Project['status'], 'default' | 'secondary' | 'destructive' | 'outline'> = {
   created: 'outline',
@@ -36,6 +38,31 @@ export function ProjectDetailPage() {
   const summary = useProjectSummary(id);
   const workspaces = useProjectWorkspaces(id);
   const currentModel = useRuntimeModel();
+
+  // Surface async job failures: a failed clone/index job leaves the project at
+  // status:"error" and writes git_repos.last_error, but POST /reindex already
+  // returned 200 ("enqueued") so the operator otherwise sees nothing. Watch the
+  // git-repo row for external projects (poll while a job is in flight / errored)
+  // and toast on the live transition into error.
+  const isExternal = !!project.data?.host_path?.startsWith('github.com/');
+  const jobInFlight = project.data?.status === 'indexing' || project.data?.status === 'error';
+  const gitRepo = useProjectGitRepo(id, isExternal, isExternal && jobInFlight);
+
+  const prevStatus = useRef<Project['status'] | undefined>(undefined);
+  useEffect(() => {
+    const status = project.data?.status;
+    // prevStatus starts undefined, so landing on an already-errored project
+    // shows the inline alert below without a spurious toast — only a live
+    // not-error → error transition (a job we were watching just failed) toasts.
+    if (prevStatus.current && prevStatus.current !== 'error' && status === 'error') {
+      toast.error('Index run failed', {
+        description:
+          gitRepo.data?.last_error ??
+          'The background clone/index job failed — see details on this page.',
+      });
+    }
+    prevStatus.current = status;
+  }, [project.data?.status, gitRepo.data?.last_error]);
 
   if (project.isLoading) return <DetailSkeleton />;
   if (project.error || !project.data) {
@@ -61,7 +88,7 @@ export function ProjectDetailPage() {
   const p = project.data;
   const s = summary.data;
   const drift = !!p.indexed_with_model && !!currentModel && p.indexed_with_model !== currentModel;
-  const isExternal = p.host_path.startsWith('github.com/');
+  const fullSyncRequired = !!p.full_sync_required;
   const displayPath = p.display_path ?? p.host_path;
 
   return (
@@ -126,6 +153,39 @@ export function ProjectDetailPage() {
         </div>
       </header>
 
+      {p.status === 'error' ? (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Last index run failed</AlertTitle>
+          <AlertDescription className="space-y-2">
+            {gitRepo.data?.last_error ? (
+              <div className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-background/40 p-2 font-mono text-xs">
+                {gitRepo.data.last_error}
+              </div>
+            ) : (
+              <div>
+                The last clone/index job for this project failed.{' '}
+                {isExternal
+                  ? 'Check the GitHub token and repo access, then retry.'
+                  : 'Check the server logs, then re-run the indexer.'}
+              </div>
+            )}
+            {isExternal ? (
+              <div className="text-xs">
+                Fix the cause above, then retry with the{' '}
+                <span className="font-medium text-foreground">Reindex</span> or{' '}
+                <span className="font-medium text-foreground">Sync</span> button.
+              </div>
+            ) : (
+              <div className="text-xs">
+                Re-run from your terminal:{' '}
+                <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {displayPath}</code>
+              </div>
+            )}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       {p.status === 'indexing' ? (
         isExternal ? (
           <IndexingProgressCard hash={p.path_hash} />
@@ -156,6 +216,33 @@ export function ProjectDetailPage() {
             <div className="text-xs">
               Reindex from your terminal:{' '}
               <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {displayPath}</code>
+            </div>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {fullSyncRequired ? (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Out of sync — full resync required</AlertTitle>
+          <AlertDescription className="space-y-2">
+            <div>
+              {p.full_sync_reason ??
+                'This project’s index is format-stale and must be rebuilt from scratch.'}{' '}
+              A full reindex is needed for consistent results; an incremental sync
+              will not clear this. The flag clears automatically once a full
+              reindex completes.
+            </div>
+            <div className="text-xs">
+              {isExternal
+                ? 'Use the Reindex button above (force full rebuild).'
+                : null}
+              {!isExternal ? (
+                <>
+                  Reindex from your terminal:{' '}
+                  <code className="rounded bg-background/40 px-1 py-0.5">cix reindex {displayPath}</code>
+                </>
+              ) : null}
             </div>
           </AlertDescription>
         </Alert>

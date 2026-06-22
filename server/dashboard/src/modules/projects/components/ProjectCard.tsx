@@ -28,6 +28,9 @@ export function ProjectCard({ project }: { project: Project }) {
     !!project.indexed_with_model &&
     !!currentModel &&
     project.indexed_with_model !== currentModel;
+  // Format-staleness flag set server-side (e.g. chunker format changed under
+  // the index). Informational — the admin triggers the full resync.
+  const fullSyncRequired = !!project.full_sync_required;
   // Sync only makes sense for GitHub-cloned projects — the server can pull +
   // incrementally index those. Local projects are driven by the CLI.
   const isExternal = project.host_path.startsWith('github.com/');
@@ -36,7 +39,7 @@ export function ProjectCard({ project }: { project: Project }) {
     <Link to={`/projects/${project.path_hash}`} className="group">
       <Card
         className={`h-full transition-colors ${
-          drift
+          drift || fullSyncRequired
             ? 'border-destructive/60 hover:border-destructive'
             : 'hover:border-foreground/30'
         }`}
@@ -64,6 +67,16 @@ export function ProjectCard({ project }: { project: Project }) {
               <Badge variant="destructive" className="gap-1">
                 <AlertTriangle className="h-3 w-3" />
                 Stale model
+              </Badge>
+            ) : null}
+            {fullSyncRequired ? (
+              <Badge
+                variant="destructive"
+                className="gap-1"
+                title={project.full_sync_reason ?? undefined}
+              >
+                <AlertTriangle className="h-3 w-3" />
+                Out of sync
               </Badge>
             ) : null}
             {project.languages.slice(0, 4).map((l) => (

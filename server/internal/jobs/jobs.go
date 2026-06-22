@@ -181,6 +181,13 @@ func (s *Service) runPool(ctx context.Context) {
 func (s *Service) workerLoop(ctx context.Context, workerID int) {
 	tick := time.NewTicker(s.pollEvery)
 	defer tick.Stop()
+	// busyStreak counts consecutive SQLITE_BUSY claim failures. BUSY here is
+	// expected contention, not a fault: some heavy writer (e.g. a big project
+	// wipe — batched now, but still minutes of elevated write traffic)
+	// outwaited our busy_timeout, and the claim simply retries next tick. Log
+	// the streak start as WARN, then a ~once-a-minute heartbeat — not an
+	// ERROR per tick (the old behaviour flooded the log for the entire wipe).
+	busyStreak := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -206,14 +213,39 @@ func (s *Service) workerLoop(ctx context.Context, workerID int) {
 			if ctx.Err() != nil || errors.Is(err, sql.ErrConnDone) {
 				return
 			}
+			if isBusyErr(err) {
+				busyStreak++
+				if busyStreak == 1 || time.Duration(busyStreak)*s.pollEvery >= time.Minute {
+					s.logger.Warn("jobs: claim contended (SQLITE_BUSY), retrying each tick",
+						"worker", workerID, "consecutive", busyStreak)
+					if busyStreak > 1 {
+						busyStreak = 1 // restart the heartbeat window
+					}
+				}
+				continue
+			}
 			s.logger.Error("jobs: claim failed", "worker", workerID, "err", err)
 			continue
+		}
+		if busyStreak > 0 {
+			s.logger.Info("jobs: claim contention cleared", "worker", workerID)
+			busyStreak = 0
 		}
 		if job == nil {
 			continue
 		}
 		s.execute(ctx, workerID, *job)
 	}
+}
+
+// isBusyErr reports whether err is SQLite's BUSY/LOCKED contention. modernc's
+// driver has no stable exported sentinel for it, so match the rendered code.
+func isBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "SQLITE_LOCKED")
 }
 
 // recoverOrphanedJobs requeues jobs stuck in 'running' from a previous

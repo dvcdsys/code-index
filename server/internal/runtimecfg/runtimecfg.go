@@ -41,6 +41,8 @@ const (
 	FieldMaxEmbeddingConcurrency = "max_embedding_concurrency"
 	FieldLlamaBatchSize          = "llama_batch_size"
 	FieldIndexEmbedBatchChunks   = "index_embed_batch_chunks"
+	FieldChunkMaxConcurrent      = "chunk_max_concurrent"
+	FieldLlamaCacheRAMMiB        = "llama_cache_ram_mib"
 )
 
 // Snapshot is a fully-resolved runtime config — every field is populated, no
@@ -54,6 +56,8 @@ type Snapshot struct {
 	MaxEmbeddingConcurrency int
 	LlamaBatchSize          int
 	IndexEmbedBatchChunks   int
+	ChunkMaxConcurrent      int
+	LlamaCacheRAMMiB        int
 
 	// Source maps Field* constants to one of SourceDB/SourceEnv/SourceRecommended.
 	Source map[string]string
@@ -79,6 +83,8 @@ type Patch struct {
 	MaxEmbeddingConcurrency *int
 	LlamaBatchSize          *int
 	IndexEmbedBatchChunks   *int
+	ChunkMaxConcurrent      *int
+	LlamaCacheRAMMiB        *int
 }
 
 // Service resolves runtime config from the DB, falling through to env-loaded
@@ -113,7 +119,12 @@ func (s *Service) Recommended() Snapshot {
 		MaxEmbeddingConcurrency: 5,
 		LlamaBatchSize:          2048,
 		IndexEmbedBatchChunks:   64,
-		Source:                  map[string]string{},
+		ChunkMaxConcurrent:      3,
+		// 0 = prompt cache disabled. llama-server's own default is 8192 MiB,
+		// which is pure host-RAM waste for embeddings (no prompt reuse) and
+		// OOM-killed the prod container; see the supervisor's --cache-ram note.
+		LlamaCacheRAMMiB: 0,
+		Source:           map[string]string{},
 	}
 }
 
@@ -125,6 +136,8 @@ type dbRow struct {
 	maxEmbeddingConcurrency sql.NullInt64
 	llamaBatchSize          sql.NullInt64
 	indexEmbedBatchChunks   sql.NullInt64
+	chunkMaxConcurrent      sql.NullInt64
+	llamaCacheRAMMiB        sql.NullInt64
 	updatedAt               sql.NullString
 	updatedBy               sql.NullString
 }
@@ -134,12 +147,14 @@ func (s *Service) loadRow(ctx context.Context) (dbRow, bool, error) {
 	err := s.db.QueryRowContext(ctx, `
 		SELECT embedding_model, llama_ctx_size, llama_n_gpu_layers,
 		       llama_n_threads, max_embedding_concurrency, llama_batch_size,
-		       index_embed_batch_chunks, updated_at, updated_by
+		       index_embed_batch_chunks, chunk_max_concurrent, llama_cache_ram_mib,
+		       updated_at, updated_by
 		FROM runtime_settings WHERE id = 1
 	`).Scan(
 		&r.embeddingModel, &r.llamaCtxSize, &r.llamaNGpuLayers,
 		&r.llamaNThreads, &r.maxEmbeddingConcurrency, &r.llamaBatchSize,
-		&r.indexEmbedBatchChunks, &r.updatedAt, &r.updatedBy,
+		&r.indexEmbedBatchChunks, &r.chunkMaxConcurrent, &r.llamaCacheRAMMiB,
+		&r.updatedAt, &r.updatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dbRow{}, false, nil
@@ -182,6 +197,8 @@ func (s *Service) Get(ctx context.Context) (Snapshot, error) {
 	out.MaxEmbeddingConcurrency = resolveInt(row.maxEmbeddingConcurrency, hasRow, envIntOrZero(s.env, "conc"), rec.MaxEmbeddingConcurrency, &out.Source, FieldMaxEmbeddingConcurrency)
 	out.LlamaBatchSize = resolveInt(row.llamaBatchSize, hasRow, envIntOrZero(s.env, "batch"), rec.LlamaBatchSize, &out.Source, FieldLlamaBatchSize)
 	out.IndexEmbedBatchChunks = resolveInt(row.indexEmbedBatchChunks, hasRow, envIntOrZero(s.env, "idxbatch"), rec.IndexEmbedBatchChunks, &out.Source, FieldIndexEmbedBatchChunks)
+	out.ChunkMaxConcurrent = resolveInt(row.chunkMaxConcurrent, hasRow, envIntOrZero(s.env, "chunkconc"), rec.ChunkMaxConcurrent, &out.Source, FieldChunkMaxConcurrent)
+	out.LlamaCacheRAMMiB = resolveInt(row.llamaCacheRAMMiB, hasRow, envIntOrZero(s.env, "cacheram"), rec.LlamaCacheRAMMiB, &out.Source, FieldLlamaCacheRAMMiB)
 
 	if hasRow {
 		if row.updatedAt.Valid {
@@ -247,6 +264,10 @@ func envIntOrZero(env *config.Config, which string) int {
 		return env.LlamaBatchSize
 	case "idxbatch":
 		return env.IndexEmbedBatchChunks
+	case "chunkconc":
+		return env.ChunkMaxConcurrent
+	case "cacheram":
+		return env.LlamaCacheRAMMiB
 	}
 	return 0
 }
@@ -287,6 +308,8 @@ func (s *Service) Set(ctx context.Context, patch Patch, updatedBy string) error 
 	mergeInt(&merged.maxEmbeddingConcurrency, patch.MaxEmbeddingConcurrency)
 	mergeInt(&merged.llamaBatchSize, patch.LlamaBatchSize)
 	mergeInt(&merged.indexEmbedBatchChunks, patch.IndexEmbedBatchChunks)
+	mergeInt(&merged.chunkMaxConcurrent, patch.ChunkMaxConcurrent)
+	mergeInt(&merged.llamaCacheRAMMiB, patch.LlamaCacheRAMMiB)
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if hasRow {
@@ -294,26 +317,30 @@ func (s *Service) Set(ctx context.Context, patch Patch, updatedBy string) error 
 			UPDATE runtime_settings
 			SET embedding_model = ?, llama_ctx_size = ?, llama_n_gpu_layers = ?,
 			    llama_n_threads = ?, max_embedding_concurrency = ?, llama_batch_size = ?,
-			    index_embed_batch_chunks = ?, updated_at = ?, updated_by = ?
+			    index_embed_batch_chunks = ?, chunk_max_concurrent = ?,
+			    llama_cache_ram_mib = ?, updated_at = ?, updated_by = ?
 			WHERE id = 1
 		`,
 			nullStr(merged.embeddingModel), nullInt(merged.llamaCtxSize),
 			nullInt(merged.llamaNGpuLayers), nullInt(merged.llamaNThreads),
 			nullInt(merged.maxEmbeddingConcurrency), nullInt(merged.llamaBatchSize),
-			nullInt(merged.indexEmbedBatchChunks), now, updatedBy,
+			nullInt(merged.indexEmbedBatchChunks), nullInt(merged.chunkMaxConcurrent),
+			nullInt(merged.llamaCacheRAMMiB), now, updatedBy,
 		)
 	} else {
 		_, err = s.db.ExecContext(ctx, `
 			INSERT INTO runtime_settings (
 				id, embedding_model, llama_ctx_size, llama_n_gpu_layers,
 				llama_n_threads, max_embedding_concurrency, llama_batch_size,
-				index_embed_batch_chunks, updated_at, updated_by
-			) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				index_embed_batch_chunks, chunk_max_concurrent, llama_cache_ram_mib,
+				updated_at, updated_by
+			) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			nullStr(merged.embeddingModel), nullInt(merged.llamaCtxSize),
 			nullInt(merged.llamaNGpuLayers), nullInt(merged.llamaNThreads),
 			nullInt(merged.maxEmbeddingConcurrency), nullInt(merged.llamaBatchSize),
-			nullInt(merged.indexEmbedBatchChunks), now, updatedBy,
+			nullInt(merged.indexEmbedBatchChunks), nullInt(merged.chunkMaxConcurrent),
+			nullInt(merged.llamaCacheRAMMiB), now, updatedBy,
 		)
 	}
 	if err != nil {
@@ -364,4 +391,6 @@ func (snap Snapshot) ApplyTo(env *config.Config) {
 	env.MaxEmbeddingConcurrency = snap.MaxEmbeddingConcurrency
 	env.LlamaBatchSize = snap.LlamaBatchSize
 	env.IndexEmbedBatchChunks = snap.IndexEmbedBatchChunks
+	env.ChunkMaxConcurrent = snap.ChunkMaxConcurrent
+	env.LlamaCacheRAMMiB = snap.LlamaCacheRAMMiB
 }
