@@ -34,7 +34,7 @@ RUN cd dashboard && \
 # opt in without rebuilding. Bump CLOUDFLARED_VERSION deliberately and re-run
 # `make scout-cpu` before any prod push. Optionally pass CLOUDFLARED_SHA256 to
 # verify the download.
-FROM alpine:3.20 AS cloudflared
+FROM alpine:3.24 AS cloudflared
 ARG TARGETARCH
 ARG CLOUDFLARED_VERSION=2025.2.1
 ARG CLOUDFLARED_SHA256=""
@@ -51,7 +51,7 @@ RUN curl -fsSL \
 # ngrok ships a single static binary via its equinox CDN stable channel.
 # The tunnel is OFF by default; this only bundles the binary so operators
 # can pick ngrok from the dashboard without rebuilding.
-FROM alpine:3.20 AS ngrok
+FROM alpine:3.24 AS ngrok
 ARG TARGETARCH
 ARG NGROK_CHANNEL=v3-stable
 RUN apk add --no-cache curl ca-certificates tar
