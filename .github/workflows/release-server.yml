@@ -156,6 +156,26 @@ jobs:
             openapi=doc
           tags: ${{ steps.tags.outputs.tags }}
 
+  prune:
+    name: Prune stale Docker Hub tags
+    needs: [docker-cpu, docker-cuda]
+    runs-on: ubuntu-latest
+    # Only on real release tags (always the newest version, so keep-N never
+    # reaps what we just pushed). Skipped on workflow_dispatch rebuilds of an
+    # older version, which a keep-newest policy would otherwise delete.
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prune old tags (keep newest 3 releases + floating)
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKER_PASSWORD }}
+          DRY_RUN: "false"
+          KEEP_RELEASES: "3"
+        run: server/scripts/dockerhub-prune.sh
+
   release:
     name: Publish release
     needs: [docker-cpu, docker-cuda]

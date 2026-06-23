@@ -1,0 +1,50 @@
+name: "Cleanup: Docker Hub tags"
+
+# Docker Hub never prunes tags on its own — every release adds ~1 GB (CUDA) and
+# scout/test/dev tags pile up forever (the repo had ballooned past 150 GB). This
+# workflow enforces a retention policy via server/scripts/dockerhub-prune.sh:
+# keep the floating tags + the newest N release versions, delete everything else.
+#
+# Triggers:
+#   - schedule: weekly sweep that actually deletes (reaps scout/dev tags pushed
+#     between releases).
+#   - workflow_dispatch: manual run. Defaults to dry-run (preview only) so you
+#     can eyeball the plan before deleting — set `dry_run=false` to apply.
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Mondays 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview only — list keep/delete without deleting"
+        type: boolean
+        default: true
+      keep_releases:
+        description: "How many newest release versions to keep"
+        type: string
+        default: "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cleanup-dockerhub
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune stale Docker Hub tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prune
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKER_PASSWORD }}
+          # Scheduled runs prune for real; manual runs honour the dry_run input
+          # (default true) so a human previews before anything is deleted.
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
+          KEEP_RELEASES: ${{ inputs.keep_releases || '3' }}
+        run: server/scripts/dockerhub-prune.sh
