@@ -110,7 +110,7 @@ jobs:
             --repo "${{ github.repository }}" || true
 
       - name: Create develop release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: cli/develop
           target_commitish: develop
