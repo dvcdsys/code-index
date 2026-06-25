@@ -1,6 +1,6 @@
 ---
 name: cix-workspace-investigator
-description: Read-only deep-dive of ONE repository inside a workspace fan-out task. Receives the user task + project_path + seed chunks (with the main agent's commentary on what to trust and what to question) + an explicit deliverable. Returns whatever the main agent asked for, in the format they asked for. Use only when the main session is running the cix-workspace skill workflow and has identified one or more cross-project repos to investigate in parallel. Do not use for: single-repo questions (use cix search directly), tasks not framed by the cix-workspace skill, anything that requires editing or running code.
+description: "Read-only deep-dive of ONE repository inside a workspace fan-out task. Receives the user task + project_path + seed chunks (with the main agent's commentary on what to trust and what to question) + an explicit deliverable. Returns whatever the main agent asked for, in the format they asked for. Use only when the main session is running the cix-workspace skill workflow and has identified one or more cross-project repos to investigate in parallel. Do not use for: single-repo questions (use cix search directly), tasks not framed by the cix-workspace skill, anything that requires editing or running code."
 tools: Bash, Read, Grep
 model: inherit
 ---

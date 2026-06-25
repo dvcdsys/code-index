@@ -5,12 +5,12 @@
     "name": "dvcdsys",
     "email": "dvcdsys@gmail.com"
   },
-  "description": "Marketplace for cix — semantic code search and navigation tooling for Claude Code",
+  "description": "Marketplace for cix — semantic code search and navigation tooling for Claude Code and Claude Cowork",
   "plugins": [
     {
       "name": "cix",
       "source": "./plugins/cix",
-      "description": "Semantic code search and navigation. Bundles the cix CLI, slash commands, behavioral hooks, and the experimental cix-workspace skill + cix-workspace-investigator sub-agent for cross-project research across cix workspaces.",
+      "description": "Semantic code search and navigation for Claude Code. Bundles the cix CLI, slash commands, behavioral hooks, and the cix + cix-workspace skills (CLI-based) plus the cix-workspace-investigator sub-agent for cross-project research across cix workspaces.",
       "author": {
         "name": "dvcdsys"
       },
@@ -20,6 +20,20 @@
       "keywords": ["search", "code-search", "semantic", "navigation", "indexing", "embeddings", "workspace", "cross-project", "sub-agent"],
       "category": "developer-tools",
       "tags": ["search", "indexing", "ai", "embeddings", "workspace", "cross-project"]
+    },
+    {
+      "name": "cix-cowork",
+      "source": "./plugins/cix-cowork",
+      "description": "cix skills for Claude Cowork: the cix and cix-workspace guidance adapted to the cix_* MCP tools. Install AFTER connecting the cix MCP server (run `cix mcp connect claude`). Skills only — no connector, no CLI.",
+      "author": {
+        "name": "dvcdsys"
+      },
+      "homepage": "https://github.com/dvcdsys/code-index",
+      "repository": "https://github.com/dvcdsys/code-index",
+      "license": "MIT",
+      "keywords": ["search", "code-search", "semantic", "navigation", "workspace", "cross-project", "mcp", "cowork", "skills"],
+      "category": "developer-tools",
+      "tags": ["search", "workspace", "cross-project", "mcp", "cowork", "skills"]
     }
   ]
 }

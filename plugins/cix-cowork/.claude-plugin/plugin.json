@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "cix-cowork",
+  "version": "0.1.0",
+  "description": "cix skills for Claude Cowork — the cix (single-repo) and cix-workspace (cross-project) guidance adapted to the cix_* MCP tools. Skills only: no connector, no CLI, no hooks. Connect the cix MCP server first with `cix mcp connect claude`, then install this for the richer guidance.",
+  "author": {
+    "name": "dvcdsys",
+    "email": "dvcdsys@gmail.com"
+  },
+  "homepage": "https://github.com/dvcdsys/code-index",
+  "repository": "https://github.com/dvcdsys/code-index",
+  "license": "MIT",
+  "keywords": [
+    "search",
+    "code-search",
+    "semantic",
+    "navigation",
+    "workspace",
+    "cross-project",
+    "mcp",
+    "cowork",
+    "skills"
+  ]
+}

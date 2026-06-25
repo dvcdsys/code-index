@@ -1,4 +1,4 @@
-.PHONY: build install clean test run server-docker server-local server-stop release
+.PHONY: build install clean test run server-docker server-local server-stop release mcpb
 
 # Build variables
 BINARY_NAME=cix
@@ -65,6 +65,21 @@ release:
 	@echo ""
 	@echo "Upload to GitHub Releases:"
 	@echo "  gh release create $(VERSION) $(DIST_DIR)/*.tar.gz $(DIST_DIR)/checksums.txt"
+
+# ── Cowork / MCP bundle ────────────────────────────────
+#
+# Build a .mcpb desktop-extension bundle so cix can be used inside Cowork and
+# Claude Desktop (Customize > Connectors). The bundle wraps the `cix` binary
+# running as a stdio MCP server (`cix mcp`). One bundle per platform.
+#
+# Usage:
+#   make mcpb                                  # host platform
+#   make mcpb VERSION=cli/v0.6.0               # stamp a version
+#   GOOS=darwin GOARCH=arm64 make mcpb         # explicit target
+#
+# Output: dist/cix-<os>-<arch>.mcpb
+mcpb:
+	VERSION="$(VERSION)" ./mcpb/build.sh
 
 # ── Server Management ──────────────────────────────────
 
