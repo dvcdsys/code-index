@@ -48,37 +48,42 @@ Then choose scope explicitly:
 Never assume a default project — always name the workspace or project you mean.`
 
 // mcpCmd runs cix as a Model Context Protocol server over stdio, so cix's
-// semantic search is usable from MCP clients (Claude Desktop / Cowork
-// connectors, packaged as a .mcpb desktop extension) without the agent
-// shelling out to the CLI. It is a thin MCP front-end over the same HTTP
-// client every other command uses, so it inherits the full multi-server /
-// custom-header / env-override config resolution from getClient.
+// semantic search is usable from MCP host apps (notably Claude Desktop, and
+// Cowork which runs inside it) without the agent shelling out to the CLI. It is
+// a thin MCP front-end over the same HTTP client every other command uses, so
+// it inherits the full multi-server / custom-header / env-override config
+// resolution from getClient. Register it with a host via `cix mcp install`.
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
-	Short: "Run cix as an MCP server over stdio (for Claude Desktop / Cowork)",
+	Short: "Run cix as an MCP server over stdio (for Claude Desktop)",
 	Long: `Run cix as a Model Context Protocol (MCP) server over stdio.
 
-This exposes cix's semantic search to MCP clients — notably the Claude Desktop
-app and Cowork — as tools the agent can call directly, instead of shelling out
-to the cix CLI. It is the recommended way to give Cowork access to cix, since
-Cowork does not load Claude Code plugins.
+This exposes cix's semantic search to MCP host apps — notably the Claude Desktop
+app (and Cowork, which runs inside it) — as tools the agent can call directly,
+instead of shelling out to the cix CLI. Claude Code already reaches cix through
+the cix CLI + plugin; this is the path for hosts that don't, starting with
+Claude Desktop.
 
 The server speaks newline-delimited JSON-RPC on stdin/stdout. It is not meant
-to be run interactively; an MCP client launches it. Server selection, API key,
+to be run interactively; an MCP host launches it. Server selection, API key,
 and custom headers are resolved exactly like every other cix command (flags >
 CIX_* env vars > ~/.cix/config.yaml).
 
 Tools exposed:
-  cix_search          semantic code search (by meaning)
-  cix_definitions     go-to-definition for a symbol (metadata only)
-  cix_references      find references to a symbol (metadata only)
-  cix_symbols         find symbols by name
-  cix_files           find files by path pattern
-  cix_summary         project overview (languages, top dirs, key symbols)
-  cix_list_projects   list indexed projects (to discover valid "project" values)
+  cix_list_servers             list the cix servers this connection can reach
+  cix_list_workspaces          list workspaces (cross-project research targets)
+  cix_list_projects            list indexed repositories (a host_path = "project")
+  cix_list_workspace_projects  list the repositories in a workspace
+  cix_workspace_search         semantic search across all repos in a workspace
+  cix_search                   semantic code search within one repository
+  cix_definitions              go-to-definition for a symbol (metadata only)
+  cix_references               find references to a symbol (metadata only)
+  cix_symbols                  find symbols by name
+  cix_files                    find files by path pattern
+  cix_summary                  project overview (languages, top dirs, key symbols)
 
-Package this command as a .mcpb desktop extension, or point a custom connector
-at it, to use cix inside Cowork.`,
+Register this server with a host app using "cix mcp install <host>" (currently:
+claude-desktop).`,
 	Args:          cobra.NoArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -139,10 +144,10 @@ func isCleanShutdown(err error) bool {
 // because no config file exists yet — but an explicit URL and key are present
 // from flags or env, it synthesizes a client from those directly.
 //
-// This is what makes the .mcpb desktop-extension path work with zero prior
-// setup: the host injects CIX_API_URL / CIX_API_KEY from the extension's
-// user_config, and a user who has never run `cix config` still gets a working
-// server. When config does exist, the normal path is used unchanged.
+// This lets a host that injects CIX_API_URL / CIX_API_KEY into the server's
+// environment work with zero prior setup — a user who has never run
+// `cix config` still gets a working client. When config does exist, the normal
+// path is used unchanged.
 func mcpGetClient() (*client.Client, error) {
 	c, err := getClient()
 	if err == nil {
@@ -259,8 +264,8 @@ type serverSummary struct {
 
 // mcpListServers reports the configured cix servers for the discovery tool.
 // With a config file it lists every named server and marks the effective
-// default; with no config but an explicit URL (the .mcpb single-server path) it
-// reports a lone synthetic default.
+// default; with no config but an explicit URL (the env-injected single-server
+// path) it reports a lone synthetic default.
 func mcpListServers() []serverSummary {
 	if cfg, err := config.Load(); err == nil && len(cfg.Servers) > 0 {
 		defName := serverName

@@ -24,7 +24,7 @@
     {
       "name": "cix-cowork",
       "source": "./plugins/cix-cowork",
-      "description": "cix skills for Claude Cowork: the cix and cix-workspace guidance adapted to the cix_* MCP tools. Install AFTER connecting the cix MCP server (run `cix mcp connect claude`). Skills only — no connector, no CLI.",
+      "description": "cix skills for Claude Desktop & Cowork: the cix and cix-workspace guidance adapted to the cix_* MCP tools. Install AFTER registering the cix MCP server (run `cix mcp install claude-desktop`). Skills only — no MCP server, no CLI.",
       "author": {
         "name": "dvcdsys"
       },

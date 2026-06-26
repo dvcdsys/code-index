@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -105,8 +106,11 @@ func (c *Client) ListWorkspaceProjects(workspaceID string) (*WorkspaceProjectLis
 }
 
 // WorkspaceSearch — GET /api/v1/workspaces/{id}/search. id is the
-// workspace's opaque ULID/UUID returned by ListWorkspaces.
-func (c *Client) WorkspaceSearch(id, query string, topProjects, topChunks int) (*WorkspaceSearchResponse, error) {
+// workspace's opaque ULID/UUID returned by ListWorkspaces. minScore is
+// optional: nil omits the parameter so the server applies its default
+// (0.4); a non-nil value (including 0 for an intentional broad sweep) is
+// sent verbatim.
+func (c *Client) WorkspaceSearch(id, query string, topProjects, topChunks int, minScore *float64) (*WorkspaceSearchResponse, error) {
 	v := url.Values{}
 	v.Set("q", query)
 	if topProjects > 0 {
@@ -114,6 +118,9 @@ func (c *Client) WorkspaceSearch(id, query string, topProjects, topChunks int) (
 	}
 	if topChunks > 0 {
 		v.Set("top_chunks", fmt.Sprintf("%d", topChunks))
+	}
+	if minScore != nil {
+		v.Set("min_score", strconv.FormatFloat(*minScore, 'f', -1, 64))
 	}
 	path := "/api/v1/workspaces/" + url.PathEscape(id) + "/search?" + v.Encode()
 	resp, err := c.do("GET", path, nil)

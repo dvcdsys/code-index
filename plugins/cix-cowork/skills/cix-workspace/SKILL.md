@@ -151,9 +151,9 @@ plausible interpretations and the wrong one costs real time."
 ## Reading the projects panel
 
 ```
-project-a@main   0.500   5 hits   bm25 0.421   dense 0.556
-project-b@main   0.412   5 hits   bm25 0.318   dense 0.498
-project-c@main   0.288   3 hits   bm25 0.155   dense 0.362
+  - service-a  (/repo/service-a)  [score 0.50, 5 hit(s); bm25 0.42, dense 0.56]
+  - service-b  (/repo/service-b)  [score 0.41, 5 hit(s); bm25 0.32, dense 0.50]
+  - service-c  (/repo/service-c)  [score 0.29, 3 hit(s); bm25 0.16, dense 0.36]
 ```
 
 - `project_score`: the blended candidacy in [0,1]. Top = strongest signal.

@@ -14,59 +14,125 @@ import (
 )
 
 var (
-	connectName  string
-	connectPrint bool
+	installName  string
+	installPrint bool
 )
 
-// mcpConnectCmd registers THIS already-installed cix binary as an MCP server in
-// the host's config, pointing at it by absolute path. It is the standard way to
-// add a local stdio MCP server (the same mechanism docker/npx-based MCP servers
-// use) — nothing is bundled or copied, since cix is already on the machine.
-var mcpConnectCmd = &cobra.Command{
-	Use:   "connect <host>",
-	Short: "Register this cix binary as an MCP server with a host app (host: claude)",
-	Long: `Register this already-installed cix binary as an MCP server with a host app.
+// mcpHost describes a host application cix can register itself with as a local
+// stdio MCP server. Each host stores MCP servers in its own config file and
+// its own format, so a host owns two things: where that config lives, and how
+// to merge/remove a server entry in that format.
+//
+// Today only Claude Desktop is implemented (JSON `mcpServers`). This registry
+// is the seam for supporting other agents/harnesses later — e.g. Codex, whose
+// MCP config is TOML (`[mcp_servers.<name>]` in ~/.codex/config.toml) — by
+// adding an entry here with its own path resolver and TOML merge/remove funcs.
+// The command wiring (install/uninstall, --print, --name, .bak) stays untouched.
+type mcpHost struct {
+	name        string // canonical token typed on the command line
+	displayName string
 
-Adds an entry to the host's MCP config (mcpServers) whose command points at THIS
-cix binary with the "mcp" subcommand, so the host launches "cix mcp" on demand.
-Other servers and settings are preserved; a .bak of the previous config is kept.
-The cix server URL and API key come from ~/.cix/config.yaml, so no secrets are
-written into the host config.
+	// configPath resolves the host's MCP config file for the current OS.
+	configPath func() (string, error)
 
-Supported hosts:
-  claude    Claude Desktop (~/Library/Application Support/Claude on macOS)
-
-Examples:
-  cix mcp connect claude            # register, then restart Claude Desktop
-  cix mcp connect claude --print    # show what would be added, change nothing
-  cix mcp connect claude --name cix-prod`,
-	Args: cobra.ExactArgs(1),
-	RunE: runMCPConnect,
+	// merge adds/updates the cix server entry in the host's existing config
+	// bytes (empty = a fresh config) and returns the rewritten config. It must
+	// be idempotent and must preserve every other server and setting.
+	merge func(existing []byte, serverKey, command string, args []string) ([]byte, error)
+	// remove deletes serverKey; the bool reports whether anything was removed.
+	remove func(existing []byte, serverKey string) ([]byte, bool, error)
+	// preview renders just the entry that merge would add, for --print.
+	preview func(serverKey, command string, args []string) (string, error)
+	// otherServers lists the OTHER server keys in the config (names only, never
+	// values, which may hold secrets), so --print can show they're preserved.
+	otherServers func(existing []byte, exclude string) []string
 }
 
-// mcpDisconnectCmd removes a previously-written registration.
-var mcpDisconnectCmd = &cobra.Command{
-	Use:   "disconnect <host>",
-	Short: "Remove cix's MCP registration from a host app (host: claude)",
+// mcpHosts is the registry of supported hosts. Add new agents/harnesses here.
+var mcpHosts = []mcpHost{
+	{
+		name:         "claude-desktop",
+		displayName:  "Claude Desktop",
+		configPath:   claudeDesktopConfigPath,
+		merge:        mcpServersJSONMerge,
+		remove:       mcpServersJSONRemove,
+		preview:      mcpServersJSONPreview,
+		otherServers: mcpServersJSONOtherNames,
+	},
+}
+
+func lookupHost(arg string) (mcpHost, error) {
+	key := strings.ToLower(strings.TrimSpace(arg))
+	for _, h := range mcpHosts {
+		if h.name == key {
+			return h, nil
+		}
+	}
+	return mcpHost{}, fmt.Errorf("unsupported host %q (supported: %s)", arg, strings.Join(hostNames(), ", "))
+}
+
+func hostNames() []string {
+	names := make([]string, len(mcpHosts))
+	for i, h := range mcpHosts {
+		names[i] = h.name
+	}
+	return names
+}
+
+// mcpInstallCmd registers THIS already-installed cix binary as an MCP server in
+// a host app's config, pointing at it by absolute path. It is the standard way
+// to add a local stdio MCP server (the same mechanism docker/npx-based MCP
+// servers use) — nothing is bundled or copied, since cix is already on the
+// machine. Claude Code already reaches cix via the cix CLI + plugin; this is the
+// path for hosts that don't, starting with Claude Desktop.
+var mcpInstallCmd = &cobra.Command{
+	Use:   "install <host>",
+	Short: "Register this cix binary as an MCP server with a host app (host: claude-desktop)",
+	Long: `Register this already-installed cix binary as a local MCP server with a host app.
+
+Adds an entry to the host's MCP config whose command points at THIS cix binary
+with the "mcp" subcommand, so the host launches "cix mcp" on demand. Other
+servers and settings are preserved; a .bak of the previous config is kept. The
+cix server URL and API key come from ~/.cix/config.yaml, so no secrets are
+written into the host config.
+
+Claude Code already reaches cix through the cix CLI + plugin, so this is its
+Claude Desktop counterpart — and Cowork, which runs inside Claude Desktop, picks
+the tools up too.
+
+Supported hosts:
+  claude-desktop    Claude Desktop (~/Library/Application Support/Claude on macOS)
+
+Examples:
+  cix mcp install claude-desktop            # register, then restart Claude Desktop
+  cix mcp install claude-desktop --print    # show what would be added, change nothing
+  cix mcp install claude-desktop --name cix-prod`,
+	Args: cobra.ExactArgs(1),
+	RunE: runMCPInstall,
+}
+
+// mcpUninstallCmd removes a previously-written registration.
+var mcpUninstallCmd = &cobra.Command{
+	Use:   "uninstall <host>",
+	Short: "Remove cix's MCP registration from a host app (host: claude-desktop)",
 	Args:  cobra.ExactArgs(1),
-	RunE:  runMCPDisconnect,
+	RunE:  runMCPUninstall,
 }
 
 func init() {
-	mcpCmd.AddCommand(mcpConnectCmd)
-	mcpCmd.AddCommand(mcpDisconnectCmd)
-	mcpConnectCmd.Flags().StringVar(&connectName, "name", "cix", "key to register the server under in mcpServers")
-	mcpConnectCmd.Flags().BoolVar(&connectPrint, "print", false, "print the entry that would be added instead of writing it")
-	mcpDisconnectCmd.Flags().StringVar(&connectName, "name", "cix", "server key to remove from mcpServers")
+	mcpCmd.AddCommand(mcpInstallCmd)
+	mcpCmd.AddCommand(mcpUninstallCmd)
+	mcpInstallCmd.Flags().StringVar(&installName, "name", "cix", "key to register the server under in the host config")
+	mcpInstallCmd.Flags().BoolVar(&installPrint, "print", false, "print the entry that would be added instead of writing it")
+	mcpUninstallCmd.Flags().StringVar(&installName, "name", "cix", "server key to remove from the host config")
 }
 
-func runMCPConnect(_ *cobra.Command, args []string) error {
-	host := strings.ToLower(strings.TrimSpace(args[0]))
-	if host != "claude" {
-		return fmt.Errorf("unsupported host %q (supported: claude)", host)
+func runMCPInstall(_ *cobra.Command, args []string) error {
+	host, err := lookupHost(args[0])
+	if err != nil {
+		return err
 	}
-
-	cfgPath, err := claudeDesktopConfigPath()
+	cfgPath, err := host.configPath()
 	if err != nil {
 		return err
 	}
@@ -80,23 +146,25 @@ func runMCPConnect(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("read %s: %w", cfgPath, rerr)
 	}
 
-	if connectPrint {
+	if installPrint {
 		// Show ONLY the entry we'd add plus the names of preserved servers —
 		// never the whole file, which may hold other servers' secret env vars.
-		entry, merr := json.MarshalIndent(
-			map[string]any{connectName: mcpServerEntry(exe, []string{"mcp"})}, "", "  ")
-		if merr != nil {
-			return merr
+		entry, perr := host.preview(installName, exe, []string{"mcp"})
+		if perr != nil {
+			return perr
 		}
+		fmt.Printf("Host:   %s\n", host.displayName)
 		fmt.Printf("Target: %s\n\n", cfgPath)
-		fmt.Printf("Would add/update under mcpServers:\n%s\n", entry)
-		if others := otherServerNames(existing, connectName); len(others) > 0 {
-			fmt.Printf("\nOther servers preserved unchanged: %s\n", strings.Join(others, ", "))
+		fmt.Printf("Would add/update the %q MCP server:\n%s\n", installName, entry)
+		if host.otherServers != nil {
+			if others := host.otherServers(existing, installName); len(others) > 0 {
+				fmt.Printf("\nOther servers preserved unchanged: %s\n", strings.Join(others, ", "))
+			}
 		}
 		return nil
 	}
 
-	out, err := mcpConnectConfig(existing, connectName, exe, []string{"mcp"})
+	out, err := host.merge(existing, installName, exe, []string{"mcp"})
 	if err != nil {
 		return err
 	}
@@ -110,18 +178,18 @@ func runMCPConnect(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("write %s: %w", cfgPath, err)
 	}
 
-	fmt.Printf("Registered cix as MCP server %q:\n  %s\n", connectName, cfgPath)
+	fmt.Printf("Registered cix as MCP server %q with %s:\n  %s\n", installName, host.displayName, cfgPath)
 	fmt.Printf("  command: %s mcp\n\n", exe)
-	fmt.Println("Restart Claude Desktop to load it; the cix tools appear once it reconnects.")
+	fmt.Printf("Restart %s to load it; the cix tools appear once it reconnects.\n", host.displayName)
 	return nil
 }
 
-func runMCPDisconnect(_ *cobra.Command, args []string) error {
-	host := strings.ToLower(strings.TrimSpace(args[0]))
-	if host != "claude" {
-		return fmt.Errorf("unsupported host %q (supported: claude)", host)
+func runMCPUninstall(_ *cobra.Command, args []string) error {
+	host, err := lookupHost(args[0])
+	if err != nil {
+		return err
 	}
-	cfgPath, err := claudeDesktopConfigPath()
+	cfgPath, err := host.configPath()
 	if err != nil {
 		return err
 	}
@@ -133,23 +201,23 @@ func runMCPDisconnect(_ *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("read %s: %w", cfgPath, rerr)
 	}
-	out, removed, err := mcpDisconnectConfig(existing, connectName)
+	out, removed, err := host.remove(existing, installName)
 	if err != nil {
 		return err
 	}
 	if !removed {
-		fmt.Printf("Nothing to do — no server %q in %s\n", connectName, cfgPath)
+		fmt.Printf("Nothing to do — no server %q in %s\n", installName, cfgPath)
 		return nil
 	}
 	if err := os.WriteFile(cfgPath, out, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", cfgPath, err)
 	}
-	fmt.Printf("Removed MCP server %q from %s. Restart Claude Desktop.\n", connectName, cfgPath)
+	fmt.Printf("Removed MCP server %q from %s. Restart %s.\n", installName, cfgPath, host.displayName)
 	return nil
 }
 
 // selfExecutablePath returns the absolute, symlink-resolved path of the running
-// cix binary, so the host launches the exact binary the user ran `connect` with
+// cix binary, so the host launches the exact binary the user ran `install` with
 // (handling the common case where `cix` on PATH is a symlink to a build).
 func selfExecutablePath() (string, error) {
 	exe, err := os.Executable()
@@ -191,10 +259,16 @@ func claudeDesktopConfigPath() (string, error) {
 	}
 }
 
-// mcpConnectConfig merges a `mcpServers.<serverKey>` entry into an existing host
-// config (or an empty one), preserving every other key and server. The result
-// is stable, indented JSON. Running it twice is idempotent.
-func mcpConnectConfig(existing []byte, serverKey, command string, args []string) ([]byte, error) {
+// ---- Claude Desktop config format: JSON `mcpServers` ------------------------
+//
+// These implement the mcpHost merge/remove/preview funcs for hosts that use the
+// Claude Desktop shape — a JSON object with an `mcpServers` map of name → entry.
+// A future TOML-based host (e.g. Codex) supplies its own equivalents.
+
+// mcpServersJSONMerge merges a `mcpServers.<serverKey>` entry into an existing
+// host config (or an empty one), preserving every other key and server. The
+// result is stable, indented JSON. Running it twice is idempotent.
+func mcpServersJSONMerge(existing []byte, serverKey, command string, args []string) ([]byte, error) {
 	root := map[string]any{}
 	if len(bytes.TrimSpace(existing)) > 0 {
 		if err := json.Unmarshal(existing, &root); err != nil {
@@ -216,9 +290,9 @@ func mcpConnectConfig(existing []byte, serverKey, command string, args []string)
 	return append(out, '\n'), nil
 }
 
-// mcpDisconnectConfig removes mcpServers.<serverKey>. The bool reports whether
+// mcpServersJSONRemove removes mcpServers.<serverKey>. The bool reports whether
 // anything was removed.
-func mcpDisconnectConfig(existing []byte, serverKey string) ([]byte, bool, error) {
+func mcpServersJSONRemove(existing []byte, serverKey string) ([]byte, bool, error) {
 	root := map[string]any{}
 	if len(bytes.TrimSpace(existing)) > 0 {
 		if err := json.Unmarshal(existing, &root); err != nil {
@@ -242,6 +316,17 @@ func mcpDisconnectConfig(existing []byte, serverKey string) ([]byte, bool, error
 	return append(out, '\n'), true, nil
 }
 
+// mcpServersJSONPreview renders just the entry mcpServersJSONMerge would add, in
+// the Claude Desktop `mcpServers` JSON shape.
+func mcpServersJSONPreview(serverKey, command string, args []string) (string, error) {
+	entry, err := json.MarshalIndent(
+		map[string]any{serverKey: mcpServerEntry(command, args)}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(entry), nil
+}
+
 // mcpServerEntry builds a single mcpServers entry: {command, args}.
 func mcpServerEntry(command string, args []string) map[string]any {
 	entry := map[string]any{"command": command}
@@ -255,9 +340,9 @@ func mcpServerEntry(command string, args []string) map[string]any {
 	return entry
 }
 
-// otherServerNames lists the mcpServers keys in existing config except exclude,
-// sorted — names only, never values (which may hold secrets).
-func otherServerNames(existing []byte, exclude string) []string {
+// mcpServersJSONOtherNames lists the mcpServers keys in existing config except
+// exclude, sorted — names only, never values (which may hold secrets).
+func mcpServersJSONOtherNames(existing []byte, exclude string) []string {
 	if len(bytes.TrimSpace(existing)) == 0 {
 		return nil
 	}

@@ -19,8 +19,8 @@ func parseServers(t *testing.T, b []byte) map[string]any {
 	return servers
 }
 
-func TestMcpConnectConfig_Empty(t *testing.T) {
-	out, err := mcpConnectConfig(nil, "cix", "/usr/local/bin/cix", []string{"mcp"})
+func TestMcpServersJSONMerge_Empty(t *testing.T) {
+	out, err := mcpServersJSONMerge(nil, "cix", "/usr/local/bin/cix", []string{"mcp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,12 +38,12 @@ func TestMcpConnectConfig_Empty(t *testing.T) {
 	}
 }
 
-func TestMcpConnectConfig_PreservesOthers(t *testing.T) {
+func TestMcpServersJSONMerge_PreservesOthers(t *testing.T) {
 	existing := []byte(`{
 	  "mcpServers": { "other": { "command": "/bin/other" } },
 	  "someTopLevel": true
 	}`)
-	out, err := mcpConnectConfig(existing, "cix", "/abs/cix", []string{"mcp"})
+	out, err := mcpServersJSONMerge(existing, "cix", "/abs/cix", []string{"mcp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,12 +59,12 @@ func TestMcpConnectConfig_PreservesOthers(t *testing.T) {
 	}
 }
 
-func TestMcpConnectConfig_Idempotent(t *testing.T) {
-	first, err := mcpConnectConfig(nil, "cix", "/abs/cix", []string{"mcp"})
+func TestMcpServersJSONMerge_Idempotent(t *testing.T) {
+	first, err := mcpServersJSONMerge(nil, "cix", "/abs/cix", []string{"mcp"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := mcpConnectConfig(first, "cix", "/abs/cix", []string{"mcp"})
+	second, err := mcpServersJSONMerge(first, "cix", "/abs/cix", []string{"mcp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,27 +73,27 @@ func TestMcpConnectConfig_Idempotent(t *testing.T) {
 	}
 }
 
-func TestMcpConnectConfig_InvalidJSON(t *testing.T) {
-	if _, err := mcpConnectConfig([]byte("{ not json"), "cix", "/abs/cix", []string{"mcp"}); err == nil {
+func TestMcpServersJSONMerge_InvalidJSON(t *testing.T) {
+	if _, err := mcpServersJSONMerge([]byte("{ not json"), "cix", "/abs/cix", []string{"mcp"}); err == nil {
 		t.Error("want error for invalid existing JSON, got nil")
 	}
 }
 
-func TestOtherServerNames(t *testing.T) {
+func TestMcpServersJSONOtherNames(t *testing.T) {
 	existing := []byte(`{"mcpServers":{"cix":{"command":"x"},"github":{"command":"y"},"docker":{"command":"z"}}}`)
-	got := otherServerNames(existing, "cix")
+	got := mcpServersJSONOtherNames(existing, "cix")
 	want := "docker, github" // sorted, excluding cix
 	if strings.Join(got, ", ") != want {
 		t.Errorf("otherServerNames = %v, want %s", got, want)
 	}
 }
 
-func TestMcpDisconnectConfig(t *testing.T) {
-	existing, _ := mcpConnectConfig(
+func TestMcpServersJSONRemove(t *testing.T) {
+	existing, _ := mcpServersJSONMerge(
 		[]byte(`{"mcpServers":{"other":{"command":"/bin/other"}}}`),
 		"cix", "/abs/cix", []string{"mcp"})
 
-	out, removed, err := mcpDisconnectConfig(existing, "cix")
+	out, removed, err := mcpServersJSONRemove(existing, "cix")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestMcpDisconnectConfig(t *testing.T) {
 	}
 
 	// Removing again is a no-op.
-	_, removed2, err := mcpDisconnectConfig(out, "cix")
+	_, removed2, err := mcpServersJSONRemove(out, "cix")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -56,7 +56,7 @@ type mcpSearchInput struct {
 	Lang     []string `json:"lang,omitempty" jsonschema:"restrict to these languages, e.g. go, python, typescript."`
 	In       []string `json:"in,omitempty" jsonschema:"restrict the search to these paths; relative paths are resolved against the repository root."`
 	Exclude  []string `json:"exclude,omitempty" jsonschema:"drop these paths from the results; relative paths are resolved against the repository root."`
-	MinScore float64  `json:"min_score,omitempty" jsonschema:"minimum relevance, 0.0-1.0 (default 0.4). Lower to 0.2 for very specific or long-tail queries."`
+	MinScore *float64 `json:"min_score,omitempty" jsonschema:"minimum relevance, 0.0-1.0. Omit for the default 0.4; lower to 0.2 for very specific or long-tail queries, or 0 to let the server decide."`
 }
 
 type mcpDefinitionsInput struct {
@@ -94,9 +94,10 @@ type mcpFilesInput struct {
 type mcpWorkspaceSearchInput struct {
 	Server      string `json:"server,omitempty" jsonschema:"name of the cix server to target, from cix_list_servers. Omit to use the default server."`
 	Workspace   string `json:"workspace" jsonschema:"id or name of the workspace to search across, from cix_list_workspaces. Required."`
-	Query       string `json:"query" jsonschema:"natural-language description of the code to find across all repositories in the workspace."`
-	TopProjects int    `json:"top_projects,omitempty" jsonschema:"maximum repositories to rank (default 5)."`
-	TopChunks   int    `json:"top_chunks,omitempty" jsonschema:"maximum code chunks to return across all repositories (default 10)."`
+	Query       string   `json:"query" jsonschema:"natural-language description of the code to find across all repositories in the workspace."`
+	TopProjects int      `json:"top_projects,omitempty" jsonschema:"maximum repositories to rank (default 5)."`
+	TopChunks   int      `json:"top_chunks,omitempty" jsonschema:"maximum code chunks to return across all repositories (default 10)."`
+	MinScore    *float64 `json:"min_score,omitempty" jsonschema:"minimum relevance, 0.0-1.0. Omit for the default 0.4; pass 0 for an intentional cross-cutting sweep that should surface long-tail, low-score repos."`
 }
 
 // registerCixTools wires the cix server registry into MCP tools. The surface is
@@ -185,7 +186,7 @@ func registerCixTools(server *mcp.Server, reg *serverRegistry) {
 		if topChunks <= 0 {
 			topChunks = mcpDefaultTopChunks
 		}
-		resp, err := c.WorkspaceSearch(id, in.Query, topProjects, topChunks)
+		resp, err := c.WorkspaceSearch(id, in.Query, topProjects, topChunks, in.MinScore)
 		if err != nil {
 			return mcpErr(err), nil, nil
 		}
@@ -209,12 +210,19 @@ func registerCixTools(server *mcp.Server, reg *serverRegistry) {
 		if limit <= 0 {
 			limit = mcpDefaultSearchLimit
 		}
+		// Mirror the `cix search` CLI: an omitted min_score applies the shared
+		// default floor (searchDefaultMinScore). An explicit value — including 0
+		// to defer to the server — is passed through verbatim.
+		minScore := searchDefaultMinScore
+		if in.MinScore != nil {
+			minScore = *in.MinScore
+		}
 		resp, err := c.Search(proj, in.Query, client.SearchOptions{
 			Limit:     limit,
 			Languages: in.Lang,
 			Paths:     mcpResolveScopePaths(proj, in.In),
 			Excludes:  mcpResolveScopePaths(proj, in.Exclude),
-			MinScore:  in.MinScore,
+			MinScore:  minScore,
 		})
 		if err != nil {
 			return mcpErr(err), nil, nil
@@ -431,6 +439,11 @@ func formatWorkspaceSearch(resp *client.WorkspaceSearchResponse) string {
 		return "No matches across the workspace. Try rephrasing the query, or widen scope with a higher top_projects/top_chunks."
 	}
 	var b strings.Builder
+	// Surface a degraded status the same way the `cix ws search` CLI does —
+	// otherwise the model reads a partial result as if it were complete.
+	if resp.Status == "partial_failure" {
+		b.WriteString("⚠ Partial result: at least one repository errored, so these matches are INCOMPLETE. Treat coverage as unreliable and check the server logs.\n\n")
+	}
 	fmt.Fprintf(&b, "Workspace search — %d repo(s) ranked, %d chunk(s):\n\n", len(resp.Projects), len(resp.Chunks))
 
 	if len(resp.Projects) > 0 {
@@ -440,7 +453,11 @@ func formatWorkspaceSearch(resp *client.WorkspaceSearchResponse) string {
 			if label == "" {
 				label = p.ProjectPath
 			}
-			fmt.Fprintf(&b, "  - %s  (%s)  [score %.2f, %d hit(s)]\n", label, p.ProjectPath, p.ProjectScore, p.NumHits)
+			// Surface the blended project_score AND its bm25 (literal overlap) /
+			// dense (semantic) components — the cix-workspace skill's trust rules
+			// key off bm25-vs-dense, so the model must actually see them.
+			fmt.Fprintf(&b, "  - %s  (%s)  [score %.2f, %d hit(s); bm25 %.2f, dense %.2f]\n",
+				label, p.ProjectPath, p.ProjectScore, p.NumHits, p.BM25Score, p.DenseScore)
 		}
 		b.WriteString("\n")
 	}

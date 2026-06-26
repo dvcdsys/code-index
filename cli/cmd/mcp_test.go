@@ -10,7 +10,16 @@ import (
 	"testing"
 
 	"github.com/anthropics/code-index/cli/internal/client"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// TestRegisterCixTools_SchemaReflection guards that every tool's input schema
+// reflects cleanly — in particular the optional *float64 min_score fields on
+// cix_search / cix_workspace_search. A bad schema panics here at AddTool time.
+func TestRegisterCixTools_SchemaReflection(t *testing.T) {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "cix", Version: "test"}, nil)
+	registerCixTools(srv, newServerRegistry())
+}
 
 func TestIsCleanShutdown(t *testing.T) {
 	cases := []struct {
@@ -232,7 +241,7 @@ func TestFormatWorkspaceSearch(t *testing.T) {
 	resp := &client.WorkspaceSearchResponse{
 		Status: "ok",
 		Projects: []client.WorkspaceSearchProject{
-			{ProjectPath: "/repo/a", Label: "service-a", ProjectScore: 0.81, NumHits: 4},
+			{ProjectPath: "/repo/a", Label: "service-a", ProjectScore: 0.81, NumHits: 4, BM25Score: 0.42, DenseScore: 0.56},
 		},
 		Chunks: []client.WorkspaceSearchChunk{
 			{ProjectPath: "/repo/a", FilePath: "/repo/a/auth/mw.go", StartLine: 10, EndLine: 12,
@@ -242,6 +251,7 @@ func TestFormatWorkspaceSearch(t *testing.T) {
 	out := formatWorkspaceSearch(resp)
 	for _, want := range []string{
 		"1 repo(s) ranked", "service-a", "/repo/a", "score 0.81",
+		"bm25 0.42", "dense 0.56",
 		"auth/mw.go:10", "go Validate", "func Validate()",
 	} {
 		if !strings.Contains(out, want) {
