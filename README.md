@@ -314,8 +314,35 @@ projects and teams that make it possible:
 - [brotli](https://github.com/andybalholm/brotli) and the
   [Go](https://go.dev/) standard library and `golang.org/x` ecosystem.
 
+**CLI**
+- [Cobra](https://github.com/spf13/cobra) — the command framework behind
+  every `cix` subcommand.
+- [Charm](https://charm.sh/) — [Bubble Tea](https://github.com/charmbracelet/bubbletea),
+  [Bubbles](https://github.com/charmbracelet/bubbles), and
+  [Lip Gloss](https://github.com/charmbracelet/lipgloss) power the
+  interactive `cix config` TUI.
+- [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) — the Model
+  Context Protocol server that exposes cix to Claude Desktop & Cowork.
+- [notify](https://github.com/rjeczalik/notify) — cross-platform filesystem
+  watching for the index-on-change watcher.
+- [koanf](https://github.com/knadh/koanf) — layered configuration
+  (flags → env → `~/.cix/config.yaml`).
+
+**Dashboard (web UI)**
+- [React](https://react.dev/) + [Vite](https://vitejs.dev/) — the embedded
+  dashboard served at `/dashboard`.
+- [Radix UI](https://www.radix-ui.com/) + [Tailwind CSS](https://tailwindcss.com/)
+  — accessible component primitives and styling (the shadcn/ui pattern).
+- [TanStack Query](https://tanstack.com/query) — server-state and data
+  fetching.
+- [openapi-typescript](https://github.com/openapi-ts/openapi-typescript) —
+  generates the dashboard's API types from the OpenAPI spec.
+- [lucide](https://lucide.dev/) and [sonner](https://github.com/emilkowalski/sonner)
+  — icons and toast notifications.
+
 Full dependency lists with versions live in
-[`server/go.mod`](server/go.mod) and [`cli/go.mod`](cli/go.mod).
+[`server/go.mod`](server/go.mod), [`cli/go.mod`](cli/go.mod), and
+[`server/dashboard/package.json`](server/dashboard/package.json).
 
 ---
 
