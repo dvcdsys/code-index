@@ -295,6 +295,9 @@ projects and teams that make it possible:
 - [tree-sitter](https://tree-sitter.github.io/tree-sitter/) — AST-aware
   chunking across 30+ languages, run via
   [wazero](https://github.com/tetratelabs/wazero) (pure-Go WASM runtime).
+- [gotreesitter](https://github.com/odvcencio/gotreesitter) — the Go
+  tree-sitter binding cix's AST chunking first grew from; thank you for the
+  head start.
 - [chromem-go](https://github.com/philippgille/chromem-go) — the
   embedded cosine-similarity vector store.
 - [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) — cgo-free
