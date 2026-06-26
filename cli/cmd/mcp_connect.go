@@ -171,10 +171,14 @@ func runMCPInstall(_ *cobra.Command, args []string) error {
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
+	// The host config can hold OTHER MCP servers' secrets (API keys in their
+	// env blocks), so don't widen its permissions: preserve the existing
+	// file's mode, and create a fresh one private (0o600) rather than 0o644.
+	mode := configFileMode(cfgPath)
 	if len(existing) > 0 {
-		_ = os.WriteFile(cfgPath+".bak", existing, 0o644) // best-effort backup
+		_ = os.WriteFile(cfgPath+".bak", existing, mode) // best-effort backup
 	}
-	if err := os.WriteFile(cfgPath, out, 0o644); err != nil {
+	if err := writeFileMode(cfgPath, out, mode); err != nil {
 		return fmt.Errorf("write %s: %w", cfgPath, err)
 	}
 
@@ -209,11 +213,31 @@ func runMCPUninstall(_ *cobra.Command, args []string) error {
 		fmt.Printf("Nothing to do — no server %q in %s\n", installName, cfgPath)
 		return nil
 	}
-	if err := os.WriteFile(cfgPath, out, 0o644); err != nil {
+	if err := writeFileMode(cfgPath, out, configFileMode(cfgPath)); err != nil {
 		return fmt.Errorf("write %s: %w", cfgPath, err)
 	}
 	fmt.Printf("Removed MCP server %q from %s. Restart %s.\n", installName, cfgPath, host.displayName)
 	return nil
+}
+
+// configFileMode returns the permission bits to write a host config with. An
+// existing file's mode is preserved; a not-yet-existing one is created private
+// (0o600) because the config sits next to other servers' secret env values.
+func configFileMode(path string) os.FileMode {
+	if fi, err := os.Stat(path); err == nil {
+		return fi.Mode().Perm()
+	}
+	return 0o600
+}
+
+// writeFileMode writes data to path and enforces mode even when the file
+// already exists (os.WriteFile only applies perm bits on creation), so a
+// previously world-readable config is tightened rather than left as-is.
+func writeFileMode(path string, data []byte, mode os.FileMode) error {
+	if err := os.WriteFile(path, data, mode); err != nil {
+		return err
+	}
+	return os.Chmod(path, mode)
 }
 
 // selfExecutablePath returns the absolute, symlink-resolved path of the running

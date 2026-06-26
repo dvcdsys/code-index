@@ -435,13 +435,20 @@ func formatWorkspaceProjects(resp *client.WorkspaceProjectListResponse) string {
 }
 
 func formatWorkspaceSearch(resp *client.WorkspaceSearchResponse) string {
+	// Check the degraded status BEFORE the empty-result shortcut (like the CLI's
+	// renderSearch), so an empty result caused by repo failures isn't reported as
+	// a clean "no matches" — the model must know coverage was incomplete.
+	partial := resp != nil && resp.Status == "partial_failure"
 	if resp == nil || (len(resp.Projects) == 0 && len(resp.Chunks) == 0) {
+		if partial {
+			return "⚠ Partial result: at least one repository errored, so the workspace was searched INCOMPLETELY. The empty result may be due to those failures, not a true absence of matches — check the server logs."
+		}
 		return "No matches across the workspace. Try rephrasing the query, or widen scope with a higher top_projects/top_chunks."
 	}
 	var b strings.Builder
 	// Surface a degraded status the same way the `cix ws search` CLI does —
 	// otherwise the model reads a partial result as if it were complete.
-	if resp.Status == "partial_failure" {
+	if partial {
 		b.WriteString("⚠ Partial result: at least one repository errored, so these matches are INCOMPLETE. Treat coverage as unreliable and check the server logs.\n\n")
 	}
 	fmt.Fprintf(&b, "Workspace search — %d repo(s) ranked, %d chunk(s):\n\n", len(resp.Projects), len(resp.Chunks))

@@ -261,4 +261,9 @@ func TestFormatWorkspaceSearch(t *testing.T) {
 	if got := formatWorkspaceSearch(&client.WorkspaceSearchResponse{}); !strings.Contains(got, "No matches") {
 		t.Errorf("empty workspace search = %q", got)
 	}
+	// An empty result caused by repo failures must still warn about incomplete
+	// coverage rather than report a clean "no matches".
+	if got := formatWorkspaceSearch(&client.WorkspaceSearchResponse{Status: "partial_failure"}); !strings.Contains(got, "INCOMPLETELY") {
+		t.Errorf("empty partial_failure should warn about incomplete coverage, got %q", got)
+	}
 }
