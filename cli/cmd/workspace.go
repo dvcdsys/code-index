@@ -58,10 +58,13 @@ detailed dashboard view all live at /dashboard on the cix-server.`,
 }
 
 var (
-	wsJSON                bool
-	wsVerbose             bool
+	wsJSON              bool
+	wsVerbose           bool
 	wsSearchTopProjects int
-	wsSearchTopChunks      int
+	wsSearchTopChunks   int
+	// wsSearchMinScore < 0 means "unset" — omit the param so the server
+	// applies its default (0.4). 0 is a valid explicit value (broad sweep).
+	wsSearchMinScore float64
 )
 
 func init() {
@@ -73,6 +76,7 @@ func init() {
 	workspaceCmd.Flags().BoolVarP(&wsVerbose, "verbose", "v", false, "Show extra columns on list / describe")
 	workspaceCmd.Flags().IntVar(&wsSearchTopProjects, "top-projects", 10, "Search: top-N projects in the projects panel (1-50)")
 	workspaceCmd.Flags().IntVar(&wsSearchTopChunks, "top-chunks", 20, "Search: top-K chunks returned overall (1-200)")
+	workspaceCmd.Flags().Float64Var(&wsSearchMinScore, "min-score", -1, "Search: minimum relevance 0.0-1.0 (omit for server default 0.4; pass 0 for a broad cross-cutting sweep)")
 }
 
 func runWorkspace(cmd *cobra.Command, args []string) error {
@@ -299,7 +303,11 @@ func cmdWorkspaceSearch(cli *client.Client, identifier, query string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := cli.WorkspaceSearch(id, query, wsSearchTopProjects, wsSearchTopChunks)
+	var minScore *float64
+	if wsSearchMinScore >= 0 {
+		minScore = &wsSearchMinScore
+	}
+	resp, err := cli.WorkspaceSearch(id, query, wsSearchTopProjects, wsSearchTopChunks, minScore)
 	if err != nil {
 		return err
 	}
