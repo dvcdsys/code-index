@@ -59,7 +59,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 # Static amd64 binary (this image is amd64-only). Bump CLOUDFLARED_VERSION
 # deliberately and re-run `make scout-cuda` before any prod push. Optionally
 # pass CLOUDFLARED_SHA256 to verify the download.
-FROM --platform=linux/amd64 alpine:3.20 AS cloudflared
+FROM --platform=linux/amd64 alpine:3.24 AS cloudflared
 ARG CLOUDFLARED_VERSION=2025.2.1
 ARG CLOUDFLARED_SHA256=""
 RUN apk add --no-cache curl ca-certificates
@@ -73,7 +73,7 @@ RUN curl -fsSL \
 
 # ── Stage 1c: fetch the ngrok agent (Managed Tunnels — ngrok provider) ─────
 # Single static amd64 binary from ngrok's equinox CDN stable channel.
-FROM --platform=linux/amd64 alpine:3.20 AS ngrok
+FROM --platform=linux/amd64 alpine:3.24 AS ngrok
 ARG NGROK_CHANNEL=v3-stable
 RUN apk add --no-cache curl ca-certificates tar
 RUN curl -fsSL \
