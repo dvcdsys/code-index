@@ -690,6 +690,13 @@ func formatFileContent(fc *client.FileContent) string {
 		b.WriteString("(truncated by server limits)\n")
 	}
 	b.WriteString("\n")
+	// No lines in range (empty file or a range past EOF): the server signals this
+	// with end_line < start_line. Decide on those fields, not on Content == ""
+	// (a single blank line is legitimately empty content).
+	if fc.EndLine < fc.StartLine {
+		b.WriteString("(no lines in range)")
+		return b.String()
+	}
 	// Number lines so the model can cite precise locations.
 	lines := strings.Split(fc.Content, "\n")
 	for i, line := range lines {

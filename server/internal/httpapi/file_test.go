@@ -198,8 +198,9 @@ func TestReadProjectFile_PathTraversal(t *testing.T) {
 	checkout := writeCheckout(t, f, ext, map[string]string{"ok.txt": "fine\n"})
 	extHash := projects.HashPath(ext)
 
-	// Lexical escapes / absolute paths → 400.
-	for _, bad := range []string{"../../etc/passwd", "/etc/passwd", "a/../../b", ".."} {
+	// Lexical escapes / absolute paths / git metadata → 400. The git metadata
+	// dir is hidden from /tree and must be unreadable via /file too.
+	for _, bad := range []string{"../../etc/passwd", "/etc/passwd", "a/../../b", "..", ".git/config", ".git"} {
 		if rr, b := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/file", map[string]any{"file": bad}); rr.Code != http.StatusBadRequest {
 			t.Errorf("traversal %q = %d, want 400; body=%s", bad, rr.Code, b)
 		}
@@ -259,6 +260,46 @@ func TestReadProjectFile_LineRange(t *testing.T) {
 	past := read(map[string]any{"file": "f.txt", "start": 99})
 	if past.Content != "" {
 		t.Errorf("past = %+v", past)
+	}
+}
+
+// TestReadProjectFile_RangePastByteCap covers a file larger than the 2 MiB read
+// cap: a whole-file read returns truncated content, but a line range that
+// begins past the readable portion is a 400 (the lines exist on disk but past
+// what the server read) rather than a confusing empty 200.
+func TestReadProjectFile_RangePastByteCap(t *testing.T) {
+	f := newFileFixture(t)
+	adminCookie := adminLogin(t, f)
+	ext := "github.com/x/big@main"
+	seedExternalProject(t, f, ext)
+
+	// ~2.4 MiB: 600 lines of 4096 bytes each. Only ~511 lines fit in the 2 MiB
+	// the server reads, so a start beyond that is past the readable window.
+	line := strings.Repeat("x", 4096)
+	var sb strings.Builder
+	for i := 0; i < 600; i++ {
+		sb.WriteString(line)
+		sb.WriteByte('\n')
+	}
+	writeCheckout(t, f, ext, map[string]string{"big.txt": sb.String()})
+	extHash := projects.HashPath(ext)
+
+	// Whole-file read: truncated, but still 200 with content.
+	rr, body := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/file", map[string]any{"file": "big.txt"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("whole big = %d; body=%s", rr.Code, body)
+	}
+	var fc openapi.FileContent
+	if err := json.Unmarshal(body, &fc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !fc.Truncated || fc.Content == "" {
+		t.Errorf("whole big should be truncated with content: %+v", fc.Truncated)
+	}
+
+	// Range beginning past the readable window → 400, not an empty 200.
+	if rr, b := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/file", map[string]any{"file": "big.txt", "start": 550}); rr.Code != http.StatusBadRequest {
+		t.Errorf("range past byte cap = %d, want 400; body=%s", rr.Code, b)
 	}
 }
 

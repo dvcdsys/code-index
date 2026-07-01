@@ -70,6 +70,13 @@ func runFile(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("read file failed: %w", err)
 	}
 
+	// No lines in range (empty file, or a range past EOF): the server signals
+	// this with end_line < start_line. Decide on those authoritative fields, not
+	// on Content == "" (a single blank line is legitimately empty content).
+	if result.EndLine < result.StartLine {
+		return nil
+	}
+
 	if fileRaw {
 		fmt.Print(result.Content)
 		if !strings.HasSuffix(result.Content, "\n") {

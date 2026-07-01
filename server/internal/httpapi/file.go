@@ -99,6 +99,19 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request, _ opena
 
 	content, startLine, endLine, total, lineTruncated := sliceLines(data, body.Start, body.End)
 
+	// If the byte cap cut the file off before the requested start line, the
+	// window is empty for a reason the caller can't see (the lines exist on
+	// disk, past the 2 MiB we read). Fail loudly rather than returning a
+	// confusing empty 200. endLine < startLine only when no lines were selected;
+	// pairing it with byteTruncated isolates the "range past the cap" case from a
+	// genuinely empty file (which is not byte-truncated).
+	if byteTruncated && endLine < startLine {
+		writeError(w, http.StatusBadRequest,
+			"requested line range begins beyond the portion of this file the server can read "+
+				"(files are capped at 2 MiB); narrow the range or start earlier in the file.")
+		return
+	}
+
 	relFile := filepath.ToSlash(filepath.Clean(strings.TrimSpace(body.File)))
 	lang := langdetect.Detect(relFile)
 	var langPtr *string
@@ -252,6 +265,14 @@ func safeJoin(root, rel string) (string, error) {
 		return root, nil
 	}
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", errUnsafePath
+	}
+	// Never expose the git metadata dir (consistent with the tree listing, which
+	// hides it at root). Only the first segment can be the clone's own .git — a
+	// nested ".git" component would be a committed path git itself refuses to
+	// create, so checking the first segment is both precise and sufficient.
+	first, _, _ := strings.Cut(filepath.ToSlash(clean), "/")
+	if first == ".git" {
 		return "", errUnsafePath
 	}
 	full := filepath.Join(root, clean)
