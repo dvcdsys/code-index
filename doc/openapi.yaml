@@ -952,6 +952,97 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/projects/{path}/file:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: readProjectFile
+      tags: [projects]
+      summary: Read a file (whole or line range) from an external project's checkout
+      description: |
+        Returns the contents of a file from the server-side git checkout of an
+        EXTERNAL (GitHub-backed) project. LOCAL projects are not served — their
+        files live on the caller's machine, not on the server — and return 409
+        with a `detail` telling the caller to read the file with their own
+        filesystem tools. Omit `start`/`end` to read the whole file; otherwise
+        both are 1-based inclusive line numbers. Output is capped by server
+        size/line limits (`truncated: true` when hit).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileReadRequest"
+      responses:
+        "200":
+          description: File content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileContent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The project is local (its files are not on the server) or its
+            checkout is not yet available. `detail` explains which and what
+            to do instead.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/projects/{path}/tree:
+    parameters:
+      - $ref: "#/components/parameters/ProjectHash"
+    post:
+      operationId: listProjectTree
+      tags: [projects]
+      summary: List a directory (one level) in an external project's checkout
+      description: |
+        Lists the immediate entries of a directory in the server-side git
+        checkout of an EXTERNAL (GitHub-backed) project — ls-like, one level,
+        no recursion. Omit `dir` (or pass empty) for the repo root. LOCAL
+        projects return 409 (see the file endpoint). Entry count is capped
+        (`truncated: true` when hit); the `.git` directory is omitted.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TreeRequest"
+      responses:
+        "200":
+          description: Directory listing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirectoryListing"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The project is local or its checkout is not yet available.
+            `detail` explains which and what to do instead.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/projects/{path}/workspaces:
     parameters:
       - $ref: "#/components/parameters/ProjectHash"
@@ -4216,6 +4307,84 @@ components:
         total:
           type: integer
           minimum: 0
+
+    FileReadRequest:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          minLength: 1
+          description: Repo-relative path of the file to read.
+        start:
+          type: integer
+          minimum: 1
+          description: First line, 1-based inclusive. Omit for start of file.
+        end:
+          type: integer
+          minimum: 1
+          description: Last line, 1-based inclusive. Omit for end of file.
+
+    FileContent:
+      type: object
+      required: [file_path, start_line, end_line, total_lines, truncated, content]
+      properties:
+        file_path: { type: string }
+        language:
+          type: string
+          nullable: true
+          description: Detected language, or null if undetected.
+        start_line:
+          type: integer
+          description: First line returned (1-based inclusive).
+        end_line:
+          type: integer
+          description: Last line returned (1-based inclusive).
+        total_lines:
+          type: integer
+          description: Total line count of the file on disk.
+        truncated:
+          type: boolean
+          description: True when output was capped by server size/line limits.
+        content: { type: string }
+
+    TreeRequest:
+      type: object
+      properties:
+        dir:
+          type: string
+          description: Repo-relative directory. Omit/empty for the repo root.
+
+    TreeEntry:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string }
+        type:
+          type: string
+          enum: [file, dir]
+        size:
+          type: integer
+          description: Size in bytes (files only; 0 for directories).
+        language:
+          type: string
+          nullable: true
+          description: Detected language for files, or null.
+
+    DirectoryListing:
+      type: object
+      required: [dir, entries, truncated]
+      properties:
+        dir:
+          type: string
+          description: The listed directory (repo-relative; empty = root).
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreeEntry"
+        truncated:
+          type: boolean
+          description: True when the entry count was capped.
 
     SemanticSearchRequest:
       type: object

@@ -14,12 +14,13 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
-	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
+	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/groups"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
+	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
@@ -106,6 +107,15 @@ type Deps struct {
 	GitRepos          *gitrepos.Service
 	WorkspaceProjects *workspaceprojects.Service
 	Jobs              *jobs.Service
+	// DataDir is the base directory under which external repos are cloned
+	// (<DataDir>/repos/<path_hash>/). Source: cfg.WorkspacesDataDir. The
+	// file/tree read handlers read from this on-disk checkout. Empty in
+	// router-only tests; those handlers then 409 (no checkout on disk).
+	DataDir string
+	// RepoLocks serialises file reads against the clone worker's worktree
+	// rewrite. Shared (same instance) with repojobs.Deps.RepoLocks. Nil-safe:
+	// NewRouter allocates a private registry when unset (tests).
+	RepoLocks *repolocks.Locks
 	// PublicBaseURL is the operator-set externally-reachable URL of the
 	// server. Used to build the webhook URL surfaced when adding a repo
 	// — when empty, handlers return the path-only form and rely on the
@@ -149,6 +159,11 @@ func NewRouter(d Deps) http.Handler {
 	// default which writes to stderr.
 	if d.Logger == nil {
 		d.Logger = slog.Default()
+	}
+	// File/tree handlers and the clone worker share one lock registry. When
+	// unset (router-only tests), give this router its own so reads still lock.
+	if d.RepoLocks == nil {
+		d.RepoLocks = repolocks.New()
 	}
 	r := chi.NewRouter()
 

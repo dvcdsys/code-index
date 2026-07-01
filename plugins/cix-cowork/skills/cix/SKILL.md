@@ -120,6 +120,18 @@ Args: `project`, `pattern` (required); optional `limit`.
 Args: `project`. Returns languages, file/chunk/symbol totals, top directories,
 key symbols. A good first call when drilling into an unfamiliar repo.
 
+### `cix_file` — read an actual file (whole or a line range)
+Args: `project`, `file` (required); optional `start`, `end` (1-based inclusive).
+Returns the file's real contents from the server's checkout. **This is your
+primary way to read source here** — Cowork has no local filesystem, so instead
+of stitching code together from `cix_search` snippets, pull the whole file (or a
+range) directly. **External (GitHub-backed) projects only**: for a local project
+the server holds no files and returns an error.
+
+### `cix_tree` — list a directory (one level)
+Args: `project`; optional `dir` (omit for repo root). ls-like, no recursion —
+use it to navigate the file tree before reading a file. External projects only.
+
 (There is no init / reindex / status / watch tool — indexing is server-side.
 If results seem stale or a repo is missing, ask the user to (re)index on the
 server host.)

@@ -136,6 +136,26 @@ cix files "config"
 cix files "middleware" --limit 20
 ```
 
+### Read Files & List Directories — EXTERNAL repos only
+```bash
+cix file internal/httpapi/server.go -n github.com/owner/repo@main   # whole file
+cix file README.md --lines 1:40 -n github.com/owner/repo@main       # line range
+cix file main.go --lines 120 -n github.com/owner/repo@main          # single line
+cix tree -n github.com/owner/repo@main                              # repo root, one level
+cix tree internal/httpapi -n github.com/owner/repo@main             # a subdir
+```
+
+These read from the server's checkout of an **external (GitHub-backed)** repo —
+the way to inspect actual file contents and the file tree of a repo you do
+**not** have locally (workspace / external projects).
+
+**Use them only for OTHER repos, not the project you're in.** For the current /
+local project, the files are already on disk — use the native `Read`, `Grep`,
+and `ls`/`cat` tools, which are faster and don't round-trip the server. `cix
+file`/`cix tree` on a local project return an error telling you exactly that.
+`--lines N:M` is 1-based inclusive (`N`, `N:`, `:M` also work). Big files /
+directories are capped and marked truncated.
+
 ### Project Overview
 ```bash
 cix summary        # languages, top dirs, key symbols

@@ -66,6 +66,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/repocloner"
 	"github.com/dvcdsys/code-index/server/internal/repoindexer"
+	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
 
@@ -132,7 +133,12 @@ type Deps struct {
 	Indexer      *indexer.Service
 	VectorStore  vectorstore.Interface
 	DataDir      string // root for cloned repos: <DataDir>/repos/<path_hash>/
-	Logger       *slog.Logger
+	// RepoLocks serialises the worktree rewrite (git reset --hard inside
+	// CloneOrFetch) against concurrent file/tree reads served by the HTTP
+	// layer. Shared (same instance) with httpapi.Deps.RepoLocks. Nil-safe:
+	// when unset the clone path simply runs without the read/write barrier.
+	RepoLocks *repolocks.Locks
+	Logger    *slog.Logger
 	// DefaultPollIntervalSeconds / MinPollIntervalSeconds resolve the poll
 	// cadence when a clone/index cycle finishes for a polling-enabled repo.
 	// Mirror config.DefaultPollInterval / config.MinPollInterval.
@@ -209,6 +215,15 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 		_ = d.GithubTokens.Touch(ctx, g.TokenID)
 	}
 
+	// Serialise the worktree rewrite (git reset --hard inside CloneOrFetch)
+	// against concurrent file/tree reads. Hold the write-lock only for the
+	// duration of the on-disk mutation, not the later DB/enqueue work.
+	var unlockRepo func()
+	if d.RepoLocks != nil {
+		mu := d.RepoLocks.For(hash)
+		mu.Lock()
+		unlockRepo = mu.Unlock
+	}
 	result, err := repocloner.CloneOrFetch(ctx, repocloner.CloneOptions{
 		GitHubURL:      g.GitHubURL,
 		Branch:         g.Branch,
@@ -216,6 +231,9 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 		LocalDir:       cloneDir,
 		PrevIndexedSHA: g.IndexedSHA,
 	})
+	if unlockRepo != nil {
+		unlockRepo()
+	}
 	if err != nil {
 		d.recordFailure(ctx, g, fmt.Errorf("clone: %w", err))
 		return err
