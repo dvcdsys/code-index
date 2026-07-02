@@ -63,6 +63,15 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    ignore:
+      # The llama.cpp CUDA image is DELIBERATELY pinned by digest in
+      # Dockerfile.cuda. Upstream refactors the shared-library layout between
+      # builds (the server logic moved into libllama-server-impl.so), so a blind
+      # digest bump silently breaks the runtime .so COPY → llama-server exit 127;
+      # this took prod down once. Bump it manually via the documented process
+      # (edit the digest + `make scout-cuda` + GPU E2E), not via Dependabot.
+      # Drift is surfaced by the check-llama-pin.sh warn job (llama-pin-check.yml).
+      - dependency-name: "ghcr.io/ggml-org/llama.cpp"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
