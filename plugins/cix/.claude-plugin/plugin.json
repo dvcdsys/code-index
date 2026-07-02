@@ -1,8 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "cix",
-  "version": "0.2.1",
-  "description": "Semantic code search and navigation for Claude Code via the cix index. Single-repo cix skill + commands, plus the experimental cix-workspace skill and cix-workspace-investigator sub-agent for cross-project research across cix workspaces.",
+  "version": "0.3.0",
+  "description": "Semantic code search and navigation for Claude Code via the cix index. Single-repo cix skill + commands (incl. cix file / cix tree for external projects), plus the experimental cix-workspace skill and cix-workspace-investigator sub-agent for cross-project research across cix workspaces.",
   "author": {
     "name": "dvcdsys",
     "email": "dvcdsys@gmail.com"
