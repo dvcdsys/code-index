@@ -3,7 +3,7 @@ module github.com/dvcdsys/code-index/server
 go 1.25.11
 
 require (
-	github.com/andybalholm/brotli v1.2.1
+	github.com/andybalholm/brotli v1.2.2
 	github.com/getkin/kin-openapi v0.140.0
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-git/go-git/v5 v5.19.1
