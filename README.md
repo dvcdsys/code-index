@@ -28,12 +28,10 @@ cix symbols "UserService" --kind class
 Or open `http://localhost:21847/dashboard` in your browser.
 
 > [!IMPORTANT]
-> **Reindex your projects after upgrading the server.** Until the approach to
-> optimal file-structure parsing (tree-sitter), chunking, and related indexing
-> internals stabilizes, each server upgrade may change how code is parsed and
-> embedded. A reindex brings every project onto the new pipeline. Within a given
-> version, search is guaranteed to be consistent and complete once you have
-> reindexed.
+> **Reindex after upgrading the server.** Until the parsing/chunking/embedding
+> pipeline stabilizes, an upgrade can change how code is embedded. A reindex
+> brings every project onto the new pipeline; within a version, search is
+> consistent once reindexed.
 
 ---
 
@@ -51,16 +49,14 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 
 ## What you get
 
-- **`cix-server`** — Go HTTP API with embedded llama.cpp sidecar for embeddings, SQLite for symbols + project metadata, chromem-go for vectors, FTS5 BM25 mirror for keyword + hybrid ranking. Ships as a single distroless container.
-- **Web dashboard** at `/dashboard` — projects, semantic search, user + API-key management, runtime sidecar control, drift indicator, release-update banner, dashboard-driven reindex. Embedded directly in the server binary.
-- **`cix` CLI** — drop-in `cix search`/`cix symbols`/`cix files`/`cix workspace …` commands for terminal + agent use.
-- **File watcher** — `cix watch` keeps the index fresh as you edit, no manual reindex.
-- **Workspaces** — group multiple repositories into a named workspace; cix clones them server-side via a stored GitHub PAT, indexes them with the same pipeline, and runs hybrid BM25 + dense search across the union. GitHub webhooks auto-reindex on `push`. See [`workspaces.md`](workspaces.md) and [`doc/WORKSPACES.md`](doc/WORKSPACES.md).
-- **Ownership + view-group sharing** — every project and workspace has an owner; admins manage *view-groups* and grant per-resource shares. Private by default; external (GitHub-cloned) projects are admin-administered. CLI / dashboard surfaces only what the caller is allowed to see.
-- **Managed Tunnels** — server-orchestrated Cloudflare Tunnel or ngrok provides a public origin for GitHub webhook ingress from behind NAT. Configured + monitored from the dashboard's Managed Tunnels page; the agent binary auto-installs on demand.
-- **Git polling sync** — repos where the user isn't an admin and can't install a webhook can opt into polling instead. Cadence is per-repo, measured from the end of the last index run.
-- **Claude Code plugin** (v0.2.0+) — install once and `cix` becomes the agent's default reflex for code search. Bundles two skills (`cix`, `cix-workspace`) and a fan-out sub-agent. See [Agent integration](#agent-integration).
-- **OpenAPI as source of truth** — Go server interface + TypeScript dashboard types are generated from `doc/openapi.yaml`. Swagger UI at `/docs`.
+- **`cix-server`** — Go HTTP API with embedded llama.cpp sidecar for embeddings, SQLite for symbols + metadata, chromem-go for vectors, FTS5 BM25 mirror for hybrid ranking. Ships as a single distroless container.
+- **Web dashboard** at `/dashboard` — projects, search, users + API keys, runtime sidecar control, drift indicator. Embedded in the server binary. See [`doc/DASHBOARD.md`](doc/DASHBOARD.md).
+- **`cix` CLI** — `cix search`/`symbols`/`files`/`workspace …` for terminal + agent use. See [`doc/CLI_REFERENCE.md`](doc/CLI_REFERENCE.md).
+- **File watcher** — `cix watch` keeps the index fresh as you edit.
+- **Workspaces** — group multiple repos into one named corpus; cix clones them server-side, indexes them, and runs hybrid BM25 + dense search across the union. GitHub webhooks auto-reindex on `push`. See [`workspaces.md`](workspaces.md).
+- **Pluggable embeddings** — local llama.cpp by default; Voyage AI or any OpenAI-compatible endpoint optional. See [Embedding providers](#embedding-providers).
+- **Ownership + view-group sharing** — every project/workspace has an owner; admins share to named groups. Private by default. See [`doc/DASHBOARD.md`](doc/DASHBOARD.md#authorization-model).
+- **Claude Code plugin** — install once and `cix` becomes the agent's default reflex for code search. See [Agent integration](#agent-integration).
 
 ---
 
@@ -69,44 +65,34 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 ```
                   ┌────────────────────────────────────┐
                   │  Browser  →  http://host:21847     │
-                  │           ─────────────────────────│
-                  │  • /dashboard   React SPA          │
-                  │  • /docs        Swagger UI         │
-                  │  • /openapi.json                   │
+                  │  • /dashboard  • /docs  • /openapi │
                   └────────────┬───────────────────────┘
-                               │
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  cix-server (Go, single distroless binary)                      │
-├─────────────────────────────────────────────────────────────────┤
 │  HTTP/REST + cookie sessions + Bearer API keys                  │
 │  ├── auth, admin, api-keys, projects, indexing, search          │
 │  ├── workspaces, github-tokens, webhooks                        │
-│  ├── embedded React dashboard (//go:embed all:dist)             │
-│  └── embedded Swagger UI                                        │
+│  └── embedded React dashboard + Swagger UI                      │
 │                                                                 │
 │  Indexing pipeline                                              │
-│  ├── tree-sitter/wasm (AST chunking, 31 langs)  (wazero)        │
-│  ├── llama-server sidecar (Unix socket → CodeRankEmbed Q8 GGUF) │
+│  ├── tree-sitter/wasm (AST chunking, 30+ langs)  (wazero)       │
+│  ├── embedding provider (local llama.cpp / Voyage / OpenAI)     │
 │  ├── chromem-go (cosine similarity vector store)                │
-│  ├── SQLite FTS5 chunk mirror (BM25 — powers hybrid workspace)  │
-│  └── modernc.org/sqlite (projects, symbols, file hashes)        │
+│  └── SQLite FTS5 mirror (BM25) + metadata (modernc/sqlite)      │
 └────────────┬─────────────────────────────────────┬──────────────┘
              │ HTTP                                │ Unix socket
              ▼                                     ▼
-   cix CLI (Go) — search,           ┌──────────────────────────┐
-   symbols, files, init,            │  llama-server child proc │
-   reindex, watch, workspace        │  (llama.cpp embeddings)  │
-                                    └──────────────────────────┘
+   cix CLI (Go)                       ┌──────────────────────────┐
+   search · symbols · workspace       │  llama-server child proc │
+                                      └──────────────────────────┘
 ```
 
-The server is a pure-Go static binary; CUDA-image variants add a CUDA runtime layer for GPU embeddings. Workspace clones live in `<data-dir>/repos/`.
+Pure-Go static binary; CUDA-image variants add a CUDA runtime layer for GPU embeddings. Workspace clones live in `<data-dir>/repos/`.
 
 ---
 
 ## Quick Start
-
-Three deployment modes:
 
 | Mode | Best for | GPU | Prerequisites |
 |------|----------|-----|---------------|
@@ -116,72 +102,35 @@ Three deployment modes:
 
 ### 1. Start the server
 
-**Docker (CPU):**
-
 ```bash
 git clone https://github.com/dvcdsys/code-index && cd code-index
 cp .env.example .env
 # Edit .env — set CIX_API_KEY, CIX_BOOTSTRAP_ADMIN_EMAIL, CIX_BOOTSTRAP_ADMIN_PASSWORD
-docker compose up -d
-curl http://localhost:21847/health   # → {"status":"ok"}
+docker compose up -d                              # CPU
+# docker compose -f docker-compose.cuda.yml up -d # NVIDIA GPU
+curl http://localhost:21847/health                # → {"status":"ok"}
 ```
 
 > [!IMPORTANT]
-> On a fresh database the server **refuses to start** unless both `CIX_BOOTSTRAP_ADMIN_EMAIL` and `CIX_BOOTSTRAP_ADMIN_PASSWORD` are set. The user is created with `must_change_password=true`, so the temporary password only works for the first login. After first login you can drop the env vars from `.env`.
+> On a fresh database the server **refuses to start** unless both `CIX_BOOTSTRAP_ADMIN_EMAIL` and `CIX_BOOTSTRAP_ADMIN_PASSWORD` are set. The admin is created with `must_change_password=true` — you change it on first login, then can drop the env vars.
 
-**Docker (CUDA — NVIDIA GPU):**
+For Apple Silicon with full Metal acceleration, run natively (Docker Desktop has no Metal access) — see [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md). For shared/team deployment, see [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md).
 
-```bash
-docker compose -f docker-compose.cuda.yml up -d
-```
+### 2. Log in
 
-See [GPU Acceleration (CUDA)](#gpu-acceleration-cuda) for host requirements.
+Open `http://localhost:21847/dashboard`, sign in with the bootstrap admin, change the password when prompted. ([What's on each page](doc/DASHBOARD.md).)
 
-**Native macOS (Apple Silicon — Metal GPU):**
-
-Docker Desktop on macOS runs containers in a Linux VM with no Metal access — for full GPU acceleration on Apple Silicon, run natively.
-
-```bash
-xcode-select --install                # if not installed
-cd server && make bundle              # builds cix-server + downloads Metal-enabled llama-server
-cp .env.example .env
-# Set CIX_API_KEY, CIX_BOOTSTRAP_ADMIN_EMAIL, CIX_BOOTSTRAP_ADMIN_PASSWORD
-# Set CIX_N_GPU_LAYERS=99 for full Metal offload
-cd server && make run
-```
-
-For a launchd auto-start setup and the full env-var checklist, see [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md).
-
-### 2. Log in to the dashboard
-
-Open http://localhost:21847/dashboard and sign in with the bootstrap admin email + password. You'll be forced to change the password on first login. See [Dashboard](#dashboard) for what's on each page.
-
-### 3. Install the CLI
-
-**One-line installer (macOS / Linux):**
+### 3. Install + configure the CLI
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install.sh | bash
-```
-
-For a pre-release build from `develop`, use `install-develop.sh` instead — see [`doc/UPDATES.md`](doc/UPDATES.md#cli-install-channels). Not for production.
-
-**From source:**
-
-```bash
-cd cli && make build && make install   # → /usr/local/bin/cix
-```
-
-### 4. Configure the CLI
-
-```bash
 cix config set api.url http://localhost:21847
 cix config set api.key $(grep CIX_API_KEY .env | cut -d= -f2)
 ```
 
-Or mint a fresh API key from the dashboard's **API Keys** page.
+From source: `cd cli && make build && make install`. Pre-release `develop` channel: [`doc/UPDATES.md`](doc/UPDATES.md#cli-install-channels).
 
-### 5. Index a project and search
+### 4. Index a project and search
 
 ```bash
 cd /path/to/your/project
@@ -189,184 +138,43 @@ cix init                            # registers + indexes + starts the file watc
 cix status                          # wait for: Status: ✓ Indexed
 
 cix search "authentication middleware"
-cix search "error handling" --in ./api
 cix symbols "handleRequest" --kind function
-cix files "config"
 cix summary
 ```
 
-…or use the dashboard's **Search** page for the same five modes.
+Full command surface: [`doc/CLI_REFERENCE.md`](doc/CLI_REFERENCE.md). Same five modes are on the dashboard's **Search** page.
 
 ---
 
-## Dashboard
+## Embedding providers
 
-The dashboard ships embedded in the server binary at `/dashboard`. No extra service to run, no nginx config, no separate static-files volume.
+cix is self-hosted first: out of the box it embeds with a **bundled
+llama.cpp sidecar** and never sends your code anywhere. The backend is
+pluggable — switched at runtime from **Dashboard → Server** (admin only).
 
-| Page | Audience | What it does |
-|------|----------|--------------|
-| **Home** | everyone | Live status strip (server version, current embedding model, sidecar Ready/Loading), update-available banner when a newer `server/v*` release is published on GitHub, module shortcuts. |
-| **Projects** | everyone | List indexed projects with stats (file count, languages, symbols, vector count, sqlite/chroma sizes), per-project **Reindex** button + live indexing indicator, copy reindex commands. Cards turn red with a **Stale model** badge when the runtime embedding model differs from the model the project was indexed with (see [Drift indicator](#drift-indicator)). |
-| **Workspaces** | everyone | Group multiple repositories into a named workspace and search them as one corpus. The in-dashboard add-repo flow streams clone + index progress live; pick the org/account first, then the repo. Status tracking: `pending` → `cloning` → `indexing` → `indexed` / `failed`. Hybrid BM25 + dense search across the whole group. See [`workspaces.md`](workspaces.md). |
-| **Search** | everyone | Five modes: semantic, symbols, references, definitions, files. Same engine the CLI uses. |
-| **API Keys** | everyone | Mint long-lived `cix_*` keys (256-bit entropy, GitHub-class), copy them once, revoke at any time. Keys inherit the issuing user's role. |
-| **GitHub Tokens** | admin | Store personal access tokens used by external (cloned) projects + workspaces. Tokens are AES-256-GCM encrypted at rest; the plaintext is returned once on creation and never again. Scopes are **derived from GitHub** at storage time (not user-declared), so the dashboard shows the PAT's true capabilities. |
-| **Users** | admin | Invite teammates, set role (admin / user), reset password (forces change on next login), disable account. |
-| **Groups** | admin | Manage *view-groups* — named user sets used to share projects and workspaces with specific people. Add/remove members, grant shares from the project or workspace detail page. |
-| **Managed Tunnels** | admin | Enable a Cloudflare Tunnel or ngrok tunnel to give the server a public origin for GitHub webhook ingress from behind NAT. Configure provider, mode (quick / named), and credentials; agent binary auto-installs on demand; live status + restart + round-trip test. |
-| **Settings** | everyone | Theme, default editor, change own password. |
-| **Server** | admin | Runtime config — embedding model, `n_ctx`, `n_gpu_layers`, `n_threads`, batch size, queue concurrency. **Save & Restart** drains in-flight embeddings, restarts the sidecar, polls until ready. Source pill on each field shows whether the live value comes from the DB override, env bootstrap, or the recommended fallback. |
+| Provider | Kind | Default model | Where code goes | API key |
+|---|---|---|---|---|
+| **Local** *(default)* | `ollama` | `awhiteside/CodeRankEmbed-Q8_0-GGUF` | Stays on your machine — bundled `llama-server`, fully offline. GPU via CUDA/Metal. | none |
+| **Voyage AI** | `voyage` | `voyage-code-3` | Sent to `api.voyageai.com`. Code-specialized, retrieval-tuned, Matryoshka dims 256–2048, `int8`. | `CIX_VOYAGE_API_KEY` |
+| **OpenAI / compatible** | `openai` | `text-embedding-3-small` | Sent to the configured `base_url` (OpenAI or any compatible endpoint). | `CIX_OPENAI_API_KEY` |
 
-### Authentication
+Set the API-key env var on the **server**, then select the provider + model in
+the dashboard. Switching providers (or a provider's model/dimensions) changes
+the embedding space, so cix treats it as a new identity and a **full reindex**
+is required — vectors aren't comparable across providers.
 
-Two paths share the same identity model:
-
-- **Cookie session** (browser) — `cix_session` HttpOnly cookie, 14-day rolling TTL, `sha256(token)` stored in DB. The raw token never leaves the browser.
-- **Bearer API key** (CLI / agents / CI) — `Authorization: Bearer cix_<43-char-base64url>` header. 256 bits of entropy, hex-`sha256`-stored, scoped to the issuing user's role.
-
-### Authorization model
-
-Two roles: **`admin`** and **`user`**. On top of roles, every resource has explicit visibility:
-
-- **Local projects** (indexed via `cix init` on a developer's machine) belong to the user who ran the init and are private to that user. Project identity is per-machine — the same path on two different machines never collides.
-- **External projects** (cloned by the server from GitHub) are *ownerless* and admin-administered. They become visible to others only through a **view-group share**.
-- **Workspaces** are owned by their creator; sharing works the same way as projects.
-- **View-groups** are admin-managed named user sets. Grant a group a share on a project or workspace from its detail page; every group member then sees it as if they owned it (read-only). Admins always see everything.
-
-Every endpoint enforces this model server-side — the dashboard hides controls the caller isn't allowed to use, and the CLI surfaces a 404 (not a 403) when probing a resource the caller has no business knowing exists.
-
-### Drift indicator
-
-When you change the runtime embedding model (Server → Embedding model → Save & Restart), every project indexed with the previous model becomes stale — vectors are no longer comparable to fresh queries. The dashboard surfaces this with red borders + `Stale model` badges on project cards, and a banner on the project detail page with a copy-to-clipboard `cix reindex --full <path>` command. After running the reindex, the drift signal clears automatically.
-
-### Disabled-embeddings mode
-
-Set `CIX_EMBEDDINGS_ENABLED=false` to bring the server up without the llama-server sidecar — auth, dashboard, project metadata, and symbol / file searches all keep working; only semantic search and indexing are disabled. The Server page renders a warning banner and disables the relevant inputs.
-
-### Workspaces
-
-The **Workspaces** page groups repositories into one named workspace and searches them as a single corpus — useful for tasks that span microservices, infra-as-code, API specs, and the like. Unlike `cix init` (which indexes the project you're `cd`'d into), workspaces track repositories that the server itself clones (or local projects that you link in).
-
-See [`workspaces.md`](workspaces.md) for the user-facing workflow and [`doc/WORKSPACES.md`](doc/WORKSPACES.md) for operator setup (encryption keys, Cloudflare/ngrok tunnel, webhook + polling sync modes, REST API). The hybrid-search algorithm lives in [`doc/SEARCH_ALGORITHM.md`](doc/SEARCH_ALGORITHM.md); the webhook lifecycle in [`doc/WEBHOOKS.md`](doc/WEBHOOKS.md).
-
----
-
-## CLI Reference
-
-### Project management
-
-| Command | Description |
-|---------|-------------|
-| `cix init [path]` | Register + index + start file watcher |
-| `cix status` | Show indexing status and progress |
-| `cix list` | List all indexed projects |
-| `cix reindex [--full]` | Trigger manual reindex |
-| `cix cancel` | Cancel an in-flight indexing run |
-| `cix summary` | Project overview: languages, directories, symbols |
-
-### Search
-
-```bash
-# Semantic search — natural language, finds by meaning
-cix search <query> [flags]
-  --in <path>          restrict to file or directory (repeatable)
-  --exclude <path>     exclude file or directory (repeatable)
-  --lang <language>    filter by language (repeatable)
-  --limit, -l <n>      max results (default: 10)
-  --min-score <0-1>    minimum relevance score (default: 0.4)
-  -p <path>            project path (default: cwd)
-
-# Symbol search — fast lookup by name
-cix symbols <name> [flags]
-  --kind <type>        function | class | method | type (repeatable)
-  --limit, -l <n>      max results (default: 20)
-
-# Definition / reference navigation
-cix definitions <symbol> [--kind <type>] [--file <path>] [--limit <n>]
-cix references <symbol> [--file <path>] [--limit <n>]
-
-# File search by path pattern
-cix files <pattern> [--limit <n>]
-```
-
-### Workspaces (cross-repo)
-
-```bash
-cix workspace list                                          # all workspaces
-cix workspace "<name>"                                      # describe (default verb)
-cix workspace "<name>" describe                             # same, explicit
-cix workspace "<name>" repos                                # list repos in the workspace
-cix workspace "<name>" search "<query>" [--limit <n>]       # hybrid BM25 + dense
-```
-
-The CLI uses a name-first grammar so an agent doesn't need to juggle workspace ids. See [`workspaces.md`](workspaces.md) for the agent contract.
-
-### File watcher
-
-```bash
-cix watch [path]             # start background daemon
-cix watch --foreground       # run in terminal (Ctrl+C to stop)
-cix watch stop               # stop daemon
-cix watch status             # check if running
-```
-
-The watcher monitors the project with `fsnotify`, debounces events (5 s default), and triggers incremental reindexing automatically. Logs: `~/.cix/logs/watcher.log`.
-
-### Configuration
-
-```bash
-cix config init              # first-run wizard (TUI form)
-cix config edit              # interactive edit (TUI form)
-cix config show              # print current config (lists servers; * marks default)
-cix config keys              # list every settable key with default/env/description
-cix config set <key> <val>   # set one value
-cix config unset <key>       # remove a server / clear a key
-cix config path              # show config file location
-```
-
-Config file: `~/.cix/config.yaml`. The full key reference lives in
-[`doc/CLI_CONFIG.md`](doc/CLI_CONFIG.md) — `cix config keys` is the
-canonical runtime view.
-
-#### Env overrides (CI)
-
-| Variable        | Overrides                                |
-|-----------------|------------------------------------------|
-| `CIX_SERVER`    | which alias resolves when `--server` is empty |
-| `CIX_API_URL`   | the resolved server's URL                |
-| `CIX_API_KEY`   | the resolved server's API key            |
-
-Precedence is **flag > env > file > default**. Env overrides apply only
-to the current process — they never write back to `~/.cix/config.yaml`.
-
-#### Multiple servers
-
-`cix` can be configured with several named servers and pick one per
-command with the global `--server <alias>` flag (without it, the
-`default_server` is used):
-
-```bash
-cix config set server.corporate.url https://cix.corp.internal
-cix config set server.corporate.key cix_...
-cix config set default_server corporate     # optional
-cix --server corporate search "rate limiter"
-cix config unset server.corporate           # remove it
-```
-
-The legacy `api.url` / `api.key` keys and the `--api-url` / `--api-key`
-flags still work — they read/override the default server — and old flat
-`api:` config files are migrated to the `servers:` layout automatically
-on first load.
+> **Choosing:** **Local** for air-gapped / privacy-sensitive repos and zero
+> per-query cost. **Voyage AI** (`voyage-code-3`) for top-tier code retrieval
+> without hosting a GPU. **OpenAI / compatible** to reuse an existing endpoint
+> or internal gateway.
 
 ---
 
 ## Agent Integration
 
-`cix` is designed to be called by AI agents (Claude, GPT, Cursor, custom agents) as a shell tool. Agents run `cix search` instead of Grep/Glob — getting ranked, relevant snippets rather than raw file dumps.
+`cix` is designed to be called by AI agents (Claude, GPT, Cursor, custom agents) as a shell tool — they run `cix search` instead of Grep/Glob and get ranked snippets rather than raw file dumps.
 
-### Claude Code (recommended: install the plugin)
-
-The **`cix` Claude Code plugin** (v0.2.0+) bundles the `cix` and `cix-workspace` skills, the `cix-workspace-investigator` sub-agent (parallel per-repo fan-out for cross-project research), CLI auto-install hooks, and a grep-nudge that suggests `cix search` when the agent reaches for Grep on an indexed project. Install from the marketplace:
+**Claude Code (plugin, recommended).** Bundles the `cix` + `cix-workspace` skills, the `cix-workspace-investigator` sub-agent, CLI auto-install hooks, and a grep-nudge:
 
 ```
 /plugin marketplace add dvcdsys/code-index
@@ -374,256 +182,52 @@ The **`cix` Claude Code plugin** (v0.2.0+) bundles the `cix` and `cix-workspace`
 /reload-plugins
 ```
 
-See [`plugins/cix/README.md`](plugins/cix/README.md) for the full hook list and configuration knobs.
+Then invoke the skill **paired with the actual task** (not a search query) — `/cix <fix / implement / investigate / refactor …>`. cix becomes the agent's IDE (goto-def, find-refs, "what calls this") while it works. Manual install: `cp -r skills/cix ~/.claude/skills/cix`. For multi-repo work: `/cix-workspace <task>`. Full hook list + configuration: [`plugins/cix/README.md`](plugins/cix/README.md).
 
-If you prefer manual install or aren't using the plugin system: `cp -r skills/cix ~/.claude/skills/cix`.
-
-Then in any Claude Code session, invoke the skill **paired with the actual engineering task** — not a search query. The pattern is `/cix <fix / implement / investigate / refactor …>`:
+**Claude Desktop & Cowork (MCP).** These don't load Claude Code plugins, so cix ships a built-in stdio MCP server exposing the same search as `cix_*` tools:
 
 ```
-/cix fix the watcher hanging on files >10MB and add a regression test
-/cix implement rate limiting on /api/v1/webhook with the same limiter
-    pattern as /auth/login
-/cix investigate why semantic search returns zero hits on the security
-    package after the last reindex
-/cix refactor the embedding queue to use a ring buffer instead of slice
-    grow-and-truncate
+cix mcp install claude-desktop      # restart Claude Desktop; cix_* tools appear
+/plugin install cix-cowork@code-index   # optional: Cowork skills
 ```
 
-The slash command primes Claude with cix usage guidance; the task that follows is what Claude actually executes. Throughout the work, Claude reaches for `cix search` / `cix definitions` / `cix references` to navigate the codebase **as a tool inside the task**, not as the task itself. This is the right mental model: cix is the agent's IDE — `goto-def`, `find-refs`, "what calls this" — that lets it understand unfamiliar code before changing it.
+The model is server-centric and multi-server (no "current project" — the agent names projects/workspaces explicitly). Full guide: [`doc/COWORK_MCP.md`](doc/COWORK_MCP.md).
 
-For multi-repo work, invoke the workspace skill explicitly: `/cix-workspace <task>`. It's manual-only by design — it doesn't auto-trigger on cross-cutting prompts. See [`workspaces.md`](workspaces.md#agent-integration) for the agent contract.
-
-To activate `cix` as the default reflex without typing `/cix` every time, add to `~/.claude/CLAUDE.md`:
-
-```markdown
-## Code search
-Use `cix` for all code search instead of Grep/Glob:
-- `cix search "query"` — semantic search by meaning
-- `cix symbols "Name" --kind function` — find symbol definitions
-- `cix files "pattern"` — find files by path
-- `cix summary` — project overview
-Run `cix init` on first use in a project.
-```
-
-(The plugin's session hooks do most of this automatically once installed.)
-
-### Other agents
-
-Same pattern — give the agent shell execution and describe the commands:
+**Other agents.** Give the agent shell execution and describe the command:
 
 ```
-Tool: shell
 Usage: cix search "what you're looking for" [--in ./subdir] [--lang python]
 Returns: ranked code snippets with file paths and line numbers
 ```
-
-### Typical agent workflow
-
-```bash
-cix init /path/to/project           # first time
-
-cix summary                         # explore
-cix search "main entry point"
-
-cix search "JWT token validation"   # find specific code
-cix symbols "ValidateToken" --kind function
-
-cix references ValidateToken        # navigate
-cix search "error handling in auth flow" --in ./api
-```
-
----
-
-## How indexing works
-
-**Chunking** — tree-sitter parses code into semantic chunks (functions, classes, methods). Unsupported languages fall back to a sliding window (2000 chars, 256 char overlap). 30+ languages have AST extraction — see [`doc/LANGUAGES.md`](doc/LANGUAGES.md) for the full list.
-
-**Embeddings** — each chunk is encoded with a GGUF build of CodeRankEmbed (default: [awhiteside/CodeRankEmbed-Q8_0-GGUF](https://huggingface.co/awhiteside/CodeRankEmbed-Q8_0-GGUF); 768d, 8192-token context, ~145 MB on disk) via the `llama-server` sidecar (llama.cpp). Queries get a `"Represent this query for searching relevant code: "` prefix for asymmetric retrieval.
-
-**Path-aware preamble** — each chunk is embedded with its file path, language, and parent symbol prefixed. This makes "auth middleware" find `auth.go` even if the file content uses different vocabulary. Toggle with `CIX_EMBED_INCLUDE_PATH` (default `true`); changing it requires `cix reindex --full`.
-
-**FTS5 / BM25 mirror** — every chunk also lands in a SQLite FTS5 virtual table indexed by trigram over `(content, symbol_name, file_path)`. Single-project search stays pure-dense; the BM25 mirror powers hybrid workspace search (acronym precision + project-level relevance gating). See [`doc/SEARCH_ALGORITHM.md`](doc/SEARCH_ALGORITHM.md).
-
-**Incremental reindex** — uses SHA-256 file hashes. Only new or changed files are re-embedded. Deleted files are removed from the index.
-
-**Filtering** — respects `.gitignore` and `.cixignore`, skips common dirs (`node_modules`, `.git`, `.venv`, etc.), skips files >`CIX_MAX_FILE_SIZE` (512 KiB default) and empty files. Per-project configuration via `.cixconfig.yaml` (see below).
-
----
-
-## Tuning search quality
-
-`cix` defaults to `--min-score 0.4`, calibrated for **CodeRankEmbed-Q8_0** with the path-aware embedding format. Typical score landscape on a real codebase:
-
-| Match strength | Score range | Action |
-|---|---|---|
-| Exact symbol or filename match | 0.65 – 0.80 | rare; very high confidence |
-| Strong path-aware concept match | 0.50 – 0.65 | typical "good" match |
-| Weaker concept / partial path overlap | 0.40 – 0.50 | typical for ambiguous queries |
-| Likely unrelated noise | < 0.40 | filtered out by default |
-
-**When to lower the threshold:** sparse queries returning no results — try `--min-score 0.25`. Exploring an unfamiliar codebase — `--min-score 0.2`. Rare single-word identifiers.
-
-**When to raise it:** agent context filling up with weak matches — `--min-score 0.5` or `0.6`.
-
-CodeRankEmbed is asymmetric: queries and passages live in different regions of the embedding space, so cosine similarities are systematically lower than for symmetric models. Don't compare these numbers to thresholds quoted for OpenAI / Voyage / generic sentence-transformers. Full details — including hybrid workspace scoring — in [`doc/SEARCH_ALGORITHM.md`](doc/SEARCH_ALGORITHM.md).
-
-For noisy directories (vendored code, fixtures, legacy migrations), `--exclude vendor --exclude bench/fixtures` works per-query, or add entries to `.cixignore` to skip them at indexing time.
-
----
-
-## Per-project configuration
-
-### `.cixignore` — exclude files from indexing
-
-Works exactly like `.gitignore` (same syntax, same nesting rules). Patterns are merged with `.gitignore` — you don't need to duplicate rules. Use this for files you want excluded from the *index* that aren't already excluded from git (vendored code, generated files, large test fixtures):
-
-```gitignore
-# .cixignore
-api/generated/
-vendor/
-*.pb.go
-testdata/fixtures/
-```
-
-Nested `.cixignore` files work like nested `.gitignore`. The file watcher automatically triggers a full reindex when `.cixignore` is created, modified, or deleted.
-
-### `.cixconfig.yaml` — project-level settings
-
-Place in the project root:
-
-```yaml
-ignore:
-  submodules: true   # automatically exclude all git submodule paths
-```
-
-When `ignore.submodules` is `true`, cix reads `.gitmodules` and excludes all submodule paths from indexing. No git binary required — the file is parsed directly. Useful for Foundry/Forge dependencies, vendored submodules, or any repo where submodules contain thousands of files you don't want indexed. The watcher triggers a full reindex when this file changes.
 
 ---
 
 ## Configuration
 
-The most common environment variables:
+Most common environment variables (full surface in [`doc/CONFIG_REFERENCE.md`](doc/CONFIG_REFERENCE.md); most are runtime-editable from **Dashboard → Server**):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CIX_API_KEY` | — | Bearer token for CLI/agents. Required. |
+| `CIX_API_KEY` | — | Bearer token for CLI/agents. **Required.** |
+| `CIX_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | — | Required on a fresh DB; seeds the first admin. |
 | `CIX_PORT` | `21847` | Listen port. |
-| `CIX_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | — | Required on a fresh DB; promotes a first admin and forces password change on first login. |
-| `CIX_EMBEDDING_MODEL` | `awhiteside/CodeRankEmbed-Q8_0-GGUF` | GGUF repo or absolute path. |
+| `CIX_EMBEDDING_MODEL` | `awhiteside/CodeRankEmbed-Q8_0-GGUF` | Local GGUF repo or absolute path. |
 | `CIX_N_GPU_LAYERS` | `-1` macOS / `0` else / `99` Docker CUDA | `99` = full offload, `0` = CPU. |
 | `CIX_EMBEDDINGS_ENABLED` | `true` | `false` boots without the llama sidecar. |
-| `CIX_VERSION_CHECK_ENABLED` | `true` | `false` disables the GitHub release-poll banner. |
-| `CIX_SECRET_KEY` / `_KEYFILE` | auto-generated keyfile | AES-256-GCM key for `github_tokens` encryption at rest. Auto-generated under the SQLite parent dir if neither is set; **back this up** (regenerating it invalidates every stored PAT). |
-| `CIX_REPOS_DIR` | `<sqlite-dir>/repos` | Where workspace-cloned GitHub repos live. Legacy alias: `CIX_WORKSPACES_DATA_DIR`. |
-| `CIX_PUBLIC_URL` | — | Public origin used to build webhook URLs (e.g. `https://cix.example.com`). Trumped by a live Managed Tunnel when one is up. |
-| `CIX_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`. |
-| `CIX_DEFAULT_POLL_INTERVAL` | `5m` | Cadence for repos opted into polling sync (Go duration string). Floor `CIX_MIN_POLL_INTERVAL=60s`. |
-| `CIX_TUNNEL_BIN_MANAGED` | `false` | Allow the server to auto-install Cloudflare / ngrok agent binaries on demand. |
+| `CIX_SECRET_KEY` / `_KEYFILE` | auto-generated keyfile | AES-256-GCM key for `github_tokens` encryption. **Back this up.** |
+| `CIX_PUBLIC_URL` | — | Public origin for webhook URLs. Trumped by a live Managed Tunnel. |
 
-Workspaces are always available — no feature gate. The full env-var surface (auth, storage, sidecar tuning, secret-key resolution, tunnel + polling knobs, runtime overrides) lives in [`doc/CONFIG_REFERENCE.md`](doc/CONFIG_REFERENCE.md). Anything in the "Tuning" group is editable at runtime from **Dashboard → Server**.
+The REST surface (auth, users, projects, indexing, search, workspaces, webhooks) is documented at `http://<host>:21847/docs` (Swagger UI) and in [`doc/openapi.yaml`](doc/openapi.yaml) — the single source of truth the Go interface and TypeScript types are generated from.
 
 ---
 
-## REST API
+## Deploying & operating
 
-The HTTP surface covers auth + sessions, users + API keys (admin), projects + indexing + search, workspaces + GitHub tokens, runtime config, and webhook reception. All endpoints except `/health`, `/api/v1/auth/login`, `/api/v1/auth/bootstrap-status`, `/dashboard/*`, `/docs`, and `/openapi.json` require authentication (Bearer API key *or* session cookie).
-
-The full schema with request/response shapes lives in [`doc/openapi.yaml`](doc/openapi.yaml) and is browsable at `http://<host>:21847/docs` (Swagger UI). The Go server interface and the TypeScript dashboard types are generated from that one file.
-
----
-
-## Troubleshooting
-
-**Server refuses to start: `bootstrap auth: no users in database and the bootstrap admin env vars are not set`** → Set both `CIX_BOOTSTRAP_ADMIN_EMAIL` and `CIX_BOOTSTRAP_ADMIN_PASSWORD` in your `.env`, restart. Once you log in and change the password, you can drop the env vars (the user lives in the DB).
-
-**`API key not set` from CLI**
-```bash
-cix config set api.key $(grep CIX_API_KEY /path/to/code-index/.env | cut -d= -f2)
-# or mint a fresh one in the dashboard's API Keys page
-```
-
-**`connection refused`**
-```bash
-curl http://localhost:21847/health                    # is the server up?
-docker compose up -d                                  # start (CPU)
-docker compose -f docker-compose.cuda.yml up -d       # start (CUDA)
-```
-
-**`project not found`** — run `cix init /path/to/project`.
-
-**Watcher not triggering reindex**
-```bash
-cix watch status
-cat ~/.cix/logs/watcher.log
-cix watch stop && cix watch /path/to/project
-```
-
-**Search returns no results**
-- Check the project is indexed: `cix status`
-- Lower the threshold: `cix search "query" --min-score 0.2` (default `0.4`)
-- `cix list` to verify the project is registered
-
-**Dashboard shows "Stale model" on every project after upgrade** → The runtime model was changed (or its version stamp shifted). Either reindex affected projects (`cix reindex --full` per project) or revert the model change in **Server → Embedding model**.
-
-**Dashboard banner says an update is available** → A newer `server/v*` release is on GitHub. Click through to the release notes; bump your Docker tag / native build at a convenient time. Disable the poll with `CIX_VERSION_CHECK_ENABLED=false` if you don't want it. See [`doc/UPDATES.md`](doc/UPDATES.md).
-
-**Workspace repo stuck in `cloning` or `indexing`** → Check **Workspaces → Jobs** in the dashboard or `GET /api/v1/jobs?status=running`. Common causes: PAT missing `repo` scope on a private repo, network not reaching github.com, sidecar not ready. See [`doc/WORKSPACES.md`](doc/WORKSPACES.md#troubleshooting).
-
-**Forgot the admin password and there's no second admin** → See `doc/SECURITY_DEPLOYMENT.md`. Better long-term: keep at least two admin accounts so this never recurs.
-
----
-
-## GPU Acceleration (CUDA)
-
-A CUDA-enabled image is available for servers with NVIDIA GPUs. Inference runs on GPU automatically — no configuration needed.
-
-### VRAM Usage (CodeRankEmbed Q8_0 GGUF, RTX 3090)
-
-With the GGUF backend the footprint is near-constant: weights (~200–250 MB) plus the pre-allocated context (`n_ctx=8192`, ~200–400 MB) give a **~0.5–0.7 GB** idle draw. Embedding calls do not spike VRAM the way fp16 PyTorch attention used to — sequence length and batch size only change latency, not peak memory.
-
-`CIX_MAX_CHUNK_TOKENS` still caps the length of each code chunk (1 token ≈ 4 chars) and must stay ≤ `CIX_LLAMA_CTX` (8192). `CIX_MAX_EMBEDDING_CONCURRENCY` defaults to `5` — the indexing queue ships chunks in parallel; the llama-server sidecar still serialises requests through one context, but pipelining host-side prep with device inference at this depth saturates the GPU without measurable latency cost. Drop to `1` only if you observe contention.
-
-See [`doc/vram-profiling.md`](doc/vram-profiling.md) for methodology and numbers, and [`doc/benchmarks.md`](doc/benchmarks.md) for the quantization comparison that picked Q8_0 as the default.
-
-### Image base
-
-The CUDA image is built on `gcr.io/distroless/cc-debian13:nonroot` (Debian 13 trixie, glibc 2.41, gcc 14) with CUDA shared libraries copied from `nvidia/cuda:12.8.1-base-ubuntu24.04`. No shell, apt, dpkg, or Ubuntu OS layer in the final image. See [`doc/DOCKER_TAGS.md`](doc/DOCKER_TAGS.md) for the full lifecycle and CVE delta.
-
-**Host requirements:**
-
-- NVIDIA GPU with driver **≥ 520** (CUDA 12.x compatible)
-- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host
-
-**Docker Compose:**
-
-```bash
-docker compose -f docker-compose.cuda.yml up -d
-```
-
-**Portainer:** use `portainer-stack-cuda.yml` — deploy as a new stack with `API_KEY`, `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD` env variables set.
-
----
-
-## Server Management
-
-```bash
-docker compose up -d                                # start (CPU)
-docker compose -f docker-compose.cuda.yml up -d     # start (CUDA)
-docker compose logs -f                              # tail logs
-docker compose down                                 # stop
-docker compose down -v                              # stop AND wipe data + models (destructive)
-```
-
-Developer builds (from source):
-
-```bash
-cd server
-make build                  # compile cix-server binary
-make bundle                 # build + fetch llama-server (macOS Metal)
-make run                    # bundle + launch with .env (dev)
-make test                   # go test ./...
-```
+- **Team / production deployment** — topology, volumes, UID/permissions, TLS, backups, upgrades: [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md).
+- **GPU (CUDA)** — host requirements, VRAM footprint, image base: [`doc/DOCKER_TAGS.md`](doc/DOCKER_TAGS.md), [`doc/vram-profiling.md`](doc/vram-profiling.md). Inference runs on GPU automatically with the `cu128` image.
+- **Security hardening** — trusted-proxy posture, rate limits, body-size caps, what cix deliberately doesn't do: [`doc/SECURITY_DEPLOYMENT.md`](doc/SECURITY_DEPLOYMENT.md).
+- **Releases** — tagging, CVE scans, Scout workflow, make targets: [`doc/RELEASES.md`](doc/RELEASES.md).
+- **Troubleshooting** — common errors + search tuning: [`doc/TROUBLESHOOTING.md`](doc/TROUBLESHOOTING.md).
 
 Pre-built images on Docker Hub:
 
@@ -632,23 +236,12 @@ Pre-built images on Docker Hub:
 | `dvcdsys/code-index:latest` | linux/amd64 + linux/arm64 | CPU |
 | `dvcdsys/code-index:cu128` | linux/amd64 | NVIDIA GPU (CUDA 12.8) |
 | `dvcdsys/code-index:<version>` / `<version>-cu128` | — | Version-pinned variants |
-| `dvcdsys/code-index:develop-cu128` | linux/amd64 | Pre-release CUDA — pairs with the develop CLI channel |
 
-For the full release procedure (tagging, CVE scans, Scout workflow, make targets), see [`doc/RELEASES.md`](doc/RELEASES.md). For tag lifecycle policy, [`doc/DOCKER_TAGS.md`](doc/DOCKER_TAGS.md).
-
----
-
-## Security
-
-The server is designed for a trusted-network or behind-a-reverse-proxy deployment. See [`doc/SECURITY_DEPLOYMENT.md`](doc/SECURITY_DEPLOYMENT.md) for:
-
-- Trusted-proxy posture for `X-Forwarded-For` (load-bearing for the per-IP login rate limiter)
-- TLS / `Secure` cookie auto-detection
-- Login brute-force resistance (5/(IP,email)/15min + 60/IP/min)
-- Body-size caps (1 MiB default, 64 MiB on `/index/files`)
-- Bootstrap admin lifecycle, password policy
-- API key scoping (inherits owner's role)
-- What the server explicitly does **not** do (CSRF tokens, CORS, multi-tenancy, self-service reset)
+```bash
+docker compose logs -f          # tail logs
+docker compose down             # stop
+docker compose down -v          # stop AND wipe data + models (destructive)
+```
 
 ---
 
@@ -656,10 +249,15 @@ The server is designed for a trusted-network or behind-a-reverse-proxy deploymen
 
 | Doc | Purpose |
 |---|---|
+| [`doc/CLI_REFERENCE.md`](doc/CLI_REFERENCE.md) | Full CLI command surface + per-project config (`.cixignore`, `.cixconfig.yaml`) |
+| [`doc/DASHBOARD.md`](doc/DASHBOARD.md) | Dashboard pages, authentication, authorization model, drift indicator |
+| [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md) | Self-hosting cix for a team — production / shared-infrastructure deployment for DevOps |
+| [`doc/TROUBLESHOOTING.md`](doc/TROUBLESHOOTING.md) | Common issues + search-quality tuning (`--min-score`) |
 | [`workspaces.md`](workspaces.md) | User-facing workspace guide (when to use, agent trust rules, query patterns) |
 | [`doc/WORKSPACES.md`](doc/WORKSPACES.md) | Operator setup (encryption keys, Cloudflare tunnel, workers, REST API) |
 | [`doc/SEARCH_ALGORITHM.md`](doc/SEARCH_ALGORITHM.md) | How per-project + hybrid workspace search rank results |
 | [`doc/WEBHOOKS.md`](doc/WEBHOOKS.md) | GitHub webhook lifecycle, modes, HMAC validation |
+| [`doc/COWORK_MCP.md`](doc/COWORK_MCP.md) | Using cix from Claude Desktop / Cowork over MCP (`cix mcp install`, multi-server) |
 | [`doc/UPDATES.md`](doc/UPDATES.md) | Release-poll banner + stable vs develop install channels |
 | [`doc/CONFIG_REFERENCE.md`](doc/CONFIG_REFERENCE.md) | Complete env-var reference |
 | [`doc/RELEASES.md`](doc/RELEASES.md) | Cutting CLI + server releases, CVE scans, make targets |
@@ -672,6 +270,79 @@ The server is designed for a trusted-network or behind-a-reverse-proxy deploymen
 | [`doc/openapi.yaml`](doc/openapi.yaml) | REST API source of truth |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contributor workflow |
 | [`plugins/cix/README.md`](plugins/cix/README.md) | Claude Code plugin reference |
+| [`plugins/cix-cowork/README.md`](plugins/cix-cowork/README.md) | Cowork skills plugin (MCP-based) reference |
+
+---
+
+## Acknowledgements
+
+cix stands on a lot of excellent open-source work. Thank you to the
+projects and teams that make it possible:
+
+**Embeddings & models**
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — the `llama-server`
+  sidecar that runs embeddings locally on CPU/GPU.
+- [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) by
+  Nomic AI — the default code-retrieval embedding model — and
+  [awhiteside/CodeRankEmbed-Q8_0-GGUF](https://huggingface.co/awhiteside/CodeRankEmbed-Q8_0-GGUF)
+  for the GGUF quantization cix ships with.
+- [Voyage AI](https://www.voyageai.com/) — `voyage-code-3` and the
+  code-specialized embedding API, supported as a first-class provider.
+- [OpenAI](https://platform.openai.com/docs/guides/embeddings) — the
+  `text-embedding-3` family and the OpenAI-compatible provider shape.
+
+**Indexing & storage**
+- [tree-sitter](https://tree-sitter.github.io/tree-sitter/) — AST-aware
+  chunking across 30+ languages, run via
+  [wazero](https://github.com/tetratelabs/wazero) (pure-Go WASM runtime).
+- [gotreesitter](https://github.com/odvcencio/gotreesitter) — the Go
+  tree-sitter binding cix's AST chunking first grew from; thank you for the
+  head start.
+- [chromem-go](https://github.com/philippgille/chromem-go) — the
+  embedded cosine-similarity vector store.
+- [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) — cgo-free
+  SQLite for project metadata, symbols, and the FTS5/BM25 mirror.
+- [go-git](https://github.com/go-git/go-git) — server-side repository
+  cloning for workspaces.
+
+**Server & API**
+- [chi](https://github.com/go-chi/chi) — HTTP router.
+- [kin-openapi](https://github.com/getkin/kin-openapi) +
+  [oapi-codegen](https://github.com/oapi-codegen/oapi-codegen) —
+  OpenAPI-as-source-of-truth codegen for the Go interface and TypeScript
+  dashboard types.
+- [brotli](https://github.com/andybalholm/brotli) and the
+  [Go](https://go.dev/) standard library and `golang.org/x` ecosystem.
+
+**CLI**
+- [Cobra](https://github.com/spf13/cobra) — the command framework behind
+  every `cix` subcommand.
+- [Charm](https://charm.sh/) — [Bubble Tea](https://github.com/charmbracelet/bubbletea),
+  [Bubbles](https://github.com/charmbracelet/bubbles), and
+  [Lip Gloss](https://github.com/charmbracelet/lipgloss) power the
+  interactive `cix config` TUI.
+- [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) — the Model
+  Context Protocol server that exposes cix to Claude Desktop & Cowork.
+- [notify](https://github.com/rjeczalik/notify) — cross-platform filesystem
+  watching for the index-on-change watcher.
+- [koanf](https://github.com/knadh/koanf) — layered configuration
+  (flags → env → `~/.cix/config.yaml`).
+
+**Dashboard (web UI)**
+- [React](https://react.dev/) + [Vite](https://vitejs.dev/) — the embedded
+  dashboard served at `/dashboard`.
+- [Radix UI](https://www.radix-ui.com/) + [Tailwind CSS](https://tailwindcss.com/)
+  — accessible component primitives and styling (the shadcn/ui pattern).
+- [TanStack Query](https://tanstack.com/query) — server-state and data
+  fetching.
+- [openapi-typescript](https://github.com/openapi-ts/openapi-typescript) —
+  generates the dashboard's API types from the OpenAPI spec.
+- [lucide](https://lucide.dev/) and [sonner](https://github.com/emilkowalski/sonner)
+  — icons and toast notifications.
+
+Full dependency lists with versions live in
+[`server/go.mod`](server/go.mod), [`cli/go.mod`](cli/go.mod), and
+[`server/dashboard/package.json`](server/dashboard/package.json).
 
 ---
 

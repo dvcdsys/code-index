@@ -66,6 +66,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/repocloner"
 	"github.com/dvcdsys/code-index/server/internal/repoindexer"
+	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
 
@@ -132,7 +133,12 @@ type Deps struct {
 	Indexer      *indexer.Service
 	VectorStore  vectorstore.Interface
 	DataDir      string // root for cloned repos: <DataDir>/repos/<path_hash>/
-	Logger       *slog.Logger
+	// RepoLocks serialises the worktree rewrite (git reset --hard inside
+	// CloneOrFetch) against concurrent file/tree reads served by the HTTP
+	// layer. Shared (same instance) with httpapi.Deps.RepoLocks. Nil-safe:
+	// when unset the clone path simply runs without the read/write barrier.
+	RepoLocks *repolocks.Locks
+	Logger    *slog.Logger
 	// DefaultPollIntervalSeconds / MinPollIntervalSeconds resolve the poll
 	// cadence when a clone/index cycle finishes for a polling-enabled repo.
 	// Mirror config.DefaultPollInterval / config.MinPollInterval.
@@ -209,13 +215,28 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 		_ = d.GithubTokens.Touch(ctx, g.TokenID)
 	}
 
-	result, err := repocloner.CloneOrFetch(ctx, repocloner.CloneOptions{
-		GitHubURL:      g.GitHubURL,
-		Branch:         g.Branch,
-		PAT:            pat,
-		LocalDir:       cloneDir,
-		PrevIndexedSHA: g.IndexedSHA,
-	})
+	// Serialise the worktree rewrite (git reset --hard inside CloneOrFetch)
+	// against concurrent file/tree reads and indexing. WithWrite holds the
+	// write-lock only for the duration of the on-disk mutation (not the later
+	// DB/enqueue work) and releases it even if CloneOrFetch panics — the jobs
+	// worker recovers panics, so a plain Lock/Unlock would leak it forever.
+	var result repocloner.Result
+	clone := func() error {
+		var cerr error
+		result, cerr = repocloner.CloneOrFetch(ctx, repocloner.CloneOptions{
+			GitHubURL:      g.GitHubURL,
+			Branch:         g.Branch,
+			PAT:            pat,
+			LocalDir:       cloneDir,
+			PrevIndexedSHA: g.IndexedSHA,
+		})
+		return cerr
+	}
+	if d.RepoLocks != nil {
+		err = d.RepoLocks.WithWrite(hash, clone)
+	} else {
+		err = clone()
+	}
 	if err != nil {
 		d.recordFailure(ctx, g, fmt.Errorf("clone: %w", err))
 		return err
@@ -348,7 +369,20 @@ func handleIndex(ctx context.Context, d Deps, job jobs.Job) error {
 		wipe = true
 	}
 
-	_, _, err = repoindexer.IndexDir(ctx, d.Indexer, g.ProjectPath, cloneDir, wipe, changes, repoindexer.DefaultFilter(), d.Logger)
+	// Read-lock the worktree while indexing: IndexDir walks and reads the same
+	// checkout the clone worker rewrites with git reset --hard. Clone (write) and
+	// index (read) jobs for one repo can otherwise run on separate workers and a
+	// concurrent reset would tear the index across two revisions. Held for the
+	// full walk so the writer waits rather than resetting under us.
+	index := func() error {
+		_, _, ierr := repoindexer.IndexDir(ctx, d.Indexer, g.ProjectPath, cloneDir, wipe, changes, repoindexer.DefaultFilter(), d.Logger)
+		return ierr
+	}
+	if d.RepoLocks != nil {
+		err = d.RepoLocks.WithRead(projects.HashPath(g.ProjectPath), index)
+	} else {
+		err = index()
+	}
 	if err != nil {
 		// A force-stop deletes the active indexer session out from under
 		// IndexDir; the next ProcessFiles/FinishIndexing then returns

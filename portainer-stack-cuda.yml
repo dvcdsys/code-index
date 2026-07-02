@@ -1,6 +1,6 @@
 services:
   code-index-api:
-    image: dvcdsys/code-index:go-cu128
+    image: dvcdsys/code-index:cu128
     container_name: code-index
     restart: unless-stopped
     ports:

@@ -20,6 +20,13 @@ var (
 	searchName      string
 )
 
+// searchDefaultMinScore is the default relevance floor for code search.
+// It is the single source of truth shared by the `cix search` CLI flag and
+// the MCP `cix_search` tool, so both surfaces apply the same threshold.
+// Calibrated for CodeRankEmbed-Q8_0 with path-aware embedding
+// (CIX_EMBED_INCLUDE_PATH=true); below it, results are usually unrelated.
+const searchDefaultMinScore = 0.4
+
 // searchCmd represents the search command
 var searchCmd = &cobra.Command{
 	Use:   "search <query>",
@@ -52,11 +59,11 @@ func init() {
 	searchCmd.Flags().StringSliceVar(&searchLanguages, "lang", nil, "Filter by language")
 	searchCmd.Flags().StringSliceVar(&searchPaths, "in", nil, "Search within file or directory (relative or absolute path)")
 	searchCmd.Flags().StringSliceVar(&searchExcludes, "exclude", nil, "Exclude file or directory from results (relative or absolute path)")
-	// Default threshold of 0.4 calibrated for CodeRankEmbed-Q8_0 with
-	// path-aware embedding (CIX_EMBED_INCLUDE_PATH=true). Below 0.4 results
-	// are usually unrelated; lower it explicitly for very specific or
-	// long-tail queries via --min-score 0.2.
-	searchCmd.Flags().Float64Var(&searchMinScore, "min-score", 0.4, "Minimum relevance score (lower with --min-score 0.2 if your query returns nothing)")
+	// Default threshold (searchDefaultMinScore) calibrated for CodeRankEmbed-Q8_0
+	// with path-aware embedding (CIX_EMBED_INCLUDE_PATH=true). Below it results
+	// are usually unrelated; lower it explicitly for very specific or long-tail
+	// queries via --min-score 0.2.
+	searchCmd.Flags().Float64Var(&searchMinScore, "min-score", searchDefaultMinScore, "Minimum relevance score (lower with --min-score 0.2 if your query returns nothing)")
 	searchCmd.Flags().StringVarP(&searchProject, "project", "p", "", "Project path (default: current directory)")
 	searchCmd.Flags().StringVarP(&searchName, "name", "n", "", "Project ID (exact match against `cix list`). Mutually exclusive with -p.")
 	searchCmd.MarkFlagsMutuallyExclusive("project", "name")

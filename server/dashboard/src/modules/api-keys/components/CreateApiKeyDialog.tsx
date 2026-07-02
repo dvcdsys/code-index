@@ -24,14 +24,29 @@ import { useCreateApiKey } from '../hooks';
 // of 2026; keeping it as a fallback turns "no way to copy" into "always works".
 function legacyCopy(text: string): boolean {
   if (typeof document === 'undefined') return false;
+  // The reveal screen auto-selects the "Full key" input on mount. On WebKit a
+  // lingering selection/focus — or an execCommand('copy') that silently fails —
+  // can make the copy read THAT selection instead of our textarea, so the
+  // "Connect the cix CLI" button ended up copying the bare key. Drop the old
+  // focus/selection first so only our textarea can be the copy source.
+  const active = document.activeElement as HTMLElement | null;
+  if (active && typeof active.blur === 'function') active.blur();
   const ta = document.createElement('textarea');
   ta.value = text;
   ta.setAttribute('readonly', '');
+  // Position off-screen instead of opacity:0. WebKit refuses
+  // execCommand('copy') on nodes it treats as invisible (opacity:0) — it copies
+  // nothing, so the stale selection wins. An off-screen but rendered textarea
+  // copies reliably.
   ta.style.position = 'fixed';
-  ta.style.opacity = '0';
+  ta.style.top = '-9999px';
+  ta.style.left = '-9999px';
   document.body.appendChild(ta);
   ta.focus();
   ta.select();
+  // iOS / older Safari ignore textarea.select(); setSelectionRange establishes
+  // the range execCommand('copy') actually reads.
+  ta.setSelectionRange(0, text.length);
   let ok = false;
   try {
     ok = document.execCommand('copy');

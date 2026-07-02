@@ -158,12 +158,14 @@ sync. After editing the source:
 
 ```bash
 plugins/cix/scripts/sync-skills.sh             # copy source → plugin
-plugins/cix/scripts/sync-skills.sh --check     # CI-friendly drift check
+plugins/cix/scripts/sync-skills.sh --check     # drift check (also run in CI)
 ```
 
-Do not edit the plugin copy directly; the next sync overwrites it. The
-standalone `skills/cix/SKILL.md` is **not** synced — the plugin version
-carries extra frontmatter the standalone loader does not need.
+`--check` runs in `ci-plugin.yml` on every push/PR that touches `skills/`
+or `plugins/`, so a divergence fails CI before merge. Do not edit the
+plugin copy directly; the next sync overwrites it. The standalone
+`skills/cix/SKILL.md` is **not** synced — the plugin version carries
+extra frontmatter the standalone loader does not need.
 
 ## Making changes
 

@@ -8,13 +8,15 @@ on:
   push:
     branches: [main, develop]
     paths:
-      - 'plugins/cix/**'
+      - 'plugins/**'
+      - 'skills/**'
       - '.claude-plugin/**'
       - '.github/workflows/ci-plugin.yml'
   pull_request:
     branches: [main, develop]
     paths:
-      - 'plugins/cix/**'
+      - 'plugins/**'
+      - 'skills/**'
       - '.claude-plugin/**'
       - '.github/workflows/ci-plugin.yml'
 
@@ -63,6 +65,15 @@ jobs:
           jq . .claude-plugin/marketplace.json
           jq . plugins/cix/.claude-plugin/plugin.json
           jq . plugins/cix/hooks/hooks.json
+          jq . plugins/cix-cowork/.claude-plugin/plugin.json
+
+      - name: Check plugin skills are in sync with canonical sources
+        run: |
+          # sync-skills.sh mirrors skills/cix-workspace/{SKILL.md,agents/*}
+          # into the cix plugin bundle. If canonical and bundle diverge
+          # (e.g. a change was made to only one copy), fail here so it is
+          # fixed before merge instead of shipping a stale plugin skill.
+          plugins/cix/scripts/sync-skills.sh --check
 
       - name: Verify symlink integrity
         run: |
