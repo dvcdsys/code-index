@@ -82,14 +82,15 @@ func runFile(cmd *cobra.Command, args []string) error {
 		if !strings.HasSuffix(result.Content, "\n") {
 			fmt.Println()
 		}
-		return nil
+	} else {
+		lines := strings.Split(result.Content, "\n")
+		width := len(strconv.Itoa(result.StartLine + len(lines)))
+		for i, line := range lines {
+			fmt.Printf("%*d  %s\n", width, result.StartLine+i, line)
+		}
 	}
-
-	lines := strings.Split(result.Content, "\n")
-	width := len(strconv.Itoa(result.StartLine + len(lines)))
-	for i, line := range lines {
-		fmt.Printf("%*d  %s\n", width, result.StartLine+i, line)
-	}
+	// Truncation warning goes to stderr in both modes, so it never pollutes a
+	// piped raw copy while still telling the user the file was cut short.
 	if result.Truncated {
 		fmt.Fprintf(os.Stderr, "\n(truncated — file has %d lines; showing %d–%d)\n",
 			result.TotalLines, result.StartLine, result.EndLine)
