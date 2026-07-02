@@ -82,6 +82,16 @@ updates:
       # (edit the digest + `make scout-cuda` + GPU E2E), not via Dependabot.
       # Drift is surfaced by the check-llama-pin.sh warn job (llama-pin-check.yml).
       - dependency-name: "ghcr.io/ggml-org/llama.cpp"
+      # The nvidia/cuda base is deliberately pinned and coupled to
+      # version-specific apt package names (libcublas-12-8) in Dockerfile.cuda —
+      # even a MINOR bump (12.8→12.9) breaks the apt install, and a CUDA move
+      # needs the prod RTX 3090 driver + `make scout-cuda`. Bump it by hand, so
+      # ignore all update types (not just major).
+      - dependency-name: "nvidia/cuda"
+      # node is the dashboard build-stage image: stay on the active LTS (24).
+      # node 26 is "Current" until ~2026-10; adopt it deliberately once it's LTS.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
