@@ -216,23 +216,26 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 	}
 
 	// Serialise the worktree rewrite (git reset --hard inside CloneOrFetch)
-	// against concurrent file/tree reads. Hold the write-lock only for the
-	// duration of the on-disk mutation, not the later DB/enqueue work.
-	var unlockRepo func()
-	if d.RepoLocks != nil {
-		mu := d.RepoLocks.For(hash)
-		mu.Lock()
-		unlockRepo = mu.Unlock
+	// against concurrent file/tree reads and indexing. WithWrite holds the
+	// write-lock only for the duration of the on-disk mutation (not the later
+	// DB/enqueue work) and releases it even if CloneOrFetch panics — the jobs
+	// worker recovers panics, so a plain Lock/Unlock would leak it forever.
+	var result repocloner.Result
+	clone := func() error {
+		var cerr error
+		result, cerr = repocloner.CloneOrFetch(ctx, repocloner.CloneOptions{
+			GitHubURL:      g.GitHubURL,
+			Branch:         g.Branch,
+			PAT:            pat,
+			LocalDir:       cloneDir,
+			PrevIndexedSHA: g.IndexedSHA,
+		})
+		return cerr
 	}
-	result, err := repocloner.CloneOrFetch(ctx, repocloner.CloneOptions{
-		GitHubURL:      g.GitHubURL,
-		Branch:         g.Branch,
-		PAT:            pat,
-		LocalDir:       cloneDir,
-		PrevIndexedSHA: g.IndexedSHA,
-	})
-	if unlockRepo != nil {
-		unlockRepo()
+	if d.RepoLocks != nil {
+		err = d.RepoLocks.WithWrite(hash, clone)
+	} else {
+		err = clone()
 	}
 	if err != nil {
 		d.recordFailure(ctx, g, fmt.Errorf("clone: %w", err))
@@ -366,7 +369,20 @@ func handleIndex(ctx context.Context, d Deps, job jobs.Job) error {
 		wipe = true
 	}
 
-	_, _, err = repoindexer.IndexDir(ctx, d.Indexer, g.ProjectPath, cloneDir, wipe, changes, repoindexer.DefaultFilter(), d.Logger)
+	// Read-lock the worktree while indexing: IndexDir walks and reads the same
+	// checkout the clone worker rewrites with git reset --hard. Clone (write) and
+	// index (read) jobs for one repo can otherwise run on separate workers and a
+	// concurrent reset would tear the index across two revisions. Held for the
+	// full walk so the writer waits rather than resetting under us.
+	index := func() error {
+		_, _, ierr := repoindexer.IndexDir(ctx, d.Indexer, g.ProjectPath, cloneDir, wipe, changes, repoindexer.DefaultFilter(), d.Logger)
+		return ierr
+	}
+	if d.RepoLocks != nil {
+		err = d.RepoLocks.WithRead(projects.HashPath(g.ProjectPath), index)
+	} else {
+		err = index()
+	}
 	if err != nil {
 		// A force-stop deletes the active indexer session out from under
 		// IndexDir; the next ProcessFiles/FinishIndexing then returns

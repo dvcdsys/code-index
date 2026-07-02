@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -47,23 +48,31 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request, _ opena
 		writeError(w, http.StatusUnprocessableEntity, "file is required")
 		return
 	}
+	if body.Start != nil && body.End != nil && *body.End < *body.Start {
+		writeError(w, http.StatusUnprocessableEntity, "end must be >= start")
+		return
+	}
 
 	cloneDir, ok := s.externalCheckoutDir(w, r, p)
 	if !ok {
 		return
 	}
+
+	// Read-lock: never observe the worktree mid git-reset (the clone worker
+	// holds the matching write-lock around CloneOrFetch). Same key the writer
+	// uses (path_hash of the external project's host_path). Taken BEFORE
+	// safeJoin so the symlink-escape check (EvalSymlinks) and the stat/open all
+	// run against one consistent worktree — otherwise a concurrent reset could
+	// swap in an escaping symlink between validation and open (TOCTOU).
+	mu := s.Deps.RepoLocks.For(projects.HashPath(p.HostPath))
+	mu.RLock()
+	defer mu.RUnlock()
+
 	full, err := safeJoin(cloneDir, body.File)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid file path")
 		return
 	}
-
-	// Read-lock: never observe the worktree mid git-reset (the clone worker
-	// holds the matching write-lock around CloneOrFetch). Same key the writer
-	// uses (path_hash of the external project's host_path).
-	mu := s.Deps.RepoLocks.For(projects.HashPath(p.HostPath))
-	mu.RLock()
-	defer mu.RUnlock()
 
 	info, err := os.Stat(full)
 	if err != nil {
@@ -86,18 +95,49 @@ func (s *Server) ReadProjectFile(w http.ResponseWriter, r *http.Request, _ opena
 		return
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
-	f.Close()
 	if err != nil {
+		f.Close()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	byteTruncated := false
-	if len(data) > maxFileBytes {
-		data = data[:maxFileBytes]
-		byteTruncated = true
+	byteTruncated := len(data) > maxFileBytes
+
+	// total_lines must reflect the whole file on disk, not just the portion we
+	// buffer for content. Count newlines across everything we read; when the
+	// byte cap cut the file short, stream the remainder (past what we keep for
+	// content) purely to keep counting — O(1) memory, single pass over the file.
+	totalNewlines := bytes.Count(data, []byte{'\n'})
+	var lastByte byte
+	if len(data) > 0 {
+		lastByte = data[len(data)-1]
+	}
+	if byteTruncated {
+		tailNL, tailLast, cerr := countTailNewlines(f)
+		if cerr != nil {
+			f.Close()
+			writeError(w, http.StatusInternalServerError, cerr.Error())
+			return
+		}
+		totalNewlines += tailNL
+		if tailLast != 0 {
+			lastByte = tailLast
+		}
+	}
+	f.Close()
+
+	// Lines = newlines, plus one more when the final line isn't newline-terminated.
+	total := totalNewlines
+	if lastByte != 0 && lastByte != '\n' {
+		total++
 	}
 
-	content, startLine, endLine, total, lineTruncated := sliceLines(data, body.Start, body.End)
+	if byteTruncated {
+		data = data[:maxFileBytes]
+	}
+	// sliceLines slices content out of the buffered bytes only; its own line
+	// count is bounded by the buffer, so we take the accurate `total` computed
+	// above and ignore the buffer-local count sliceLines returns.
+	content, startLine, endLine, _, lineTruncated := sliceLines(data, body.Start, body.End)
 
 	// If the byte cap cut the file off before the requested start line, the
 	// window is empty for a reason the caller can't see (the lines exist on
@@ -138,9 +178,14 @@ func (s *Server) ListProjectTree(w http.ResponseWriter, r *http.Request, _ opena
 		return
 	}
 	var body openapi.TreeRequest
-	// Body is optional (empty = repo root); ignore decode errors on empty body.
+	// Body is optional (empty = repo root), so an empty body (io.EOF) is fine —
+	// but a malformed or wrong-typed body must not be silently treated as "list
+	// the root"; reject it like /file does.
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 	}
 	dir := ""
 	if body.Dir != nil {
@@ -151,15 +196,18 @@ func (s *Server) ListProjectTree(w http.ResponseWriter, r *http.Request, _ opena
 	if !ok {
 		return
 	}
+
+	// Read-lock before safeJoin (symlink check) + stat + list, so all of them
+	// see one consistent worktree even if the clone worker resets concurrently.
+	mu := s.Deps.RepoLocks.For(projects.HashPath(p.HostPath))
+	mu.RLock()
+	defer mu.RUnlock()
+
 	full, err := safeJoin(cloneDir, dir)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid directory path")
 		return
 	}
-
-	mu := s.Deps.RepoLocks.For(projects.HashPath(p.HostPath))
-	mu.RLock()
-	defer mu.RUnlock()
 
 	info, err := os.Stat(full)
 	if err != nil {
@@ -356,4 +404,24 @@ func sliceLines(data []byte, start, end *int) (content string, outStart, outEnd,
 		truncated = true
 	}
 	return strings.Join(sel, "\n"), s, e, total, truncated
+}
+
+// countTailNewlines streams f from its current offset to EOF, returning the
+// number of '\n' bytes and the last byte seen (0 if the tail was empty). It is
+// used to count the lines of a file past the byte cap without buffering them.
+func countTailNewlines(f *os.File) (count int, last byte, err error) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			count += bytes.Count(buf[:n], []byte{'\n'})
+			last = buf[n-1]
+		}
+		if rerr == io.EOF {
+			return count, last, nil
+		}
+		if rerr != nil {
+			return count, last, rerr
+		}
+	}
 }

@@ -1,16 +1,19 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/apikeys"
 	apidb "github.com/dvcdsys/code-index/server/internal/db"
@@ -219,6 +222,68 @@ func TestReadProjectFile_PathTraversal(t *testing.T) {
 	}
 }
 
+// TestReadProjectFile_SymlinkSwapUnderLock is the finding-1 regression guard.
+// The handler must take the read-lock BEFORE resolving the path, so that a
+// clone worker holding the write-lock can't swap a benign path for an escaping
+// symlink between validation and open (a TOCTOU that would leak host files).
+// We hold the write-lock, let a reader enter and block, then materialise an
+// escaping symlink and release — the reader must reject it, never read outside
+// the repo root. (If the lock ordering regressed to validate-then-lock, the
+// reader would validate the still-missing path, block, then open the symlink.)
+func TestReadProjectFile_SymlinkSwapUnderLock(t *testing.T) {
+	f := newFileFixture(t)
+	adminCookie := adminLogin(t, f)
+	ext := "github.com/x/swap@main"
+	seedExternalProject(t, f, ext)
+	checkout := writeCheckout(t, f, ext, map[string]string{"benign.txt": "safe\n"})
+	extHash := projects.HashPath(ext)
+
+	// A secret living OUTSIDE the checkout root.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("TOP SECRET\n"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	// Hold the write-lock exactly as the clone worker does during git reset.
+	mu := f.Deps.RepoLocks.For(extHash)
+	mu.Lock()
+
+	type result struct {
+		code int
+		body string
+	}
+	got := make(chan result, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		reqBody, _ := json.Marshal(map[string]any{"file": "evil/secret.txt"})
+		req := withCookie(httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+extHash+"/file", bytes.NewReader(reqBody)), adminCookie)
+		req.Header.Set("Content-Type", "application/json")
+		f.Router.ServeHTTP(rr, req)
+		got <- result{rr.Code, rr.Body.String()}
+	}()
+
+	// Let the reader enter the handler and block on the read-lock before the
+	// escaping symlink exists.
+	time.Sleep(100 * time.Millisecond)
+	if err := os.Symlink(outside, filepath.Join(checkout, "evil")); err != nil {
+		mu.Unlock()
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	mu.Unlock()
+
+	select {
+	case r := <-got:
+		if strings.Contains(r.body, "TOP SECRET") {
+			t.Fatalf("reader escaped the repo root and read an outside file (code=%d): %s", r.code, r.body)
+		}
+		if r.code != http.StatusBadRequest {
+			t.Errorf("symlink-swap read = %d, want 400 (escape rejected); body=%s", r.code, r.body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader never returned (possible deadlock)")
+	}
+}
+
 func TestReadProjectFile_LineRange(t *testing.T) {
 	f := newFileFixture(t)
 	adminCookie := adminLogin(t, f)
@@ -261,6 +326,13 @@ func TestReadProjectFile_LineRange(t *testing.T) {
 	if past.Content != "" {
 		t.Errorf("past = %+v", past)
 	}
+
+	// Inverted range (end < start) is rejected server-side, not silently clamped
+	// to one line — the wire contract is enforced for MCP/raw callers, not just
+	// the CLI.
+	if rr, b := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/file", map[string]any{"file": "f.txt", "start": 4, "end": 2}); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("inverted range = %d, want 422; body=%s", rr.Code, b)
+	}
 }
 
 // TestReadProjectFile_RangePastByteCap covers a file larger than the 2 MiB read
@@ -295,6 +367,11 @@ func TestReadProjectFile_RangePastByteCap(t *testing.T) {
 	}
 	if !fc.Truncated || fc.Content == "" {
 		t.Errorf("whole big should be truncated with content: %+v", fc.Truncated)
+	}
+	// total_lines must be the real on-disk count (600), not just the ~511 lines
+	// that fit inside the 2 MiB the server buffered for content.
+	if fc.TotalLines != 600 {
+		t.Errorf("total_lines = %d, want 600 (real on-disk count past the byte cap)", fc.TotalLines)
 	}
 
 	// Range beginning past the readable window → 400, not an empty 200.
@@ -347,6 +424,52 @@ func TestListProjectTree(t *testing.T) {
 	_ = json.Unmarshal(body, &dl)
 	if len(dl.Entries) != 1 || dl.Entries[0].Name != "a.go" {
 		t.Errorf("internal listing = %+v", dl.Entries)
+	}
+
+	// A wrong-typed dir must be rejected, not silently answered with the root
+	// listing (dir is optional, but malformed != empty).
+	if rr, b := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/tree", map[string]any{"dir": 123}); rr.Code != http.StatusBadRequest {
+		t.Errorf("malformed tree body = %d, want 400; body=%s", rr.Code, b)
+	}
+}
+
+// TestListProjectTree_AccessGating mirrors the /file gating test: /tree must be
+// unreadable by a user the external project isn't shared to (no directory-tree
+// disclosure), and readable once shared. Required by the project's
+// "gating test per endpoint" rule.
+func TestListProjectTree_AccessGating(t *testing.T) {
+	f := newFileFixture(t)
+	adminCookie := adminLogin(t, f)
+	bobCookie := seedUser(t, f, adminCookie, "bob@example.com", "bobpass1234")
+
+	ext := "github.com/x/treegate@main"
+	seedExternalProject(t, f, ext)
+	writeCheckout(t, f, ext, map[string]string{"main.go": "package main\n"})
+	extHash := projects.HashPath(ext)
+
+	// Unshared bob → 404 (must not enumerate the tree).
+	if rr, b := doReq(t, f, bobCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/tree", nil); rr.Code != http.StatusNotFound {
+		t.Errorf("bob unshared tree = %d, want 404; body=%s", rr.Code, b)
+	}
+
+	// Admin (privileged) → 200.
+	if rr, b := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/tree", nil); rr.Code != http.StatusOK {
+		t.Fatalf("admin tree = %d, want 200; body=%s", rr.Code, b)
+	}
+
+	// Share to a group bob belongs to → bob now gets 200.
+	_, gbody := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups", map[string]string{"name": "TreeReaders"})
+	var g struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(gbody, &g)
+	bobID := userIDByEmail(t, f, adminCookie, "bob@example.com")
+	doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups/"+g.ID+"/members", map[string]string{"user_id": bobID})
+	if rr, b := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/shares", map[string]string{"group_id": g.ID}); rr.Code != http.StatusNoContent {
+		t.Fatalf("share = %d (%s)", rr.Code, b)
+	}
+	if rr, b := doReq(t, f, bobCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/tree", nil); rr.Code != http.StatusOK {
+		t.Errorf("bob shared tree = %d, want 200; body=%s", rr.Code, b)
 	}
 }
 
