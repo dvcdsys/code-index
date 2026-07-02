@@ -44,6 +44,10 @@ Then choose scope explicitly:
     cix_search / cix_definitions / cix_references / cix_symbols / cix_files /
     cix_summary. Use cix_definitions / cix_references when you already know a
     symbol name (cheap, metadata only); cix_search when searching by intent.
+  - Read an actual file or browse the tree of an EXTERNAL (GitHub-backed) repo →
+    cix_file (whole file or a line range) and cix_tree (one directory level).
+    These work only for external projects the server keeps on disk; for a local
+    project, read its files with your own filesystem tools instead.
 
 Never assume a default project — always name the workspace or project you mean.`
 
@@ -81,6 +85,8 @@ Tools exposed:
   cix_symbols                  find symbols by name
   cix_files                    find files by path pattern
   cix_summary                  project overview (languages, top dirs, key symbols)
+  cix_file                     read a file (whole or line range) — external projects only
+  cix_tree                     list a directory (one level) — external projects only
 
 Register this server with a host app using "cix mcp install <host>" (currently:
 claude-desktop).`,

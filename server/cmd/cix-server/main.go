@@ -36,6 +36,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/pollscheduler"
 	"github.com/dvcdsys/code-index/server/internal/repojobs"
+	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
@@ -428,6 +429,10 @@ func run() error {
 		Concurrency: cfg.WorkerConcurrency,
 		Logger:      logger,
 	})
+	// One lock registry shared between the clone worker (writer) and the
+	// HTTP file/tree read handlers (readers) so a read never observes a
+	// worktree mid git-reset.
+	repoLocks := repolocks.New()
 	repojobs.Register(repojobs.Deps{
 		DB:                         database,
 		Jobs:                       jobsSvc,
@@ -436,6 +441,7 @@ func run() error {
 		Indexer:                    idx,
 		VectorStore:                vsHolder,
 		DataDir:                    cfg.WorkspacesDataDir,
+		RepoLocks:                  repoLocks,
 		Logger:                     logger,
 		DefaultPollIntervalSeconds: int(cfg.DefaultPollInterval.Seconds()),
 		MinPollIntervalSeconds:     int(cfg.MinPollInterval.Seconds()),
@@ -594,6 +600,8 @@ func run() error {
 		GitRepos:          grSvc,
 		WorkspaceProjects: wpSvc,
 		Jobs:              jobsSvc,
+		DataDir:           cfg.WorkspacesDataDir,
+		RepoLocks:         repoLocks,
 		PublicBaseURL:     cfg.PublicBaseURL,
 		Tunnel:            tunnelMgr,
 		WebhookReconciler: webhookReconciler,

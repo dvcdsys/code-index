@@ -119,6 +119,12 @@ highest-ranked relevant one:
 For a natural-language drill-down query ("how does X work"), pass `min_score: 0`
 — abstract queries can score in the 0.2–0.3 range the default rejects.
 
+Workspace repos are external (server-cloned), so once `cix_search` points you at
+a file, read the real source with `cix_file(project, file, [start], [end])`
+instead of relying on the capped chunk teaser, and browse the layout with
+`cix_tree(project, [dir])`. In Cowork (no local filesystem) these are the way to
+see actual file contents.
+
 Investigate the strongest-signal repo fully before opening the next. Most tasks
 resolve after drilling into the top 1–2 repos; you rarely need all of them.
 

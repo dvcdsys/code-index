@@ -168,6 +168,16 @@ keeps abstract NL queries non-empty. For drill-down on a natural-
 language question ("how does X work end-to-end"), pass `--min-score 0`
 explicitly to be safe. For strict code-symbol matching, pass `0.4+`.
 
+Workspace repos are **external** (server-cloned), so once search points you at
+a file you can read the actual source — not just the capped chunk teaser —
+straight from the server's checkout:
+
+```bash
+cix tree internal/api -n <project_path>              # browse the tree (one level)
+cix file internal/api/handler.go -n <project_path>   # whole file
+cix file internal/api/handler.go --lines 80:140 -n <project_path>
+```
+
 > Prefer the CLI over a raw `curl … /api/v1/projects/{hash}/search`: the
 > CLI resolves the right server (and its key) from your config, so you
 > can't accidentally point `$CIX_URL`/`$CIX_KEY` at a *different* server

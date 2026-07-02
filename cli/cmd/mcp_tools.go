@@ -92,12 +92,26 @@ type mcpFilesInput struct {
 }
 
 type mcpWorkspaceSearchInput struct {
-	Server      string `json:"server,omitempty" jsonschema:"name of the cix server to target, from cix_list_servers. Omit to use the default server."`
-	Workspace   string `json:"workspace" jsonschema:"id or name of the workspace to search across, from cix_list_workspaces. Required."`
+	Server      string   `json:"server,omitempty" jsonschema:"name of the cix server to target, from cix_list_servers. Omit to use the default server."`
+	Workspace   string   `json:"workspace" jsonschema:"id or name of the workspace to search across, from cix_list_workspaces. Required."`
 	Query       string   `json:"query" jsonschema:"natural-language description of the code to find across all repositories in the workspace."`
 	TopProjects int      `json:"top_projects,omitempty" jsonschema:"maximum repositories to rank (default 5)."`
 	TopChunks   int      `json:"top_chunks,omitempty" jsonschema:"maximum code chunks to return across all repositories (default 10)."`
 	MinScore    *float64 `json:"min_score,omitempty" jsonschema:"minimum relevance, 0.0-1.0. Omit for the default 0.4; pass 0 for an intentional cross-cutting sweep that should surface long-tail, low-score repos."`
+}
+
+type mcpFileInput struct {
+	Server  string `json:"server,omitempty" jsonschema:"name of the cix server to target, from cix_list_servers. Omit to use the default server."`
+	Project string `json:"project" jsonschema:"host_path of the EXTERNAL (GitHub-backed) repository, from cix_list_projects. Required. Local projects are not served — read those with your own filesystem tools."`
+	File    string `json:"file" jsonschema:"repo-relative path of the file to read, e.g. internal/httpapi/server.go."`
+	Start   int    `json:"start,omitempty" jsonschema:"first line to return, 1-based inclusive. Omit to read from the start of the file."`
+	End     int    `json:"end,omitempty" jsonschema:"last line to return, 1-based inclusive. Omit to read to the end of the file."`
+}
+
+type mcpTreeInput struct {
+	Server  string `json:"server,omitempty" jsonschema:"name of the cix server to target, from cix_list_servers. Omit to use the default server."`
+	Project string `json:"project" jsonschema:"host_path of the EXTERNAL (GitHub-backed) repository, from cix_list_projects. Required. Local projects are not served."`
+	Dir     string `json:"dir,omitempty" jsonschema:"repo-relative directory to list. Omit or pass empty for the repository root."`
 }
 
 // registerCixTools wires the cix server registry into MCP tools. The surface is
@@ -339,6 +353,44 @@ func registerCixTools(server *mcp.Server, reg *serverRegistry) {
 			return mcpErr(err), nil, nil
 		}
 		return mcpText(formatSummary(proj, resp)), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "cix_file",
+		Description: "Read a file (whole, or a line range via start/end) from one repository's server-side checkout. Works ONLY for external (GitHub-backed) projects the server keeps on disk — ideal for reading files in workspace / external repos you cannot see locally. For a local project, read the file with your own filesystem tools instead (the server returns an error telling you so). Requires an explicit 'project' and 'file'.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in mcpFileInput) (*mcp.CallToolResult, any, error) {
+		c, err := reg.clientFor(in.Server)
+		if err != nil {
+			return mcpErr(err), nil, nil
+		}
+		proj, err := mcpResolveProject(c, in.Project)
+		if err != nil {
+			return mcpErr(err), nil, nil
+		}
+		resp, err := c.ReadFile(proj, in.File, in.Start, in.End)
+		if err != nil {
+			return mcpErr(err), nil, nil
+		}
+		return mcpText(formatFileContent(resp)), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "cix_tree",
+		Description: "List one level of a directory (ls-like, no recursion) in one repository's server-side checkout. Works ONLY for external (GitHub-backed) projects the server keeps on disk; use it to navigate the file tree of a workspace / external repo. For a local project, list it with your own filesystem tools. Requires an explicit 'project'; omit 'dir' for the repo root.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in mcpTreeInput) (*mcp.CallToolResult, any, error) {
+		c, err := reg.clientFor(in.Server)
+		if err != nil {
+			return mcpErr(err), nil, nil
+		}
+		proj, err := mcpResolveProject(c, in.Project)
+		if err != nil {
+			return mcpErr(err), nil, nil
+		}
+		resp, err := c.ListDir(proj, in.Dir)
+		if err != nil {
+			return mcpErr(err), nil, nil
+		}
+		return mcpText(formatTree(resp)), nil, nil
 	})
 }
 
@@ -620,6 +672,62 @@ func formatSummary(projectRoot string, s *client.ProjectSummary) string {
 		for _, sym := range s.RecentSymbols {
 			fmt.Fprintf(&b, "  - %s (%s) — %s\n", sym.Name, sym.Kind, relPath(projectRoot, sym.FilePath))
 		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatFileContent(fc *client.FileContent) string {
+	if fc == nil {
+		return "No content."
+	}
+	var b strings.Builder
+	lang := ""
+	if fc.Language != nil && *fc.Language != "" {
+		lang = " · " + *fc.Language
+	}
+	fmt.Fprintf(&b, "%s (lines %d–%d of %d%s)\n", fc.FilePath, fc.StartLine, fc.EndLine, fc.TotalLines, lang)
+	if fc.Truncated {
+		b.WriteString("(truncated by server limits)\n")
+	}
+	b.WriteString("\n")
+	// No lines in range (empty file or a range past EOF): the server signals this
+	// with end_line < start_line. Decide on those fields, not on Content == ""
+	// (a single blank line is legitimately empty content).
+	if fc.EndLine < fc.StartLine {
+		b.WriteString("(no lines in range)")
+		return b.String()
+	}
+	// Number lines so the model can cite precise locations.
+	lines := strings.Split(fc.Content, "\n")
+	for i, line := range lines {
+		fmt.Fprintf(&b, "%d\t%s\n", fc.StartLine+i, line)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatTree(dl *client.DirectoryListing) string {
+	if dl == nil {
+		return "No listing."
+	}
+	dir := dl.Dir
+	if dir == "" {
+		dir = "."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s/ (%d entries)\n", dir, len(dl.Entries))
+	for _, e := range dl.Entries {
+		if e.Type == "dir" {
+			fmt.Fprintf(&b, "  %s/\n", e.Name)
+			continue
+		}
+		size := ""
+		if e.Size != nil {
+			size = fmt.Sprintf("  (%d B)", *e.Size)
+		}
+		fmt.Fprintf(&b, "  %s%s\n", e.Name, size)
+	}
+	if dl.Truncated {
+		b.WriteString("(truncated — more entries than the listing cap)\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

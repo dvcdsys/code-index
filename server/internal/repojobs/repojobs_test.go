@@ -3,6 +3,7 @@ package repojobs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"testing"
@@ -11,6 +12,8 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
 	"github.com/dvcdsys/code-index/server/internal/jobs"
+	"github.com/dvcdsys/code-index/server/internal/projects"
+	"github.com/dvcdsys/code-index/server/internal/repolocks"
 )
 
 func seedProject(t *testing.T, d *sql.DB, hostPath string) {
@@ -91,6 +94,68 @@ func TestReconcileStuckProjects(t *testing.T) {
 	}
 	if got := getStatus("/local/proj"); got != "indexing" {
 		t.Errorf("local project: status=%q, want 'indexing' (no git_repos — out of scope)", got)
+	}
+}
+
+// TestHandleIndex_TakesReadLock is the finding-7 integration guard: the index
+// job must acquire the per-repo read-lock around the worktree walk, so a
+// concurrent clone (which takes the write-lock around git reset --hard) can't
+// rewrite the checkout mid-index. We hold the write-lock, run handleIndex, and
+// assert it blocks until we release — proving the read-lock is really taken.
+// The indexer is nil, so IndexDir returns immediately once the lock is granted.
+func TestHandleIndex_TakesReadLock(t *testing.T) {
+	d, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	gr := gitrepos.New(d)
+
+	const host = "github.com/x/idx@main"
+	seedProject(t, d, host)
+	if _, err := gr.Create(ctx, gitrepos.CreateRequest{GitHubURL: "https://github.com/x/idx", Branch: "main"}); err != nil {
+		t.Fatalf("create git_repo: %v", err)
+	}
+
+	locks := repolocks.New()
+	deps := Deps{
+		DB:        d,
+		GitRepos:  gr,
+		RepoLocks: locks,
+		DataDir:   t.TempDir(),
+		Indexer:   nil, // IndexDir returns "indexer not configured" once it runs
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	payload, _ := json.Marshal(IndexPayload{ProjectPath: host})
+	job := jobs.Job{Type: TypeIndexRepo, Payload: payload}
+
+	// Hold the write-lock exactly as the clone worker would.
+	writer := locks.For(projects.HashPath(host))
+	writer.Lock()
+
+	done := make(chan error, 1)
+	go func() { done <- handleIndex(ctx, deps, job) }()
+
+	// While the write-lock is held, handleIndex must be blocked before IndexDir.
+	select {
+	case err := <-done:
+		writer.Unlock()
+		t.Fatalf("handleIndex returned (%v) while the write-lock was held — it did not take the read-lock", err)
+	case <-time.After(150 * time.Millisecond):
+		// expected: blocked on the read-lock
+	}
+
+	writer.Unlock()
+
+	// Now it should proceed and finish (with the nil-indexer error).
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected handleIndex to surface the nil-indexer error once unblocked")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleIndex never returned after the write-lock was released")
 	}
 }
 
