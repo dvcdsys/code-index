@@ -49,6 +49,16 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+        # Group only minor/patch so the weekly PR stays safe to merge. The
+        # dashboard build is not exercised on PRs (only on the develop
+        # pre-release image), so a grouped mega-bump can silently break it.
+        update-types: ["minor", "patch"]
+    # Frontend majors (React 19, Tailwind 4, Vite 8, react-router 7, TS 6, …)
+    # are deliberate migrations — code changes + manual build validation — so
+    # Dependabot does not open them automatically. Bump them by hand when chosen.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     labels:
       - "dependencies"
       - "javascript"
