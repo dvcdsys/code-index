@@ -1,6 +1,9 @@
 package watchtui
 
-import "github.com/charmbracelet/bubbles/key"
+import (
+	"github.com/charmbracelet/bubbles/key"
+	tea "github.com/charmbracelet/bubbletea"
+)
 
 // keymap groups every binding the manager responds to. Kept in one place so
 // the help overlay and the Update switch agree on what's available.
@@ -78,6 +81,12 @@ func newKeymap() keymap {
 			key.WithHelp("q/esc", "quit"),
 		),
 	}
+}
+
+// isAction reports whether msg is one of the mutating action keys — the set
+// gated by Model.busy while a background action is in flight.
+func (k keymap) isAction(msg tea.KeyMsg) bool {
+	return key.Matches(msg, k.Stop, k.Restart, k.Start, k.StartAuto, k.StopAll, k.Delete, k.ToggleAut)
 }
 
 // shortHelp returns the keys shown in the always-on status bar.

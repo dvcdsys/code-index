@@ -3,6 +3,7 @@ package watchtui
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -28,10 +29,12 @@ type Item struct {
 // Manager is the seam the TUI drives. Splitting it out keeps the daemon
 // package free of a client import and lets tests inject a fake.
 //
-// List / Stop / StartAllAuto / StopAll / LogPath are fully local (no
-// network). Start / Restart preflight against the server because the
-// spawned watcher child needs a registered project to sync to.
-// LastIndexed is the only network call and is best-effort enrichment.
+// List / Stop / StopAll / SetAutoWatch / LogPath are fully local (no
+// network). Start / Restart / StartAllAuto preflight against the server
+// because the spawned watcher child needs a registered project to sync to,
+// and Delete confirms the server-side removal — so all of those can block
+// for up to the client timeout and must be called off the TUI event loop.
+// LastIndexed is best-effort enrichment.
 type Manager interface {
 	List() ([]Item, error)
 	LastIndexed() (map[string]*time.Time, error)
@@ -124,13 +127,31 @@ func (d *DaemonManager) StartAllAuto() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("load config: %w", err)
 	}
+	var pending []string
+	for _, p := range cfg.Projects {
+		if p.AutoWatch && !daemon.GetStatus(p.Path).Running {
+			pending = append(pending, p.Path)
+		}
+	}
+	if len(pending) == 0 {
+		return 0, nil
+	}
+	// One reachability probe for the whole batch: with the server down each
+	// probe can hang for the full client timeout, so probing per project
+	// would multiply that wait by the number of pending projects.
+	if err := serverReachable(d.client); err != nil {
+		return 0, err
+	}
 	started := 0
 	var firstErr error
-	for _, p := range cfg.Projects {
-		if !p.AutoWatch || daemon.GetStatus(p.Path).Running {
+	for _, path := range pending {
+		if err := projectRegistered(d.client, path); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
-		if _, err := GuardedStart(d.client, p.Path); err != nil {
+		if _, err := daemon.Start(path); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -178,12 +199,25 @@ func (d *DaemonManager) Delete(path string) error {
 // must be reachable and the project must be registered on it (the watcher
 // child exits immediately otherwise). Shared by the TUI and `cix watch`.
 func Preflight(c *client.Client, path string) error {
+	if err := serverReachable(c); err != nil {
+		return err
+	}
+	return projectRegistered(c, path)
+}
+
+// serverReachable checks that a server is configured and answering /health.
+func serverReachable(c *client.Client) error {
 	if c == nil {
 		return fmt.Errorf("no server configured — set one with `cix config`")
 	}
 	if err := c.Health(); err != nil {
 		return fmt.Errorf("server not reachable: %w", err)
 	}
+	return nil
+}
+
+// projectRegistered checks that path is a registered project on the server.
+func projectRegistered(c *client.Client, path string) error {
 	if _, err := c.GetProject(path); err != nil {
 		return fmt.Errorf("project not registered — run `cix init %s` first: %w", path, err)
 	}
@@ -229,14 +263,46 @@ func mergeItems(known []config.ProjectEntry, daemons []daemon.Status) []Item {
 	return items
 }
 
+// tailReadBudget caps how many bytes readTail loads. Watcher logs are
+// append-only and never rotated, so they can grow unbounded; seeking to the
+// tail keeps opening the detail overlay O(budget) instead of O(file size).
+const tailReadBudget = 64 * 1024
+
 // readTail returns the last n lines of a log file, or a single diagnostic
-// line if it can't be read.
+// line if it can't be read. Only the final tailReadBudget bytes are read.
 func readTail(path string, n int) []string {
-	data, err := os.ReadFile(path)
+	return readTailN(path, n, tailReadBudget)
+}
+
+func readTailN(path string, n int, budget int64) []string {
+	f, err := os.Open(path)
 	if err != nil {
 		return []string{fmt.Sprintf("(no log: %v)", err)}
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return []string{fmt.Sprintf("(no log: %v)", err)}
+	}
+	var off int64
+	if st.Size() > budget {
+		off = st.Size() - budget
+	}
+	buf := make([]byte, st.Size()-off)
+	read, err := f.ReadAt(buf, off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return []string{fmt.Sprintf("(no log: %v)", err)}
+	}
+	data := string(buf[:read])
+	if off > 0 {
+		// We landed mid-line; drop the partial first line.
+		if i := strings.IndexByte(data, '\n'); i >= 0 {
+			data = data[i+1:]
+		}
+	}
+
+	lines := strings.Split(strings.TrimRight(data, "\n"), "\n")
 	if len(lines) == 1 && lines[0] == "" {
 		return []string{"(log is empty)"}
 	}

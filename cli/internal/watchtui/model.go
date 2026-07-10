@@ -17,6 +17,17 @@ type Model struct {
 	// overlay so a stale/absent value never blocks the local row list.
 	enrich map[string]*time.Time
 
+	// enrichInFlight is true while a LastIndexed load is running. The tick
+	// skips re-firing until the previous load lands (single-flight), so a
+	// stalled server can't accumulate one hung request per tick.
+	enrichInFlight bool
+
+	// busy names the network-bound action currently running as a background
+	// command (e.g. "starting alpha"). While non-empty, mutating keys are
+	// rejected so two actions can't interleave daemon/config state; cleared
+	// by actionDoneMsg.
+	busy string
+
 	// Detail (log tail) overlay.
 	detail     bool
 	detailPath string
@@ -49,6 +60,9 @@ func NewModel(mgr Manager) Model {
 		mgr:    mgr,
 		styles: newStyles(),
 		keys:   newKeymap(),
+		// Init fires the first enrichment load; mark it in flight here
+		// because Init has a value receiver and can't set the flag itself.
+		enrichInFlight: true,
 	}
 	m.refresh()
 	return m

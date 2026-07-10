@@ -166,6 +166,11 @@ func (m Model) renderStatus() string {
 			"delete %s and its server index? this is permanent  (y/N)", label(m.confirmPath)))
 	}
 	if m.statusMsg == "" {
+		// Keep the in-flight action visible even after a keypress cleared
+		// the transient status.
+		if m.busy != "" {
+			return m.styles.statusBar.Render(m.busy + "…")
+		}
 		return ""
 	}
 	style := m.styles.statusOK

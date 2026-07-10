@@ -7,9 +7,13 @@
 // watcher daemons, so the user can see every watcher at a glance and stop,
 // restart, or start any of them from one screen.
 //
-// Actions on the daemon layer (stop/start/restart) are local and run
-// synchronously inside Update; only the last-indexed enrichment touches the
-// network, and it does so off the event loop via a tea.Cmd.
+// Local actions (stop, stop-all, auto_watch toggle) run synchronously inside
+// Update — they are filesystem-only and microsecond-fast. Anything that talks
+// to the server (start/restart preflight, start-all-auto, delete, and the
+// last-indexed enrichment) runs off the event loop as a tea.Cmd, so a slow or
+// unreachable server can never freeze rendering or input. A busy flag keeps
+// two background actions from interleaving, and the enrichment is
+// single-flight so a stalled server can't pile up one hung request per tick.
 package watchtui
 
 import (

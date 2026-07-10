@@ -88,10 +88,35 @@ func makeKey(s string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
 
-// send pushes msgs through Update and returns the final Model.
+// send pushes msgs through Update and returns the final Model. Returned
+// commands are dropped — background actions stay "in flight".
 func send(m Model, msgs ...tea.Msg) Model {
 	for _, msg := range msgs {
 		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	return m
+}
+
+// sendExec pushes msgs through Update and, when a command is returned, runs
+// it synchronously and feeds its message back — the test-side equivalent of
+// bubbletea's runtime for the one-shot action/enrich commands. Batches
+// (ticker) are skipped: executing tea.Tick would sleep for real.
+func sendExec(m Model, msgs ...tea.Msg) Model {
+	for _, msg := range msgs {
+		updated, cmd := m.Update(msg)
+		m = updated.(Model)
+		if cmd == nil {
+			continue
+		}
+		res := cmd()
+		if res == nil {
+			continue
+		}
+		if _, isBatch := res.(tea.BatchMsg); isBatch {
+			continue
+		}
+		updated, _ = m.Update(res)
 		m = updated.(Model)
 	}
 	return m
@@ -184,9 +209,71 @@ func TestStopKey_NotRunning_NoCall(t *testing.T) {
 func TestStartKey_OnStoppedRow(t *testing.T) {
 	f := twoRows()
 	m := newTestModel(f)
-	m = send(m, makeKey("down"), makeKey("S")) // beta is stopped
+	m = sendExec(m, makeKey("down"), makeKey("S")) // beta is stopped
 	if len(f.startCalls) != 1 || f.startCalls[0] != "/proj/beta" {
 		t.Fatalf("startCalls = %v, want [/proj/beta]", f.startCalls)
+	}
+	if m.busy != "" {
+		t.Errorf("busy should clear once the action completes; busy=%q", m.busy)
+	}
+	if m.statusErr {
+		t.Errorf("status should be OK after a successful start; msg=%q", m.statusMsg)
+	}
+}
+
+// TestActionsRunOffEventLoop pins the responsiveness contract: pressing a
+// network-bound action key must NOT invoke the manager inside Update — the
+// call happens in the returned command — and must mark the model busy.
+func TestActionsRunOffEventLoop(t *testing.T) {
+	cases := []struct {
+		name   string
+		keys   []tea.Msg
+		called func(f *fakeManager) int
+	}{
+		{"start", []tea.Msg{makeKey("down"), makeKey("S")}, func(f *fakeManager) int { return len(f.startCalls) }},
+		{"restart", []tea.Msg{makeKey("r")}, func(f *fakeManager) int { return len(f.restartCalls) }},
+		{"start-auto", []tea.Msg{makeKey("A")}, func(f *fakeManager) int { return f.autoCalls }},
+		{"delete", []tea.Msg{makeKey("d"), makeKey("y")}, func(f *fakeManager) int { return len(f.deleteCalls) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := twoRows()
+			m := send(newTestModel(f), c.keys...) // send drops the command
+			if got := c.called(f); got != 0 {
+				t.Errorf("%s ran inside Update (%d calls); must run in the background command", c.name, got)
+			}
+			if m.busy == "" {
+				t.Errorf("%s should mark the model busy while in flight", c.name)
+			}
+		})
+	}
+}
+
+// TestBusyGate_OneActionAtATime: while an action is in flight, other
+// mutating keys are rejected; the gate reopens on actionDoneMsg.
+func TestBusyGate_OneActionAtATime(t *testing.T) {
+	f := twoRows()
+	m := newTestModel(f)
+	m = send(m, makeKey("down"), makeKey("S")) // async start of beta, still in flight
+	if m.busy == "" {
+		t.Fatal("S should mark the model busy")
+	}
+
+	m = send(m, makeKey("up"), makeKey("s")) // try to stop alpha (running) while busy
+	if len(f.stopCalls) != 0 {
+		t.Errorf("action while busy must be rejected; stopCalls=%v", f.stopCalls)
+	}
+	if !m.statusErr {
+		t.Error("busy rejection should surface as an error status")
+	}
+
+	m = send(m, actionDoneMsg{status: "started beta"})
+	if m.busy != "" {
+		t.Fatal("actionDoneMsg should clear busy")
+	}
+	m = send(m, makeKey("s")) // stop is synchronous — runs inside Update
+	if len(f.stopCalls) != 1 || f.stopCalls[0] != "/proj/alpha" {
+		t.Errorf("stop should work again once the action completes; stopCalls=%v", f.stopCalls)
 	}
 }
 
@@ -205,9 +292,12 @@ func TestStartKey_AlreadyRunning_NoCall(t *testing.T) {
 func TestRestartKey_CallsManager(t *testing.T) {
 	f := twoRows()
 	m := newTestModel(f)
-	m = send(m, makeKey("r"))
+	m = sendExec(m, makeKey("r"))
 	if len(f.restartCalls) != 1 || f.restartCalls[0] != "/proj/alpha" {
 		t.Fatalf("restartCalls = %v, want [/proj/alpha]", f.restartCalls)
+	}
+	if m.busy != "" {
+		t.Errorf("busy should clear once the restart completes; busy=%q", m.busy)
 	}
 }
 
@@ -228,12 +318,15 @@ func TestStartAutoKey_CallsManager(t *testing.T) {
 	f := twoRows()
 	f.autoN = 2
 	m := newTestModel(f)
-	m = send(m, makeKey("A"))
+	m = sendExec(m, makeKey("A"))
 	if f.autoCalls != 1 {
 		t.Fatalf("autoCalls = %d, want 1", f.autoCalls)
 	}
 	if m.statusErr {
 		t.Errorf("start-auto should be OK; msg=%q", m.statusMsg)
+	}
+	if !strings.Contains(m.statusMsg, "2") {
+		t.Errorf("status should report the started count; msg=%q", m.statusMsg)
 	}
 }
 
@@ -323,7 +416,7 @@ func TestDeleteKey_RequiresConfirmation(t *testing.T) {
 func TestDeleteConfirm_YesDeletes(t *testing.T) {
 	f := twoRows()
 	m := newTestModel(f)
-	m = send(m, makeKey("d"), makeKey("y"))
+	m = sendExec(m, makeKey("d"), makeKey("y"))
 	if len(f.deleteCalls) != 1 || f.deleteCalls[0] != "/proj/alpha" {
 		t.Fatalf("deleteCalls = %v, want [/proj/alpha]", f.deleteCalls)
 	}
@@ -367,7 +460,7 @@ func TestDeleteError_ShowsStatusErr(t *testing.T) {
 	f := twoRows()
 	f.deleteErr = errors.New("kaboom")
 	m := newTestModel(f)
-	m = send(m, makeKey("d"), makeKey("y"))
+	m = sendExec(m, makeKey("d"), makeKey("y"))
 	if !m.statusErr {
 		t.Error("a delete error should set statusErr=true")
 	}
@@ -395,6 +488,36 @@ func TestEnrichMsg_AppliesLastIndexed(t *testing.T) {
 	it, ok := find(m.items, "/proj/alpha")
 	if !ok || it.LastIndexedAt == nil {
 		t.Fatalf("LastIndexedAt should be applied to /proj/alpha")
+	}
+}
+
+// TestEnrichSingleFlight pins the anti-pile-up rule: only one LastIndexed
+// load may be in flight; the next fires only after the previous one lands.
+func TestEnrichSingleFlight(t *testing.T) {
+	m := newTestModel(twoRows())
+	// NewModel marks the initial load (fired by Init) as in flight.
+	if !m.enrichInFlight {
+		t.Fatal("NewModel should mark the initial enrichment in flight")
+	}
+	if cmd := m.maybeEnrichCmd(); cmd != nil {
+		t.Error("no second enrichment may fire while one is in flight")
+	}
+
+	m = send(m, enrichMsg{byPath: nil})
+	if m.enrichInFlight {
+		t.Fatal("enrichMsg should clear the in-flight flag")
+	}
+	if cmd := m.maybeEnrichCmd(); cmd == nil {
+		t.Error("the gate should reopen after the previous load lands")
+	}
+	if !m.enrichInFlight {
+		t.Error("firing a load should re-arm the in-flight flag")
+	}
+
+	// An errored load must also reopen the gate (retry on the next tick).
+	m = send(m, enrichMsg{err: errors.New("server down")})
+	if m.enrichInFlight {
+		t.Error("an errored enrichment should still clear the in-flight flag")
 	}
 }
 

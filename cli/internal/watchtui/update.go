@@ -21,6 +21,13 @@ type enrichMsg struct {
 	err    error
 }
 
+// actionDoneMsg reports the completion of a background action started by
+// runAsync. status is ready-to-render text; isErr picks the style.
+type actionDoneMsg struct {
+	status string
+	isErr  bool
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
@@ -35,13 +42,36 @@ func loadEnrichCmd(mgr Manager) tea.Cmd {
 	}
 }
 
-// Init kicks off the refresh ticker and the first enrichment load.
+// maybeEnrichCmd fires a LastIndexed load unless one is already in flight —
+// single-flight, so a stalled server (the client timeout is minutes) can't
+// pile up a hung goroutine per tick.
+func (m *Model) maybeEnrichCmd() tea.Cmd {
+	if m.enrichInFlight {
+		return nil
+	}
+	m.enrichInFlight = true
+	return loadEnrichCmd(m.mgr)
+}
+
+// runAsync marks the model busy and returns a command running fn off the
+// event loop. Network-bound actions (start/restart/start-auto/delete) go
+// through here: their server calls can block for the full client timeout,
+// and running them inside Update would freeze rendering and input.
+func (m *Model) runAsync(busy string, fn func() actionDoneMsg) tea.Cmd {
+	m.busy = busy
+	m.setStatus(busy+"…", true)
+	return func() tea.Msg { return fn() }
+}
+
+// Init kicks off the refresh ticker and the first enrichment load (marked
+// in flight by NewModel).
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(tickCmd(), loadEnrichCmd(m.mgr))
 }
 
 // Update is the central message handler. bubbletea serializes calls, so
-// synchronous actions and the tick can never overlap.
+// state transitions never overlap; background work (enrichment, network
+// actions) only ever comes back as a message.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -49,12 +79,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tickMsg:
 		m.refresh()
-		return m, tea.Batch(tickCmd(), loadEnrichCmd(m.mgr))
+		return m, tea.Batch(tickCmd(), m.maybeEnrichCmd())
 	case enrichMsg:
+		m.enrichInFlight = false
 		if msg.err == nil {
 			m.enrich = msg.byPath
 			m.applyEnrich()
 		}
+		return m, nil
+	case actionDoneMsg:
+		m.busy = ""
+		m.setStatus(msg.status, !msg.isErr)
+		m.refresh()
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -78,14 +114,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.confirmDelete {
 		m.confirmDelete = false
 		if s := msg.String(); s == "y" || s == "Y" {
-			m.doDelete()
-		} else {
-			m.setStatus("delete canceled", true)
+			return m, m.doDelete()
 		}
+		m.setStatus("delete canceled", true)
 		return m, nil
 	}
 
 	m.clearStatus()
+
+	// One background action at a time: while one is in flight, reject the
+	// other mutating keys (navigation, refresh, and overlays stay available)
+	// so daemon/config mutations can't interleave.
+	if m.busy != "" && m.keys.isAction(msg) {
+		m.setStatus("still "+m.busy+"…", false)
+		return m, nil
+	}
 
 	switch {
 	case key.Matches(msg, m.keys.Quit):
@@ -105,7 +148,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Refresh):
 		m.refresh()
 		m.setStatus("refreshed", true)
-		return m, loadEnrichCmd(m.mgr)
+		return m, m.maybeEnrichCmd()
 	case key.Matches(msg, m.keys.Detail):
 		m.openDetail()
 		return m, nil
@@ -113,14 +156,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.doStop()
 		return m, nil
 	case key.Matches(msg, m.keys.Start):
-		m.doStart()
-		return m, nil
+		return m, m.doStart()
 	case key.Matches(msg, m.keys.Restart):
-		m.doRestart()
-		return m, nil
+		return m, m.doRestart()
 	case key.Matches(msg, m.keys.StartAuto):
-		m.doStartAuto()
-		return m, nil
+		return m, m.doStartAuto()
 	case key.Matches(msg, m.keys.StopAll):
 		m.doStopAll()
 		return m, nil
@@ -159,15 +199,16 @@ func (m *Model) doToggleAuto() {
 }
 
 // doDelete removes the confirmed project everywhere (watcher + server index +
-// local config). Called only after the user answers 'y' to the prompt.
-func (m *Model) doDelete() {
-	if err := m.mgr.Delete(m.confirmPath); err != nil {
-		m.setStatus("delete: "+err.Error(), false)
-		m.refresh()
-		return
-	}
-	m.setStatus("deleted "+label(m.confirmPath), true)
-	m.refresh()
+// local config). Called only after the user answers 'y' to the prompt. The
+// server delete runs in the background — it's a network call.
+func (m *Model) doDelete() tea.Cmd {
+	mgr, path := m.mgr, m.confirmPath
+	return m.runAsync("deleting "+label(path), func() actionDoneMsg {
+		if err := mgr.Delete(path); err != nil {
+			return actionDoneMsg{status: "delete: " + err.Error(), isErr: true}
+		}
+		return actionDoneMsg{status: "deleted " + label(path)}
+	})
 }
 
 // doStop stops the selected watcher (if running).
@@ -188,56 +229,59 @@ func (m *Model) doStop() {
 	m.refresh()
 }
 
-// doStart starts a watcher for the selected (stopped) row.
-func (m *Model) doStart() {
+// doStart starts a watcher for the selected (stopped) row in the background
+// — the preflight talks to the server.
+func (m *Model) doStart() tea.Cmd {
 	it, ok := m.selected()
 	if !ok {
-		return
+		return nil
 	}
 	if it.Running {
 		m.setStatus(label(it.Path)+" already running", false)
-		return
+		return nil
 	}
-	if err := m.mgr.Start(it.Path); err != nil {
-		m.setStatus("start: "+err.Error(), false)
-		return
-	}
-	m.setStatus("started "+label(it.Path), true)
-	m.refresh()
+	mgr, path := m.mgr, it.Path
+	return m.runAsync("starting "+label(path), func() actionDoneMsg {
+		if err := mgr.Start(path); err != nil {
+			return actionDoneMsg{status: "start: " + err.Error(), isErr: true}
+		}
+		return actionDoneMsg{status: "started " + label(path)}
+	})
 }
 
-// doRestart restarts the selected watcher.
-func (m *Model) doRestart() {
+// doRestart restarts the selected watcher in the background — the preflight
+// talks to the server.
+func (m *Model) doRestart() tea.Cmd {
 	it, ok := m.selected()
 	if !ok {
-		return
+		return nil
 	}
-	if err := m.mgr.Restart(it.Path); err != nil {
-		m.setStatus("restart: "+err.Error(), false)
-		return
-	}
-	m.setStatus("restarted "+label(it.Path), true)
-	m.refresh()
+	mgr, path := m.mgr, it.Path
+	return m.runAsync("restarting "+label(path), func() actionDoneMsg {
+		if err := mgr.Restart(path); err != nil {
+			return actionDoneMsg{status: "restart: " + err.Error(), isErr: true}
+		}
+		return actionDoneMsg{status: "restarted " + label(path)}
+	})
 }
 
-// doStartAuto starts every auto_watch project that isn't already running.
-func (m *Model) doStartAuto() {
-	n, err := m.mgr.StartAllAuto()
-	if err != nil {
-		if n > 0 {
-			m.setStatus(fmt.Sprintf("started %d, then: %s", n, err.Error()), false)
-		} else {
-			m.setStatus("start-auto: "+err.Error(), false)
+// doStartAuto starts every auto_watch project that isn't already running,
+// in the background — each start is preflighted against the server.
+func (m *Model) doStartAuto() tea.Cmd {
+	mgr := m.mgr
+	return m.runAsync("starting auto_watch projects", func() actionDoneMsg {
+		n, err := mgr.StartAllAuto()
+		switch {
+		case err != nil && n > 0:
+			return actionDoneMsg{status: fmt.Sprintf("started %d, then: %s", n, err.Error()), isErr: true}
+		case err != nil:
+			return actionDoneMsg{status: "start-auto: " + err.Error(), isErr: true}
+		case n == 0:
+			return actionDoneMsg{status: "no auto_watch projects to start"}
+		default:
+			return actionDoneMsg{status: fmt.Sprintf("started %d auto_watch watcher(s)", n)}
 		}
-		m.refresh()
-		return
-	}
-	if n == 0 {
-		m.setStatus("no auto_watch projects to start", true)
-	} else {
-		m.setStatus(fmt.Sprintf("started %d auto_watch watcher(s)", n), true)
-	}
-	m.refresh()
+	})
 }
 
 // doStopAll stops every running watcher.
