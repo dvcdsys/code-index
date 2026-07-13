@@ -29,6 +29,13 @@ named workspace at once and tells you:
 Those three questions are the *goal* of using this skill. Don't jump
 to implementation before you can answer all three with evidence.
 
+> **Prerequisite: a populated workspace.** This skill assumes the
+> workspace already exists and its repos are indexed. If it doesn't,
+> create and populate one first (owner/admin): `cix ws create "<name>"`,
+> then `cix ws "<name>" add <project>` for each already-indexed repo — or
+> clone new GitHub repos in via the dashboard. `cix ws` lists what's
+> available; the main `cix` skill has the full management verb reference.
+
 ---
 
 ## First: which server hosts the workspace?

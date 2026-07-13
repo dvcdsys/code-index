@@ -56,8 +56,9 @@ cross-project search endpoint.
   every push to the tracked branch.
 - **Dashboard UI.** Browser-facing CRUD for workspaces, repos, tokens,
   and a two-stage search interface.
-- **CLI integration.** `cix ws` for listing workspaces, describing
-  them, and running cross-project search from the terminal.
+- **CLI integration.** `cix ws` from the terminal: list/describe
+  workspaces and run cross-project search, plus manage them — create a
+  workspace, link/unlink already-indexed projects, rename, and delete.
 - **Agent skill.** A `cix-workspace` skill teaches AI agents how to use
   the workspace search responsibly, with a dedicated
   `cix-workspace-investigator` sub-agent for parallel per-repo
@@ -281,6 +282,34 @@ clone metadata, then `POST /api/v1/workspaces/{id}/projects` to link
 the resulting `path_hash` into the workspace. The clone + index job
 runs in the background.
 
+### From the CLI
+
+`cix ws` manages workspaces and their membership from the terminal — the
+counterpart to the dashboard's **Link existing project** button. It links
+projects that are **already indexed** (local `cix init` projects or
+previously-cloned GitHub repos); it does **not** clone. To clone and index
+a *new* GitHub repo, use the dashboard or `POST /git-repos` (below).
+
+```bash
+# Create a workspace
+cix ws create "platform" --description "core platform repos"
+
+# Link an already-indexed project — by absolute path, host_path, or path_hash
+cix ws platform add /Users/me/svc-a
+cix ws platform add github.com/owner/repo@main
+cix ws platform add .                     # the current directory
+
+# Unlink / rename / delete
+cix ws platform remove github.com/owner/repo@main
+cix ws platform rename "platform-core"
+cix ws platform delete                     # prompts; -y to skip
+```
+
+Linking requires the project to be in `indexed` status; a still-cloning
+project returns a "not yet indexed" error until the pipeline finishes. See
+the [CLI reference](doc/CLI_REFERENCE.md#workspaces-cross-repo) for the full
+verb list.
+
 ### From the API
 
 Registering a GitHub-cloned project is a two-step flow: create the
@@ -365,6 +394,9 @@ linked to other workspaces.
 curl -X DELETE http://localhost:21847/api/v1/workspaces/<wid>/projects/<path_hash> \
   -H "Authorization: Bearer $CIX_API_KEY"
 ```
+
+From the CLI: `cix ws "<name>" remove <project>` (addressed by path,
+host_path, or path_hash).
 
 ### Deleting a project entirely
 

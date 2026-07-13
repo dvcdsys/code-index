@@ -45,6 +45,8 @@ and how to tune `--min-score`.
 
 ## Workspaces (cross-repo)
 
+Read / search (`ws` is an alias for `workspace`):
+
 ```bash
 cix workspace list                                          # all workspaces
 cix workspace "<name>"                                      # describe (default verb)
@@ -52,6 +54,26 @@ cix workspace "<name>" describe                             # same, explicit
 cix workspace "<name>" repos                                # list repos in the workspace
 cix workspace "<name>" search "<query>" [--limit <n>]       # hybrid BM25 + dense
 ```
+
+Manage (owner/admin):
+
+```bash
+cix ws create "<name>" [--description "<text>"]             # create a workspace
+cix ws "<name>" add <project…>                              # link indexed project(s)
+cix ws "<name>" remove <project…>                           # unlink project(s)
+cix ws "<name>" rename "<new-name>"                         # rename
+cix ws "<name>" update [--name "<new>"] [--description "<text>"]  # patch fields
+cix ws "<name>" delete [-y]                                 # delete (prompts; -y skips)
+```
+
+A `<project>` is any **already-indexed** project, addressed by its absolute
+path, its host_path (e.g. `github.com/owner/repo@main`), or its 16-hex
+`path_hash` — run `cix list` to see them. `add`/`remove` accept several at
+once, and with no project default to the current directory. `add` links an
+existing index; it does **not** clone. To clone and index a *new* GitHub
+repo into a workspace, use the dashboard's **Add repo** flow (see
+[`WORKSPACES.md`](WORKSPACES.md)). `delete` removes the workspace and its
+membership links only — the underlying projects are untouched.
 
 The CLI uses a name-first grammar so an agent doesn't need to juggle
 workspace ids. See [`../workspaces.md`](../workspaces.md) for the agent contract.
