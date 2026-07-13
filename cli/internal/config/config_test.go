@@ -386,6 +386,34 @@ func TestAddProject(t *testing.T) {
 	}
 }
 
+// TestAddProject_UpdatesAutoWatchOnExisting guards the upsert path: calling
+// AddProject for a path already in the config must persist a changed
+// auto_watch flag (it used to mutate a loop-variable copy and save nothing).
+func TestAddProject_UpdatesAutoWatchOnExisting(t *testing.T) {
+	isolateHome(t)
+
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddProject("/srv/proj", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddProject("/srv/proj", true); err != nil {
+		t.Fatalf("AddProject update error = %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Projects) != 1 {
+		t.Fatalf("Projects = %v, want exactly one entry", cfg.Projects)
+	}
+	if !cfg.Projects[0].AutoWatch {
+		t.Error("AutoWatch = false, want true — the flag update was not persisted")
+	}
+}
+
 // TestAddProject_NoDuplicate verifies that adding the same path twice keeps
 // only one entry.
 func TestAddProject_NoDuplicate(t *testing.T) {

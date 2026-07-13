@@ -519,10 +519,12 @@ func AddProject(path string, autoWatch bool) error {
 		return err
 	}
 
-	for _, p := range cfg.Projects {
-		if p.Path == path {
-			if p.AutoWatch != autoWatch {
-				p.AutoWatch = autoWatch
+	// Index the slice: `for _, p := range` yields a copy, so assigning to
+	// p.AutoWatch would update nothing and Save would write the old value.
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Path == path {
+			if cfg.Projects[i].AutoWatch != autoWatch {
+				cfg.Projects[i].AutoWatch = autoWatch
 				return Save(cfg)
 			}
 			return nil

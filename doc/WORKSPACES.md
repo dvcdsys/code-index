@@ -56,6 +56,14 @@ and the table rename in `e433fee`.
    and runs the existing indexer pipeline against it. Status transitions
    visible on the workspace detail page: `created → indexing → indexed`.
 
+> **Linking an already-indexed project (no clone).** Steps 4–5 clone a
+> *new* GitHub repo. To instead group projects that are **already
+> indexed** — local `cix init` projects, or repos cloned earlier — link
+> them without a second clone via the dashboard's **Link existing
+> project** button or the CLI: `cix ws "<name>" add <project>` (plus
+> `cix ws create` / `remove` / `rename` / `delete` for the rest). Full
+> verb list: [`CLI_REFERENCE.md`](CLI_REFERENCE.md#workspaces-cross-repo).
+
 ## Environment variables
 
 | Variable | Default | Purpose |

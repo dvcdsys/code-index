@@ -28,6 +28,12 @@ There is no "current repo" here (Cowork has no opened working directory). A
 workspace groups several indexed repos on a server; infer the task's **anchor
 repo** from the request, and let the workspace supply the surrounding repos.
 
+> **This skill only searches.** The `cix_*` MCP tools are read-only — there is
+> no MCP tool to create a workspace or link/unlink repos. If the workspace you
+> need doesn't exist yet, an operator sets it up with the `cix` CLI
+> (`cix ws create` / `add`) or the dashboard; here you consume workspaces that
+> already exist.
+
 ## First: which server hosts the workspace?
 
 A cix connection may reach more than one **server** (a local box, a remote

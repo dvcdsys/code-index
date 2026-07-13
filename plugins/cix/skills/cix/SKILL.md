@@ -211,6 +211,39 @@ specific server. Only add `--server <alias>` when the task explicitly
 targets that named backend; never guess an alias — run `cix config show`
 to see the configured names if unsure.
 
+### Workspaces — cross-repo search + management
+
+A **workspace** groups several indexed repos into one corpus for
+cross-project search. List / describe / search:
+
+```bash
+cix ws                                   # list workspaces
+cix ws "<name>"                          # describe (repos + status)
+cix ws "<name>" search "<query>"         # hybrid cross-repo search
+```
+
+Management (owner/admin):
+
+```bash
+cix ws create "<name>" [--description "…"]   # create
+cix ws "<name>" add <project…>               # link an indexed project (local or external)
+cix ws "<name>" remove <project…>            # unlink
+cix ws "<name>" rename "<new>"               # rename
+cix ws "<name>" update [--name "<new>"] [--description "…"]
+cix ws "<name>" delete [-y]                  # delete (prompts; -y skips)
+```
+
+`add`/`remove` take a project's absolute path, host_path
+(`github.com/owner/repo@main`), or 16-hex `path_hash` (see `cix list`); no
+arg defaults to the current directory. `add` links an **already-indexed**
+project — it does not clone (to clone a new GitHub repo into a workspace,
+use the dashboard). `delete` drops the workspace + its links, not the
+projects.
+
+For the full cross-project *research* workflow — which repos to trust, how
+to read the hybrid bm25/dense scores — use the dedicated **`cix-workspace`**
+skill (`/cix-workspace <task>`).
+
 ---
 
 ## Search quality — what scores mean

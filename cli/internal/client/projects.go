@@ -1,9 +1,16 @@
 package client
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
+
+// ErrProjectGone reports that the server already had no such project (404).
+// The delete is a server-side no-op, so idempotent callers can treat it as
+// success and proceed with local cleanup.
+var ErrProjectGone = errors.New("project not found on server")
 
 // Project represents a code project
 type Project struct {
@@ -96,3 +103,22 @@ func (c *Client) CreateProject(path string) (*Project, error) {
 	return &project, nil
 }
 
+// DeleteProject deletes a project and its server-side index (symbols, refs,
+// embeddings). Requires the project owner or an admin. A 404 is reported as
+// ErrProjectGone so callers can treat an already-deleted project as success.
+func (c *Client) DeleteProject(path string) error {
+	resp, err := c.do("DELETE", fmt.Sprintf("/api/v1/projects/%s", encodeProjectPath(path)), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return ErrProjectGone
+	default:
+		return parseResponse(resp, nil)
+	}
+}
