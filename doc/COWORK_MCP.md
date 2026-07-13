@@ -110,6 +110,13 @@ returns an error listing the valid choices, so the agent self-corrects. In
 `cix_search`, relative `in`/`exclude` paths resolve against the **repository
 root**, never a working directory.
 
+> **Read-only surface.** These MCP tools list, search, and read — they never
+> create, delete, or link anything. Workspace *management* (creating a
+> workspace, linking/unlinking projects, deleting one) is done with the `cix`
+> CLI (`cix ws create` / `add` / `remove` / `delete`) or the dashboard; an MCP
+> host consumes workspaces that already exist. Full verbs:
+> [`CLI_REFERENCE.md`](CLI_REFERENCE.md#workspaces-cross-repo).
+
 ## Configuration precedence
 
 `cix mcp` resolves its target server exactly like every other cix command, plus
