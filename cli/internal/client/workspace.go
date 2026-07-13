@@ -105,6 +105,86 @@ func (c *Client) ListWorkspaceProjects(workspaceID string) (*WorkspaceProjectLis
 	return &out, nil
 }
 
+// CreateWorkspace — POST /api/v1/workspaces. Creates a workspace owned by
+// the caller. An empty description is omitted from the body. The server
+// also stamps timestamps + owner_user_id on the returned payload, which the
+// minimal Workspace struct simply ignores.
+func (c *Client) CreateWorkspace(name, description string) (*Workspace, error) {
+	body := map[string]any{"name": name}
+	if description != "" {
+		body["description"] = description
+	}
+	resp, err := c.do("POST", "/api/v1/workspaces", body)
+	if err != nil {
+		return nil, err
+	}
+	var out Workspace
+	if err := parseResponse(resp, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdateWorkspace — PATCH /api/v1/workspaces/{id}. Both fields are optional:
+// a nil pointer omits the field so the server leaves it unchanged; a non-nil
+// value is sent verbatim (an empty description string clears it). Callers
+// should pass at least one non-nil pointer or the request is a no-op.
+func (c *Client) UpdateWorkspace(id string, name, description *string) (*Workspace, error) {
+	body := map[string]any{}
+	if name != nil {
+		body["name"] = *name
+	}
+	if description != nil {
+		body["description"] = *description
+	}
+	resp, err := c.do("PATCH", "/api/v1/workspaces/"+url.PathEscape(id), body)
+	if err != nil {
+		return nil, err
+	}
+	var out Workspace
+	if err := parseResponse(resp, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteWorkspace — DELETE /api/v1/workspaces/{id}. Removes the workspace and
+// its project-membership rows; the projects themselves are untouched.
+// Returns nil on 204 and a formatted error otherwise (including 404 when the
+// workspace is already gone).
+func (c *Client) DeleteWorkspace(id string) error {
+	resp, err := c.do("DELETE", "/api/v1/workspaces/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	return parseResponse(resp, nil)
+}
+
+// LinkProjectToWorkspace — POST /api/v1/workspaces/{id}/projects. Adds an
+// already-indexed project (addressed by its 16-hex path_hash) to the
+// workspace. The server rejects not-yet-indexed projects (422) and
+// duplicates (409); both surface as formatted errors from parseResponse.
+func (c *Client) LinkProjectToWorkspace(id, projectHash string) error {
+	body := map[string]string{"project_hash": projectHash}
+	resp, err := c.do("POST", "/api/v1/workspaces/"+url.PathEscape(id)+"/projects", body)
+	if err != nil {
+		return err
+	}
+	return parseResponse(resp, nil)
+}
+
+// UnlinkProjectFromWorkspace — DELETE
+// /api/v1/workspaces/{id}/projects/{hash}. Removes the membership row; the
+// project itself is untouched. A 404 (unknown project, or not linked to this
+// workspace) surfaces as a formatted error.
+func (c *Client) UnlinkProjectFromWorkspace(id, projectHash string) error {
+	resp, err := c.do("DELETE", "/api/v1/workspaces/"+url.PathEscape(id)+"/projects/"+url.PathEscape(projectHash), nil)
+	if err != nil {
+		return err
+	}
+	return parseResponse(resp, nil)
+}
+
 // WorkspaceSearch — GET /api/v1/workspaces/{id}/search. id is the
 // workspace's opaque ULID/UUID returned by ListWorkspaces. minScore is
 // optional: nil omits the parameter so the server applies its default

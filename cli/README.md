@@ -30,7 +30,7 @@ cli/
 │   ├── config.go        — `cix config show/set/unset/path` (+ multi-server keys)
 │   ├── config_keys.go   — `cix config keys` (schema-driven key listing)
 │   ├── config_edit.go   — `cix config edit` / `cix config init` (huh-driven TUI)
-│   ├── workspace.go     — `cix workspace …` (cross-repo, name-first)
+│   ├── workspace.go     — `cix workspace …` (cross-repo search + create/add/remove/rename/delete, name-first)
 │   └── version.go       — `cix version`
 ├── internal/
 │   ├── client/          — HTTP client to cix-server

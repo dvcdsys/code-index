@@ -1,9 +1,14 @@
 package cmd
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/anthropics/code-index/cli/internal/client"
 )
 
 // TestListWorkspaceProjects_DecodesPayload locks the acceptance from
@@ -290,6 +295,444 @@ func TestResolveWorkspaceID_ByName(t *testing.T) {
 			t.Errorf("resolveWorkspaceID(%q) = %q, want %q", c.in, got, c.wantID)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Mutation verbs: create / delete / add / remove / update.
+// ---------------------------------------------------------------------------
+
+// TestCreateWorkspace verifies `cix ws create <name> --description ...` POSTs
+// the right body and renders the created id/name. The description flag is
+// threaded through the global the same way cobra sets it in real use.
+func TestCreateWorkspace(t *testing.T) {
+	var gotBody map[string]any
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/workspaces" {
+			json.NewDecoder(r.Body).Decode(&gotBody)
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"id": "ws_new", "name": "platform", "description": "core repos",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	useAPI(t, srv)
+
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+
+	prev := wsDescription
+	wsDescription = "core repos"
+	t.Cleanup(func() { wsDescription = prev })
+
+	out, err := captureOutput(func() error { return cmdCreateWorkspace(cli, []string{"platform"}) })
+	if err != nil {
+		t.Fatalf("cmdCreateWorkspace: %v", err)
+	}
+	if gotBody["name"] != "platform" {
+		t.Errorf("expected name=platform in body, got: %v", gotBody)
+	}
+	if gotBody["description"] != "core repos" {
+		t.Errorf("expected description in body, got: %v", gotBody)
+	}
+	if !strings.Contains(out, "created workspace platform") || !strings.Contains(out, "ws_new") {
+		t.Errorf("expected created confirmation with id, got:\n%s", out)
+	}
+}
+
+// TestCreateWorkspace_ArgCount pins the arity guard — create needs exactly
+// one positional name; zero or many is a usage error (never a silent POST).
+func TestCreateWorkspace_ArgCount(t *testing.T) {
+	cli := &client.Client{}
+	for _, args := range [][]string{{}, {"a", "b"}} {
+		if err := cmdCreateWorkspace(cli, args); err == nil {
+			t.Errorf("cmdCreateWorkspace(%v): expected arity error, got nil", args)
+		}
+	}
+}
+
+// TestDeleteWorkspace_WithYes confirms `--yes` skips the prompt and the
+// resolved id is DELETEd. The 204 must be treated as success.
+func TestDeleteWorkspace_WithYes(t *testing.T) {
+	var deletedPath string
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/workspaces":
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}},
+				"total":      1,
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/workspaces/ws_1":
+			deletedPath = r.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	useAPI(t, srv)
+
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+	prev := wsYes
+	wsYes = true
+	t.Cleanup(func() { wsYes = prev })
+
+	out, err := captureOutput(func() error { return cmdDeleteWorkspace(cli, "platform") })
+	if err != nil {
+		t.Fatalf("cmdDeleteWorkspace: %v", err)
+	}
+	if deletedPath != "/api/v1/workspaces/ws_1" {
+		t.Errorf("expected DELETE on resolved id ws_1, got %q", deletedPath)
+	}
+	if !strings.Contains(out, "deleted workspace platform") {
+		t.Errorf("expected deletion confirmation, got:\n%s", out)
+	}
+}
+
+// TestDeleteWorkspace_NonInteractiveRequiresYes locks the safety gate: with
+// no TTY and no --yes, delete must refuse rather than block reading stdin.
+// We force a non-interactive stdin (a pipe) so isInteractive() is
+// deterministically false regardless of how the test harness is launched.
+func TestDeleteWorkspace_NonInteractiveRequiresYes(t *testing.T) {
+	withPipedStdin(t, "")
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/workspaces" {
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}},
+				"total":      1,
+			})
+			return
+		}
+		// A DELETE reaching the server here would be a bug — the gate must
+		// stop before any HTTP mutation.
+		t.Errorf("unexpected request %s %s — delete gate should have aborted", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	})
+	useAPI(t, srv)
+
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+	prev := wsYes
+	wsYes = false
+	t.Cleanup(func() { wsYes = prev })
+
+	_, err = captureOutput(func() error { return cmdDeleteWorkspace(cli, "platform") })
+	if err == nil {
+		t.Fatal("expected refusal error without --yes on non-interactive stdin")
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("error should point at --yes, got: %v", err)
+	}
+}
+
+// TestAddProjects_ResolvesAndLinks covers the happy path: an identifier is
+// resolved to a path_hash via the live project list, then POSTed as
+// {project_hash}. We exercise all three identifier forms in one run.
+func TestAddProjects_ResolvesAndLinks(t *testing.T) {
+	var linkedHashes []string
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}},
+				"total":      1,
+			})
+		case r.URL.Path == "/api/v1/projects" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"projects": []map[string]any{
+					{"path_hash": "a1b2c3d4e5f60718", "host_path": "github.com/owner/repo@main", "status": "indexed"},
+				},
+				"total": 1,
+			})
+		case r.URL.Path == "/api/v1/workspaces/ws_1/projects" && r.Method == http.MethodPost:
+			var body struct {
+				ProjectHash string `json:"project_hash"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			linkedHashes = append(linkedHashes, body.ProjectHash)
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"workspace_id": "ws_1", "project_path": "github.com/owner/repo@main",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	useAPI(t, srv)
+
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+
+	// Both the host_path form and the raw hash form must resolve to the
+	// same path_hash and produce two link calls.
+	out, err := captureOutput(func() error {
+		return cmdAddProjects(cli, "platform", []string{"github.com/owner/repo@main", "a1b2c3d4e5f60718"})
+	})
+	if err != nil {
+		t.Fatalf("cmdAddProjects: %v", err)
+	}
+	if len(linkedHashes) != 2 {
+		t.Fatalf("expected 2 link calls, got %d (%v)", len(linkedHashes), linkedHashes)
+	}
+	for _, h := range linkedHashes {
+		if h != "a1b2c3d4e5f60718" {
+			t.Errorf("expected project_hash a1b2c3d4e5f60718, got %q", h)
+		}
+	}
+	if strings.Count(out, "✓ added") != 2 {
+		t.Errorf("expected two success lines, got:\n%s", out)
+	}
+}
+
+// TestAddProjects_NotIndexedSurfacesError checks the 422 path: the server
+// rejects a not-yet-indexed project and the CLI reports a per-project
+// failure plus a non-nil aggregate error (non-zero exit).
+func TestAddProjects_NotIndexedSurfacesError(t *testing.T) {
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}},
+				"total":      1,
+			})
+		case r.URL.Path == "/api/v1/projects" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"projects": []map[string]any{
+					{"path_hash": "a1b2c3d4e5f60718", "host_path": "github.com/owner/repo@main", "status": "indexing"},
+				},
+				"total": 1,
+			})
+		case r.URL.Path == "/api/v1/workspaces/ws_1/projects" && r.Method == http.MethodPost:
+			apiError(w, http.StatusUnprocessableEntity,
+				"project is not yet indexed — wait for indexing to complete before linking")
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	useAPI(t, srv)
+
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+	_, err = captureOutput(func() error {
+		return cmdAddProjects(cli, "platform", []string{"github.com/owner/repo@main"})
+	})
+	if err == nil {
+		t.Fatal("expected aggregate error when a link fails")
+	}
+	if !strings.Contains(err.Error(), "failed to add") {
+		t.Errorf("expected aggregate 'failed to add' error, got: %v", err)
+	}
+}
+
+// TestAddProjects_UnknownProject asserts the local resolution guard: an
+// identifier absent from the project list fails before any POST, with an
+// actionable hint.
+func TestAddProjects_UnknownProject(t *testing.T) {
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/workspaces":
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}},
+				"total":      1,
+			})
+		case r.URL.Path == "/api/v1/projects":
+			writeJSON(w, 200, map[string]any{"projects": []map[string]any{}, "total": 0})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/workspaces/ws_1/projects"):
+			t.Errorf("unexpected link POST for an unresolved project")
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	useAPI(t, srv)
+
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+	_, err = captureOutput(func() error {
+		return cmdAddProjects(cli, "platform", []string{"github.com/nope/nope@main"})
+	})
+	if err == nil {
+		t.Fatal("expected failure for an unknown project")
+	}
+}
+
+// TestRemoveProjects_Unlinks confirms remove resolves the hash and issues a
+// DELETE at the {id}/projects/{hash} path.
+func TestRemoveProjects_Unlinks(t *testing.T) {
+	var deletedPath string
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}},
+				"total":      1,
+			})
+		case r.URL.Path == "/api/v1/projects" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"projects": []map[string]any{
+					{"path_hash": "a1b2c3d4e5f60718", "host_path": "github.com/owner/repo@main", "status": "indexed"},
+				},
+				"total": 1,
+			})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/workspaces/ws_1/projects/"):
+			deletedPath = r.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	useAPI(t, srv)
+
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+	out, err := captureOutput(func() error {
+		return cmdRemoveProjects(cli, "platform", []string{"a1b2c3d4e5f60718"})
+	})
+	if err != nil {
+		t.Fatalf("cmdRemoveProjects: %v", err)
+	}
+	if deletedPath != "/api/v1/workspaces/ws_1/projects/a1b2c3d4e5f60718" {
+		t.Errorf("expected unlink DELETE on the hash path, got %q", deletedPath)
+	}
+	if !strings.Contains(out, "✓ removed") {
+		t.Errorf("expected removal confirmation, got:\n%s", out)
+	}
+}
+
+// TestResolveProjectHash exercises the three-tier identifier resolver
+// directly (pure over a fixture list) so the priority order and the
+// not-found error are pinned without HTTP.
+func TestResolveProjectHash(t *testing.T) {
+	projects := []client.Project{
+		{PathHash: "a1b2c3d4e5f60718", HostPath: "github.com/owner/repo@main"},
+		{PathHash: "7f3e2c1a0d4b5e69", HostPath: "/Users/me/local-proj"},
+	}
+	cases := []struct {
+		in       string
+		wantHash string
+		wantErr  bool
+	}{
+		{"a1b2c3d4e5f60718", "a1b2c3d4e5f60718", false},           // raw hash
+		{"github.com/owner/repo@main", "a1b2c3d4e5f60718", false}, // external host_path
+		{"/Users/me/local-proj", "7f3e2c1a0d4b5e69", false},       // absolute host_path
+		{"deadbeefdeadbeef", "", true},                            // hex but unknown
+		{"nope", "", true},                                        // no match
+	}
+	for _, c := range cases {
+		got, _, err := resolveProjectHash(projects, c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("resolveProjectHash(%q): expected error, got hash=%q", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("resolveProjectHash(%q): unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.wantHash {
+			t.Errorf("resolveProjectHash(%q) = %q, want %q", c.in, got, c.wantHash)
+		}
+	}
+}
+
+// TestResolveProjectHash_LocalDerived locks the local-project path, which a
+// naive host_path string compare misses: the server stores a local project's
+// host_path as the full "local:{machine_id}:{path}" identity key, so an
+// absolute path must be resolved by re-deriving the path_hash (matching the
+// server's key derivation), not by matching the bare path against host_path.
+// This is the exact regression the E2E run surfaced.
+func TestResolveProjectHash_LocalDerived(t *testing.T) {
+	absPath := "/Users/me/some/local/project"
+	derived := client.EncodeProjectPath(absPath) // sha1("local:<machine_id>:<abs>")
+	projects := []client.Project{
+		{PathHash: derived, HostPath: "local:machineabc:" + absPath},
+	}
+	got, hp, err := resolveProjectHash(projects, absPath)
+	if err != nil {
+		t.Fatalf("resolveProjectHash(%q): unexpected error: %v", absPath, err)
+	}
+	if got != derived {
+		t.Errorf("resolveProjectHash(%q) = %q, want derived hash %q", absPath, got, derived)
+	}
+	if hp != "local:machineabc:"+absPath {
+		t.Errorf("expected the stored host_path back, got %q", hp)
+	}
+}
+
+// TestReadAffirmative pins the yes-parsing used by the delete prompt.
+func TestReadAffirmative(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"y\n", true}, {"yes\n", true}, {"Y\n", true}, {"YES\n", true},
+		{"n\n", false}, {"\n", false}, {"", false}, {"nope\n", false},
+	}
+	for _, c := range cases {
+		withPipedStdin(t, c.in)
+		if got := readAffirmative(); got != c.want {
+			t.Errorf("readAffirmative(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestCreateKeywordRouting proves `cix ws create <name>` routes to create
+// (a POST) rather than being read as "describe the workspace named create".
+func TestCreateKeywordRouting(t *testing.T) {
+	posted := false
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/workspaces" {
+			posted = true
+			writeJSON(w, http.StatusCreated, map[string]any{"id": "ws_x", "name": "newws"})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	useAPI(t, srv)
+
+	prev := wsDescription
+	wsDescription = ""
+	t.Cleanup(func() { wsDescription = prev })
+
+	_, err := captureOutput(func() error { return runWorkspace(workspaceCmd, []string{"create", "newws"}) })
+	if err != nil {
+		t.Fatalf("runWorkspace create: %v", err)
+	}
+	if !posted {
+		t.Error("expected `ws create newws` to POST a new workspace")
+	}
+}
+
+// withPipedStdin swaps os.Stdin for the read end of a pipe pre-filled with
+// input, making isInteractive() deterministically false and feeding
+// readAffirmative(). Restored on cleanup.
+func withPipedStdin(t *testing.T, input string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	old := os.Stdin
+	os.Stdin = r
+	go func() {
+		io.WriteString(w, input)
+		w.Close()
+	}()
+	t.Cleanup(func() { os.Stdin = old })
 }
 
 // defaultWorkspaceHandler returns the standard 2-project fixture used
