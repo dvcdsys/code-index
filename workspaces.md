@@ -822,7 +822,7 @@ GET    /api/v1/workspaces                       list
 POST   /api/v1/workspaces                       create (body: {name, description})
 GET    /api/v1/workspaces/{id}                  detail
 PATCH  /api/v1/workspaces/{id}                  rename / update description
-DELETE /api/v1/workspaces/{id}                  remove (cascades to repos + clones)
+DELETE /api/v1/workspaces/{id}                  delete (removes the workspace + membership links only; projects, git_repos, and clones are untouched)
 ```
 
 ### Workspace project membership
