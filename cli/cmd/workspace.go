@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -133,6 +134,9 @@ func runWorkspace(cmd *cobra.Command, args []string) error {
 	// comment. It must be handled before the name-first arms because the
 	// workspace it names does not exist yet.
 	if len(args) >= 1 && strings.EqualFold(args[0], "create") {
+		if err := guardVerbFlags(cmd, "create"); err != nil {
+			return err
+		}
 		return cmdCreateWorkspace(cli, args[1:])
 	}
 
@@ -150,6 +154,10 @@ func runWorkspace(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	verb := strings.ToLower(args[1])
 	rest := args[2:]
+
+	if err := guardVerbFlags(cmd, verb); err != nil {
+		return err
+	}
 
 	switch verb {
 	case "list", "repos":
@@ -412,7 +420,15 @@ func cmdCreateWorkspace(cli *client.Client, args []string) error {
 	if len(args) != 1 {
 		return errors.New("create needs exactly one workspace name (cix ws create <name> [--description \"...\"])")
 	}
-	ws, err := cli.CreateWorkspace(args[0], wsDescription)
+	name := args[0]
+	// `list` and `create` are reserved by the name-first grammar: a workspace
+	// with either name would be unaddressable (`cix ws list` lists workspaces,
+	// `cix ws create` starts a create). Reject them up front rather than let
+	// the user make a workspace they can only reach by opaque id.
+	if lower := strings.ToLower(name); lower == "list" || lower == "create" {
+		return fmt.Errorf("%q is reserved and can't be a workspace name — it would be unreachable via the `cix ws` grammar", name)
+	}
+	ws, err := cli.CreateWorkspace(name, wsDescription)
 	if err != nil {
 		return err
 	}
@@ -420,7 +436,7 @@ func cmdCreateWorkspace(cli *client.Client, args []string) error {
 		return emitJSON(ws)
 	}
 	fmt.Printf("created workspace %s  (%s)\n", ws.Name, ws.ID)
-	fmt.Fprintf(os.Stderr, "add projects with: cix ws %s add <project>\n", ws.Name)
+	fmt.Fprintf(os.Stderr, "add projects with: cix ws %q add <project>\n", ws.Name)
 	return nil
 }
 
@@ -495,6 +511,9 @@ func cmdDeleteWorkspace(cli *client.Client, identifier string) error {
 	if err := cli.DeleteWorkspace(id); err != nil {
 		return err
 	}
+	if wsJSON {
+		return emitJSON(map[string]any{"deleted": true, "workspace": identifier, "id": id})
+	}
 	fmt.Printf("deleted workspace %s\n", identifier)
 	return nil
 }
@@ -531,34 +550,61 @@ func mutateProjects(cli *client.Client, identifier string, projectArgs []string,
 		return fmt.Errorf("list projects: %w", err)
 	}
 
+	doneVerb := "added"
+	if op != "add" {
+		doneVerb = "removed"
+	}
+	results := make([]projectMutationResult, 0, len(targets))
 	failures := 0
 	for _, t := range targets {
 		hash, hostPath, rerr := resolveProjectHash(projList, t)
 		if rerr != nil {
-			fmt.Fprintf(os.Stderr, "✗ %s: %v\n", t, rerr)
+			results = append(results, projectMutationResult{Project: t, Status: "failed", Error: rerr.Error()})
+			if !wsJSON {
+				fmt.Fprintf(os.Stderr, "✗ %s: %v\n", t, rerr)
+			}
 			failures++
 			continue
 		}
 		var opErr error
-		var verb string
 		if op == "add" {
 			opErr = cli.LinkProjectToWorkspace(id, hash)
-			verb = "added"
 		} else {
 			opErr = cli.UnlinkProjectFromWorkspace(id, hash)
-			verb = "removed"
 		}
 		if opErr != nil {
-			fmt.Fprintf(os.Stderr, "✗ %s: %v\n", hostPath, opErr)
+			results = append(results, projectMutationResult{Project: t, HostPath: hostPath, Status: "failed", Error: opErr.Error()})
+			if !wsJSON {
+				fmt.Fprintf(os.Stderr, "✗ %s: %v\n", hostPath, opErr)
+			}
 			failures++
 			continue
 		}
-		fmt.Printf("✓ %s %s\n", verb, hostPath)
+		results = append(results, projectMutationResult{Project: t, HostPath: hostPath, Status: doneVerb})
+		if !wsJSON {
+			fmt.Printf("✓ %s %s\n", doneVerb, hostPath)
+		}
+	}
+	// In --json mode the machine-readable summary goes to stdout; a partial
+	// failure still returns an error so the exit code (and stderr) reflect it.
+	if wsJSON {
+		if err := emitJSON(map[string]any{"workspace": identifier, "results": results, "failed": failures}); err != nil {
+			return err
+		}
 	}
 	if failures > 0 {
 		return fmt.Errorf("%d of %d project(s) failed to %s", failures, len(targets), op)
 	}
 	return nil
+}
+
+// projectMutationResult is one row of the --json output for add / remove.
+// Status is "added", "removed", or "failed"; Error is set only on failure.
+type projectMutationResult struct {
+	Project  string `json:"project"`
+	HostPath string `json:"host_path,omitempty"`
+	Status   string `json:"status"`
+	Error    string `json:"error,omitempty"`
 }
 
 // projectTargets returns the project identifiers to act on. An empty list
@@ -581,7 +627,9 @@ func projectTargets(args []string) ([]string, error) {
 //
 //  1. an exact 16-hex path_hash
 //  2. an exact host_path (e.g. github.com/owner/repo@main, or an abs path)
-//  3. a filesystem path (".", relative, ~-expanded) → abs → host_path match
+//  3. a filesystem path (".", or a relative path) → abs → derived path_hash
+//     (a local project's host_path is the namespaced identity key, not the
+//     bare path, so tier 3 matches on the re-derived hash, not host_path)
 //
 // Resolving against the live project list (rather than blindly hashing the
 // input) lets the CLI reject unknown projects locally with an actionable
@@ -629,6 +677,29 @@ func isHex16(s string) bool {
 		}
 	}
 	return true
+}
+
+// guardVerbFlags rejects a management flag (--name / --description / --yes)
+// that was set on the command line but is meaningless for the chosen verb —
+// cheap protection against a silently-ignored flag, e.g.
+// `cix ws create foo --name bar` (--name is update-only). The read/search
+// flags (--json, --verbose, --top-*, --min-score) are never touched here.
+func guardVerbFlags(cmd *cobra.Command, verb string) error {
+	appliesTo := map[string][]string{
+		"name":        {"update"},
+		"description": {"create", "update"},
+		"yes":         {"delete"},
+	}
+	for flag, verbs := range appliesTo {
+		f := cmd.Flags().Lookup(flag)
+		if f == nil || !f.Changed {
+			continue
+		}
+		if !slices.Contains(verbs, verb) {
+			return fmt.Errorf("--%s is not valid for `cix ws %s`", flag, verb)
+		}
+	}
+	return nil
 }
 
 // isInteractive reports whether stdin is a TTY. Dependency-free char-device

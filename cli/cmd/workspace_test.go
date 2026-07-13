@@ -717,6 +717,253 @@ func TestCreateKeywordRouting(t *testing.T) {
 	}
 }
 
+// TestRenameWorkspace confirms `rename` PATCHes only the name (no description
+// key) and renders the confirmation.
+func TestRenameWorkspace(t *testing.T) {
+	var gotBody map[string]any
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}}, "total": 1,
+			})
+		case r.URL.Path == "/api/v1/workspaces/ws_1" && r.Method == http.MethodPatch:
+			json.NewDecoder(r.Body).Decode(&gotBody)
+			writeJSON(w, 200, map[string]any{"id": "ws_1", "name": "platform-core"})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	useAPI(t, srv)
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+	out, err := captureOutput(func() error { return cmdRenameWorkspace(cli, "platform", "platform-core") })
+	if err != nil {
+		t.Fatalf("cmdRenameWorkspace: %v", err)
+	}
+	if gotBody["name"] != "platform-core" {
+		t.Errorf("expected name=platform-core in PATCH body, got %v", gotBody)
+	}
+	if _, hasDesc := gotBody["description"]; hasDesc {
+		t.Errorf("rename must not send a description key, got %v", gotBody)
+	}
+	if !strings.Contains(out, "renamed workspace to platform-core") {
+		t.Errorf("expected rename confirmation, got:\n%s", out)
+	}
+}
+
+// TestUpdateWorkspace_ClearsDescription is the key regression guard for the
+// cmd.Flags().Changed semantics: `--description ""` must send an explicit
+// empty description (clear it), NOT drop the field — and must not send a name
+// key when only --description was given. A future refactor that switches to a
+// zero-value check would silently break the clear-on-empty behavior.
+func TestUpdateWorkspace_ClearsDescription(t *testing.T) {
+	var raw []byte
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}}, "total": 1,
+			})
+		case r.URL.Path == "/api/v1/workspaces/ws_1" && r.Method == http.MethodPatch:
+			raw, _ = io.ReadAll(r.Body)
+			writeJSON(w, 200, map[string]any{"id": "ws_1", "name": "platform", "description": ""})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	useAPI(t, srv)
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+
+	setWSFlag(t, "description", "") // --description "" → Changed=true, clears
+
+	_, err = captureOutput(func() error { return cmdUpdateWorkspace(workspaceCmd, cli, "platform") })
+	if err != nil {
+		t.Fatalf("cmdUpdateWorkspace: %v", err)
+	}
+	var body map[string]any
+	if e := json.Unmarshal(raw, &body); e != nil {
+		t.Fatalf("decode PATCH body: %v", e)
+	}
+	d, hasDesc := body["description"]
+	if !hasDesc {
+		t.Errorf("expected an explicit description key (clear), got %v", body)
+	}
+	if d != "" {
+		t.Errorf("expected empty description, got %v", d)
+	}
+	if _, hasName := body["name"]; hasName {
+		t.Errorf("did not expect a name key when only --description was set, got %v", body)
+	}
+}
+
+// TestUpdateWorkspace_NoFlags: with neither flag changed, update errors before
+// any HTTP call and names both flags.
+func TestUpdateWorkspace_NoFlags(t *testing.T) {
+	f := workspaceCmd.Flags()
+	nc, dc := f.Lookup("name").Changed, f.Lookup("description").Changed
+	f.Lookup("name").Changed = false
+	f.Lookup("description").Changed = false
+	t.Cleanup(func() { f.Lookup("name").Changed = nc; f.Lookup("description").Changed = dc })
+
+	err := cmdUpdateWorkspace(workspaceCmd, &client.Client{}, "platform")
+	if err == nil {
+		t.Fatal("expected error when neither --name nor --description is given")
+	}
+	if !strings.Contains(err.Error(), "--name") || !strings.Contains(err.Error(), "--description") {
+		t.Errorf("error should mention both flags, got: %v", err)
+	}
+}
+
+// TestGuardVerbFlags locks the irrelevant-flag guard: --name (update-only) is
+// rejected for create/delete but accepted for update.
+func TestGuardVerbFlags(t *testing.T) {
+	setWSFlag(t, "name", "x")
+	if err := guardVerbFlags(workspaceCmd, "create"); err == nil {
+		t.Error("expected --name rejected for create")
+	} else if !strings.Contains(err.Error(), "--name") {
+		t.Errorf("error should mention --name, got: %v", err)
+	}
+	if err := guardVerbFlags(workspaceCmd, "delete"); err == nil {
+		t.Error("expected --name rejected for delete")
+	}
+	if err := guardVerbFlags(workspaceCmd, "update"); err != nil {
+		t.Errorf("--name must be valid for update, got: %v", err)
+	}
+}
+
+// TestCreateWorkspace_RejectsReservedName pins that `list`/`create` (any case)
+// are refused as workspace names — they'd be unaddressable by the name-first
+// grammar.
+func TestCreateWorkspace_RejectsReservedName(t *testing.T) {
+	cli := &client.Client{}
+	for _, name := range []string{"list", "create", "LIST", "Create"} {
+		if err := cmdCreateWorkspace(cli, []string{name}); err == nil {
+			t.Errorf("cmdCreateWorkspace(%q): expected reserved-name error, got nil", name)
+		}
+	}
+}
+
+// TestAddProjects_JSON verifies --json emits a machine-readable summary on
+// stdout (and no ✓ lines) for the add path.
+func TestAddProjects_JSON(t *testing.T) {
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}}, "total": 1,
+			})
+		case r.URL.Path == "/api/v1/projects" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"projects": []map[string]any{
+					{"path_hash": "a1b2c3d4e5f60718", "host_path": "github.com/owner/repo@main", "status": "indexed"},
+				}, "total": 1,
+			})
+		case r.URL.Path == "/api/v1/workspaces/ws_1/projects" && r.Method == http.MethodPost:
+			writeJSON(w, http.StatusCreated, map[string]any{"workspace_id": "ws_1"})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	useAPI(t, srv)
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+	prev := wsJSON
+	wsJSON = true
+	t.Cleanup(func() { wsJSON = prev })
+
+	out, err := captureOutput(func() error {
+		return cmdAddProjects(cli, "platform", []string{"github.com/owner/repo@main"})
+	})
+	if err != nil {
+		t.Fatalf("cmdAddProjects: %v", err)
+	}
+	if strings.Contains(out, "✓") {
+		t.Errorf("JSON mode must not print ✓ lines, got:\n%s", out)
+	}
+	var parsed struct {
+		Workspace string `json:"workspace"`
+		Failed    int    `json:"failed"`
+		Results   []struct {
+			HostPath string `json:"host_path"`
+			Status   string `json:"status"`
+		} `json:"results"`
+	}
+	if e := json.Unmarshal([]byte(out), &parsed); e != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", e, out)
+	}
+	if parsed.Failed != 0 || len(parsed.Results) != 1 || parsed.Results[0].Status != "added" {
+		t.Errorf("unexpected JSON result: %+v", parsed)
+	}
+}
+
+// TestDeleteWorkspace_JSON verifies --json emits a structured deletion record.
+func TestDeleteWorkspace_JSON(t *testing.T) {
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{
+				"workspaces": []map[string]any{{"id": "ws_1", "name": "platform"}}, "total": 1,
+			})
+		case r.URL.Path == "/api/v1/workspaces/ws_1" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	useAPI(t, srv)
+	cli, err := getClient()
+	if err != nil {
+		t.Fatalf("getClient: %v", err)
+	}
+	prevJSON, prevYes := wsJSON, wsYes
+	wsJSON, wsYes = true, true
+	t.Cleanup(func() { wsJSON, wsYes = prevJSON, prevYes })
+
+	out, err := captureOutput(func() error { return cmdDeleteWorkspace(cli, "platform") })
+	if err != nil {
+		t.Fatalf("cmdDeleteWorkspace: %v", err)
+	}
+	var parsed struct {
+		Deleted   bool   `json:"deleted"`
+		Workspace string `json:"workspace"`
+	}
+	if e := json.Unmarshal([]byte(out), &parsed); e != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", e, out)
+	}
+	if !parsed.Deleted || parsed.Workspace != "platform" {
+		t.Errorf("unexpected JSON: %+v", parsed)
+	}
+}
+
+// setWSFlag sets a workspaceCmd flag (marking it Changed) for the duration of
+// the test, restoring both the value and the Changed bit afterward so flag
+// state never leaks across tests.
+func setWSFlag(t *testing.T, name, value string) {
+	t.Helper()
+	f := workspaceCmd.Flags()
+	lk := f.Lookup(name)
+	if lk == nil {
+		t.Fatalf("unknown flag %q", name)
+	}
+	prevChanged := lk.Changed
+	prevVal := lk.Value.String()
+	if err := f.Set(name, value); err != nil {
+		t.Fatalf("set flag %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		f.Set(name, prevVal)
+		lk.Changed = prevChanged
+	})
+}
+
 // withPipedStdin swaps os.Stdin for the read end of a pipe pre-filled with
 // input, making isInteractive() deterministically false and feeding
 // readAffirmative(). Restored on cleanup.
