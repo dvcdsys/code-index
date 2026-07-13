@@ -10,6 +10,7 @@ import (
 	"github.com/anthropics/code-index/cli/internal/config"
 	"github.com/anthropics/code-index/cli/internal/daemon"
 	"github.com/anthropics/code-index/cli/internal/watcher"
+	"github.com/anthropics/code-index/cli/internal/watchtui"
 	"github.com/spf13/cobra"
 )
 
@@ -34,7 +35,8 @@ Examples:
   cix watch stop               # Stop daemon for current directory
   cix watch stop --all         # Stop all daemons
   cix watch status             # Check daemon for current directory
-  cix watch list               # List all running daemons`,
+  cix watch list               # List all running daemons
+  cix watch manage             # Interactive manager (start/stop/restart, TUI)`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runWatch,
 }
@@ -66,11 +68,41 @@ var watchListCmd = &cobra.Command{
 	RunE:  runWatchList,
 }
 
+var watchManageCmd = &cobra.Command{
+	Use:     "manage",
+	Aliases: []string{"ui"},
+	Short:   "Interactively manage all file watchers (TUI)",
+	Long: `Open a full-screen manager listing every known project and its watcher
+state. Navigate and stop / restart / start individual watchers, start all
+auto_watch projects, stop everything, or tail a watcher's log — all from
+one screen.
+
+The list unites the local project list (~/.cix/config.yaml) with the
+running watcher daemons, so it works offline for listing and stopping;
+starting a watcher requires a reachable server.
+
+Keys (press ? for the full table):
+  ↑/k ↓/j   move
+  s         stop selected
+  r         restart selected
+  S         start selected
+  a/space   toggle the project's auto_watch flag
+  A         start all auto_watch projects
+  x         stop all
+  d         delete project (server index + local; asks to confirm)
+  l/enter   tail log
+  g         refresh
+  q/esc     quit`,
+	Args: cobra.NoArgs,
+	RunE: runWatchManage,
+}
+
 func init() {
 	rootCmd.AddCommand(watchCmd)
 	watchCmd.AddCommand(watchStopCmd)
 	watchCmd.AddCommand(watchStatusCmd)
 	watchCmd.AddCommand(watchListCmd)
+	watchCmd.AddCommand(watchManageCmd)
 
 	watchCmd.Flags().BoolVarP(&watchForeground, "foreground", "f", false, "Run in foreground instead of daemon")
 	watchCmd.Flags().BoolVar(&watchDaemonMode, "daemon-mode", false, "")
@@ -105,18 +137,11 @@ func runWatchDaemon(projectPath string) error {
 		return err
 	}
 
-	if err := apiClient.Health(); err != nil {
-		return fmt.Errorf("API server not reachable: %w", err)
-	}
-
-	_, err = apiClient.GetProject(projectPath)
+	// GuardedStart runs the same preflight (server reachable + project
+	// registered) the interactive manager uses, then starts the daemon.
+	pid, err := watchtui.GuardedStart(apiClient, projectPath)
 	if err != nil {
-		return fmt.Errorf("project not found — run 'cix init %s' first: %w", projectPath, err)
-	}
-
-	pid, err := daemon.Start(projectPath)
-	if err != nil {
-		return fmt.Errorf("start daemon: %w", err)
+		return err
 	}
 
 	logFile, _ := daemon.LogFilePath(projectPath)
@@ -251,6 +276,19 @@ func runWatchList(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runWatchManage(cmd *cobra.Command, args []string) error {
+	// Needs a real terminal — refuse cleanly when piped or called by agents
+	// (bubbletea would otherwise error opening the TTY).
+	if fi, err := os.Stdout.Stat(); err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		return fmt.Errorf("`cix watch manage` needs an interactive terminal")
+	}
+
+	// Tolerate a missing/unreachable server: listing and stopping work
+	// offline; only starting a watcher needs the server (surfaced in-TUI).
+	apiClient, _ := getClient()
+	return watchtui.Run(watchtui.NewDaemonManager(apiClient))
 }
 
 func resolveProjectPath(args []string) (string, error) {
