@@ -1,0 +1,215 @@
+/* Docs-only styles — extends styles.css */
+
+.docs-layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 60px;
+  width: min(1180px, 92vw);
+  margin: 0 auto;
+  padding: 50px 0 40px;
+  align-items: flex-start;
+  position: relative;
+  z-index: 2;
+}
+
+.docs-sidebar {
+  position: sticky;
+  top: 100px;
+  align-self: start;
+}
+
+.docs-sidebar-inner {
+  display: flex;
+  flex-direction: column;
+}
+
+.toc {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  border-left: 2.5px solid var(--ink);
+  padding-left: 16px;
+}
+.toc li a {
+  text-decoration: none;
+  color: var(--ink-soft);
+  font-weight: 500;
+  font-size: 14.5px;
+  padding: 4px 0;
+  display: inline-block;
+}
+.toc li a:hover { color: var(--ink); }
+.toc li.on a {
+  color: var(--red);
+  font-weight: 700;
+  position: relative;
+}
+.toc li.on a::before {
+  content: "";
+  position: absolute;
+  left: -19px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 5px;
+  height: 5px;
+  background: var(--red);
+  border-radius: 50%;
+}
+
+.docs-hero {
+  margin-bottom: 64px;
+  padding-bottom: 40px;
+  border-bottom: 2px dashed var(--ink);
+}
+.docs-hero h1 {
+  font-size: clamp(40px, 5.5vw, 64px);
+  margin: 14px 0 18px;
+}
+
+.docs-section {
+  padding: 36px 0 56px;
+  scroll-margin-top: 100px;
+}
+.docs-section h2 {
+  font-size: clamp(28px, 3.5vw, 40px);
+  margin: 12px 0 22px;
+}
+.docs-section h3 {
+  font-size: 19px;
+  font-weight: 700;
+  margin: 32px 0 14px;
+}
+.docs-section p {
+  color: var(--ink-soft);
+  margin: 0 0 14px;
+  text-wrap: pretty;
+  max-width: 68ch;
+}
+.docs-section code {
+  font-family: var(--font-mono);
+  background: var(--paper);
+  padding: 1px 7px;
+  border: 1.5px solid var(--ink);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.bullets {
+  margin: 8px 0 14px;
+  padding-left: 22px;
+}
+.bullets li {
+  margin-bottom: 8px;
+  color: var(--ink-soft);
+}
+.bullets li b { color: var(--ink); }
+
+.code-pre {
+  font-family: var(--font-mono);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 2.5px solid var(--ink);
+  border-radius: 14px;
+  padding: 16px 20px;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-x: auto;
+  box-shadow: 4px 4px 0 var(--ink);
+  margin: 14px 0 18px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.docs-main { min-width: 0; }
+
+.def-list {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0 14px;
+}
+.def-row {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 18px;
+  padding: 12px 0;
+  border-bottom: 1.5px dashed rgba(31, 20, 16, 0.2);
+}
+.def-row:last-child { border-bottom: none; }
+.def-row dt {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--red);
+}
+.def-row dt code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--red);
+  font-weight: 600;
+}
+.def-row dd {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 14.5px;
+}
+.def-row dd code {
+  font-size: 12.5px;
+  padding: 1px 5px;
+}
+
+.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0 18px;
+  background: var(--paper);
+  border: 2.5px solid var(--ink);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.tbl th, .tbl td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1.5px solid rgba(31, 20, 16, 0.15);
+  font-size: 14px;
+}
+.tbl th {
+  background: var(--bg-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: var(--ink);
+}
+.tbl td code {
+  font-size: 12.5px;
+  padding: 1px 5px;
+}
+.tbl tbody tr:last-child td { border-bottom: none; }
+
+.ascii-diagram {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  margin: 0;
+  white-space: pre;
+  overflow-x: auto;
+}
+.diagram { background: var(--paper); padding: 22px; border-radius: 14px; }
+
+@media (max-width: 920px) {
+  .docs-layout { grid-template-columns: 1fr; gap: 24px; padding-top: 24px; }
+  /* single-column grid items must not size to their widest table/pre */
+  .docs-main, .docs-sidebar { min-width: 0; }
+  .docs-sidebar { position: static; }
+  .toc { display: flex; flex-wrap: wrap; gap: 12px; border-left: none; padding-left: 0; }
+  .toc li.on a::before { display: none; }
+  .def-row { grid-template-columns: 1fr; gap: 4px; }
+  /* tables can't shrink below min-content (long CIX_* names) — scroll them */
+  .tbl { display: block; overflow-x: auto; }
+}

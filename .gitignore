@@ -47,7 +47,13 @@ cli/dist/
 # Server build artifacts + runtime logs
 server/dist/
 server/exec.log
+# Root scratch dir only — anchored: a bare "tmp" would silently ignore any
+# nested file/dir named tmp (same pitfall as the docs/ pattern below).
+/tmp/
 
+# Marketing site (site/) build artifacts
+site/node_modules/
+site/dist/
 # Dashboard build output — produced by `make dashboard-build`.
 # A committed `.gitkeep` keeps dist/ non-empty so `//go:embed all:dist` works
 # on a fresh clone (the embed.FS needs at least one entry). The real
@@ -62,11 +68,10 @@ server/internal/httpapi/dashboard/dist/*
 .python-version
 
 # Local docs (top-level docs/ is a notebook directory per CLAUDE.md;
-# tracked project documentation lives in doc/). Exception below for the
+# tracked project documentation lives in doc/). Anchored to the repo root —
+# a bare "docs/" would also swallow nested dirs like site/docs/ and the
 # embedded Swagger UI bundle inside the Go server package.
-docs/
-!server/internal/httpapi/docs/
-!server/internal/httpapi/docs/**
+/docs/
 
 # Claude Code
 .claude/
