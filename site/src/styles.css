@@ -525,8 +525,12 @@ h3 { font-size: clamp(20px, 2vw, 24px); }
   flex-direction: column;
   gap: 12px;
   flex: 1;
-  min-height: 380px;
+  /* fixed-height panes that scroll internally, like the real thing;
+     JS keeps both pinned to the bottom as content streams in */
+  height: 480px;
+  overflow-y: auto;
 }
+.ws-term-body { height: 480px; overflow-y: auto; min-height: 0; }
 .msg {
   max-width: 88%;
   padding: 11px 14px;
@@ -541,6 +545,19 @@ h3 { font-size: clamp(20px, 2vw, 24px); }
   background: var(--bg-2);
   padding: 1px 5px;
   border-radius: 6px;
+}
+.msg .msg-code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  overflow-x: auto;
+  white-space: pre;
 }
 .msg-user {
   align-self: flex-end;

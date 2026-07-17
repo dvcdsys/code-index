@@ -1,25 +1,32 @@
 import { useState, useEffect, useRef } from 'react';
 
 // Two-pane workspace demo: an agent chat on the left, and the cix commands
-// the agent actually runs on the right — synchronized. The point is the
-// WORKFLOW: one minimal question → broad workspace search → several services
-// implicated → targeted per-repo lookups → a concrete, actionable answer.
+// the agent actually runs on the right — synchronized, both panes scroll
+// like the real thing. The point is the WORKFLOW: one minimal question →
+// broad workspace search → several services implicated → targeted per-repo
+// lookups (including a dead end: no admin UI exists) → a concrete answer
+// down to the SQL to run and the cache to flush.
 //
 // This is a SCRIPTED scenario with abstract repos (acme-*), not transcribed
 // output (unlike the hero terminal): a fictitious workspace keeps real
 // project internals off the marketing page. The OUTPUT FORMAT mirrors the
-// real CLI (cli/cmd/workspace.go renderSearch, cix symbols / cix search
-// renderers) — keep it faithful when editing.
+// real CLI (cli/cmd/workspace.go renderSearch, cix search / cix symbols
+// renderers, and the literal "No results found" empty message) — keep it
+// faithful when editing.
 
 const REPOS = ['acme-gateway', 'acme-billing', 'acme-auth', 'acme-web'];
 
 const USER_MSG = 'How do I add a new fee to checkout?';
 
-const INTERIM = <>Fees touch <b>acme-billing</b>, <b>acme-gateway</b> and <b>acme-web</b>. Checking where fees are defined and how the gateway caches them…</>;
+const INTERIM = <>Fees touch <b>acme-billing</b>, <b>acme-gateway</b> and <b>acme-web</b>. Checking how fees are stored and whether there's an admin UI for them…</>;
 
-const REPLY = <>Add it in <b>acme-billing</b>: extend <code>FeeSchedule</code> (internal/fees/schedule.go:34) and register it with <code>RegisterFee</code>. Then flush the gateway's quote cache — <code>QuoteCache.Invalidate</code> (internal/pricing/cache.go:81) — or checkout keeps serving stale totals. <b>acme-web</b> picks the new fee up from <code>/v1/fees</code>, no change needed.</>;
+const REPLY = <>
+  Fees are <b>rows in the database</b>: <code>FeeSchedule</code> loads the <code>fees</code> table via <code>LoadSchedule</code> (fees/store.go:41); schema in <code>migrations/0007_create_fees.sql</code>. I found <b>no admin UI</b> for fees (nothing matches in acme-web), so add the row directly:
+  <pre className="msg-code">{`INSERT INTO fees (code, label, amount_bps, active)
+VALUES ('intl_card', 'Intl. card fee', 150, true);`}</pre>
+  Then flush the gateway's quote cache — <code>QuoteCache.Invalidate</code> (pricing/cache.go:81) — or checkout keeps serving stale totals. acme-web renders whatever <code>/v1/fees</code> returns, no change needed.
+</>;
 
-// Step outputs use the same row vocabulary as the other terminals on the page.
 const STEPS = [
   {
     cmd: 'cix ws platform search "fee calculation"',
@@ -33,17 +40,23 @@ const STEPS = [
     interimAfter: true,
   },
   {
-    cmd: 'cix symbols Fee -n acme-billing',
+    cmd: 'cix search "fees table schema" -n acme-billing',
     output: [
-      { t: 'dim', text: 'Found 2 symbol(s):' },
-      { t: 'sym', kind: '[type]', name: 'FeeSchedule' },
-      { t: 'loc', text: 'internal/fees/schedule.go:34-58 (go)' },
-      { t: 'sym', kind: '[function]', name: 'RegisterFee' },
-      { t: 'loc', text: 'internal/fees/schedule.go:73-98 (go)' },
+      { t: 'dim', text: 'Found 2 file(s) (18.9ms):' },
+      { t: 'file', text: '1. migrations/0007_create_fees.sql', meta: '[best 0.581] · 1 match · sql' },
+      { t: 'chunkline', score: '0.581', lines: '1-14', sig: 'CREATE TABLE fees' },
+      { t: 'file', text: '2. internal/fees/store.go', meta: '[best 0.522] · 1 match · go' },
+      { t: 'chunkline', score: '0.522', lines: '41-77', sig: 'method LoadSchedule' },
     ],
   },
   {
-    cmd: 'cix search "fee quote cache" -n acme-gateway',
+    cmd: 'cix search "fees admin form" -n acme-web',
+    output: [
+      { t: 'dim', text: 'No results found' },
+    ],
+  },
+  {
+    cmd: 'cix search "quote cache invalidate" -n acme-gateway',
     output: [
       { t: 'dim', text: 'Found 1 file(s) (21.4ms):' },
       { t: 'file', text: '1. internal/pricing/cache.go', meta: '[best 0.573] · 2 matches · go' },
@@ -62,6 +75,8 @@ export function WorkspaceDemo() {
   const [outShown, setOutShown] = useState(0);
   const [interimShown, setInterimShown] = useState(false);
   const timeoutsRef = useRef([]);
+  const termRef = useRef(null);
+  const chatRef = useRef(null);
 
   const step = STEPS[stepIdx];
 
@@ -92,14 +107,14 @@ export function WorkspaceDemo() {
       } else if (step.interimAfter && !interimShown) {
         T(() => { setInterimShown(true); setPhase('interim'); }, 350);
       } else {
-        T(() => advance(), 500);
+        T(() => advance(), 600);
       }
     } else if (phase === 'interim') {
       T(() => advance(), 1400);
     } else if (phase === 'reply') {
       T(() => setPhase('hold'), 400);
     } else if (phase === 'hold') {
-      T(() => setPhase('wipe'), 9000);
+      T(() => setPhase('wipe'), 11000);
     } else if (phase === 'wipe') {
       T(() => {
         setUserTyped('');
@@ -124,10 +139,16 @@ export function WorkspaceDemo() {
     }
   }, [phase, userTyped, cmdTyped, outShown, stepIdx, interimShown]);
 
+  // keep both panes pinned to the bottom as content streams in,
+  // exactly like a live terminal / chat
+  useEffect(() => {
+    if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight;
+    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+  });
+
   const replyVisible = phase === 'reply' || phase === 'hold' || phase === 'wipe';
   const thinking = !replyVisible && phase !== 'user';
 
-  // terminal renders every finished step in full, plus the current one
   const doneSteps = STEPS.slice(0, stepIdx);
   const currentTyping = phase === 'cmd';
   const currentOut = phase === 'out' || phase === 'interim' ? outShown
@@ -143,12 +164,12 @@ export function WorkspaceDemo() {
 
       <div className="ws-demo">
         {/* left: agent chat */}
-        <div className="chat-win" role="img" aria-label="agent chat: the user asks one question, the agent investigates across repos and answers with concrete changes">
+        <div className="chat-win" role="img" aria-label="agent chat: the user asks one question, the agent investigates across repos and answers with the exact SQL to run">
           <div className="chat-head">
             <span className="dot r" /><span className="dot y" /><span className="dot g" />
             <span className="title">agent chat</span>
           </div>
-          <div className="chat-body">
+          <div className="chat-body" ref={chatRef}>
             {userTyped && (
               <div className="msg msg-user">
                 {userTyped}
@@ -170,12 +191,12 @@ export function WorkspaceDemo() {
         </div>
 
         {/* right: what the agent actually runs */}
-        <div className="term" role="img" aria-label="terminal: the sequence of cix commands the agent runs — a workspace-wide search, then targeted per-repo lookups">
+        <div className="term" role="img" aria-label="terminal: the sequence of cix commands the agent runs — a workspace-wide search, then targeted per-repo lookups, including one that finds nothing">
           <div className="term-bar">
             <span className="dot r" /><span className="dot y" /><span className="dot g" />
             <span className="title">what the agent runs</span>
           </div>
-          <div className="term-body" style={{ minHeight: 440 }}>
+          <div className="term-body ws-term-body" ref={termRef}>
             {doneSteps.map((d, di) => (
               <div key={di} style={{ marginBottom: 14 }}>
                 <CmdLine text={d.cmd} />
