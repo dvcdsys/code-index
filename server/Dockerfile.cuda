@@ -118,7 +118,12 @@ RUN mkdir -p /opt/cuda-runtime/usr/local/cuda/lib64 \
 # Ubuntu-based image's `cix:cix` user) so existing prod named volumes
 # keep working without a chown migration. Distroless has no /etc/passwd
 # entry for 1001, but the kernel cares only about the numeric UID.
-RUN mkdir -p /opt/cix-data && chown 1001:1001 /opt/cix-data
+# /data/models is pre-created too so the separate `cix-models:/data/models`
+# named volume in docker-compose.cuda.yml inherits 1001 ownership (a fresh
+# volume copies the image dir's uid/gid) instead of mounting root-owned and
+# failing the GGUF download with "mkdir /data/models: permission denied".
+# Inert for the prod portainer stack, which mounts a single /data volume.
+RUN mkdir -p /opt/cix-data/models && chown -R 1001:1001 /opt/cix-data
 
 # ── Stage 4: distroless runtime ────────────────────────────────────────────
 # gcr.io/distroless/cc-debian13:nonroot (Debian 13 trixie):
