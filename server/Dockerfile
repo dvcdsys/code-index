@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1.7
-# Phase 1 CPU-only multi-stage Dockerfile.
-# Embeddings (CUDA / llama-server sidecar) land in Phase 3.
+# CPU multi-stage Dockerfile (multi-arch: linux/amd64 + linux/arm64).
+#
+# Bundles the CPU llama.cpp embeddings sidecar (llama-server + the ggml .so
+# set) so semantic search works out of the box. It is the SAME "ollama"
+# provider the CUDA image (Dockerfile.cuda) runs — the only difference
+# between the two images is the NVIDIA/CUDA layer; the sidecar ships in both.
+# Without it cix-server still boots and serves symbol/keyword search, but
+# every semantic query fails ("llama-server not found at /app/llama-server").
 #
 # The build context is `server/` but the OpenAPI spec lives at
 # `<repo-root>/doc/openapi.yaml`. We expose it via a named build context so
@@ -80,15 +86,58 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o /out/cix-server \
     ./cmd/cix-server
 
-# Pre-create an empty /data tree so the final stage can COPY it in with
-# nonroot (uid 65532) ownership. Without this, a fresh Docker named volume
-# initialises root-owned and the distroless nonroot uid in the runtime
-# stage cannot `mkdir /data/sqlite` on first boot.
-RUN mkdir -p /out/data
+# Pre-create the /data tree so the final stage can COPY it in with nonroot
+# (uid 65532) ownership. Without this, a fresh Docker named volume initialises
+# root-owned and the distroless nonroot uid in the runtime stage cannot
+# `mkdir /data/sqlite` on first boot. /data/models is pre-created too so the
+# separate `cix-models:/data/models` named volume in docker-compose.yml
+# inherits 65532 ownership (a fresh volume copies the image dir's uid/gid) —
+# otherwise the GGUF cache dir mounts root-owned and the model download fails
+# with "mkdir /data/models: permission denied".
+RUN mkdir -p /out/data/models
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# ── Stage: CPU llama.cpp embeddings sidecar (multi-arch source) ────────────
+# Pinned by digest for reproducible builds. The floating :server tag drifts on
+# every upstream release and the shared-library layout periodically changes
+# (the server logic now lives in libllama-server-impl.so) — an unpinned tag
+# means a rebuild silently picks up a new layout and can break the runtime
+# copy below. This is the CPU-only MULTI-ARCH index (linux/amd64 + linux/arm64
+# + others), so buildx resolves the matching arch automatically for each
+# target platform. Bump this digest deliberately and re-run `make scout-cpu`.
+# Resolve a new digest with:
+#   docker buildx imagetools inspect ghcr.io/ggml-org/llama.cpp:server
+FROM ghcr.io/ggml-org/llama.cpp:server@sha256:6bc9134e3278a0ecab23d7ef2f6a46b4595740014fe9bc2f67e8ba7dca8395b4 AS llama-source
+
+# ── Stage: distroless runtime ──────────────────────────────────────────────
+# gcr.io/distroless/cc-debian13:nonroot (Debian 13 trixie) — NOT static-debian12.
+# The bundled llama-server is dynamically linked and needs glibc + libstdc++ +
+# libgomp + libssl/libcrypto, none of which exist in the static image. Debian
+# 13 is required because llama-server needs GLIBC_2.38 + GLIBCXX_3.4.32 (gcc 13+);
+# Debian 12 ships only glibc 2.36 / gcc 12. cc-debian13:nonroot provides every
+# system lib llama-server links (verified) + ca-certificates for the first-boot
+# HF model download, and keeps the same nonroot uid 65532 as the old image.
+FROM gcr.io/distroless/cc-debian13:nonroot
 WORKDIR /
 COPY --from=builder /out/cix-server /cix-server
+
+# ── Embeddings sidecar: CPU llama.cpp (the "ollama" provider) ──────────────
+# Copy the whole /app/*.so* set rather than a fixed list: upstream loads the
+# CPU backend variants (libggml-cpu-*.so) via dlopen at runtime and the exact
+# file set shifts between releases; a fixed list silently drops a now-required
+# .so → llama-server exit 127. The extra unused variants add only a few MB.
+COPY --from=llama-source /app/llama-server /app/llama-server
+COPY --from=llama-source /app/*.so* /app/
+# Distroless has no ldconfig — resolve llama-server's libs via LD_LIBRARY_PATH.
+ENV LD_LIBRARY_PATH=/app
+ENV CIX_LLAMA_BIN_DIR=/app
+# CPU-only: no GPU offload. (The Go default is already 0 on linux; pinned here
+# so `docker run` without compose is unambiguous.)
+ENV CIX_N_GPU_LAYERS=0
+ENV CIX_LLAMA_TRANSPORT=unix
+ENV CIX_LLAMA_STARTUP_TIMEOUT=120
+# GGUF cache lives on the /data volume (see the cix-models named volume in
+# docker-compose.yml); /data/models is pre-owned 65532 in the builder stage.
+ENV CIX_GGUF_CACHE_DIR=/data/models
 # Managed Tunnels provider binaries (the feature is configured & enabled
 # from the dashboard; both are exec'd directly — no shell needed).
 COPY --from=cloudflared /cloudflared /cloudflared
