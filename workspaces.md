@@ -1,11 +1,11 @@
 # Workspaces
 
-> [!WARNING]
-> **Experimental.** Workspaces ship behind a feature flag and the HTTP + UI
-> surface is still evolving. The defaults and search algorithm are
-> calibrated on a 113-query eval (see [§ Search algorithm](#search-algorithm)),
-> but expect breaking changes to API shape, dashboard layout, and CLI flags
-> before this graduates to stable.
+> [!NOTE]
+> Workspaces are off by default. Set `CIX_WORKSPACES_ENABLED=true` and
+> restart the server to enable them — see
+> [§ Enabling workspaces](#enabling-workspaces). The defaults and search
+> algorithm are calibrated on a 113-query eval
+> (see [§ Search algorithm](#search-algorithm)).
 
 A **workspace** is a named group of repositories that cix can search **as
 one corpus**. Where `cix search` is for the project you're `cd`'d into, a
@@ -973,10 +973,8 @@ to do the deep dive without bloating the main session's context.
 
 ## Roadmap
 
-This feature is experimental. Known direction:
+Known direction:
 
-- **Multi-tenancy / workspace ACLs.** Today any authenticated user sees
-  every workspace. Per-workspace owner + reader roles are planned.
 - **`project_kind` enum in `projects[]`.** Surface whether each project
   is `code` / `manifests` / `contracts` / `docs` so agents can reason
   about the "words vs change location" mismatch noted above.
