@@ -2,7 +2,7 @@ import { CixAscii } from '../shared/ascii.jsx';
 import { Foot } from '../shared/foot.jsx';
 import { SERVER_VERSION, CLI_VERSION, GITHUB_URL } from '../shared/versions.js';
 import { HeroTerminal } from './terminal.jsx';
-import { Why, Features, Playground, Agent, QuickStart, FAQ } from './sections.jsx';
+import { Why, Features, Playground, Workspaces, Agent, QuickStart, FAQ } from './sections.jsx';
 
 export function App() {
   return (
@@ -14,6 +14,7 @@ export function App() {
         <Why />
         <Features />
         <Playground />
+        <Workspaces />
         <Agent />
         <QuickStart />
         <FAQ />
@@ -33,6 +34,7 @@ function Nav() {
         <nav className="nav-links">
           <a className="nav-sec" href="#why">Why</a>
           <a className="nav-sec" href="#features">Features</a>
+          <a className="nav-sec" href="#workspaces">Workspaces</a>
           <a className="nav-sec" href="#agent">For agents</a>
           <a className="nav-sec" href="#quickstart">Quick start</a>
           <a href="/docs/">Docs</a>

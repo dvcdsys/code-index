@@ -1,4 +1,5 @@
 import { CLITabs } from './tabs.jsx';
+import { WorkspaceDemo } from './workspace-demo.jsx';
 import { GITHUB_URL, PLUGIN_VERSION } from '../shared/versions.js';
 
 export function Why() {
@@ -79,6 +80,25 @@ export function Playground() {
           <p className="lead">Click through. Every output below is real, transcribed from cix running against its own repository — the same text an agent gets back.</p>
         </div>
         <CLITabs />
+      </div>
+    </section>
+  );
+}
+
+export function Workspaces() {
+  return (
+    <section className="section" id="workspaces">
+      <div className="wrap">
+        <div className="section-head">
+          <span className="eyebrow">Multi-repo · experimental</span>
+          <h2>One question. Four repos.<br/>One answer.</h2>
+          <p className="lead">A <b>workspace</b> groups repositories into one searchable corpus. The agent names the workspace, asks in plain language, and hybrid BM25 + dense ranking surfaces the right repo first — no per-repo hopping, no guessing where the code lives.</p>
+        </div>
+        <WorkspaceDemo />
+        <p className="ws-note">
+          Scripted scenario with abstract repos — the command and output format are the real CLI's.
+          Enable with <code>CIX_WORKSPACES_ENABLED=true</code> · <a href="/docs/#workspaces">workspace docs →</a>
+        </p>
       </div>
     </section>
   );

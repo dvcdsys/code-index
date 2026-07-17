@@ -466,7 +466,113 @@ h3 { font-size: clamp(20px, 2vw, 24px); }
 /* Self-defense for embeddable wide components: whatever grid/flex parent a
    terminal or code block lands in, it must shrink and scroll internally
    rather than blow the page width open. */
-.term, .tabs, .code-block { min-width: 0; max-width: 100%; }
+.term, .tabs, .code-block, .chat-win { min-width: 0; max-width: 100%; }
+
+/* ── Workspace demo (chat + terminal, synchronized) ── */
+.repo-chips {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.repo-chips-label { color: var(--ink-mute); letter-spacing: 0.03em; }
+.repo-chips-label b { color: var(--red); }
+.repo-chip {
+  background: var(--paper);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  padding: 4px 13px;
+  font-weight: 600;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+.ws-demo {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  gap: var(--gap);
+  align-items: stretch;
+}
+.ws-demo > * { min-width: 0; }
+.chat-win {
+  background: var(--paper);
+  border: 2.5px solid var(--ink);
+  border-radius: 18px;
+  box-shadow: 7px 7px 0 var(--ink);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 16px;
+  border-bottom: 2.5px solid var(--ink);
+  background: var(--bg-2);
+}
+.chat-head .title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-mute);
+  margin-left: 8px;
+  letter-spacing: 0.06em;
+}
+.chat-body {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 380px;
+}
+.msg {
+  max-width: 88%;
+  padding: 11px 14px;
+  border: 2px solid var(--ink);
+  border-radius: 14px;
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+.msg code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--bg-2);
+  padding: 1px 5px;
+  border-radius: 6px;
+}
+.msg-user {
+  align-self: flex-end;
+  background: var(--ochre);
+  border-bottom-right-radius: 4px;
+}
+.msg-agent {
+  align-self: flex-start;
+  background: var(--bg);
+  border-bottom-left-radius: 4px;
+  animation: rowIn 0.3s ease;
+}
+.msg-thinking { display: flex; gap: 5px; padding: 14px 16px; }
+.msg-thinking span {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--ink-mute);
+  animation: thinkPulse 1.1s ease-in-out infinite;
+}
+.msg-thinking span:nth-child(2) { animation-delay: 0.18s; }
+.msg-thinking span:nth-child(3) { animation-delay: 0.36s; }
+@keyframes thinkPulse {
+  0%, 100% { opacity: 0.25; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-3px); }
+}
+.ws-note {
+  margin-top: 18px;
+  font-size: 13.5px;
+  font-family: var(--font-mono);
+  color: var(--ink-mute);
+}
+.ws-note code { color: var(--ink-soft); }
 .term .prompt { color: var(--ochre); }
 .term .cmd { color: #F2E6CF; }
 .term .arg { color: #E8A93B; }
@@ -848,6 +954,8 @@ footer.foot {
 /* responsive */
 @media (max-width: 920px) {
   .hero { grid-template-columns: 1fr; gap: 40px; }
+  .ws-demo { grid-template-columns: 1fr; }
+  .chat-body { min-height: 0; }
   .why-grid { grid-template-columns: 1fr; }
   .feat-grid { grid-template-columns: 1fr; }
   .feat, .feat.wide, .feat.full { grid-column: span 1; }
