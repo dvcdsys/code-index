@@ -203,5 +203,3 @@ jobs:
             |---|---|
             | CPU (multi-arch) | `dvcdsys/code-index:${{ steps.ver.outputs.version }}` |
             | CUDA 12.8 | `dvcdsys/code-index:${{ steps.ver.outputs.version }}-cu128` |
-
-            See [doc/MIGRATION_FROM_PYTHON.md](doc/MIGRATION_FROM_PYTHON.md) if upgrading from the Python backend.
