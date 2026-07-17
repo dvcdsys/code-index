@@ -91,8 +91,8 @@ export function Workspaces() {
       <div className="wrap">
         <div className="section-head">
           <span className="eyebrow">Multi-repo · experimental</span>
-          <h2>One question. Four repos.<br/>One answer.</h2>
-          <p className="lead">A <b>workspace</b> groups repositories into one searchable corpus. The agent names the workspace, asks in plain language, and hybrid BM25 + dense ranking surfaces the right repo first — no per-repo hopping, no guessing where the code lives.</p>
+          <h2>One question. All your repos.<br/>One concrete answer.</h2>
+          <p className="lead">A <b>workspace</b> groups any number of repositories into one searchable corpus. The agent starts broad — hybrid BM25 + dense ranking surfaces the services involved — then drills into each repo with targeted lookups, and comes back with changes you can actually make.</p>
         </div>
         <WorkspaceDemo />
         <p className="ws-note">
