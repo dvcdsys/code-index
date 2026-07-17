@@ -336,10 +336,9 @@ GET /api/v1/admin/embedding-providers        GET/PUT …/active · POST …/{kin
 POST /api/v1/admin/sidecar/restart           GET …/sidecar/status`}</CodeBlock>
           </Section>
 
-          <Section id="workspaces" title="Workspaces" eyebrow="Multi-repo" badge="experimental">
+          <Section id="workspaces" title="Workspaces" eyebrow="Multi-repo">
             <p>A <b>workspace</b> is a named group of repositories that cix searches as <b>one corpus</b>. Where <code>cix search</code> is for the project you're <code>cd</code>'d into, a workspace is for tasks that span repos — microservices that talk to each other, a feature whose implementation crosses several services, or any time the answer is "look in N repos, not one".</p>
-            <p>Workspaces clone GitHub repositories server-side (under <code>CIX_REPOS_DIR</code>), index them next to your local projects, and expose a single <b>hybrid search</b> endpoint: a dense (cosine) pass and a BM25 (SQLite FTS5) pass fan out per project, then a two-stage ranker gates the relevant repos and fuses both signals. Defaults are calibrated on a 113-query eval.</p>
-            <p>Experimental: ships behind a feature flag; API shape and CLI flags may still change.</p>
+            <p>Workspaces clone GitHub repositories server-side (under <code>CIX_REPOS_DIR</code>), index them next to your local projects, and expose a single <b>hybrid search</b> endpoint: a dense (cosine) pass and a BM25 (SQLite FTS5) pass fan out per project, then a two-stage ranker gates the relevant repos and fuses both signals. Defaults are calibrated on a 113-query eval. One query returns ranked projects <i>and</i> the top chunks across all of them — most of an agent's context needs land in a single round-trip.</p>
             <h3>Enable &amp; use</h3>
             <CodeBlock>{`# server
 echo 'CIX_WORKSPACES_ENABLED=true' >> .env

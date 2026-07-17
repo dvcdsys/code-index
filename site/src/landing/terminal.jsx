@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { DemoControls } from '../shared/demo-controls.jsx';
 
 // Animated hero terminal. Every query below was actually run with `cix search`
 // against this repository — scores, paths, line numbers, timings and symbol
@@ -44,6 +45,7 @@ const HERO_QUERIES = [
 ];
 
 export function HeroTerminal() {
+  const [running, setRunning] = useState(true);
   const [phase, setPhase] = useState('typing'); // typing | streaming | hold | wipe
   const [qIdx, setQIdx] = useState(0);
   const [typed, setTyped] = useState('');
@@ -52,11 +54,29 @@ export function HeroTerminal() {
 
   const q = HERO_QUERIES[qIdx];
 
+  // ⏹ — freeze on the current query, fully rendered
+  function stop() {
+    setRunning(false);
+    setTyped(q.cmd);
+    setShown(q.results.length);
+    setPhase('hold');
+  }
+
+  // ▶ — resume cycling from the next query
+  function play() {
+    setTyped('');
+    setShown(0);
+    setQIdx((qIdx + 1) % HERO_QUERIES.length);
+    setPhase('typing');
+    setRunning(true);
+  }
+
   useEffect(() => {
     const clear = () => {
       timeoutsRef.current.forEach(clearTimeout);
       timeoutsRef.current = [];
     };
+    if (!running) return clear;
     const T = (fn, ms) => { const id = setTimeout(fn, ms); timeoutsRef.current.push(id); };
 
     if (phase === 'typing') {
@@ -82,17 +102,18 @@ export function HeroTerminal() {
       }, 280);
     }
     return clear;
-  }, [phase, typed, shown, qIdx]);
+  }, [running, phase, typed, shown, qIdx]);
 
   return (
-    <div className="term" role="img" aria-label="cix search demonstration — real output recorded from cix searching its own repository">
+    <div className="term">
       <div className="term-bar">
         <span className="dot r" />
         <span className="dot y" />
         <span className="dot g" />
         <span className="title">~/code/code-index — cix search</span>
+        <DemoControls running={running} onPlay={play} onStop={stop} />
       </div>
-      <div className="term-body">
+      <div className="term-body" role="img" aria-label="cix search demonstration — real output recorded from cix searching its own repository">
         <div>
           <span className="prompt">$</span>{' '}
           <span className="cmd">

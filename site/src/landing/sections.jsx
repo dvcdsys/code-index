@@ -39,7 +39,7 @@ const FEATURES = [
   { glyph: '⌘', cls: '', title: 'Symbols, defs & refs',
     body: 'Five search modes share one engine: semantic, symbols, definitions, references, files. Same fidelity in CLI, dashboard and agent.' },
   { glyph: '⊞', cls: 'plum', title: 'Workspaces: search N repos as one',
-    body: 'Group repositories into a named workspace and search the union — hybrid BM25 + dense ranking surfaces the right repo first. Experimental, behind a feature flag.' },
+    body: 'Group repositories into a named workspace and search the union — hybrid BM25 + dense ranking surfaces the right repo first. One query returns context from every repo at once.' },
   { glyph: '~', cls: 'moss', title: 'Live file watcher',
     body: 'Native filesystem events (FSEvents / inotify) with a 5-second debounce. Edit a file — the index follows. SHA-256 hashes mean only changed files re-embed.' },
   { glyph: '⊕', cls: '', title: 'Embedded dashboard',
@@ -90,7 +90,7 @@ export function Workspaces() {
     <section className="section" id="workspaces">
       <div className="wrap">
         <div className="section-head">
-          <span className="eyebrow">Multi-repo · experimental</span>
+          <span className="eyebrow">Multi-repo</span>
           <h2>One question. All your repos.<br/>One concrete answer.</h2>
           <p className="lead">A <b>workspace</b> groups any number of repositories into one searchable corpus. The agent starts broad — hybrid BM25 + dense ranking surfaces the services involved — then drills into each repo with targeted lookups, and comes back with changes you can actually make.</p>
         </div>
@@ -263,7 +263,7 @@ const FAQS = [
   { q: 'What happens when I change the embedding model?',
     a: <>Nothing is destroyed. The system database is model-independent; only the vector store is namespaced — each provider/model gets its own directory, so old and new vectors never mix. Every project remembers which model it was indexed with, the dashboard shows a "stale model" badge on drifted projects, and the next reindex (automatically promoted to a full one after a model change) clears it.</> },
   { q: "What's a workspace?",
-    a: <>A named group of repositories that cix searches as one corpus — for microservices, cross-repo features, or "the answer is in one of these five repos" tasks. Repos are cloned server-side, indexed next to your local projects, and queried through a single hybrid BM25 + dense endpoint. Experimental: enable with <code>CIX_WORKSPACES_ENABLED=true</code>.</> },
+    a: <>A named group of repositories that cix searches as one corpus — for microservices, cross-repo features, or "the answer is in one of these five repos" tasks. Repos are cloned server-side, indexed next to your local projects, and queried through a single hybrid BM25 + dense endpoint. Enable with <code>CIX_WORKSPACES_ENABLED=true</code>.</> },
   { q: 'Why port 21847?',
     a: <>Because <code>21847</code> is unassigned by IANA and doesn't collide with anything common. Override with <code>CIX_PORT</code>.</> },
 ];

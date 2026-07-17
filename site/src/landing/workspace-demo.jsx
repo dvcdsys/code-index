@@ -1,30 +1,38 @@
 import { useState, useEffect, useRef } from 'react';
+import { DemoControls } from '../shared/demo-controls.jsx';
 
 // Two-pane workspace demo: an agent chat on the left, and the cix commands
 // the agent actually runs on the right — synchronized, both panes scroll
 // like the real thing. The point is the WORKFLOW: one minimal question →
-// broad workspace search → several services implicated → targeted per-repo
-// lookups (including a dead end: no admin UI exists) → a concrete answer
-// down to the SQL to run and the cache to flush.
+// ONE broad workspace search that already surfaces most of the relevant
+// material across repos (storage AND the gateway cache) → one deep dive for
+// the code bodies → one honest dead end (no admin UI) → a concrete answer
+// down to the SQL to run.
 //
 // This is a SCRIPTED scenario with abstract repos (acme-*), not transcribed
 // output (unlike the hero terminal): a fictitious workspace keeps real
 // project internals off the marketing page. The OUTPUT FORMAT mirrors the
-// real CLI (cli/cmd/workspace.go renderSearch, cix search / cix symbols
-// renderers, and the literal "No results found" empty message) — keep it
-// faithful when editing.
+// real CLI — cli/cmd/workspace.go renderSearch (Top projects / Top chunks
+// with project: and symbol: lines, no code bodies); cix search chunk output
+// with `-- [score] lines N-M (kind)` heads and fenced code bodies; the
+// literal "No results found" empty message. Keep it faithful when editing.
+// The CREATE TABLE body is the point: it is where the agent's INSERT
+// columns visibly come from.
 
 const REPOS = ['acme-gateway', 'acme-billing', 'acme-auth', 'acme-web'];
 
-const USER_MSG = 'How do I add a new fee to checkout?';
+// The leading slash-command is the cix plugin's real cross-repo research
+// skill — invoking it is how a Claude Code user actually starts this flow.
+const SLASH_CMD = '/cix-workspace';
+const USER_MSG = `${SLASH_CMD} using the platform workspace, find how do I add a new fee to checkout?`;
 
-const INTERIM = <>Fees touch <b>acme-billing</b>, <b>acme-gateway</b> and <b>acme-web</b>. Checking how fees are stored and whether there's an admin UI for them…</>;
+const INTERIM = <>One search maps it: fees load from a database table in <b>acme-billing</b> (<code>LoadSchedule</code>), and <b>acme-gateway</b> caches computed quotes (<code>QuoteCache.Invalidate</code>). Pulling the schema and checking for an admin UI…</>;
 
 const REPLY = <>
   Fees are <b>rows in the database</b>: <code>FeeSchedule</code> loads the <code>fees</code> table via <code>LoadSchedule</code> (fees/store.go:41); schema in <code>migrations/0007_create_fees.sql</code>. I found <b>no admin UI</b> for fees (nothing matches in acme-web), so add the row directly:
   <pre className="msg-code">{`INSERT INTO fees (code, label, amount_bps, active)
 VALUES ('intl_card', 'Intl. card fee', 150, true);`}</pre>
-  Then flush the gateway's quote cache — <code>QuoteCache.Invalidate</code> (pricing/cache.go:81) — or checkout keeps serving stale totals. acme-web renders whatever <code>/v1/fees</code> returns, no change needed.
+  Then flush the gateway's quote cache — <code>QuoteCache.Invalidate</code> (pricing/cache.go:81, the workspace search already surfaced it) — or checkout keeps serving stale totals. acme-web renders whatever <code>/v1/fees</code> returns, no change needed.
 </>;
 
 const STEPS = [
@@ -35,6 +43,15 @@ const STEPS = [
       { t: 'proj', score: '0.643', label: 'acme-billing', hits: '9 hits', bm25: '6.870', dense: '0.581', path: 'github.com/acme/acme-billing' },
       { t: 'proj', score: '0.512', label: 'acme-gateway', hits: '6 hits', bm25: '4.902', dense: '0.494', path: 'github.com/acme/acme-gateway' },
       { t: 'proj', score: '0.334', label: 'acme-web', hits: '2 hits', bm25: '1.428', dense: '0.371', path: 'github.com/acme/acme-web' },
+      { t: 'head', text: 'Top chunks:', gap: true },
+      { t: 'wchunk', score: '0.631', loc: 'internal/fees/store.go:41-58' },
+      { t: 'wmeta', text: 'project: github.com/acme/acme-billing' },
+      { t: 'wsym', name: 'LoadSchedule' },
+      { t: 'wchunk', score: '0.573', loc: 'internal/pricing/cache.go:81-96', gap: true },
+      { t: 'wmeta', text: 'project: github.com/acme/acme-gateway' },
+      { t: 'wsym', name: 'QuoteCache.Invalidate' },
+      { t: 'wchunk', score: '0.548', loc: 'migrations/0007_create_fees.sql:1-9', gap: true },
+      { t: 'wmeta', text: 'project: github.com/acme/acme-billing' },
       { t: 'dim', text: '  …' },
     ],
     interimAfter: true,
@@ -44,9 +61,26 @@ const STEPS = [
     output: [
       { t: 'dim', text: 'Found 2 file(s) (18.9ms):' },
       { t: 'file', text: '1. migrations/0007_create_fees.sql', meta: '[best 0.581] · 1 match · sql' },
-      { t: 'chunkline', score: '0.581', lines: '1-14', sig: 'CREATE TABLE fees' },
+      { t: 'chunkhead', score: '0.581', lines: '1-9', kind: 'module' },
+      { t: 'code', lang: 'sql', lines: [
+        'CREATE TABLE fees (',
+        '    code        TEXT PRIMARY KEY,',
+        '    label       TEXT NOT NULL,',
+        '    amount_bps  INTEGER NOT NULL, -- basis points',
+        '    active      BOOLEAN NOT NULL DEFAULT true',
+        ');',
+      ]},
       { t: 'file', text: '2. internal/fees/store.go', meta: '[best 0.522] · 1 match · go' },
-      { t: 'chunkline', score: '0.522', lines: '41-77', sig: 'method LoadSchedule' },
+      { t: 'chunkhead', score: '0.522', lines: '41-58', kind: 'method LoadSchedule' },
+      { t: 'code', lang: 'go', lines: [
+        '// LoadSchedule builds the fee schedule checkout uses.',
+        '// Only active fees are applied.',
+        'func (s *Store) LoadSchedule(ctx context.Context) (*FeeSchedule, error) {',
+        '    rows, err := s.db.QueryContext(ctx,',
+        '        `SELECT code, label, amount_bps',
+        '           FROM fees WHERE active`)',
+        '    …',
+      ]},
     ],
   },
   {
@@ -55,19 +89,13 @@ const STEPS = [
       { t: 'dim', text: 'No results found' },
     ],
   },
-  {
-    cmd: 'cix search "quote cache invalidate" -n acme-gateway',
-    output: [
-      { t: 'dim', text: 'Found 1 file(s) (21.4ms):' },
-      { t: 'file', text: '1. internal/pricing/cache.go', meta: '[best 0.573] · 2 matches · go' },
-      { t: 'chunkline', score: '0.573', lines: '81-112', sig: 'method Invalidate' },
-      { t: 'chunkline', score: '0.488', lines: '29-61', sig: 'type QuoteCache' },
-    ],
-  },
 ];
+
+const LAST = STEPS.length - 1;
 
 // phases: user → think → (cmd → out [→ interim])×steps → reply → hold → wipe
 export function WorkspaceDemo() {
+  const [running, setRunning] = useState(true);
   const [stepIdx, setStepIdx] = useState(0);
   const [phase, setPhase] = useState('user');
   const [userTyped, setUserTyped] = useState('');
@@ -85,6 +113,7 @@ export function WorkspaceDemo() {
       timeoutsRef.current.forEach(clearTimeout);
       timeoutsRef.current = [];
     };
+    if (!running) return clear;
     const T = (fn, ms) => { const id = setTimeout(fn, ms); timeoutsRef.current.push(id); };
 
     if (phase === 'user') {
@@ -103,32 +132,25 @@ export function WorkspaceDemo() {
       }
     } else if (phase === 'out') {
       if (outShown < step.output.length) {
-        T(() => setOutShown(outShown + 1), 190);
+        T(() => setOutShown(outShown + 1), 180);
       } else if (step.interimAfter && !interimShown) {
         T(() => { setInterimShown(true); setPhase('interim'); }, 350);
       } else {
         T(() => advance(), 600);
       }
     } else if (phase === 'interim') {
-      T(() => advance(), 1400);
+      T(() => advance(), 1500);
     } else if (phase === 'reply') {
       T(() => setPhase('hold'), 400);
     } else if (phase === 'hold') {
-      T(() => setPhase('wipe'), 11000);
+      T(() => setPhase('wipe'), 12000);
     } else if (phase === 'wipe') {
-      T(() => {
-        setUserTyped('');
-        setCmdTyped('');
-        setOutShown(0);
-        setInterimShown(false);
-        setStepIdx(0);
-        setPhase('user');
-      }, 300);
+      T(() => reset('user'), 300);
     }
     return clear;
 
     function advance() {
-      if (stepIdx < STEPS.length - 1) {
+      if (stepIdx < LAST) {
         setStepIdx(stepIdx + 1);
         setCmdTyped('');
         setOutShown(0);
@@ -137,7 +159,33 @@ export function WorkspaceDemo() {
         setPhase('reply');
       }
     }
-  }, [phase, userTyped, cmdTyped, outShown, stepIdx, interimShown]);
+  }, [running, phase, userTyped, cmdTyped, outShown, stepIdx, interimShown]);
+
+  function reset(startPhase) {
+    setUserTyped('');
+    setCmdTyped('');
+    setOutShown(0);
+    setInterimShown(false);
+    setStepIdx(0);
+    setPhase(startPhase);
+  }
+
+  // ⏹ — skip straight to the completed session
+  function stop() {
+    setRunning(false);
+    setUserTyped(USER_MSG);
+    setInterimShown(true);
+    setStepIdx(LAST);
+    setCmdTyped(STEPS[LAST].cmd);
+    setOutShown(STEPS[LAST].output.length);
+    setPhase('hold');
+  }
+
+  // ▶ — run the loop again from the top
+  function play() {
+    reset('user');
+    setRunning(true);
+  }
 
   // keep both panes pinned to the bottom as content streams in,
   // exactly like a live terminal / chat
@@ -147,7 +195,7 @@ export function WorkspaceDemo() {
   });
 
   const replyVisible = phase === 'reply' || phase === 'hold' || phase === 'wipe';
-  const thinking = !replyVisible && phase !== 'user';
+  const thinking = running && !replyVisible && phase !== 'user';
 
   const doneSteps = STEPS.slice(0, stepIdx);
   const currentTyping = phase === 'cmd';
@@ -172,7 +220,8 @@ export function WorkspaceDemo() {
           <div className="chat-body" ref={chatRef}>
             {userTyped && (
               <div className="msg msg-user">
-                {userTyped}
+                <span className="msg-slash">{userTyped.slice(0, SLASH_CMD.length)}</span>
+                {userTyped.slice(SLASH_CMD.length)}
                 {phase === 'user' && <span className="cursor" />}
               </div>
             )}
@@ -191,12 +240,13 @@ export function WorkspaceDemo() {
         </div>
 
         {/* right: what the agent actually runs */}
-        <div className="term" role="img" aria-label="terminal: the sequence of cix commands the agent runs — a workspace-wide search, then targeted per-repo lookups, including one that finds nothing">
+        <div className="term">
           <div className="term-bar">
             <span className="dot r" /><span className="dot y" /><span className="dot g" />
             <span className="title">what the agent runs</span>
+            <DemoControls running={running} onPlay={play} onStop={stop} />
           </div>
-          <div className="term-body ws-term-body" ref={termRef}>
+          <div className="term-body ws-term-body" ref={termRef} role="img" aria-label="terminal: one workspace-wide search surfaces storage and cache at once, then a deep dive and a dead-end check">
             {doneSteps.map((d, di) => (
               <div key={di} style={{ marginBottom: 14 }}>
                 <CmdLine text={d.cmd} />
@@ -232,7 +282,7 @@ function StepOut({ rows, upTo }) {
   return (
     <div style={{ marginTop: 8 }}>
       {rows.slice(0, upTo).map((row, i) => (
-        <div className="term-row" key={i}>
+        <div className="term-row" key={i} style={row.gap ? { marginTop: 10 } : undefined}>
           {row.t === 'head' && <div className="dim">{row.text}</div>}
           {row.t === 'dim' && <div className="dim">{row.text}</div>}
           {row.t === 'proj' && (
@@ -242,17 +292,29 @@ function StepOut({ rows, upTo }) {
               <span className="path">{row.path}</span>
             </div>
           )}
-          {row.t === 'sym' && (
-            <div>{'  '}<span className="dim">{row.kind}</span> <span className="blue">{row.name}</span></div>
+          {row.t === 'wchunk' && (
+            <div>{'  '}<span className="score">[{row.score}]</span> <span className="path">{row.loc}</span></div>
           )}
-          {row.t === 'loc' && (
-            <div className="dim">{'    '}<span className="path">{row.text}</span></div>
+          {row.t === 'wmeta' && (
+            <div className="dim">{'         ' + row.text}</div>
+          )}
+          {row.t === 'wsym' && (
+            <div>{'         '}<span className="dim">symbol:  </span><span className="blue">{row.name}</span></div>
           )}
           {row.t === 'file' && (
             <div><span className="path">{row.text}</span><span className="dim">  {row.meta}</span></div>
           )}
-          {row.t === 'chunkline' && (
-            <div>{'   '}<span className="score">[{row.score}]</span><span className="dim"> lines {row.lines}  </span><span className="blue">{row.sig}</span></div>
+          {row.t === 'chunkhead' && (
+            <div>{'   '}<span className="dim">-- </span><span className="score">[{row.score}]</span><span className="dim"> lines {row.lines}  (</span><span className="blue">{row.kind}</span><span className="dim">)</span></div>
+          )}
+          {row.t === 'code' && (
+            <div>
+              <div className="dim">{'      ```' + row.lang}</div>
+              {row.lines.map((l, j) => (
+                <div key={j} className={l.trimStart().startsWith('//') || l.includes('-- basis') ? 'dim' : ''}>{'      ' + l}</div>
+              ))}
+              <div className="dim">{'      ```'}</div>
+            </div>
           )}
         </div>
       ))}

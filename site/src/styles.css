@@ -564,6 +564,15 @@ h3 { font-size: clamp(20px, 2vw, 24px); }
   background: var(--ochre);
   border-bottom-right-radius: 4px;
 }
+.msg-user .msg-slash {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.9em;
+  background: var(--paper);
+  border-radius: 6px;
+  padding: 1px 6px;
+  margin-right: 2px;
+}
 .msg-agent {
   align-self: flex-start;
   background: var(--bg);
@@ -590,6 +599,32 @@ h3 { font-size: clamp(20px, 2vw, 24px); }
   color: var(--ink-mute);
 }
 .ws-note code { color: var(--ink-soft); }
+
+/* play / stop controls on animated demos */
+.demo-ctl {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.demo-ctl button {
+  appearance: none;
+  background: transparent;
+  border: 1.5px solid var(--code-mute);
+  color: var(--code-mute);
+  border-radius: 6px;
+  width: 24px;
+  height: 19px;
+  padding: 0;
+  font-size: 10px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.demo-ctl button:hover:not(:disabled) { color: var(--code-fg); border-color: var(--code-fg); }
+.demo-ctl button:disabled { opacity: 0.35; cursor: default; }
+.chat-head .demo-ctl button { border-color: var(--ink-mute); color: var(--ink-mute); }
+.chat-head .demo-ctl button:hover:not(:disabled) { color: var(--ink); border-color: var(--ink); }
 .term .prompt { color: var(--ochre); }
 .term .cmd { color: #F2E6CF; }
 .term .arg { color: #E8A93B; }
