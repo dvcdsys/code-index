@@ -118,8 +118,10 @@ export function Agent() {
             <h3 style={{ marginTop: 14 }}>Two commands. Hooks register themselves.</h3>
             <p>The plugin ships the CLI, eight slash commands, two lazy-loading skills, a workspace-research sub-agent, and five behavioral hooks. SessionStart checks if your project is indexed; a PostToolUse hook nudges Claude — with exponential backoff — to reach for cix instead of Grep.</p>
             <pre className="code-block" style={{ margin: '12px 0' }}>
-              <span className="prompt">&gt;</span> /plugin marketplace add dvcdsys/code-index{'\n'}
-              <span className="prompt">&gt;</span> /plugin install cix@code-index
+              <span className="prompt">$</span> claude plugin marketplace add dvcdsys/code-index{'\n'}
+              <span className="prompt">$</span> claude plugin install cix@code-index{'\n'}
+              <span className="comment"># in a terminal, not inside a session —</span>{'\n'}
+              <span className="comment"># active on the next `claude` start</span>
             </pre>
             <ul className="cmd-list">
               <li><b>/cix:search</b><span>natural-language semantic search</span></li>
@@ -220,10 +222,10 @@ const QS_STEPS = [
   },
   {
     n: '05', title: 'Hook up your agent',
-    desc: <>The plugin ships the CLI, eight slash commands, the <code>/cix</code> and <code>/cix-workspace</code> skills, and hooks that steer Claude toward cix in indexed projects. Claude Desktop / Cowork: <code>cix mcp install claude-desktop</code>.</>,
+    desc: <>Run in a terminal, <i>not</i> inside a Claude session — the plugin activates on the next <code>claude</code> start. It ships the CLI, eight slash commands, the <code>/cix</code> and <code>/cix-workspace</code> skills, and hooks that steer Claude toward cix in indexed projects. Claude Desktop / Cowork: <code>cix mcp install claude-desktop</code>.</>,
     code: <>
-      <span className="prompt">&gt;</span> /plugin marketplace add dvcdsys/code-index{'\n'}
-      <span className="prompt">&gt;</span> /plugin install cix@code-index{'\n'}
+      <span className="prompt">$</span> claude plugin marketplace add dvcdsys/code-index{'\n'}
+      <span className="prompt">$</span> claude plugin install cix@code-index{'\n'}
       <span className="comment"># /cix:search /cix:def /cix:refs /cix:init</span>{'\n'}
       <span className="comment"># /cix:status /cix:summary /cix:file /cix:tree</span>{'\n'}
       <span className="comment"># skills: /cix · /cix-workspace</span>
