@@ -110,16 +110,21 @@ cd server && make bundle             # builds server + downloads Metal-enabled l
 cp ../.env.example ../.env           # set the bootstrap admin vars
 make run`}</CodeBlock>
 
+            <h3>First login &amp; API key</h3>
+            <p>Open <code>http://localhost:21847/dashboard</code> and sign in with the bootstrap admin credentials from <code>.env</code> (<code>CIX_BOOTSTRAP_ADMIN_EMAIL</code> / <code>CIX_BOOTSTRAP_ADMIN_PASSWORD</code>). Go to <b>API&nbsp;Keys → Create key</b>, name the key, and copy the revealed <code>cix_…</code> value — it is shown exactly once. The same dialog also gives you a ready-to-paste <code>cix config</code> connect command, so you can skip the manual configuration below.</p>
+
             <h3>CLI</h3>
             <CodeBlock>{`# One-line installer (macOS / Linux)
 curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install.sh | bash
+
+# Paste the connect command from the API-key dialog, or:
 
 # Interactive first-run wizard…
 cix config init
 
 # …or configure by hand (multi-server layout)
 cix config set server.local.url http://localhost:21847
-cix config set server.local.key cix_<your-token>
+cix config set server.local.key cix_<your-token>   # from API Keys → Create key
 cix config set default_server local`}</CodeBlock>
           </Section>
 
