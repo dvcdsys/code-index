@@ -35,6 +35,32 @@ jobs:
       - name: Run govulncheck
         run: govulncheck ./...
 
+  # The CLI was never scanned, and it ships prebuilt binaries whose stdlib
+  # comes from the toolchain pinned in cli/go.mod — so an unscanned CLI went
+  # out as v0.10.0 built on go1.25.0 with 16 reachable stdlib advisories.
+  # Same gate as the server so that cannot recur.
+  govulncheck-cli:
+    name: govulncheck (cli)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
   trivy:
     name: Trivy (filesystem)
     runs-on: ubuntu-latest

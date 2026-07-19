@@ -1,6 +1,6 @@
 module github.com/anthropics/code-index/cli
 
-go 1.25.0
+go 1.25.12
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
