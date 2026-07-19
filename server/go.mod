@@ -1,6 +1,6 @@
 module github.com/dvcdsys/code-index/server
 
-go 1.25.12
+go 1.26.5
 
 require (
 	github.com/andybalholm/brotli v1.2.2
