@@ -385,8 +385,11 @@ cix mcp uninstall claude-desktop`}</CodeBlock>
           <Section id="plugin" title="Claude Code plugin" eyebrow="Agents">
             <p>The official Claude Code plugin (v{PLUGIN_VERSION}) ships from the repo's marketplace. It bundles the CLI, <b>eight slash commands</b>, two lazy-loading skills (<code>cix</code> + <code>cix-workspace</code>), a <code>cix-workspace-investigator</code> sub-agent for parallel cross-repo research, and five behavioral hooks.</p>
             <h3>Install</h3>
-            <CodeBlock>{`/plugin marketplace add dvcdsys/code-index
-/plugin install cix@code-index`}</CodeBlock>
+            <CodeBlock>{`# Run in a terminal — NOT inside a Claude Code session.
+claude plugin marketplace add dvcdsys/code-index
+claude plugin install cix@code-index
+# Activates automatically on the next \`claude\` start — no reload needed.`}</CodeBlock>
+            <p>Both commands also work as <code>/plugin …</code> slash commands inside an interactive session, but the terminal form is the dependable one — it doesn't depend on the session's plugin-reload behavior.</p>
             <h3>What the hooks do</h3>
             <DefList rows={[
               ['SessionStart',            'Runs cix status (2s budget), caches the verdict for the session, and sweeps marker files older than 30 days.'],

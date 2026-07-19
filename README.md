@@ -182,11 +182,14 @@ is required — vectors aren't comparable across providers.
 
 **Claude Code (plugin, recommended).** Bundles the `cix` + `cix-workspace` skills, the `cix-workspace-investigator` sub-agent, CLI auto-install hooks, and a grep-nudge:
 
+```bash
+# Run in a terminal — NOT inside a Claude Code session.
+claude plugin marketplace add dvcdsys/code-index
+claude plugin install cix@code-index
+# Activates automatically on the next `claude` start — no reload needed.
 ```
-/plugin marketplace add dvcdsys/code-index
-/plugin install cix@code-index
-/reload-plugins
-```
+
+(The `/plugin …` slash commands work inside an interactive session too, but the terminal form is the dependable path.)
 
 Then invoke the skill **paired with the actual task** (not a search query) — `/cix <fix / implement / investigate / refactor …>`. cix becomes the agent's IDE (goto-def, find-refs, "what calls this") while it works. Manual install: `cp -r skills/cix ~/.claude/skills/cix`. For multi-repo work: `/cix-workspace <task>`. Full hook list + configuration: [`plugins/cix/README.md`](plugins/cix/README.md).
 
