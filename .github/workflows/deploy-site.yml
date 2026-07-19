@@ -1,0 +1,109 @@
+name: Deploy Site
+
+# Deploys site/ to Cloudflare Pages (project "codeindex" -> codeindex.app)
+# whenever site content lands on main, then prunes old Pages deployments
+# so stale preview URLs don't accumulate (same deny-by-default spirit as
+# server/scripts/dockerhub-prune.sh).
+#
+# Requires the CLOUDFLARE_API_TOKEN repository secret (Account -> Cloudflare
+# Pages -> Edit). Without it the workflow skips gracefully instead of failing.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/deploy-site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-site
+  cancel-in-progress: false
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: cd90a306e47092dadae337d4da479268
+  PAGES_PROJECT: codeindex
+  # Newest N deployments to keep; everything older is deleted. The live
+  # production deployment is always among the newest, so it is never touched.
+  KEEP_DEPLOYMENTS: "5"
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare Pages
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - name: Check deploy credentials
+        id: guard
+        working-directory: .
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN secret is not set — skipping site deploy. Create an API token (Account -> Cloudflare Pages -> Edit) and add it as a repository secret to enable auto-deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.guard.outputs.ready == 'true'
+
+      - uses: actions/setup-node@v5
+        if: steps.guard.outputs.ready == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        if: steps.guard.outputs.ready == 'true'
+        run: npm ci
+
+      - name: Build
+        if: steps.guard.outputs.ready == 'true'
+        run: npm run build
+
+      - name: Deploy
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler pages deploy dist --project-name "$PAGES_PROJECT" --branch main
+
+      - name: Prune old deployments
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          API="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${PAGES_PROJECT}/deployments"
+          AUTH="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
+
+          resp=$(curl -sf -H "$AUTH" "$API?per_page=25") || {
+            echo "::warning::Could not list deployments — skipping prune."
+            exit 0
+          }
+
+          # Newest first; drop the first KEEP_DEPLOYMENTS, delete the rest.
+          ids=$(echo "$resp" | jq -r --argjson keep "$KEEP_DEPLOYMENTS" \
+            '.result | sort_by(.created_on) | reverse | .[$keep:] | .[].id')
+
+          if [ -z "$ids" ]; then
+            echo "Nothing to prune (<= $KEEP_DEPLOYMENTS deployments)."
+            exit 0
+          fi
+
+          for id in $ids; do
+            # force=true is required for deployments that carry aliases; the
+            # live production deployment is refused by the API regardless, so
+            # a per-item failure is logged but never fails the job.
+            if curl -sf -X DELETE -H "$AUTH" "$API/$id?force=true" >/dev/null; then
+              echo "Deleted deployment $id"
+            else
+              echo "::warning::Failed to delete deployment $id (kept)"
+            fi
+          done
