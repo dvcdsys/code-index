@@ -1,7 +1,7 @@
 // Single source of truth for version strings shown on the site.
 // Bump on each release (see site/README.md). These are hand-maintained on
 // purpose: the site must never claim a version that is not actually tagged.
-export const SERVER_VERSION = '0.12.2';
+export const SERVER_VERSION = '0.12.3';
 export const CLI_VERSION = '0.10.0';
 export const PLUGIN_VERSION = '0.3.0';
 export const COWORK_PLUGIN_VERSION = '0.1.0';
