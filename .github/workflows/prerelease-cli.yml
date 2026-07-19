@@ -66,8 +66,11 @@ jobs:
           # Stamp short SHA so `cix --version` distinguishes one dev build
           # from another even though the tag is floating.
           VERSION="develop-${GITHUB_SHA::7}"
+          # -w drops DWARF only. Keep the Go symbol table (no -s) so
+          # govulncheck -mode=binary can do symbol-level analysis — see
+          # release-cli.yml for the full rationale.
           go build \
-            -ldflags="-s -w -X 'github.com/dvcdsys/code-index/cli/cmd.Version=${VERSION}'" \
+            -ldflags="-w -X 'github.com/dvcdsys/code-index/cli/cmd.Version=${VERSION}'" \
             -o "dist/cix" .
 
       - name: Package
