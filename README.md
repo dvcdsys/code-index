@@ -9,7 +9,7 @@
 ██║     ██║ ╚███╔╝
 ██║     ██║ ██╔██╗
 ╚██████╗██║██╔╝ ██╗
- ╚═════╝╚═╝╚═╝  ╚═╝  Code IndeX
+ ╚═════╝╚═╝╚═╝  ╚═╝  CodeIndeX
 ```
 
 [![Release: Server](https://github.com/dvcdsys/code-index/actions/workflows/release-server.yml/badge.svg)](https://github.com/dvcdsys/code-index/actions/workflows/release-server.yml)
@@ -17,7 +17,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker Hub](https://img.shields.io/docker/pulls/dvcdsys/code-index)](https://hub.docker.com/r/dvcdsys/code-index)
 
-Search your codebase by meaning, not just text. Self-hosted, embeddings-based, works with any agent or terminal — with a full web dashboard and multi-repo workspace search.
+**cix — CodeIndeX.** Search your codebase by meaning, not just text. Self-hosted, embeddings-based, works with any agent or terminal — with a full web dashboard and multi-repo workspace search. Website: [codeindex.app](https://codeindex.app)
 
 ```bash
 cix search "authentication middleware"
