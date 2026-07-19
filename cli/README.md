@@ -1,4 +1,4 @@
-# `cix` — Code IndeX CLI
+# `cix` — CodeIndeX CLI
 
 A thin Go client for the `cix-server` semantic code index. Runs `init`,
 `search`, `symbols`, `def`, `refs`, `files`, `summary`, `watch`,

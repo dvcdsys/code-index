@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#1F1410"/>
+  <text x="32" y="43" font-family="Menlo, Consolas, 'JetBrains Mono', monospace" font-size="27" font-weight="700" text-anchor="middle" fill="#F2E6CF">ci<tspan fill="#D63D2C">x</tspan></text>
+</svg>

@@ -1,11 +1,11 @@
 # Workspaces
 
-> [!WARNING]
-> **Experimental.** Workspaces ship behind a feature flag and the HTTP + UI
-> surface is still evolving. The defaults and search algorithm are
-> calibrated on a 113-query eval (see [§ Search algorithm](#search-algorithm)),
-> but expect breaking changes to API shape, dashboard layout, and CLI flags
-> before this graduates to stable.
+> [!NOTE]
+> Workspaces ship enabled in every release — there is no feature flag to
+> turn them on (the old `CIX_WORKSPACES_ENABLED` gate was removed in the
+> 0.4.x line). See [§ Server setup](#server-setup) for the optional storage
+> and webhook env vars. The defaults and search algorithm are calibrated on
+> a 113-query eval (see [§ Search algorithm](#search-algorithm)).
 
 A **workspace** is a named group of repositories that cix can search **as
 one corpus**. Where `cix search` is for the project you're `cd`'d into, a
@@ -24,7 +24,7 @@ cross-project search endpoint.
 ## Table of contents
 
 - [What you get](#what-you-get)
-- [Enabling workspaces](#enabling-workspaces)
+- [Server setup](#server-setup)
 - [Concepts](#concepts)
 - [Quick start](#quick-start)
 - [Adding repositories](#adding-repositories)
@@ -66,24 +66,16 @@ cross-project search endpoint.
 
 ---
 
-## Enabling workspaces
+## Server setup
 
-The feature is off by default. Set the flag in `.env` (or the equivalent
-in your deployment):
-
-```bash
-CIX_WORKSPACES_ENABLED=true
-```
-
-…and restart the server. Without the flag every workspace endpoint
-returns `503 Service Unavailable` with `workspaces feature is disabled
-(set CIX_WORKSPACES_ENABLED=true and restart)`.
-
-You may also want to set:
+Workspaces are part of every release — there is no feature flag and
+nothing to turn on. (The `CIX_WORKSPACES_ENABLED` gate was removed in the
+0.4.x line, together with GitHub-repo support becoming always-on.) These
+env vars are all optional:
 
 ```bash
 # Where workspace repo clones live on disk. Defaults to <data-dir>/repos.
-CIX_WORKSPACES_DATA_DIR=/var/lib/cix/repos
+CIX_REPOS_DIR=/var/lib/cix/repos
 
 # Public URL of this server — required if you want auto-registered
 # GitHub webhooks. Without it, webhook mode falls back to `manual`.
@@ -147,12 +139,11 @@ records when searching.
 End-to-end walkthrough, assuming the server is up and you have a fresh
 admin login.
 
-### 1. Enable the feature
+### 1. Nothing to enable
 
-```bash
-echo 'CIX_WORKSPACES_ENABLED=true' >> .env
-docker compose restart   # or `make run` for native
-```
+Workspaces ship in every release — no flag, no restart-to-enable. Skip
+straight to creating one. (Optionally point clones at a dedicated volume
+first with `CIX_REPOS_DIR`; see [§ Server setup](#server-setup).)
 
 ### 2. Create a workspace
 
@@ -796,8 +787,7 @@ Don't use a workspace when:
 
 | Variable | Default | Description |
 |---|---|---|
-| `CIX_WORKSPACES_ENABLED` | `false` | **Required** to enable the feature. Restart after change. |
-| `CIX_WORKSPACES_DATA_DIR` | `<data-dir>/repos` | Where workspace repo clones live on disk. |
+| `CIX_REPOS_DIR` | `<data-dir>/repos` | Where workspace repo clones live on disk. Legacy alias: `CIX_WORKSPACES_DATA_DIR`. |
 | `CIX_PUBLIC_URL` | — | Public origin used to build webhook delivery URLs. Required for `webhook_mode=auto`. |
 | `CIX_SECRET_KEY` | — | 32-byte hex/base64 key for at-rest encryption of GitHub tokens. Falls back to a keyfile or auto-generated key. |
 | `CIX_SECRET_KEYFILE` | — | Path to an alternative key source (file with mode ≤ 0600). |
@@ -813,7 +803,9 @@ needed beyond `api.url` and `api.key`.
 ## REST API reference
 
 All endpoints require `Authorization: Bearer <cix_*>` or a valid cookie
-session. All return `503` if `CIX_WORKSPACES_ENABLED=false`.
+session. A `503` from these routes means the workspaces service failed to
+wire on the server (see [Troubleshooting](#troubleshooting)) — not a
+disabled feature.
 
 ### Workspaces
 
@@ -873,9 +865,12 @@ Full OpenAPI: `doc/openapi.yaml` and `http://<host>:21847/docs`.
 
 ## Troubleshooting
 
-**`503 workspaces feature is disabled`**
-→ `CIX_WORKSPACES_ENABLED=true` is missing or the server hasn't been
-restarted.
+**`503` from `/api/v1/workspaces/*`**
+→ Workspaces ship in every release (no feature flag), so a 503 means the
+workspaces service didn't construct — usually the at-rest encryption layer
+for GitHub tokens failed to initialize. Check `CIX_SECRET_KEY` /
+`CIX_SECRET_KEYFILE` (see [Server setup](#server-setup)); a plain restart
+won't help.
 
 **`status: "error"` on a project, dashboard surfaces "authentication required"**
 → Private repo with no token, or token's scopes are insufficient.
@@ -973,10 +968,8 @@ to do the deep dive without bloating the main session's context.
 
 ## Roadmap
 
-This feature is experimental. Known direction:
+Known direction:
 
-- **Multi-tenancy / workspace ACLs.** Today any authenticated user sees
-  every workspace. Per-workspace owner + reader roles are planned.
 - **`project_kind` enum in `projects[]`.** Surface whether each project
   is `code` / `manifests` / `contracts` / `docs` so agents can reason
   about the "words vs change location" mismatch noted above.

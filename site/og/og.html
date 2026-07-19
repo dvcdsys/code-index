@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- Standalone prop page for rendering public/og-image.png (1200x630) via
+     headless Chrome — see site/README.md. The CIX block art below duplicates
+     src/shared/ascii.jsx (this page can't import modules); keep them in sync
+     and re-render the PNG when either changes. -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    background: #F2E6CF;
+    font-family: "Rubik", -apple-system, "Helvetica Neue", sans-serif;
+    color: #1F1410;
+    position: relative;
+    border: 14px solid #1F1410;
+    padding: 60px 70px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  /* subtle paper grain */
+  body::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.12  0 0 0 0 0.08  0 0 0 0 0.06  0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    opacity: 0.55; mix-blend-mode: multiply;
+  }
+  .top { display: flex; align-items: flex-start; justify-content: space-between; }
+  pre.logo {
+    font-family: Menlo, monospace; font-size: 22px; line-height: 1.05;
+    color: #D63D2C; font-weight: 700; text-shadow: 3px 3px 0 rgba(31,20,16,.18);
+  }
+  .tag {
+    display: inline-block; margin-top: 10px; font-family: Menlo, monospace;
+    font-size: 20px; font-weight: 700; letter-spacing: .14em; color: #1F1410;
+    border: 3px solid #1F1410; border-radius: 10px; padding: 4px 14px;
+    background: #F8EFDC; box-shadow: 3px 3px 0 #1F1410;
+  }
+  .stamp {
+    transform: rotate(7deg); border: 3px solid #7E2D3F; color: #7E2D3F;
+    border-radius: 12px; padding: 10px 18px; text-align: center;
+    font-family: Menlo, monospace; font-weight: 700; letter-spacing: .12em;
+    font-size: 15px; opacity: .85; text-transform: uppercase;
+  }
+  h1 { font-size: 84px; line-height: 1.02; font-weight: 900; letter-spacing: -0.02em; }
+  h1 .blob {
+    color: #D63D2C;
+    box-shadow: inset 0 -26px 0 #E8A93B55;
+  }
+  .bottom { display: flex; align-items: center; justify-content: space-between; }
+  .chips { display: flex; gap: 14px; font-family: Menlo, monospace; font-size: 19px; font-weight: 600; color: #4A332A; }
+  .chips span { background: #F8EFDC; border: 2.5px solid #1F1410; border-radius: 999px; padding: 8px 18px; box-shadow: 2px 2px 0 #1F1410; }
+  .url { font-family: Menlo, monospace; font-size: 26px; font-weight: 700; color: #1F1410; }
+  .url b { color: #D63D2C; }
+</style>
+</head>
+<body>
+  <div class="top">
+    <div>
+      <pre class="logo"> ██████╗██╗██╗  ██╗
+██╔════╝██║╚██╗██╔╝
+██║     ██║ ╚███╔╝
+██║     ██║ ██╔██╗
+╚██████╗██║██╔╝ ██╗
+ ╚═════╝╚═╝╚═╝  ╚═╝</pre>
+      <span class="tag">CodeIndeX</span>
+    </div>
+    <div class="stamp">vibecoded<br>for vibecoding</div>
+  </div>
+  <h1>Search your codebase<br>by <span class="blob">meaning</span>,<br>not just text.</h1>
+  <div class="bottom">
+    <div class="chips">
+      <span>self-hosted</span>
+      <span>MIT</span>
+      <span>built for agents</span>
+    </div>
+    <div class="url"><b>code</b>index<b>.app</b></div>
+  </div>
+</body>
+</html>

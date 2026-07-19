@@ -1,0 +1,86 @@
+name: CI Site
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - ".github/workflows/ci-site.yml"
+  push:
+    branches: [main, develop]
+    paths:
+      - "site/**"
+      - ".github/workflows/ci-site.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # The site must never regress to the pre-audit claims or dev-grade
+      # tooling. Fails the build if a forbidden string appears in the output.
+      # CSS is included on purpose — a CDN font/@import regression would land
+      # there, not in HTML/JS. \b guards keep Rollup's base64 chunk hashes
+      # from false-positiving.
+      - name: Check for forbidden claims
+        run: |
+          FORBIDDEN='v0\.5|200\+ languages|21 MB|fsnotify|unpkg\.com|\bbabel\b'
+          if grep -rniE "$FORBIDDEN" dist/ --include='*.html' --include='*.js' --include='*.css'; then
+            echo "::error::Forbidden string found in built site (stale claim or dev-grade dependency)"
+            exit 1
+          fi
+          echo "OK: no forbidden strings in dist/"
+
+      # The site must never advertise a stale OR fake version: the plugin
+      # version must match plugin.json in this repo, and the server/CLI
+      # versions must equal the NEWEST release tags — not merely exist.
+      # "Exists" was the original rule and it was too weak: after
+      # server/v0.12.3 shipped, a versions.js still saying 0.12.2 passed
+      # (0.12.2 is a real tag) and the deployed site kept advertising the
+      # old release. Comparing against the newest tag closes that drift.
+      - name: Check version consistency
+        run: |
+          # Anchor on the full `export const <NAME> =` declaration: an
+          # unanchored grep for PLUGIN_VERSION also matches the
+          # COWORK_PLUGIN_VERSION line, which made $PLUGIN two-valued and
+          # the comparison below fail unconditionally.
+          v() { grep -oE "^export const $1 = '[^']+'" src/shared/versions.js | cut -d"'" -f2; }
+          SERVER=$(v SERVER_VERSION); CLI=$(v CLI_VERSION); PLUGIN=$(v PLUGIN_VERSION)
+          PLUGIN_JSON=$(node -p "require('../plugins/cix/.claude-plugin/plugin.json').version")
+          TAGS=$(git ls-remote --tags origin)
+          # Newest semver tag per release stream. The trailing `$` anchor skips
+          # the `^{}` peeled refs that annotated tags add to ls-remote output.
+          newest() { echo "$TAGS" | grep -oE "refs/tags/$1/v[0-9]+\.[0-9]+\.[0-9]+$" | sed "s#refs/tags/$1/v##" | sort -V | tail -n1; }
+          NEWEST_SERVER=$(newest server); NEWEST_CLI=$(newest cli)
+          echo "site: server=$SERVER cli=$CLI plugin=$PLUGIN"
+          echo "repo: server=$NEWEST_SERVER cli=$NEWEST_CLI plugin.json=$PLUGIN_JSON"
+          FAIL=0
+          if [ "$PLUGIN" != "$PLUGIN_JSON" ]; then
+            echo "::error::versions.js PLUGIN_VERSION ($PLUGIN) != plugins/cix plugin.json ($PLUGIN_JSON)"; FAIL=1
+          fi
+          if [ "$SERVER" != "$NEWEST_SERVER" ]; then
+            echo "::error::versions.js SERVER_VERSION ($SERVER) != newest release server/v$NEWEST_SERVER — bump it so the site stops advertising a stale version"; FAIL=1
+          fi
+          if [ "$CLI" != "$NEWEST_CLI" ]; then
+            echo "::error::versions.js CLI_VERSION ($CLI) != newest release cli/v$NEWEST_CLI — bump it so the site stops advertising a stale version"; FAIL=1
+          fi
+          exit $FAIL
