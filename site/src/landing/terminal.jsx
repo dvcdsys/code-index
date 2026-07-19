@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { DemoControls } from '../shared/demo-controls.jsx';
+import { useFrameTimeouts } from '../shared/use-frame-timeouts.js';
 
 // Animated hero terminal. Every query below was actually run with `cix search`
 // against this repository — scores, paths, line numbers, timings and symbol
@@ -50,7 +51,7 @@ export function HeroTerminal() {
   const [qIdx, setQIdx] = useState(0);
   const [typed, setTyped] = useState('');
   const [shown, setShown] = useState(0);
-  const timeoutsRef = useRef([]);
+  const { T, clearAll } = useFrameTimeouts();
 
   const q = HERO_QUERIES[qIdx];
 
@@ -72,12 +73,7 @@ export function HeroTerminal() {
   }
 
   useEffect(() => {
-    const clear = () => {
-      timeoutsRef.current.forEach(clearTimeout);
-      timeoutsRef.current = [];
-    };
-    if (!running) return clear;
-    const T = (fn, ms) => { const id = setTimeout(fn, ms); timeoutsRef.current.push(id); };
+    if (!running) return clearAll;
 
     if (phase === 'typing') {
       if (typed.length < q.cmd.length) {
@@ -101,7 +97,7 @@ export function HeroTerminal() {
         setPhase('typing');
       }, 280);
     }
-    return clear;
+    return clearAll;
   }, [running, phase, typed, shown, qIdx]);
 
   return (

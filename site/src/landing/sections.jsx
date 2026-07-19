@@ -76,8 +76,8 @@ export function Playground() {
       <div className="wrap">
         <div className="section-head">
           <span className="eyebrow">CLI tour</span>
-          <h2>Five commands. One indexed brain.</h2>
-          <p className="lead">Click through. Every output below is real, transcribed from cix running against its own repository — the same text an agent gets back.</p>
+          <h2>Six commands. One indexed brain.</h2>
+          <p className="lead">Click through — the same text an agent gets back.</p>
         </div>
         <CLITabs />
       </div>
@@ -96,8 +96,7 @@ export function Workspaces() {
         </div>
         <WorkspaceDemo />
         <p className="ws-note">
-          Scripted scenario with abstract repos — the command and output format are the real CLI's.
-          Enable with <code>CIX_WORKSPACES_ENABLED=true</code> · <a href="/docs/#workspaces">workspace docs →</a>
+          Example scenario · <a href="/docs/#workspaces">workspace docs →</a>
         </p>
       </div>
     </section>
@@ -199,24 +198,25 @@ const QS_STEPS = [
     </>,
   },
   {
-    n: '03', title: 'Index a project',
-    desc: <><code>cix init</code> registers, indexes, and starts the file watcher in the background. Status streams as files are embedded.</>,
+    n: '03', title: 'Index & first search',
+    desc: <><code>cix init</code> registers, indexes, and starts the file watcher in the background. Search from the terminal, the dashboard, or any agent with shell access.</>,
     code: <>
       <span className="prompt">$</span> cd ~/code/your-project{'\n'}
       <span className="prompt">$</span> cix init{'\n'}
       <span className="comment"># → registered. indexing 2,431 files…</span>{'\n'}
-      <span className="prompt">$</span> cix status{'\n'}
-      <span className="comment"># Status: ✓ Indexed</span>
+      <span className="prompt">$</span> cix search "rate limit per IP"{'\n'}
+      <span className="prompt">$</span> cix refs RateLimiter
     </>,
   },
   {
-    n: '04', title: 'Search and ship',
-    desc: <>From the terminal, the dashboard, or any agent with shell access. Same engine, same ranking, same vectors.</>,
+    n: '04', title: 'Hook up your agent',
+    desc: <>The plugin ships the CLI, eight slash commands, the <code>/cix</code> and <code>/cix-workspace</code> skills, and hooks that steer Claude toward cix in indexed projects. Claude Desktop / Cowork: <code>cix mcp install claude-desktop</code>.</>,
     code: <>
-      <span className="prompt">$</span> cix search "rate limit per IP"{'\n'}
-      <span className="prompt">$</span> cix symbols Watcher --kind type{'\n'}
-      <span className="prompt">$</span> cix refs SendFilesStreaming{'\n'}
-      <span className="prompt">$</span> cix files "openapi"
+      <span className="prompt">&gt;</span> /plugin marketplace add dvcdsys/code-index{'\n'}
+      <span className="prompt">&gt;</span> /plugin install cix@code-index{'\n'}
+      <span className="comment"># /cix:search /cix:def /cix:refs /cix:init</span>{'\n'}
+      <span className="comment"># /cix:status /cix:summary /cix:file /cix:tree</span>{'\n'}
+      <span className="comment"># skills: /cix · /cix-workspace</span>
     </>,
   },
 ];
@@ -227,7 +227,7 @@ export function QuickStart() {
       <div className="wrap">
         <div className="section-head">
           <span className="eyebrow">Quick start</span>
-          <h2>From clone to first search<br/>in about four minutes.</h2>
+          <h2>Clone to agent-ready.<br/>About ten minutes.</h2>
         </div>
         <div className="qs-grid">
           {QS_STEPS.map(s => (
@@ -254,6 +254,8 @@ export function QuickStart() {
 const FAQS = [
   { q: 'Does my code leave my machine?',
     a: <>Not by default. The server runs on your hardware (Docker, native macOS, or your own GPU box), and embeddings happen locally via a llama.cpp sidecar — no SaaS endpoint, no telemetry. If you <i>choose</i> to switch the embedding provider to a remote API (Voyage, OpenAI-compatible), chunks go to that provider; that's an explicit admin action, off by default.</> },
+  { q: "How is this different from Sourcegraph, GitHub code search, or Cursor's indexing?",
+    a: <>Scope. Those give you search inside <i>their</i> surface — a web app, a code host, one editor. cix ships the entire path as one MIT repo you run yourself: the Go server with an embedded dashboard, the CLI, the file watcher, multi-repo workspaces, a Claude Code plugin (slash commands, skills, hooks), an MCP server for Claude Desktop &amp; Cowork, and team-deployment docs down to TLS, backups and upgrades. It's not an indexer you build a workflow around — it <i>is</i> the workflow, from <code>docker compose up</code> to your agent quoting <code>file:line</code>.</> },
   { q: 'Why a custom embedding model? Can I use OpenAI?',
     a: <>The default is <code>CodeRankEmbed</code> — a model purpose-built for code retrieval. It's asymmetric: queries get a different prefix than passages, so cosine scores look lower than generic models (a strong match here is ~0.55, not 0.80). You can swap in any GGUF from HuggingFace via <code>CIX_EMBEDDING_MODEL</code> (PyTorch repos aren't supported — inference goes through the llama-server sidecar), or configure a remote provider from the dashboard.</> },
   { q: 'What languages are supported?',
@@ -263,7 +265,7 @@ const FAQS = [
   { q: 'What happens when I change the embedding model?',
     a: <>Nothing is destroyed. The system database is model-independent; only the vector store is namespaced — each provider/model gets its own directory, so old and new vectors never mix. Every project remembers which model it was indexed with, the dashboard shows a "stale model" badge on drifted projects, and the next reindex (automatically promoted to a full one after a model change) clears it.</> },
   { q: "What's a workspace?",
-    a: <>A named group of repositories that cix searches as one corpus — for microservices, cross-repo features, or "the answer is in one of these five repos" tasks. Repos are cloned server-side, indexed next to your local projects, and queried through a single hybrid BM25 + dense endpoint. Enable with <code>CIX_WORKSPACES_ENABLED=true</code>.</> },
+    a: <>A named group of repositories that cix searches as one corpus — for microservices, cross-repo features, or "the answer is in one of these five repos" tasks. Repos are cloned server-side, indexed next to your local projects, and queried through a single hybrid BM25 + dense endpoint. Enabled in every release — no flag to flip.</> },
   { q: 'Why port 21847?',
     a: <>Because <code>21847</code> is unassigned by IANA and doesn't collide with anything common. Override with <code>CIX_PORT</code>.</> },
 ];

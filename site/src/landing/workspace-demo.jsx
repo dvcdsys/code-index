@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { DemoControls } from '../shared/demo-controls.jsx';
+import { useFrameTimeouts } from '../shared/use-frame-timeouts.js';
 
 // Two-pane workspace demo: an agent chat on the left, and the cix commands
 // the agent actually runs on the right — synchronized, both panes scroll
@@ -102,19 +103,14 @@ export function WorkspaceDemo() {
   const [cmdTyped, setCmdTyped] = useState('');
   const [outShown, setOutShown] = useState(0);
   const [interimShown, setInterimShown] = useState(false);
-  const timeoutsRef = useRef([]);
+  const { T, clearAll } = useFrameTimeouts();
   const termRef = useRef(null);
   const chatRef = useRef(null);
 
   const step = STEPS[stepIdx];
 
   useEffect(() => {
-    const clear = () => {
-      timeoutsRef.current.forEach(clearTimeout);
-      timeoutsRef.current = [];
-    };
-    if (!running) return clear;
-    const T = (fn, ms) => { const id = setTimeout(fn, ms); timeoutsRef.current.push(id); };
+    if (!running) return clearAll;
 
     if (phase === 'user') {
       if (userTyped.length < USER_MSG.length) {
@@ -147,7 +143,7 @@ export function WorkspaceDemo() {
     } else if (phase === 'wipe') {
       T(() => reset('user'), 300);
     }
-    return clear;
+    return clearAll;
 
     function advance() {
       if (stepIdx < LAST) {

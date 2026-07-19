@@ -21,6 +21,26 @@ const CLI_TABS = [
     ],
   },
   {
+    key: 'ws',
+    label: 'cix ws search',
+    desc: <>One query across the whole <b>workspace</b> — ranked projects, chunks from every repo. <a href="#workspaces">Full session ↓</a></>,
+    cmd: 'cix ws platform search "fee calculation"',
+    output: [
+      { type: 'sum', text: 'Top projects:' },
+      { type: 'proj', score: '0.643', label: 'acme-billing', meta: '— 9 hits · bm25 6.870 · dense 0.581' },
+      { type: 'proj', score: '0.512', label: 'acme-gateway', meta: '— 6 hits · bm25 4.902 · dense 0.494' },
+      { type: 'proj', score: '0.334', label: 'acme-web', meta: '— 2 hits · bm25 1.428 · dense 0.371' },
+      { type: 'sum', text: 'Top chunks:', gap: true },
+      { type: 'wchunk', score: '0.631', loc: 'internal/fees/store.go:41-58' },
+      { type: 'wmeta', text: 'project: github.com/acme/acme-billing' },
+      { type: 'wsym', name: 'LoadSchedule' },
+      { type: 'wchunk', score: '0.573', loc: 'internal/pricing/cache.go:81-96', gap: true },
+      { type: 'wmeta', text: 'project: github.com/acme/acme-gateway' },
+      { type: 'wsym', name: 'QuoteCache.Invalidate' },
+      { type: 'sum', text: '…', gap: true },
+    ],
+  },
+  {
     key: 'symbols',
     label: 'cix symbols',
     desc: <>Fast lookup by name across functions, classes, methods, types. Built on the tree-sitter symbol index — exact, not embedding-based.</>,
@@ -101,7 +121,7 @@ export function CLITabs() {
             </div>
             <div style={{ marginTop: 14 }}>
               {tab.output.map((row, i) => (
-                <div className="term-row" key={i} style={{ marginBottom: 6, animationDelay: `${i * 0.04}s` }}>
+                <div className="term-row" key={i} style={{ marginBottom: 6, marginTop: row.gap ? 12 : 0, animationDelay: `${i * 0.04}s` }}>
                   {row.type === 'file' && (
                     <div style={{ marginTop: 6 }}>
                       <span className="path">{row.path}</span>
@@ -143,6 +163,21 @@ export function CLITabs() {
                   )}
                   {row.type === 'sum' && (
                     <div className="dim">{row.text}</div>
+                  )}
+                  {row.type === 'proj' && (
+                    <div>
+                      {'  '}<span className="score">[{row.score}]</span> <span className="blue">{row.label}</span>
+                      <span className="dim">  {row.meta}</span>
+                    </div>
+                  )}
+                  {row.type === 'wchunk' && (
+                    <div>{'  '}<span className="score">[{row.score}]</span> <span className="path">{row.loc}</span></div>
+                  )}
+                  {row.type === 'wmeta' && (
+                    <div className="dim">{'         ' + row.text}</div>
+                  )}
+                  {row.type === 'wsym' && (
+                    <div>{'         '}<span className="dim">symbol:  </span><span className="blue">{row.name}</span></div>
                   )}
                 </div>
               ))}

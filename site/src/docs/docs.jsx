@@ -144,7 +144,7 @@ cix search <query> [--in <path>] [--exclude <path>] [--lang <lang>]
 cix symbols <name> [--kind function|class|method|type] [--limit <n>]
 
 # Definitions / references (aliases: def, goto · refs, usages)
-cix def  <symbol> [--kind <kind>] [--file <path>]
+cix def  <symbol> [--kind <kind>] [--file <path>] [--limit <n>]
 cix refs <symbol> [--file <path>] [--limit <n>]
 
 # Files by path pattern
@@ -185,7 +185,7 @@ cix ws <name> delete [-y]`}</CodeBlock>
               ['cix watch list',          'List all running watcher daemons.'],
               ['cix watch manage',        'Interactive TUI to start/stop/restart watchers (alias: ui).'],
             ]}/>
-            <p>The watcher uses native filesystem events (FSEvents on macOS, inotify on Linux) with a 5-second debounce. Logs at <code>~/.cix/logs/watcher.log</code>.</p>
+            <p>The watcher uses native filesystem events (FSEvents on macOS, inotify on Linux) with a 5-second debounce. Logs live in <code>~/.cix/logs/</code>, one file per project (<code>watcher-&lt;hash&gt;.log</code>).</p>
 
             <h3>Configuration</h3>
             <DefList rows={[
@@ -209,7 +209,7 @@ cix config set default_server <name>`}</CodeBlock>
             <table className="tbl">
               <thead><tr><th>Match strength</th><th>Score range</th><th>Action</th></tr></thead>
               <tbody>
-                <tr><td>Exact symbol or filename</td><td><code>0.65 – 0.80</code></td><td>rare; very high confidence</td></tr>
+                <tr><td>Exact symbol or filename</td><td><code>≥ 0.65</code></td><td>rare; very high confidence</td></tr>
                 <tr><td>Strong path-aware concept</td><td><code>0.50 – 0.65</code></td><td>typical "good" match</td></tr>
                 <tr><td>Weaker / partial overlap</td><td><code>0.40 – 0.50</code></td><td>typical for vague queries</td></tr>
                 <tr><td>Likely unrelated noise</td><td><code>&lt; 0.40</code></td><td>filtered out by default</td></tr>
@@ -228,7 +228,7 @@ cix reindex --full`}</CodeBlock>
           </Section>
 
           <Section id="config" title="Configuration" eyebrow="Environment">
-            <p>All server settings use the <code>CIX_*</code> prefix. This is the curated set — the full reference (~50 variables) lives in <a href={`${GITHUB_URL}/blob/main/doc/CONFIG_REFERENCE.md`} target="_blank" rel="noopener"><code>doc/CONFIG_REFERENCE.md</code></a>. Tuning values are also editable at runtime from <code>/dashboard/server</code>; env values are the boot-time seed.</p>
+            <p>All server settings use the <code>CIX_*</code> prefix. This is the curated set — the full reference (~40 variables) lives in <a href={`${GITHUB_URL}/blob/main/doc/CONFIG_REFERENCE.md`} target="_blank" rel="noopener"><code>doc/CONFIG_REFERENCE.md</code></a>. Tuning values are also editable at runtime from <code>/dashboard/server</code>; env values are the boot-time seed.</p>
             <h3>Core</h3>
             <VarTable rows={[
               ['CIX_PORT', '21847', 'HTTP listen port.'],
@@ -247,8 +247,7 @@ cix reindex --full`}</CodeBlock>
             ]}/>
             <h3>Embeddings &amp; sidecar</h3>
             <VarTable rows={[
-              ['CIX_EMBEDDING_PROVIDER', 'ollama', 'Seeds the DB on first boot; after that the dashboard setting wins.'],
-              ['CIX_EMBEDDING_MODEL', 'awhiteside/CodeRankEmbed-Q8_0-GGUF', 'HuggingFace repo or absolute .gguf path.'],
+              ['CIX_EMBEDDING_MODEL', 'awhiteside/CodeRankEmbed-Q8_0-GGUF', <>Model for the local llama.cpp provider — HuggingFace repo or absolute .gguf path. Switch providers (Voyage, OpenAI) from the dashboard.</>],
               ['CIX_EMBEDDINGS_ENABLED', 'true', 'Disable to run symbol/file search only.'],
               ['CIX_MAX_EMBEDDING_CONCURRENCY', '5', 'Embedding queue parallelism.'],
               ['CIX_EMBED_INCLUDE_PATH', 'true', <>Path/lang/symbol preamble. Toggling needs <code>reindex --full</code>.</>],
@@ -257,9 +256,8 @@ cix reindex --full`}</CodeBlock>
               ['CIX_LLAMA_TRANSPORT', 'unix', <>Sidecar IPC: <code>unix</code> or <code>tcp</code>.</>],
               ['CIX_LLAMA_STARTUP_TIMEOUT', '60', 'Seconds to wait for the sidecar.'],
             ]}/>
-            <h3>Features</h3>
+            <h3>GitHub &amp; tunnels</h3>
             <VarTable rows={[
-              ['CIX_WORKSPACES_ENABLED', 'false', <>Required for <a href="#workspaces">workspaces</a>. Restart after change.</>],
               ['CIX_PUBLIC_URL', null, 'External origin for webhook URLs (a live tunnel takes precedence).'],
               ['CIX_TUNNEL_BIN_MANAGED', 'false', 'Let the server download/update tunnel binaries.'],
             ]}/>
@@ -339,13 +337,9 @@ POST /api/v1/admin/sidecar/restart           GET …/sidecar/status`}</CodeBlock
           <Section id="workspaces" title="Workspaces" eyebrow="Multi-repo">
             <p>A <b>workspace</b> is a named group of repositories that cix searches as <b>one corpus</b>. Where <code>cix search</code> is for the project you're <code>cd</code>'d into, a workspace is for tasks that span repos — microservices that talk to each other, a feature whose implementation crosses several services, or any time the answer is "look in N repos, not one".</p>
             <p>Workspaces clone GitHub repositories server-side (under <code>CIX_REPOS_DIR</code>), index them next to your local projects, and expose a single <b>hybrid search</b> endpoint: a dense (cosine) pass and a BM25 (SQLite FTS5) pass fan out per project, then a two-stage ranker gates the relevant repos and fuses both signals. Defaults are calibrated on a 113-query eval. One query returns ranked projects <i>and</i> the top chunks across all of them — most of an agent's context needs land in a single round-trip.</p>
-            <h3>Enable &amp; use</h3>
-            <CodeBlock>{`# server
-echo 'CIX_WORKSPACES_ENABLED=true' >> .env
-docker compose restart
-
-# CLI
-cix ws create platform --description "Platform services"
+            <h3>Use it</h3>
+            <p>Workspaces ship enabled in every release — no feature flag, nothing to turn on. Point clones at a dedicated volume with <code>CIX_REPOS_DIR</code> if you like, then:</p>
+            <CodeBlock>{`cix ws create platform --description "Platform services"
 cix ws platform add <project>…        # attach indexed projects
 cix ws platform search "who validates webhook signatures"
 cix ws platform search "feature flag rollout" --json   # for agents`}</CodeBlock>
@@ -363,7 +357,7 @@ cix mcp uninstall claude-desktop`}</CodeBlock>
             <p>No secrets are written to the host config — the server URL and API key stay in <code>~/.cix/config.yaml</code>.</p>
             <h3>The 13 tools</h3>
             <p><code>cix_search</code>, <code>cix_definitions</code>, <code>cix_references</code>, <code>cix_symbols</code>, <code>cix_files</code>, <code>cix_summary</code>, <code>cix_file</code>, <code>cix_tree</code>, <code>cix_workspace_search</code>, <code>cix_list_workspaces</code>, <code>cix_list_workspace_projects</code>, <code>cix_list_projects</code>, <code>cix_list_servers</code>.</p>
-            <p>The model is deliberately <b>server-centric and multi-server</b>: there is no "current project" and nothing is inferred from a working directory. Every tool takes an optional <code>server</code> argument (an alias from your CLI config); the agent names the project or workspace explicitly. <code>cix_file</code>/<code>cix_tree</code> work for external (GitHub-backed) projects, which the server keeps on disk.</p>
+            <p>The model is deliberately <b>server-centric and multi-server</b>: there is no "current project" and nothing is inferred from a working directory. Every tool except <code>cix_list_servers</code> takes an optional <code>server</code> argument (an alias from your CLI config); the agent names the project or workspace explicitly. <code>cix_file</code>/<code>cix_tree</code> work for external (GitHub-backed) projects, which the server keeps on disk.</p>
             <h3>Optional Cowork skills</h3>
             <CodeBlock>{`/plugin install cix-cowork@code-index`}</CodeBlock>
             <p><code>cix-cowork</code> (v{COWORK_PLUGIN_VERSION}) is a skills-only companion plugin — no hooks, no CLI — that teaches Cowork the cix and cix-workspace research workflows over the MCP tools. The tools work without it.</p>
@@ -392,7 +386,7 @@ cix mcp uninstall claude-desktop`}</CodeBlock>
             <p>Sync happens per repo in one of three webhook modes:</p>
             <ul className="bullets">
               <li><b>auto</b> — the server registers the webhook on GitHub itself, using a stored personal access token (PAT needs <code>repo</code> + <code>admin:repo_hook</code>).</li>
-              <li><b>manual</b> — you copy the URL + secret from <code>GET /projects/{'{hash}'}/webhook-info</code> into GitHub's settings.</li>
+              <li><b>manual</b> — you copy the URL + secret from <code>GET /api/v1/projects/{'{hash}'}/webhook-info</code> into GitHub's settings.</li>
               <li><b>disabled</b> — polling only (interval configurable).</li>
             </ul>
             <p>Deliveries hit <code>POST /api/v1/webhooks/github/{'{hash}'}</code> and are authenticated per repo with an HMAC-SHA256 signature over the body (<code>X-Hub-Signature-256</code>) — not with a cix API key. A valid push on the tracked branch enqueues a re-sync + reindex. PATs are stored encrypted and managed under <code>/api/v1/github-tokens</code> (admin-only; the plaintext is never echoed back).</p>
@@ -431,7 +425,7 @@ cix mcp uninstall claude-desktop`}</CodeBlock>
               ['"connection refused"', <>Server isn't running. <code>curl http://localhost:21847/health</code>; if it fails, <code>docker compose up -d</code>.</>],
               ['Search returns no results', <>Lower the threshold (<code>--min-score 0.2</code>), verify <code>cix status</code> says Indexed, and confirm <code>cix list</code> shows the project.</>],
               ['"Stale model" on every project', <>The embedding model changed. Reindex each project (after a model change the server automatically promotes it to a full reindex) — or revert the change in <b>Server → Embedding provider</b>.</>],
-              ['Workspace endpoints return 503', <><code>CIX_WORKSPACES_ENABLED=true</code> is missing, or the server wasn't restarted after setting it.</>],
+              ['Workspace endpoints return 503', <>Workspaces ship in every release (no feature flag), so a 503 means the workspaces service failed to wire — usually the encryption layer for GitHub tokens didn't initialize. Check the encryption-key config (<a href={`${GITHUB_URL}/blob/main/doc/WORKSPACES.md`} target="_blank" rel="noopener"><code>doc/WORKSPACES.md</code></a>); a plain restart won't help.</>],
               ['Locked out of the admin account', <>Another admin can reset you via <b>Users → Reset password</b> (or <code>POST /api/v1/admin/users/{'{id}'}/reset-password</code>) and clear login locks under <b>Login locks</b>. Long-term: keep two admin accounts.</>],
             ]}/>
           </Section>
