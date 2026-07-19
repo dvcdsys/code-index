@@ -188,8 +188,18 @@ const QS_STEPS = [
     </>,
   },
   {
-    n: '02', title: 'Install the CLI',
-    desc: <>One-liner for macOS and Linux. <code>cix config init</code> is an interactive first-run wizard; or set the server by hand with <code>cix config set</code>.</>,
+    n: '02', title: 'Log in & mint an API key',
+    desc: <>Sign in with the bootstrap admin from <code>.env</code>, then <b>API&nbsp;Keys → Create key</b>. The key is revealed exactly once — and the dialog hands you a ready-to-paste <code>cix config</code> connect command for the next step.</>,
+    code: <>
+      <span className="prompt">$</span> open http://localhost:21847/dashboard{'\n'}
+      <span className="comment"># sign in with the bootstrap admin from .env</span>{'\n'}
+      <span className="comment"># API Keys → Create key → copy cix_…</span>{'\n'}
+      <span className="comment"># (shown once, with a ready connect command)</span>
+    </>,
+  },
+  {
+    n: '03', title: 'Install the CLI',
+    desc: <>One-liner for macOS and Linux. Paste the connect command from the key dialog, run the interactive <code>cix config init</code> wizard, or set the server by hand with <code>cix config set</code>.</>,
     code: <>
       <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
       {'    '}/dvcdsys/code-index/main/install.sh | bash{'\n'}
@@ -198,7 +208,7 @@ const QS_STEPS = [
     </>,
   },
   {
-    n: '03', title: 'Index & first search',
+    n: '04', title: 'Index & first search',
     desc: <><code>cix init</code> registers, indexes, and starts the file watcher in the background. Search from the terminal, the dashboard, or any agent with shell access.</>,
     code: <>
       <span className="prompt">$</span> cd ~/code/your-project{'\n'}
@@ -209,7 +219,7 @@ const QS_STEPS = [
     </>,
   },
   {
-    n: '04', title: 'Hook up your agent',
+    n: '05', title: 'Hook up your agent',
     desc: <>The plugin ships the CLI, eight slash commands, the <code>/cix</code> and <code>/cix-workspace</code> skills, and hooks that steer Claude toward cix in indexed projects. Claude Desktop / Cowork: <code>cix mcp install claude-desktop</code>.</>,
     code: <>
       <span className="prompt">&gt;</span> /plugin marketplace add dvcdsys/code-index{'\n'}
