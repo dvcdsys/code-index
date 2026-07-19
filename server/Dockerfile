@@ -80,9 +80,14 @@ RUN go mod download
 COPY . .
 # Drop the built dashboard into the embed root so `go build` includes it.
 COPY --from=dashboard /src/internal/httpapi/dashboard/dist/ ./internal/httpapi/dashboard/dist/
+# -w drops DWARF only. Keep the Go symbol table (no -s) so a binary-mode
+# vulnerability scan of the shipped image can do symbol-level analysis; on a
+# stripped binary govulncheck falls back to module-level reporting and flags
+# advisories for packages that are not even linked. Cost: ~+7% on the binary
+# (~1.7 MB), negligible inside the image.
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
-    -ldflags "-s -w -X main.version=${VERSION}" \
+    -ldflags "-w -X main.version=${VERSION}" \
     -o /out/cix-server \
     ./cmd/cix-server
 
