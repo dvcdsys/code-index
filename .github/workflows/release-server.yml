@@ -203,3 +203,48 @@ jobs:
             |---|---|
             | CPU (multi-arch) | `dvcdsys/code-index:${{ steps.ver.outputs.version }}` |
             | CUDA 12.8 | `dvcdsys/code-index:${{ steps.ver.outputs.version }}-cu128` |
+
+  site-version:
+    name: Check the site advertises this release
+    needs: [docker-cpu, docker-cuda]
+    runs-on: ubuntu-latest
+    # The marketing site (site/) is a surface nothing else in a release
+    # touches, so it silently keeps advertising the previous version —
+    # versions.js still said 0.12.2 the moment server/v0.12.3 shipped.
+    # ci-site.yml hard-fails on a stale versions.js, but it only triggers on
+    # site/** changes, so a server release never runs it. This job closes that
+    # gap at release time.
+    #
+    # Deliberately NON-BLOCKING: versions.js may only name a version that is
+    # already tagged, so the bump legitimately lands *after* this tag exists.
+    # The warning is the reminder to go do it, not a failure.
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compare site versions.js with the released version
+        run: |
+          # The site lives on its own branch until it merges; skip until then.
+          if [ ! -f site/src/shared/versions.js ]; then
+            echo "no site/src/shared/versions.js at this ref — nothing to check"
+            exit 0
+          fi
+          RELEASED="${GITHUB_REF_NAME#server/}"; RELEASED="${RELEASED#v}"
+          SITE=$(grep -oE "^export const SERVER_VERSION = '[^']+'" site/src/shared/versions.js | cut -d"'" -f2)
+          echo "released=$RELEASED  site=$SITE"
+          if [ "$SITE" = "$RELEASED" ]; then
+            echo "site already advertises $RELEASED — nothing to do"
+            echo "Site already advertises \`$RELEASED\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "::warning title=Site version is stale::site/src/shared/versions.js still says $SITE — bump SERVER_VERSION to $RELEASED so the published site stops advertising the previous release."
+          {
+            echo "### ⚠️ Site still advertises \`$SITE\`"
+            echo ""
+            echo "\`server/v$RELEASED\` just shipped. Bump \`SERVER_VERSION\` in"
+            echo "\`site/src/shared/versions.js\` to \`$RELEASED\`, or the deployed"
+            echo "site keeps showing the previous release."
+            echo ""
+            echo "\`ci-site.yml\` fails until this is done."
+          } >> "$GITHUB_STEP_SUMMARY"
