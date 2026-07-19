@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/config"
 )
 
 // TestGetClient_ExpandsHeaderEnvVars is the end-to-end proof of issue #59:

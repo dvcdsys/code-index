@@ -9,7 +9,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/anthropics/code-index/cli/internal/client"
+	"github.com/dvcdsys/code-index/cli/internal/client"
 )
 
 // projectHash returns the same project URL hash the client uses for routing —

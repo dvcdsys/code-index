@@ -17,8 +17,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/anthropics/code-index/cli/internal/client"
-	"github.com/anthropics/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/client"
+	"github.com/dvcdsys/code-index/cli/internal/config"
 )
 
 // RunEdit boots the TUI against the current config. cfg is mutated via

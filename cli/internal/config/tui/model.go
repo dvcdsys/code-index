@@ -2,7 +2,7 @@ package tui
 
 import (
 	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/anthropics/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/config"
 )
 
 // sectionID enumerates the left-panel entries. Stable order — the View

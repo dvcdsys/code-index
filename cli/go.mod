@@ -1,4 +1,4 @@
-module github.com/anthropics/code-index/cli
+module github.com/dvcdsys/code-index/cli
 
 go 1.25.12
 

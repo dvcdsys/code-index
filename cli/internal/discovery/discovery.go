@@ -11,7 +11,7 @@ import (
 
 	ignore "github.com/sabhiram/go-gitignore"
 
-	"github.com/anthropics/code-index/cli/internal/projectconfig"
+	"github.com/dvcdsys/code-index/cli/internal/projectconfig"
 )
 
 // DiscoveredFile represents a file found during discovery.

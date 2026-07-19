@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/code-index/cli/internal/client"
+	"github.com/dvcdsys/code-index/cli/internal/client"
 )
 
 // projectHash mirrors the client's project URL hash — delegated to the real

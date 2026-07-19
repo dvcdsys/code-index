@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/anthropics/code-index/cli/internal/client"
-	"github.com/anthropics/code-index/cli/internal/discovery"
+	"github.com/dvcdsys/code-index/cli/internal/client"
+	"github.com/dvcdsys/code-index/cli/internal/discovery"
 )
 
 const defaultBatchSize = 5

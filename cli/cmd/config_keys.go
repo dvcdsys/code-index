@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"text/tabwriter"
 
-	"github.com/anthropics/code-index/cli/internal/config"
-	"github.com/anthropics/code-index/cli/internal/config/schema"
+	"github.com/dvcdsys/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/config/schema"
 	"github.com/spf13/cobra"
 )
 
