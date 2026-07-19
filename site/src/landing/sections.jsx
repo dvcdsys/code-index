@@ -189,11 +189,11 @@ const QS_STEPS = [
   },
   {
     n: '02', title: 'Log in & mint an API key',
-    desc: <>Sign in with the bootstrap admin from <code>.env</code>, then <b>API&nbsp;Keys → Create key</b>. The key is revealed exactly once — and the dialog hands you a ready-to-paste <code>cix config</code> connect command for the next step.</>,
+    desc: <>Sign in with the bootstrap admin from <code>.env</code>, then <b>API&nbsp;Keys → New key</b>. The key is revealed exactly once — and the dialog hands you a ready-to-paste <code>cix config</code> connect command for the next step.</>,
     code: <>
       <span className="prompt">$</span> open http://localhost:21847/dashboard{'\n'}
       <span className="comment"># sign in with the bootstrap admin from .env</span>{'\n'}
-      <span className="comment"># API Keys → Create key → copy cix_…</span>{'\n'}
+      <span className="comment"># API Keys → New key → copy cix_…</span>{'\n'}
       <span className="comment"># (shown once, with a ready connect command)</span>
     </>,
   },
