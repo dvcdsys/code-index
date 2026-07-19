@@ -120,7 +120,7 @@ For Apple Silicon with full Metal acceleration, run natively (Docker Desktop has
 
 Open `http://localhost:21847/dashboard`, sign in with the bootstrap admin, change the password when prompted. ([What's on each page](doc/DASHBOARD.md).)
 
-Then go to **API Keys → Create key**, name the key, and copy the revealed `cix_…` value — it is shown exactly once. The dialog also gives you a ready-to-paste `cix config` connect command for step 3.
+Then go to **API Keys → New key**, name the key, and copy the revealed `cix_…` value — it is shown exactly once. The dialog also gives you a ready-to-paste `cix config` connect command for step 3.
 
 ### 3. Install + configure the CLI
 

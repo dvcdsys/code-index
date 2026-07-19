@@ -111,7 +111,21 @@ cp ../.env.example ../.env           # set the bootstrap admin vars
 make run`}</CodeBlock>
 
             <h3>First login &amp; API key</h3>
-            <p>Open <code>http://localhost:21847/dashboard</code> and sign in with the bootstrap admin credentials from <code>.env</code> (<code>CIX_BOOTSTRAP_ADMIN_EMAIL</code> / <code>CIX_BOOTSTRAP_ADMIN_PASSWORD</code>). Go to <b>API&nbsp;Keys → Create key</b>, name the key, and copy the revealed <code>cix_…</code> value — it is shown exactly once. The same dialog also gives you a ready-to-paste <code>cix config</code> connect command, so you can skip the manual configuration below.</p>
+            <p>Open <code>http://localhost:21847/dashboard</code> and sign in with the bootstrap admin credentials from <code>.env</code> (<code>CIX_BOOTSTRAP_ADMIN_EMAIL</code> / <code>CIX_BOOTSTRAP_ADMIN_PASSWORD</code>). Go to <b>API&nbsp;Keys → New key</b>, name the key, and copy the revealed <code>cix_…</code> value — it is shown exactly once. The same dialog also gives you a ready-to-paste <code>cix config</code> connect command, so you can skip the manual configuration below.</p>
+            <div className="shot-row">
+              <figure className="shot shot-wide">
+                <img src="/img/dashboard-api-keys.png" alt="The API keys page of the cix dashboard, with the New key button in the top right corner" loading="lazy" width="1600" height="1006" />
+                <figcaption>API Keys → New key. Keys are bearer tokens for CLI / SDK access — created here, revoked here.</figcaption>
+              </figure>
+              <figure className="shot">
+                <img src="/img/dashboard-create-key.png" alt="The Create API key dialog asking for a key name" loading="lazy" width="1024" height="502" />
+                <figcaption>Name the key after the machine or agent that will use it.</figcaption>
+              </figure>
+              <figure className="shot">
+                <img src="/img/dashboard-key-created.png" alt="The API key created dialog revealing the one-time key and a ready-to-paste cix config connect command" loading="lazy" width="1024" height="1094" />
+                <figcaption>The full key is revealed once, together with a copy-paste connect command for the CLI. (The key on this screenshot is long revoked.)</figcaption>
+              </figure>
+            </div>
 
             <h3>CLI</h3>
             <CodeBlock>{`# One-line installer (macOS / Linux)
@@ -124,7 +138,7 @@ cix config init
 
 # …or configure by hand (multi-server layout)
 cix config set server.local.url http://localhost:21847
-cix config set server.local.key cix_<your-token>   # from API Keys → Create key
+cix config set server.local.key cix_<your-token>   # from API Keys → New key
 cix config set default_server local`}</CodeBlock>
           </Section>
 
