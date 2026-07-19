@@ -58,8 +58,13 @@ jobs:
         run: |
           # Strip `cli/` namespace prefix — binaries report `v0.4.0`, not `cli/v0.4.0`.
           VERSION="${GITHUB_REF_NAME#cli/}"
+          # -w drops DWARF only. Keep the Go symbol table (no -s): govulncheck
+          # -mode=binary needs it for symbol-level analysis; on stripped
+          # binaries it falls back to module-level reporting and flags
+          # unreachable advisories (e.g. GO-2026-5932 / x/crypto/openpgp).
+          # Cost: ~+11% binary size.
           go build \
-            -ldflags="-s -w -X 'github.com/dvcdsys/code-index/cli/cmd.Version=${VERSION}'" \
+            -ldflags="-w -X 'github.com/dvcdsys/code-index/cli/cmd.Version=${VERSION}'" \
             -o "dist/cix" .
 
       - name: Package
