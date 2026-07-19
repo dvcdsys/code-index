@@ -116,17 +116,23 @@ curl http://localhost:21847/health                # → {"status":"ok"}
 
 For Apple Silicon with full Metal acceleration, run natively (Docker Desktop has no Metal access) — see [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md). For shared/team deployment, see [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md).
 
-### 2. Log in
+### 2. Log in and mint an API key
 
 Open `http://localhost:21847/dashboard`, sign in with the bootstrap admin, change the password when prompted. ([What's on each page](doc/DASHBOARD.md).)
+
+Then go to **API Keys → Create key**, name the key, and copy the revealed `cix_…` value — it is shown exactly once. The dialog also gives you a ready-to-paste `cix config` connect command for step 3.
 
 ### 3. Install + configure the CLI
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install.sh | bash
-cix config set api.url http://localhost:21847
-cix config set api.key $(grep CIX_API_KEY .env | cut -d= -f2)
+# paste the connect command from the API-key dialog, or:
+cix config set server.local.url http://localhost:21847
+cix config set server.local.key cix_<key-from-step-2>
+cix config set default_server local
 ```
+
+(Legacy alternative: set `CIX_API_KEY=cix_…` in `.env` before first boot and the server imports it as an API key.)
 
 From source: `cd cli && make build && make install`. Pre-release `develop` channel: [`doc/UPDATES.md`](doc/UPDATES.md#cli-install-channels).
 
