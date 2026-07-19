@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/anthropics/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/config"
 )
 
 // Init satisfies tea.Model — nothing to fire at startup.

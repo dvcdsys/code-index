@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/anthropics/code-index/cli/cmd"
+	"github.com/dvcdsys/code-index/cli/cmd"
 )
 
 func main() {

@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/anthropics/code-index/cli/internal/client"
-	"github.com/anthropics/code-index/cli/internal/fileutil"
-	"github.com/anthropics/code-index/cli/internal/indexer"
+	"github.com/dvcdsys/code-index/cli/internal/client"
+	"github.com/dvcdsys/code-index/cli/internal/fileutil"
+	"github.com/dvcdsys/code-index/cli/internal/indexer"
 	"github.com/rjeczalik/notify"
 )
 

@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/anthropics/code-index/cli/internal/config"
-	"github.com/anthropics/code-index/cli/internal/config/schema"
+	"github.com/dvcdsys/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/config/schema"
 )
 
 // row is one entry rendered in the right panel. The TUI keeps every

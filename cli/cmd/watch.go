@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/anthropics/code-index/cli/internal/config"
-	"github.com/anthropics/code-index/cli/internal/daemon"
-	"github.com/anthropics/code-index/cli/internal/watcher"
-	"github.com/anthropics/code-index/cli/internal/watchtui"
+	"github.com/dvcdsys/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/daemon"
+	"github.com/dvcdsys/code-index/cli/internal/watcher"
+	"github.com/dvcdsys/code-index/cli/internal/watchtui"
 	"github.com/spf13/cobra"
 )
 

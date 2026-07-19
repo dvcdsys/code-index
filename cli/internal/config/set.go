@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/anthropics/code-index/cli/internal/config/schema"
+	"github.com/dvcdsys/code-index/cli/internal/config/schema"
 )
 
 // ErrUnknownKey is returned by SetByPath when key does not match any

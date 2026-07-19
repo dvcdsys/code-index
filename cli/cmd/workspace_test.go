@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/code-index/cli/internal/client"
+	"github.com/dvcdsys/code-index/cli/internal/client"
 )
 
 // TestListWorkspaceProjects_DecodesPayload locks the acceptance from

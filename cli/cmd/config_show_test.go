@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/config"
 )
 
 // TestRenderConfigShow_Snapshot pins the human-readable layout of `cix

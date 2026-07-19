@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/anthropics/code-index/cli/internal/config"
-	"github.com/anthropics/code-index/cli/internal/config/tui"
+	"github.com/dvcdsys/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/config/tui"
 	"github.com/spf13/cobra"
 )
 

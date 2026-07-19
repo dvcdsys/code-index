@@ -5,9 +5,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/anthropics/code-index/cli/internal/config"
-	"github.com/anthropics/code-index/cli/internal/daemon"
-	"github.com/anthropics/code-index/cli/internal/indexer"
+	"github.com/dvcdsys/code-index/cli/internal/config"
+	"github.com/dvcdsys/code-index/cli/internal/daemon"
+	"github.com/dvcdsys/code-index/cli/internal/indexer"
 	"github.com/spf13/cobra"
 )
 

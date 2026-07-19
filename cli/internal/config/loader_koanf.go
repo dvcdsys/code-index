@@ -14,7 +14,7 @@ import (
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 
-	"github.com/anthropics/code-index/cli/internal/config/schema"
+	"github.com/dvcdsys/code-index/cli/internal/config/schema"
 )
 
 // loadWithKoanf is the schema-driven config loader. It produces a *Config

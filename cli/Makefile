@@ -12,7 +12,7 @@ ROOT_DIR=$(shell cd .. && pwd)
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	go build -ldflags="-X 'github.com/anthropics/code-index/cli/cmd.Version=$(VERSION)'" -o $(BUILD_DIR)/$(BINARY_NAME) .
+	go build -ldflags="-X 'github.com/dvcdsys/code-index/cli/cmd.Version=$(VERSION)'" -o $(BUILD_DIR)/$(BINARY_NAME) .
 	@echo "Built to $(BUILD_DIR)/$(BINARY_NAME)"
 
 install: build
@@ -52,7 +52,7 @@ release:
 		BIN="$(DIST_DIR)/$(BINARY_NAME)-$$target"; \
 		echo "  $$target..."; \
 		GOOS=$$GOOS GOARCH=$$GOARCH go build \
-			-ldflags="-X 'github.com/anthropics/code-index/cli/cmd.Version=$(VERSION)'" \
+			-ldflags="-X 'github.com/dvcdsys/code-index/cli/cmd.Version=$(VERSION)'" \
 			-o "$$BIN" . ; \
 		tar -czf "$(DIST_DIR)/$(BINARY_NAME)-$$target.tar.gz" \
 			-C "$(DIST_DIR)" "$(BINARY_NAME)-$$target" ; \

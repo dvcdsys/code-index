@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/code-index/cli/internal/client"
+	"github.com/dvcdsys/code-index/cli/internal/client"
 	"github.com/rjeczalik/notify"
 )
 
