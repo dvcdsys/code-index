@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { CixAscii } from '../shared/ascii.jsx';
 import { Foot } from '../shared/foot.jsx';
+import { TeamDiagram } from '../shared/team-diagram.jsx';
 import {
   SERVER_VERSION, CLI_VERSION, PLUGIN_VERSION, COWORK_PLUGIN_VERSION, GITHUB_URL,
 } from '../shared/versions.js';
@@ -13,6 +14,7 @@ const TOC = [
   { id: 'config',       label: 'Configuration' },
   { id: 'api',          label: 'REST API' },
   { id: 'workspaces',   label: 'Workspaces' },
+  { id: 'multiuser',    label: 'Multi-user & sharing' },
   { id: 'mcp',          label: 'MCP · Desktop & Cowork' },
   { id: 'plugin',       label: 'Claude Code plugin' },
   { id: 'github',       label: 'GitHub repos & tunnels' },
@@ -365,6 +367,37 @@ cix ws platform search "feature flag rollout" --json   # for agents`}</CodeBlock
             <p>GitHub-backed repositories are registered by an admin first (dashboard → workspace → <b>Add GitHub repository</b>, or <code>POST /api/v1/git-repos</code>) — with webhook or polling sync so the index follows <code>push</code>. See <a href="#github">GitHub repos &amp; tunnels</a>. Full guide: <a href={`${GITHUB_URL}/blob/main/workspaces.md`} target="_blank" rel="noopener"><code>workspaces.md</code></a>.</p>
           </Section>
 
+          <Section id="multiuser" title="Multi-user & sharing" eyebrow="Teams">
+            <p>cix is deployed <b>once per team</b>, not once per laptop. One server holds every index; developers, agents and CI authenticate against it with their own credentials, and an <b>ownership + view-group</b> model decides who sees what. This page section is the whole story — the wire-level enforcement details live in <a href="#security">Security &amp; access</a>.</p>
+            <TeamDiagram />
+            <h3>Users &amp; roles</h3>
+            <p>Two roles: <b>admin</b> and <b>user</b>. The first admin is bootstrapped from <code>CIX_BOOTSTRAP_ADMIN_EMAIL</code> / <code>CIX_BOOTSTRAP_ADMIN_PASSWORD</code> on first boot (on an empty database the server refuses to start without them) and must change the password on first login. From there, admins manage the team on the <b>Users</b> page: invite teammates, set roles, reset passwords (a reset forces a change on next login), disable accounts. Keep two admin accounts so a lockout stays recoverable.</p>
+            <h3>One identity, two credentials</h3>
+            <ul className="bullets">
+              <li><b>Session cookie</b> — the dashboard signs you in with <code>cix_session</code> (HttpOnly, 14-day rolling TTL; only its SHA-256 is stored server-side).</li>
+              <li><b>Bearer API key</b> — the CLI and agents send <code>Authorization: Bearer cix_…</code>. Every user mints their own keys on the <b>API Keys</b> page: 256-bit entropy, revealed exactly once, stored hashed, revocable at any time. A key inherits the issuing user's role — there is no shared admin token to pass around.</li>
+            </ul>
+            <p>Both paths resolve to the same identity, so a search from the dashboard and a <code>cix search</code> from a laptop see exactly the same projects.</p>
+            <h3>Who owns what</h3>
+            <table className="tbl">
+              <thead><tr><th>Resource</th><th>Owner</th><th>Visible to</th><th>Shareable?</th></tr></thead>
+              <tbody>
+                <tr><td><b>Local project</b> (<code>cix init</code>)</td><td>the dev who ran init</td><td>owner + admins</td><td>no — strictly private</td></tr>
+                <tr><td><b>External project</b> (server-cloned from GitHub)</td><td>ownerless — admin-run</td><td>admins + groups it's shared to</td><td>yes — an admin shares it to any group</td></tr>
+                <tr><td><b>Workspace</b></td><td>its creator</td><td>owner + admins + groups it's shared to</td><td>yes — the owner (to groups they belong to) or an admin (to any group)</td></tr>
+              </tbody>
+            </table>
+            <p>Local projects are keyed per user <i>and per machine</i> — the same path indexed on two laptops is two separate private projects; nothing ever merges by accident. The shareable corpus of a team is the external projects and workspaces the server itself hosts.</p>
+            <h3>View-groups: how sharing works</h3>
+            <AccessDiagram />
+            <ul className="bullets">
+              <li><b>Create the group</b> — dashboard → <b>Groups</b> (admin): name it, add members.</li>
+              <li><b>Grant the share</b> — open the external project's or workspace's detail page → share to the group. Workspace owners can do this themselves for groups they belong to; project shares are admin-granted.</li>
+              <li><b>Members search</b> — everyone in the group now sees the resource as if it were their own, <b>read-only</b>: search, definitions, references, files all work; settings and reindex stay with the owner/admin.</li>
+            </ul>
+            <p>Two properties are easy to miss. Reads on a resource you can't see return <b>404, not 403</b> — probing never confirms that something exists. And workspace search results are <b>intersected with your visibility</b>: a shared workspace never leaks chunks from a repo you weren't granted.</p>
+          </Section>
+
           <Section id="mcp" title="MCP — Claude Desktop & Cowork" eyebrow="Agents">
             <p>Claude Desktop and Cowork don't load Claude Code plugins — the supported channel there is <b>MCP</b> (Model Context Protocol). So the CLI doubles as an MCP server: <code>cix mcp</code> speaks JSON-RPC over stdio and is launched by the host app, not by you.</p>
             <h3>One-command install</h3>
@@ -404,7 +437,7 @@ claude plugin install cix@code-index
 
           <Section id="github" title="GitHub repos & managed tunnels" eyebrow="Sync">
             <h3>External (GitHub-backed) projects</h3>
-            <p>cix indexes two kinds of project. <b>Local projects</b> are created by the CLI (<code>cix init</code>) and are private to their owner. <b>External projects</b> are registered by an admin (<code>POST /api/v1/git-repos</code> or the dashboard): the server clones the GitHub repo under <code>CIX_REPOS_DIR</code>, indexes it, and keeps it in sync. Regular users see an external project only when an admin shares it into one of their <a href="#security">view-groups</a>.</p>
+            <p>cix indexes two kinds of project. <b>Local projects</b> are created by the CLI (<code>cix init</code>) and are private to their owner. <b>External projects</b> are registered by an admin (<code>POST /api/v1/git-repos</code> or the dashboard): the server clones the GitHub repo under <code>CIX_REPOS_DIR</code>, indexes it, and keeps it in sync. Regular users see an external project only when an admin shares it into one of their <a href="#multiuser">view-groups</a>.</p>
             <p>Sync happens per repo in one of three webhook modes:</p>
             <ul className="bullets">
               <li><b>auto</b> — the server registers the webhook on GitHub itself, using a stored personal access token (PAT needs <code>repo</code> + <code>admin:repo_hook</code>).</li>
@@ -437,7 +470,7 @@ claude plugin install cix@code-index
                 <tr><td><Tag t="Admin" /></td><td>admins only</td><td>git-repos, PATs, groups, tunnels, users</td></tr>
               </tbody>
             </table>
-            <p>Local projects are private to their creator. External (GitHub-backed) projects are ownerless and admin-administered — they reach users only through <b>view-groups</b> (read/search). Reads on resources you can't see return 404, not 403, so existence isn't leaked. Workspace search results are automatically intersected with the projects you're allowed to see.</p>
+            <p>The ownership + sharing semantics behind these levels — who owns what, view-groups, the 404-instead-of-403 rule — are laid out with diagrams in <a href="#multiuser">Multi-user &amp; sharing</a>. Every rule there is enforced server-side in the handlers; the dashboard hiding a control is never the security boundary.</p>
           </Section>
 
           <Section id="troubleshoot" title="Troubleshooting" eyebrow="When it breaks">
@@ -464,6 +497,93 @@ claude plugin install cix@code-index
 
       <Foot slim homeHref="/" />
     </>
+  );
+}
+
+// "Who sees what" — the ownership + view-group visibility map, in the same
+// hand-drawn brand style as TeamDiagram (which renders above it on this page,
+// hence the distinct marker id).
+function AccessDiagram() {
+  const ink = 'var(--ink)';
+  const paper = 'var(--paper)';
+  const mono = 'var(--font-mono)';
+  const box = { fill: paper, stroke: ink, strokeWidth: 2.5 };
+  const drawer = { fill: 'var(--bg-2)', stroke: ink, strokeWidth: 2 };
+  const label = { fontFamily: mono, fontSize: 12, fill: ink };
+  const small = { fontFamily: mono, fontSize: 10.5, fill: 'var(--ink-mute)' };
+  return (
+    <svg viewBox="0 0 760 392" role="img" aria-label="Alice owns a private local project; an external project and a workspace are shared to the backend view-group, so its members read and search them; admins see everything; anything invisible returns 404" style={{ width: '100%', height: 'auto', display: 'block', margin: '10px 0 18px' }}>
+      <defs>
+        <marker id="ad-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill={ink} />
+        </marker>
+      </defs>
+
+      {/* left: people */}
+      <g transform="rotate(-2 90 50)">
+        <rect x="14" y="24" width="152" height="52" rx="12" {...box} />
+        <text x="30" y="46" style={label}>✎ alice</text>
+        <text x="30" y="64" style={small}>user · owner</text>
+      </g>
+      <g transform="rotate(1.5 90 176)">
+        <rect x="14" y="150" width="152" height="52" rx="12" {...box} />
+        <text x="30" y="172" style={label}>✳ bob</text>
+        <text x="30" y="190" style={small}>user · member</text>
+      </g>
+      <g transform="rotate(-1.5 90 302)">
+        <rect x="14" y="276" width="152" height="52" rx="12" fill="var(--code-bg)" stroke={ink} strokeWidth="2.5" />
+        <text x="30" y="298" fontFamily={mono} fontSize="12" fill="var(--code-fg)">◆ root</text>
+        <text x="30" y="316" fontFamily={mono} fontSize="10.5" fill="var(--code-mute)">admin</text>
+      </g>
+
+      {/* center: view-group */}
+      <g transform="rotate(1 360 184)">
+        <rect x="272" y="140" width="176" height="88" rx="14" {...box} />
+        <text x="290" y="164" style={small}>view-group</text>
+        <text x="290" y="186" fontFamily={mono} fontSize="14" fontWeight="700" fill={ink}>backend</text>
+        <rect x="288" y="196" width="144" height="22" rx="7" {...drawer} />
+        <text x="298" y="211" style={small}>members: alice · bob</text>
+      </g>
+
+      {/* membership arrows */}
+      <line x1="168" y1="56" x2="268" y2="152" stroke={ink} strokeWidth="2.5" markerEnd="url(#ad-arrow)" />
+      <line x1="168" y1="178" x2="266" y2="184" stroke={ink} strokeWidth="2.5" markerEnd="url(#ad-arrow)" />
+
+      {/* alice → her private local project (over the top) */}
+      <path d="M 150 30 C 300 -6, 440 6, 534 40" fill="none" stroke={ink} strokeWidth="2.5" markerEnd="url(#ad-arrow)" />
+      <text x="288" y="44" style={small}>owner — only alice + admins</text>
+
+      {/* group → shared resources */}
+      <line x1="452" y1="172" x2="534" y2="172" stroke={ink} strokeWidth="2.5" markerEnd="url(#ad-arrow)" />
+      <path d="M 452 204 C 496 232, 508 260, 534 284" fill="none" stroke={ink} strokeWidth="2.5" markerEnd="url(#ad-arrow)" />
+      <text x="458" y="160" style={small}>read / search</text>
+
+      {/* admin sees everything */}
+      <path d="M 170 306 C 300 348, 440 348, 534 330" fill="none" stroke={ink} strokeWidth="2.5" strokeDasharray="6 5" markerEnd="url(#ad-arrow)" />
+      <text x="286" y="368" style={small}>admins see everything</text>
+
+      {/* right: resources */}
+      <g transform="rotate(1.5 640 60)">
+        <rect x="540" y="22" width="206" height="70" rx="12" {...box} />
+        <text x="556" y="46" style={label}>⌂ local project</text>
+        <text x="556" y="64" style={small}>~/code/api — alice's</text>
+        <text x="556" y="82" style={small}>private · not shareable</text>
+      </g>
+      <g transform="rotate(-1.5 640 176)">
+        <rect x="540" y="140" width="206" height="70" rx="12" {...box} />
+        <text x="556" y="164" style={label}>⊙ external project</text>
+        <text x="556" y="182" style={small}>github.com/acme/gateway</text>
+        <text x="556" y="200" style={small}>shared → backend</text>
+      </g>
+      <g transform="rotate(1 640 292)">
+        <rect x="540" y="256" width="206" height="70" rx="12" {...box} />
+        <text x="556" y="280" style={label}>⊞ workspace</text>
+        <text x="556" y="298" style={small}>platform · repo × 4</text>
+        <text x="556" y="316" style={small}>shared → backend</text>
+      </g>
+
+      <text x="14" y="382" style={small}>no access → 404, not 403 — existence isn't leaked</text>
+    </svg>
   );
 }
 
