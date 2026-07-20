@@ -54,9 +54,26 @@ export function Features() {
       <div className="wrap">
         <div className="section-head">
           <span className="eyebrow">What you get</span>
-          <h2>One binary. Five search modes.<br/>Every agent speaks it.</h2>
+          <h2>Not a framework to assemble.<br/>A pipeline that runs.</h2>
+          <p className="lead">Server, CLI, dashboard and agent skills ship wired together — five search modes on one index, and every agent speaks them. Here's what's in the box.</p>
         </div>
         <div className="feat-grid">
+          <div className="card feat full">
+            <div className="glyph">⊚</div>
+            <h3>One server. The whole team.</h3>
+            <p>cix isn't a per-seat sidecar — it's a shared server with a real access model. Multi-user from the first boot:</p>
+            <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 }}>
+              <div style={{ flex: '1 1 400px', minWidth: 0 }}>
+                <TeamDiagram />
+              </div>
+              <ul className="team-list" style={{ flex: '1 1 280px' }}>
+                <li><b>Users &amp; roles</b><span>admin and user; a bootstrap admin is created on first boot and forced to change the password.</span></li>
+                <li><b>View-groups</b><span>share a project or workspace to a named group — everything is owner-private until you do.</span></li>
+                <li><b>Per-user API keys</b><span>minted and revoked in the dashboard, stored as hashes — no shared admin token.</span></li>
+                <li><b>GitHub, wired in</b><span>repos clone server-side; a push webhook reindexes automatically. Configured from the dashboard, not a CI file.</span></li>
+              </ul>
+            </div>
+          </div>
           {FEATURES.map((f, i) => (
             <div key={i} className={`card feat ${f.cls}`}>
               <div className="glyph">{f.glyph}</div>
@@ -64,6 +81,109 @@ export function Features() {
               <p>{f.body}</p>
             </div>
           ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TeamDiagram() {
+  const ink = 'var(--ink)';
+  const paper = 'var(--paper)';
+  const mono = 'var(--font-mono)';
+  const box = { fill: paper, stroke: ink, strokeWidth: 2.5 };
+  const label = { fontFamily: mono, fontSize: 12, fill: ink };
+  const small = { fontFamily: mono, fontSize: 10.5, fill: 'var(--ink-mute)' };
+  return (
+    <svg viewBox="0 0 760 340" role="img" aria-label="Many users and agents talk to one cix server with roles, view-groups and API keys; the server indexes repositories and reindexes on GitHub push" style={{ width: '100%', height: 'auto', display: 'block' }}>
+      <defs>
+        <marker id="td-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill={ink} />
+        </marker>
+      </defs>
+
+      {/* left: clients */}
+      <g transform="rotate(-2 100 55)">
+        <rect x="14" y="24" width="178" height="62" rx="12" fill="var(--code-bg)" stroke={ink} strokeWidth="2.5" />
+        <text x="30" y="50" fontFamily={mono} fontSize="12" fill="var(--code-fg)"><tspan fill="var(--red)">$</tspan> cix search "…"</text>
+        <text x="30" y="72" fontFamily={mono} fontSize="10.5" fill="var(--code-mute)">dev · CLI</text>
+      </g>
+      <g transform="rotate(1.5 100 165)">
+        <rect x="14" y="134" width="178" height="62" rx="12" {...box} />
+        <text x="30" y="160" style={label}>✳ agent</text>
+        <text x="30" y="182" style={small}>Claude Code · MCP · any shell</text>
+      </g>
+      <g transform="rotate(-1.5 100 275)">
+        <rect x="14" y="244" width="178" height="62" rx="12" {...box} />
+        <text x="30" y="270" style={label}>◨ browser</text>
+        <text x="30" y="292" style={small}>dashboard · admin</text>
+      </g>
+
+      {/* arrows clients → server */}
+      <line x1="196" y1="55" x2="296" y2="130" stroke={ink} strokeWidth="2.5" markerEnd="url(#td-arrow)" />
+      <line x1="196" y1="165" x2="296" y2="168" stroke={ink} strokeWidth="2.5" markerEnd="url(#td-arrow)" />
+      <line x1="196" y1="275" x2="296" y2="206" stroke={ink} strokeWidth="2.5" markerEnd="url(#td-arrow)" />
+      <text x="206" y="142" style={small}>Bearer cix_…</text>
+      <text x="222" y="252" style={small}>session</text>
+
+      {/* center: server */}
+      <g>
+        <rect x="302" y="72" width="196" height="216" rx="16" {...box} />
+        <text x="322" y="102" fontFamily={mono} fontSize="15" fontWeight="700" fill={ink}>cix server</text>
+        <text x="322" y="120" style={small}>:21847 · one for everyone</text>
+        <rect x="320" y="136" width="160" height="34" rx="9" fill="var(--bg-2)" stroke={ink} strokeWidth="2" />
+        <text x="334" y="158" style={label}>roles</text>
+        <rect x="320" y="180" width="160" height="34" rx="9" fill="var(--bg-2)" stroke={ink} strokeWidth="2" />
+        <text x="334" y="202" style={label}>view-groups</text>
+        <rect x="320" y="224" width="160" height="34" rx="9" fill="var(--bg-2)" stroke={ink} strokeWidth="2" />
+        <text x="334" y="246" style={label}>API keys</text>
+      </g>
+
+      {/* github webhook */}
+      <g transform="rotate(2 640 40)">
+        <rect x="566" y="16" width="150" height="48" rx="24" {...box} />
+        <text x="592" y="45" style={label}>⊙ GitHub</text>
+      </g>
+      <path d="M 610 66 C 580 96, 540 92, 502 108" fill="none" stroke={ink} strokeWidth="2.5" strokeDasharray="6 5" markerEnd="url(#td-arrow)" />
+      <text x="608" y="106" style={small}>push → reindex</text>
+
+      {/* server → repos */}
+      <line x1="498" y1="200" x2="566" y2="200" stroke={ink} strokeWidth="2.5" markerEnd="url(#td-arrow)" />
+      <text x="504" y="190" style={small}>search</text>
+
+      {/* right: repo stack */}
+      <g transform="rotate(1.5 650 210)">
+        <rect x="600" y="140" width="140" height="52" rx="10" fill="var(--bg-2)" stroke={ink} strokeWidth="2" />
+        <rect x="588" y="158" width="140" height="52" rx="10" fill="var(--bg-2)" stroke={ink} strokeWidth="2" />
+        <rect x="576" y="176" width="150" height="52" rx="10" {...box} />
+        <text x="590" y="199" style={label}>repo × N</text>
+        <text x="590" y="217" style={small}>projects · workspaces</text>
+      </g>
+      <text x="576" y="262" style={small}>private by default —</text>
+      <text x="576" y="278" style={small}>shared via view-groups</text>
+    </svg>
+  );
+}
+
+export function CaseStudy() {
+  return (
+    <section className="section" id="field-notes">
+      <div className="wrap">
+        <div className="section-head">
+          <span className="eyebrow">Field notes</span>
+          <h2>A legacy C++ engine,<br/>ported by an agent.</h2>
+        </div>
+        <div className="card" style={{ padding: 28 }}>
+          <span className="sticker" style={{ background: 'var(--plum)', color: 'var(--paper)' }}>real project · open source</span>
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'flex-start', marginTop: 14 }}>
+            <div style={{ flex: '1 1 340px' }}>
+              <h3>Command &amp; Conquer: Generals — Zero Hour, running native Metal on Apple Silicon.</h3>
+              <p style={{ marginTop: 10 }}><b>GeneralsGameCode-macOS</b> is a native Metal port of the Zero Hour engine — no Wine, no DXVK translation layer. The port was driven by an agent working through cix: goto-definition and find-references across a sprawling legacy C++ codebase, semantic search where grep dead-ends. Before the repo was indexed, iterations kept stalling on missed call sites and regressions; with the index in place, the port converged to a fully working engine — graphics and shaders included.</p>
+            </div>
+            <div style={{ flex: '0 1 auto', alignSelf: 'center' }}>
+              <a className="btn" href="https://github.com/dvcdsys/GeneralsGameCode-macOS" target="_blank" rel="noopener">View the port on GitHub ↗</a>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -117,6 +237,7 @@ export function Agent() {
             <span className="sticker">Claude Code plugin · v{PLUGIN_VERSION}</span>
             <h3 style={{ marginTop: 14 }}>Two commands. Hooks register themselves.</h3>
             <p>The plugin ships the CLI, eight slash commands, two lazy-loading skills, a workspace-research sub-agent, and five behavioral hooks. SessionStart checks if your project is indexed; a PostToolUse hook nudges Claude — with exponential backoff — to reach for cix instead of Grep.</p>
+            <p>The skills aren't guessed prompts. They were distilled from dozens of recorded agent sessions on large codebases — VS Code among them — where grep-vs-semantic outcomes were scored retrospectively and the winning strategies became the skill text.</p>
             <pre className="code-block" style={{ margin: '12px 0' }}>
               <span className="prompt">$</span> claude plugin marketplace add dvcdsys/code-index{'\n'}
               <span className="prompt">$</span> claude plugin install cix@code-index{'\n'}
@@ -268,6 +389,8 @@ const FAQS = [
     a: <>Not by default. The server runs on your hardware (Docker, native macOS, or your own GPU box), and embeddings happen locally via a llama.cpp sidecar — no SaaS endpoint, no telemetry. If you <i>choose</i> to switch the embedding provider to a remote API (Voyage, OpenAI-compatible), chunks go to that provider; that's an explicit admin action, off by default.</> },
   { q: "How is this different from Sourcegraph, GitHub code search, or Cursor's indexing?",
     a: <>Scope. Those give you search inside <i>their</i> surface — a web app, a code host, one editor. cix ships the entire path as one MIT repo you run yourself: the Go server with an embedded dashboard, the CLI, the file watcher, multi-repo workspaces, a Claude Code plugin (slash commands, skills, hooks), an MCP server for Claude Desktop &amp; Cowork, and team-deployment docs down to TLS, backups and upgrades. It's not an indexer you build a workflow around — it <i>is</i> the workflow, from <code>docker compose up</code> to your agent quoting <code>file:line</code>.</> },
+  { q: 'How is this different from indexing frameworks like CocoIndex or LlamaIndex?',
+    a: <>Those hand you building blocks — a Python API, pipelines you compose, storage you pick — and the retrieval product around them is yours to build. cix is the already-assembled product: server, dashboard, CLI, file watcher and agent integrations, wired together from <code>docker compose up</code> to an agent quoting <code>file:line</code>. If you want to design your own pipeline, a framework is the right tool. If you want your agent searching this afternoon, run cix.</> },
   { q: 'Why a custom embedding model? Can I use OpenAI?',
     a: <>The default is <code>CodeRankEmbed</code> — a model purpose-built for code retrieval. It's asymmetric: queries get a different prefix than passages, so cosine scores look lower than generic models (a strong match here is ~0.55, not 0.80). You can swap in any GGUF from HuggingFace via <code>CIX_EMBEDDING_MODEL</code> (PyTorch repos aren't supported — inference goes through the llama-server sidecar), or configure a remote provider from the dashboard.</> },
   { q: 'What languages are supported?',
