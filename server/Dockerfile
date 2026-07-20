@@ -111,7 +111,7 @@ RUN mkdir -p /out/data/models
 # target platform. Bump this digest deliberately and re-run `make scout-cpu`.
 # Resolve a new digest with:
 #   docker buildx imagetools inspect ghcr.io/ggml-org/llama.cpp:server
-FROM ghcr.io/ggml-org/llama.cpp:server@sha256:6bc9134e3278a0ecab23d7ef2f6a46b4595740014fe9bc2f67e8ba7dca8395b4 AS llama-source
+FROM ghcr.io/ggml-org/llama.cpp:server@sha256:e10504c7f5c5bacece7e7e5957760eee53868642d853fe5ecfe8611065929a24 AS llama-source
 
 # ── Stage: distroless runtime ──────────────────────────────────────────────
 # gcr.io/distroless/cc-debian13:nonroot (Debian 13 trixie) — NOT static-debian12.
