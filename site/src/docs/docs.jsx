@@ -71,7 +71,7 @@ export function DocsApp() {
           <div className="docs-hero">
             <span className="eyebrow">Documentation</span>
             <h1>cix docs</h1>
-            <p className="lead">cix (CodeIndeX) — everything you need to run a self-hosted semantic index for your code. Deploy, configure, and integrate with agents.</p>
+            <p className="lead">cix (CodeIndeX) — everything you need to run the self-hosted semantic code-search platform. Deploy, configure, and integrate with agents.</p>
             <div className="badge-strip">
               <span className="sticker">server v{SERVER_VERSION}</span>
               <span className="sticker" style={{ background: 'var(--ochre)' }}>CLI v{CLI_VERSION}</span>
