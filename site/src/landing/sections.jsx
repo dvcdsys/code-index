@@ -224,33 +224,32 @@ export function Agent() {
 
 const QS_STEPS = [
   {
-    n: '01', title: 'Run the server',
-    desc: <>Docker Compose for CPU. <code>docker-compose.cuda.yml</code> for NVIDIA (driver ≥ 525 + Container Toolkit). On Apple Silicon, run natively for Metal: <code>cd server && make bundle && make run</code>.</>,
-    code: <>
-      <span className="prompt">$</span> git clone https://github.com/dvcdsys/code-index{'\n'}
-      <span className="prompt">$</span> cd code-index && cp .env.example .env{'\n'}
-      <span className="comment"># set CIX_BOOTSTRAP_ADMIN_EMAIL + _PASSWORD</span>{'\n'}
-      <span className="prompt">$</span> docker compose up -d
-    </>,
-  },
-  {
-    n: '02', title: 'Log in & mint an API key',
-    desc: <>Sign in with the bootstrap admin from <code>.env</code>, then <b>API&nbsp;Keys → New key</b>. The key is revealed exactly once — and the dialog hands you a ready-to-paste <code>cix config</code> connect command for the next step.</>,
-    code: <>
-      <span className="prompt">$</span> open http://localhost:21847/dashboard{'\n'}
-      <span className="comment"># sign in with the bootstrap admin from .env</span>{'\n'}
-      <span className="comment"># API Keys → New key → copy cix_…</span>{'\n'}
-      <span className="comment"># (shown once, with a ready connect command)</span>
-    </>,
-  },
-  {
-    n: '03', title: 'Install the CLI',
-    desc: <>One-liner for macOS and Linux. Paste the connect command from the key dialog, run the interactive <code>cix config init</code> wizard, or set the server by hand with <code>cix config set</code>.</>,
+    n: '01', title: 'Run the installer',
+    desc: <>One interactive installer for every mode — Docker CPU, Docker CUDA (driver ≥ 525 + Container Toolkit), or native Metal on Apple Silicon. It picks the right mode for your machine, brings the server up, and installs + connects the <code>cix</code> CLI for you.</>,
     code: <>
       <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
+      {'    '}/dvcdsys/code-index/main/install-server.sh | bash{'\n'}
+      <span className="comment"># a few questions → server up, CLI connected,</span>{'\n'}
+      <span className="comment"># dashboard URL + admin login printed</span>
+    </>,
+  },
+  {
+    n: '02', title: 'Log in & set your password',
+    desc: <>Sign in with the admin login the installer printed. The password is temporary — the dashboard makes you pick a real one right away. That's the whole step.</>,
+    code: <>
+      <span className="prompt">$</span> open http://localhost:21847/dashboard{'\n'}
+      <span className="comment"># sign in with the admin login from step 01</span>{'\n'}
+      <span className="comment"># → you're asked to set a new password</span>
+    </>,
+  },
+  {
+    n: '03', title: 'Connect more machines (optional)',
+    desc: <>The machine you installed on is already connected — skip ahead. For a laptop or agent box elsewhere: mint a key in <b>API&nbsp;Keys → New key</b> (revealed once, with a ready-to-paste connect command), install the CLI there, paste.</>,
+    code: <>
+      <span className="comment"># on the other machine:</span>{'\n'}
+      <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
       {'    '}/dvcdsys/code-index/main/install.sh | bash{'\n'}
-      <span className="prompt">$</span> cix config set server.local.url http://localhost:21847{'\n'}
-      <span className="prompt">$</span> cix config set server.local.key cix_xxx
+      <span className="prompt">$</span> <span className="comment"># paste the connect command from the key dialog</span>
     </>,
   },
   {
@@ -272,7 +271,10 @@ const QS_STEPS = [
       <span className="prompt">$</span> claude plugin install cix@code-index{'\n'}
       <span className="comment"># /cix:search /cix:def /cix:refs /cix:init</span>{'\n'}
       <span className="comment"># /cix:status /cix:summary /cix:file /cix:tree</span>{'\n'}
-      <span className="comment"># skills: /cix · /cix-workspace</span>
+      <span className="comment"># skills: /cix · /cix-workspace</span>{'\n'}
+      <span className="comment"># update later:</span>{'\n'}
+      <span className="prompt">$</span> claude plugin marketplace update code-index{'\n'}
+      <span className="prompt">$</span> claude plugin update cix@code-index
     </>,
   },
 ];

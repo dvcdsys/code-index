@@ -134,13 +134,20 @@ weak passwords at ~480 guesses per (IP, email) per day.
 A user who forgets their password cannot reset it themselves. Recovery
 options (in order of preference):
 
-1. Another admin issues `POST /api/v1/admin/users` with a new initial
-   password and `must_change_password=1`, then disables the old account.
-2. Direct SQLite access to clear `users.disabled_at` and reset
-   `users.password_hash` (use bcrypt cost 12).
+1. Another admin resets the password from **Dashboard → Users** (or
+   `POST /api/v1/admin/users/{id}/reset-password`). The new password is
+   temporary — `must_change_password=1` — and the user's sessions are
+   revoked.
+2. Operator access to the server machine:
+   `cix-server -reset-password <email>` (wrapped for native installs by
+   `server/scripts/reset-password.sh`, for Docker via
+   `docker exec -i <container> /cix-server -reset-password <email>`).
+   Same semantics: temporary password, sessions revoked. The
+   authorization boundary is possession of the database file — anyone
+   who can run this could equally edit SQLite directly.
 
-Plan for this when designating admins — keep at least two so an admin
-reset never requires DB-level intervention.
+Plan for this when designating admins — keep at least two so recovery
+never requires shell access to the server.
 
 ## API key scoping
 
