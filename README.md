@@ -17,7 +17,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker Hub](https://img.shields.io/docker/pulls/dvcdsys/code-index)](https://hub.docker.com/r/dvcdsys/code-index)
 
-**cix — CodeIndeX.** Search your codebase by meaning, not just text. Self-hosted, embeddings-based, works with any agent or terminal — with a full web dashboard and multi-repo workspace search. Website: [codeindex.app](https://codeindex.app)
+**cix — CodeIndeX.** Search your codebase by meaning, not just text. A self-hosted semantic code-search platform — server with a web dashboard, CLI, agent skills, and multi-repo workspace search. Works with any agent or terminal. Website: [codeindex.app](https://codeindex.app)
 
 ```bash
 cix search "authentication middleware"
