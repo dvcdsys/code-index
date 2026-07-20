@@ -383,7 +383,7 @@ cix mcp uninstall claude-desktop`}</CodeBlock>
           </Section>
 
           <Section id="plugin" title="Claude Code plugin" eyebrow="Agents">
-            <p>The official Claude Code plugin (v{PLUGIN_VERSION}) ships from the repo's marketplace. It bundles the CLI, <b>eight slash commands</b>, two lazy-loading skills (<code>cix</code> + <code>cix-workspace</code>), a <code>cix-workspace-investigator</code> sub-agent for parallel cross-repo research, and five behavioral hooks.</p>
+            <p>The official Claude Code plugin (v{PLUGIN_VERSION}) ships from the repo's marketplace. It bundles the CLI, <b>eight slash commands</b>, two lazy-loading skills (<code>cix</code> + <code>cix-workspace</code>), a <code>cix-workspace-investigator</code> sub-agent for parallel cross-repo research, and five behavioral hooks. The skills were distilled from dozens of recorded agent sessions on large codebases, scored retrospectively for grep-vs-semantic effectiveness.</p>
             <h3>Install</h3>
             <CodeBlock>{`# Run in a terminal — NOT inside a Claude Code session.
 claude plugin marketplace add dvcdsys/code-index
