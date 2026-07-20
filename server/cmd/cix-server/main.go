@@ -70,6 +70,8 @@ func runHealthcheck() {
 func main() {
 	printVersion := flag.Bool("v", false, "print version and exit")
 	doHealthcheck := flag.Bool("healthcheck", false, "run health probe and exit")
+	resetPasswordEmail := flag.String("reset-password", "",
+		"offline password recovery: reset the given user's password and exit (reads the new password from piped stdin, or generates one)")
 	flag.Parse()
 	if *printVersion {
 		fmt.Printf("cix-server %s (%s, api %s)\n", version, backend, apiVersion)
@@ -77,6 +79,13 @@ func main() {
 	}
 	if *doHealthcheck {
 		runHealthcheck()
+	}
+	if *resetPasswordEmail != "" {
+		if err := runResetPassword(*resetPasswordEmail); err != nil {
+			fmt.Fprintln(os.Stderr, "cix-server:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "cix-server:", err)

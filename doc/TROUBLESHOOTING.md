@@ -37,7 +37,12 @@ cix watch stop && cix watch /path/to/project
 
 **Workspace repo stuck in `cloning` or `indexing`** → Check **Workspaces → Jobs** in the dashboard or `GET /api/v1/jobs?status=running`. Common causes: PAT missing `repo` scope on a private repo, network not reaching github.com, sidecar not ready. See [`WORKSPACES.md`](WORKSPACES.md#troubleshooting).
 
-**Forgot the admin password and there's no second admin** → See [`SECURITY_DEPLOYMENT.md`](SECURITY_DEPLOYMENT.md). Better long-term: keep at least two admin accounts so this never recurs.
+**Forgot the admin password and there's no second admin** → Reset it offline on the server machine — no restart needed, the account is forced to change it on next login:
+```bash
+./server/scripts/reset-password.sh you@example.com                      # native install
+docker exec -i <container> /cix-server -reset-password you@example.com  # Docker
+```
+Better long-term: keep at least two admin accounts so this never recurs. Details: [`SECURITY_DEPLOYMENT.md`](SECURITY_DEPLOYMENT.md).
 
 ---
 

@@ -94,21 +94,26 @@ export function DocsApp() {
           </Section>
 
           <Section id="install" title="Install" eyebrow="Quick start">
-            <h3>Server (Docker, CPU)</h3>
+            <h3>Server — one command, any mode</h3>
+            <p>The interactive installer detects your platform and offers the right mode — <b>native</b> (macOS Apple Silicon, full Metal GPU), <b>docker</b> (CPU, any OS), or <b>docker-gpu</b> (NVIDIA CUDA). It checks prerequisites, asks a few questions (every one has a sensible default), writes the configuration, and brings the server up:</p>
+            <CodeBlock>{`curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
+
+# equivalent, from a clone:
+git clone https://github.com/dvcdsys/code-index && cd code-index
+./install-server.sh`}</CodeBlock>
+            <p>At the end it prints the dashboard URL and your admin login (the password is temporary — you change it on first login), and offers to install the <code>cix</code> CLI and connect it to the new server — so <code>cix init</code> works immediately. Re-running after a <code>git pull</code> upgrades in place; <code>--uninstall</code> removes the server but keeps your data. Forgot the admin password later? <code>./server/scripts/reset-password.sh &lt;email&gt;</code> resets it offline. Details: <a href="https://github.com/dvcdsys/code-index/blob/main/doc/SETUP_MACOS_NATIVE.md">SETUP_MACOS_NATIVE.md</a>.</p>
+
+            <h3>Manual setup (what the installer automates)</h3>
+            <p><b>Docker (CPU):</b></p>
             <CodeBlock>{`git clone https://github.com/dvcdsys/code-index && cd code-index
 cp .env.example .env
 # Edit .env: CIX_BOOTSTRAP_ADMIN_EMAIL, CIX_BOOTSTRAP_ADMIN_PASSWORD
 docker compose up -d
 curl http://localhost:21847/health   # → {"status":"ok"}`}</CodeBlock>
-
-            <h3>Server (CUDA / NVIDIA GPU)</h3>
+            <p><b>Docker (CUDA / NVIDIA GPU)</b> — requires an NVIDIA driver ≥ 525 (CUDA 12.x) and the NVIDIA Container Toolkit; the CUDA image sets <code>CIX_N_GPU_LAYERS=99</code> for full GPU offload:</p>
             <CodeBlock>{`docker compose -f docker-compose.cuda.yml up -d`}</CodeBlock>
-            <p>Requires an NVIDIA driver ≥ 525 (CUDA 12.x) and the NVIDIA Container Toolkit. The CUDA image sets <code>CIX_N_GPU_LAYERS=99</code> for full GPU offload.</p>
-
-            <h3>Server (native macOS, Apple Silicon)</h3>
-            <p>Docker on macOS can't reach the Metal GPU. For full Metal offload, run natively — on macOS the server already defaults to offloading all layers, no extra configuration needed:</p>
-            <CodeBlock>{`xcode-select --install              # if not installed
-cd server && make bundle             # builds server + downloads Metal-enabled llama-server
+            <p><b>Native macOS (Apple Silicon)</b> — Docker on macOS can't reach the Metal GPU; for full Metal offload build and run natively (Go 1.25+, Node.js, Xcode CLT):</p>
+            <CodeBlock>{`cd server && make bundle             # builds server + downloads Metal-enabled llama-server
 cp ../.env.example ../.env           # set the bootstrap admin vars
 make run`}</CodeBlock>
 
@@ -421,7 +426,11 @@ cix mcp uninstall claude-desktop`}</CodeBlock>
             <CodeBlock>{`# Run in a terminal — NOT inside a Claude Code session.
 claude plugin marketplace add dvcdsys/code-index
 claude plugin install cix@code-index
-# Activates automatically on the next \`claude\` start — no reload needed.`}</CodeBlock>
+# Activates automatically on the next \`claude\` start — no reload needed.
+
+# Update later (marketplace first, then the plugin):
+claude plugin marketplace update code-index
+claude plugin update cix@code-index`}</CodeBlock>
             <p>Both commands also work as <code>/plugin …</code> slash commands inside an interactive session, but the terminal form is the dependable one — it doesn't depend on the session's plugin-reload behavior.</p>
             <h3>What the hooks do</h3>
             <DefList rows={[

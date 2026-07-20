@@ -100,9 +100,22 @@ Pure-Go static binary; CUDA-image variants add a CUDA runtime layer for GPU embe
 |------|----------|-----|---------------|
 | **Docker (CPU)** | any OS, dev / small repos | none | Docker |
 | **Docker (CUDA)** | NVIDIA GPU servers | CUDA 12.x | Docker + NVIDIA Container Toolkit |
-| **Native (macOS)** | Apple Silicon w/ full Metal | Metal | Go 1.25+, Xcode CLT |
+| **Native (macOS)** | Apple Silicon w/ full Metal | Metal | Go 1.25+, Node.js, Xcode CLT |
 
 ### 1. Start the server
+
+One command, any mode — the installer detects your platform, asks a few questions (deployment mode, admin email, password, port — every one has a sensible default), and brings the server up:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
+```
+
+(Equivalent from a clone: `git clone https://github.com/dvcdsys/code-index && cd code-index && ./install-server.sh`.)
+
+At the end it prints the dashboard URL and your admin login — and offers to install the `cix` CLI and connect it to the new server, so `cix init` works immediately (steps 2–3 below happen automatically on a fresh install). Re-running after a `git pull` upgrades in place; `--uninstall` removes the server but keeps your data. Native-mode details and manual setup: [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md). For shared/team deployment, see [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md).
+
+<details>
+<summary>Manual Docker setup (what the installer automates)</summary>
 
 ```bash
 git clone https://github.com/dvcdsys/code-index && cd code-index
@@ -116,7 +129,7 @@ curl http://localhost:21847/health                # → {"status":"ok"}
 > [!IMPORTANT]
 > On a fresh database the server **refuses to start** unless both `CIX_BOOTSTRAP_ADMIN_EMAIL` and `CIX_BOOTSTRAP_ADMIN_PASSWORD` are set. The admin is created with `must_change_password=true` — you change it on first login, then can drop the env vars.
 
-For Apple Silicon with full Metal acceleration, run natively (Docker Desktop has no Metal access) — see [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md). For shared/team deployment, see [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md).
+</details>
 
 ### 2. Log in and mint an API key
 
@@ -189,6 +202,10 @@ is required — vectors aren't comparable across providers.
 claude plugin marketplace add dvcdsys/code-index
 claude plugin install cix@code-index
 # Activates automatically on the next `claude` start — no reload needed.
+
+# Update later (marketplace first, then the plugin):
+claude plugin marketplace update code-index
+claude plugin update cix@code-index
 ```
 
 (The `/plugin …` slash commands work inside an interactive session too, but the terminal form is the dependable path.)

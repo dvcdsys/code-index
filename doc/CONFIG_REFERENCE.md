@@ -112,7 +112,7 @@ See [`UPDATES.md`](UPDATES.md) for how the banner works end-to-end.
 | Memory (indexing) | up to 2 GB | up to 2 GB | up to 2 GB system + ~0.7 GB VRAM |
 | GPU | Metal | none | NVIDIA CUDA 12.x |
 | Disk | `~/.cix/data/` (~50–200 MB/project) | same (mounted volume) | same |
-| Auto-restart | use `launchd` (see [`SETUP_MACOS_NATIVE.md`](SETUP_MACOS_NATIVE.md)) | yes | yes |
+| Auto-restart | `launchd` agent, set up by `install-server.sh` (see [`SETUP_MACOS_NATIVE.md`](SETUP_MACOS_NATIVE.md)) | yes | yes |
 
 ## Switching embedding models
 
