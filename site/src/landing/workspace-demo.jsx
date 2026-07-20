@@ -97,6 +97,9 @@ const LAST = STEPS.length - 1;
 // phases: user → think → (cmd → out [→ interim])×steps → reply → hold → wipe
 export function WorkspaceDemo() {
   const [running, setRunning] = useState(true);
+  // don't burn the animation before anyone sees it: hold at frame zero
+  // until the demo first scrolls into view, then play from the top
+  const [started, setStarted] = useState(false);
   const [stepIdx, setStepIdx] = useState(0);
   const [phase, setPhase] = useState('user');
   const [userTyped, setUserTyped] = useState('');
@@ -106,11 +109,23 @@ export function WorkspaceDemo() {
   const { T, clearAll } = useFrameTimeouts();
   const termRef = useRef(null);
   const chatRef = useRef(null);
+  const rootRef = useRef(null);
 
   const step = STEPS[stepIdx];
 
   useEffect(() => {
-    if (!running) return clearAll;
+    const el = rootRef.current;
+    if (!el || started) return;
+    if (typeof IntersectionObserver === 'undefined') { setStarted(true); return; }
+    const io = new IntersectionObserver(([e]) => {
+      if (e.isIntersecting) { setStarted(true); io.disconnect(); }
+    }, { threshold: 0.25 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [started]);
+
+  useEffect(() => {
+    if (!running || !started) return clearAll;
 
     if (phase === 'user') {
       if (userTyped.length < USER_MSG.length) {
@@ -155,7 +170,7 @@ export function WorkspaceDemo() {
         setPhase('reply');
       }
     }
-  }, [running, phase, userTyped, cmdTyped, outShown, stepIdx, interimShown]);
+  }, [running, started, phase, userTyped, cmdTyped, outShown, stepIdx, interimShown]);
 
   function reset(startPhase) {
     setUserTyped('');
@@ -168,6 +183,7 @@ export function WorkspaceDemo() {
 
   // ⏹ — skip straight to the completed session
   function stop() {
+    setStarted(true);
     setRunning(false);
     setUserTyped(USER_MSG);
     setInterimShown(true);
@@ -179,6 +195,7 @@ export function WorkspaceDemo() {
 
   // ▶ — run the loop again from the top
   function play() {
+    setStarted(true);
     reset('user');
     setRunning(true);
   }
@@ -199,7 +216,7 @@ export function WorkspaceDemo() {
     : (phase === 'cmd' ? 0 : step.output.length);
 
   return (
-    <div>
+    <div ref={rootRef}>
       <div className="repo-chips" aria-label="example workspace named platform">
         <span className="repo-chips-label">workspace <b>platform</b> ·</span>
         {REPOS.map(r => <span key={r} className="repo-chip">{r}</span>)}

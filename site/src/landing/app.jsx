@@ -2,7 +2,7 @@ import { CixAscii } from '../shared/ascii.jsx';
 import { Foot } from '../shared/foot.jsx';
 import { SERVER_VERSION, CLI_VERSION, GITHUB_URL } from '../shared/versions.js';
 import { HeroTerminal } from './terminal.jsx';
-import { Why, Features, Playground, Workspaces, Agent, QuickStart, FAQ } from './sections.jsx';
+import { Why, Features, Playground, Workspaces, Agent, CaseStudy, QuickStart, FAQ } from './sections.jsx';
 
 export function App() {
   return (
@@ -16,6 +16,7 @@ export function App() {
         <Playground />
         <Workspaces />
         <Agent />
+        <CaseStudy />
         <QuickStart />
         <FAQ />
       </main>
@@ -61,15 +62,14 @@ function Hero() {
             Large parts of this project are agent-generated. Use at your own risk — though I do, every day. PRs and issues welcome.
           </span>
         </span>
-        <span className="eyebrow">server v{SERVER_VERSION} · CLI v{CLI_VERSION} · MIT · self-hosted</span>
+        <span className="eyebrow">server v{SERVER_VERSION} + CLI v{CLI_VERSION} + skills · MIT · <span style={{ whiteSpace: 'nowrap' }}>self-hosted</span></span>
         <h1 style={{ marginTop: 18 }}>
           Search your codebase by{' '}
           <span className="blob">meaning</span>,<br />
           not just text.
         </h1>
         <p className="lead" style={{ marginTop: 20 }}>
-          <code style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--red)', fontSize: '1.05em' }}>cix</code> (CodeIndeX) is a self-hosted semantic index for your code. One Go binary, a local llama.cpp sidecar, dense vectors plus a BM25 mirror —
-          ranked snippets with file paths and line numbers, in milliseconds. Built for agents. Drop-in for terminals.
+          <code style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--red)', fontSize: '1.05em' }}>cix</code> (CodeIndeX) is a self-hosted semantic code-search server — with a thin CLI for terminals and agents, and skills that teach Claude to reach for it. Hybrid BM25 + dense ranking, <code>file:line</code> snippets in milliseconds. Deploy once — a single Go binary or Docker — and point every repo, teammate and agent at it.
         </p>
         <div className="hero-cta">
           <a className="btn btn-primary" href="#quickstart">Get started →</a>
@@ -79,6 +79,7 @@ function Hero() {
           <span><b>31</b> languages via tree-sitter</span>
           <span><b>768d</b> CodeRankEmbed Q8</span>
           <span><b>BM25 + dense</b> hybrid ranking</span>
+          <span><b>multi-user</b> team-ready server</span>
         </div>
       </div>
       <div style={{ position: 'relative' }}>

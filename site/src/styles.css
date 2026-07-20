@@ -1020,3 +1020,28 @@ footer.foot {
   .nav-links .nav-sec { display: none; }
   :root { --pad-section: 4.5rem; }
 }
+
+/* Built-for-teams section */
+.team-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.team-list li {
+  list-style: none;
+  background: var(--bg-2);
+  border: 2px solid var(--ink);
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.team-list li b {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  margin-bottom: 3px;
+}
+.team-list li span { color: var(--ink-soft); }
