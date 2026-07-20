@@ -54,8 +54,8 @@ export function Features() {
       <div className="wrap">
         <div className="section-head">
           <span className="eyebrow">What you get</span>
-          <h2>Not a framework to assemble.<br/>A pipeline that runs.</h2>
-          <p className="lead">Server, CLI, dashboard and agent skills ship wired together — five search modes on one index, and every agent speaks them. Here's what's in the box.</p>
+          <h2>Not a framework to assemble.<br/>A platform you run.</h2>
+          <p className="lead">One platform: server, CLI, dashboard and agent skills, wired together — five search modes on one index, and every agent speaks them. Here's what's in the box.</p>
         </div>
         <div className="feat-grid">
           <div className="card feat full">
@@ -388,9 +388,9 @@ const FAQS = [
   { q: 'Does my code leave my machine?',
     a: <>Not by default. The server runs on your hardware (Docker, native macOS, or your own GPU box), and embeddings happen locally via a llama.cpp sidecar — no SaaS endpoint, no telemetry. If you <i>choose</i> to switch the embedding provider to a remote API (Voyage, OpenAI-compatible), chunks go to that provider; that's an explicit admin action, off by default.</> },
   { q: "How is this different from Sourcegraph, GitHub code search, or Cursor's indexing?",
-    a: <>Scope. Those give you search inside <i>their</i> surface — a web app, a code host, one editor. cix ships the entire path as one MIT repo you run yourself: the Go server with an embedded dashboard, the CLI, the file watcher, multi-repo workspaces, a Claude Code plugin (slash commands, skills, hooks), an MCP server for Claude Desktop &amp; Cowork, and team-deployment docs down to TLS, backups and upgrades. It's not an indexer you build a workflow around — it <i>is</i> the workflow, from <code>docker compose up</code> to your agent quoting <code>file:line</code>.</> },
+    a: <>Scope. Those give you search inside <i>their</i> surface — a web app, a code host, one editor. cix ships the whole platform as one MIT repo you run yourself: the Go server with an embedded dashboard, the CLI, the file watcher, multi-repo workspaces, a Claude Code plugin (slash commands, skills, hooks), an MCP server for Claude Desktop &amp; Cowork, and team-deployment docs down to TLS, backups and upgrades. It's not an indexer you build a workflow around — it <i>is</i> the workflow, from <code>docker compose up</code> to your agent quoting <code>file:line</code>.</> },
   { q: 'How is this different from indexing frameworks like CocoIndex or LlamaIndex?',
-    a: <>Those hand you building blocks — a Python API, pipelines you compose, storage you pick — and the retrieval product around them is yours to build. cix is the already-assembled product: server, dashboard, CLI, file watcher and agent integrations, wired together from <code>docker compose up</code> to an agent quoting <code>file:line</code>. If you want to design your own pipeline, a framework is the right tool. If you want your agent searching this afternoon, run cix.</> },
+    a: <>Those hand you building blocks — a Python API, pipelines you compose, storage you pick — and the retrieval product around them is yours to build. cix is the already-assembled platform: server, dashboard, CLI, file watcher and agent integrations, wired together from <code>docker compose up</code> to an agent quoting <code>file:line</code>. If you want to design your own pipeline, a framework is the right tool. If you want your agent searching this afternoon, run cix.</> },
   { q: 'Why a custom embedding model? Can I use OpenAI?',
     a: <>The default is <code>CodeRankEmbed</code> — a model purpose-built for code retrieval. It's asymmetric: queries get a different prefix than passages, so cosine scores look lower than generic models (a strong match here is ~0.55, not 0.80). You can swap in any GGUF from HuggingFace via <code>CIX_EMBEDDING_MODEL</code> (PyTorch repos aren't supported — inference goes through the llama-server sidecar), or configure a remote provider from the dashboard.</> },
   { q: 'What languages are supported?',
