@@ -69,7 +69,7 @@ function Hero() {
           not just text.
         </h1>
         <p className="lead" style={{ marginTop: 20 }}>
-          <code style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--red)', fontSize: '1.05em' }}>cix</code> (CodeIndeX) is a self-hosted semantic code-search server — with a thin CLI for terminals and agents, and skills that teach Claude to reach for it. Hybrid BM25 + dense ranking, <code>file:line</code> snippets in milliseconds. Deploy once — a single Go binary or Docker — and point every repo, teammate and agent at it.
+          <code style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--red)', fontSize: '1.05em' }}>cix</code> (CodeIndeX) is a self-hosted semantic code-search platform — a server with an embedded dashboard, a thin CLI for terminals and agents, and skills that teach Claude to reach for it. Hybrid BM25 + dense ranking, <code>file:line</code> snippets in milliseconds. Deploy once — a single Go binary or Docker — and point every repo, teammate and agent at it.
         </p>
         <div className="hero-cta">
           <a className="btn btn-primary" href="#quickstart">Get started →</a>
@@ -79,7 +79,7 @@ function Hero() {
           <span><b>31</b> languages via tree-sitter</span>
           <span><b>768d</b> CodeRankEmbed Q8</span>
           <span><b>BM25 + dense</b> hybrid ranking</span>
-          <span><b>multi-user</b> team-ready server</span>
+          <span><b>multi-user</b> self-hosted platform</span>
         </div>
       </div>
       <div style={{ position: 'relative' }}>
