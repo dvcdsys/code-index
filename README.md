@@ -25,7 +25,9 @@ cix search "database retry logic" --in ./api --lang go
 cix symbols "UserService" --kind class
 ```
 
-Or open `http://localhost:21847/dashboard` in your browser.
+Or open `http://localhost:21847/dashboard` in your browser:
+
+<img src="site/public/img/dashboard-home.png" alt="The cix dashboard — server status at a glance and a guided “Connect Claude Code to cix” onboarding with copy-paste commands" width="900">
 
 > [!IMPORTANT]
 > **Reindex after upgrading the server.** Until the parsing/chunking/embedding
