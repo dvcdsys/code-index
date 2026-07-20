@@ -271,7 +271,10 @@ const QS_STEPS = [
       <span className="prompt">$</span> claude plugin install cix@code-index{'\n'}
       <span className="comment"># /cix:search /cix:def /cix:refs /cix:init</span>{'\n'}
       <span className="comment"># /cix:status /cix:summary /cix:file /cix:tree</span>{'\n'}
-      <span className="comment"># skills: /cix · /cix-workspace</span>
+      <span className="comment"># skills: /cix · /cix-workspace</span>{'\n'}
+      <span className="comment"># update later:</span>{'\n'}
+      <span className="prompt">$</span> claude plugin marketplace update code-index{'\n'}
+      <span className="prompt">$</span> claude plugin update cix@code-index
     </>,
   },
 ];

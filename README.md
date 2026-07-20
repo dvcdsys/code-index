@@ -202,6 +202,10 @@ is required — vectors aren't comparable across providers.
 claude plugin marketplace add dvcdsys/code-index
 claude plugin install cix@code-index
 # Activates automatically on the next `claude` start — no reload needed.
+
+# Update later (marketplace first, then the plugin):
+claude plugin marketplace update code-index
+claude plugin update cix@code-index
 ```
 
 (The `/plugin …` slash commands work inside an interactive session too, but the terminal form is the dependable path.)
