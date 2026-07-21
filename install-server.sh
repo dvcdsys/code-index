@@ -313,6 +313,15 @@ compose() {
     fi
 }
 
+# image_created <ref> — YYYY-MM-DD a local image was built, empty when the
+# image is not on this host. Used to date the image we fall back to when a
+# pull fails, so "reusing the local image" is never a silent claim.
+image_created() {
+    local __c
+    __c=$(docker image inspect "$1" --format '{{.Created}}' 2>/dev/null || true)
+    printf '%s' "${__c%%T*}"
+}
+
 # ── uninstall ─────────────────────────────────────────────────────────────
 if [[ "$UNINSTALL" == true ]]; then
     step "Uninstalling cix-server"
@@ -691,9 +700,11 @@ EOF
 else
     COMPOSE_ARGS=()
     IMAGE_UID=65532
+    IMAGE_REF="dvcdsys/code-index:latest"
     if [[ "$MODE" == "docker-gpu" ]]; then
         COMPOSE_ARGS=(-f "$REPO_ROOT/docker-compose.cuda.yml")
         IMAGE_UID=1001
+        IMAGE_REF="dvcdsys/code-index:cu128"
     fi
 
     step "Writing configuration"
@@ -711,7 +722,31 @@ else
         fi
     fi
 
-    step "Pulling the image and starting the container"
+    # The literals above are only for messages; ask compose what it will
+    # actually run so a tag change in the compose file can't make us lie.
+    # Older compose builds lack `config --images` — then the literal stands.
+    IMAGE_FROM_COMPOSE=$( (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} config --images 2>/dev/null | head -1) || true )
+    [[ -n "$IMAGE_FROM_COMPOSE" ]] && IMAGE_REF="$IMAGE_FROM_COMPOSE"
+
+    # `up -d` only pulls when the image is MISSING locally, so without an
+    # explicit pull any host that ever pulled this tag installs whatever it
+    # happens to have — silently, health check and all.
+    step "Pulling the image"
+    if (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} pull); then
+        IMAGE_BUILT=$(image_created "$IMAGE_REF")
+        ok "$IMAGE_REF is current${IMAGE_BUILT:+ (built $IMAGE_BUILT)}"
+    else
+        # Offline, or the registry is down. Starting from the local image is
+        # the right degradation — the rest of this script degrades the same
+        # way — but it must be visible, and dated, not a silent stale run.
+        IMAGE_BUILT=$(image_created "$IMAGE_REF")
+        [[ -n "$IMAGE_BUILT" ]] \
+            || die "could not pull $IMAGE_REF and no local copy exists — check the network (or Docker Hub) and re-run"
+        warn "could not pull $IMAGE_REF — starting from the local image, built $IMAGE_BUILT"
+        warn "That may be several releases behind. Re-run the installer once the network is back to upgrade."
+    fi
+
+    step "Starting the container"
     (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} up -d)
     ok "container started"
 
