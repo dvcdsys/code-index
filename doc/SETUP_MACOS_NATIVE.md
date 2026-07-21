@@ -235,7 +235,7 @@ place instead of being duplicated into `EnvironmentVariables`.)
 | Installer stops at "Checking prerequisites" | Missing Go / Node / Xcode CLT. | Follow the `brew install` hint it prints, re-run. |
 | `make bundle` fails downloading llama-server | Network blocked, or upstream release moved. | Inspect `server/Makefile`'s download URL; report if upstream changed. |
 | Server starts but `/health` 404s | Wrong port. | `lsof -i :21847` to confirm. Check `CIX_PORT` in `.env`. |
-| Health check takes minutes on first boot | The embedding model (~600 MB) downloads before serving. | Watch `tail -f ~/.cix/logs/cix-server.err`; it's a one-time cost. |
+| Health check takes minutes on first boot | The embedding model (~150 MB) downloads before serving. | Watch `tail -f ~/.cix/logs/cix-server.err`; it's a one-time cost. |
 | GPU not used (CPU fallback) | `CIX_N_GPU_LAYERS=0` set in `.env`. | Remove it (macOS default offloads all layers) or set `99`. |
 | "killed: 9" on first llama-server launch | macOS amfid rejected the unsigned binary. | Re-run `make bundle` (or the installer) to refresh the local signature. |
 | Server starts via terminal but not via `launchd` | Launcher script or `.env` missing / unreadable. | Check `~/.cix/logs/cix-server.err`; re-run `./install-server.sh` to regenerate. |
