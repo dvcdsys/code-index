@@ -67,8 +67,10 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       # Operator-managed bind for sqlite + chroma so backups and inspection
-      # are one `cd` away on the host. Make sure the directory is owned by
-      # 1001:1001 OR use `user: "0:0"` — see CLAUDE.md.
+      # are one `cd` away on the host. On Linux the directory must be owned
+      # by 1001:1001 (`sudo chown -R 1001:1001 ~/.cix/data`) or the server
+      # cannot create its database; `user: "0:0"` is the less safe fallback.
+      # install-server.sh does the chown for you. See doc/TEAM_DEPLOYMENT.md.
       - ${HOME}/.cix/data:/data
       # Docker-managed named volume layered ON TOP of /data/models. This
       # isolates the GGUF cache from host-side bind permission issues and
