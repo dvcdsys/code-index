@@ -204,9 +204,14 @@ and `YOUR_USER` placeholder before loading.
 Save as `~/Library/LaunchAgents/com.cix.server.plist`, then:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.cix.server.plist
-launchctl start com.cix.server
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cix.server.plist
+launchctl print gui/$(id -u)/com.cix.server   # confirm it really loaded
 ```
+
+Use `bootstrap`, not the legacy `launchctl load`: `load` prints its
+errors but still exits `0`, so a failed load looks like a successful
+one. Either way, `launchctl print` is the only trustworthy answer to
+"is it loaded?".
 
 After every `git pull` that updates `server/`, rebuild and the
 plist picks up the new binary automatically (the path doesn't
@@ -214,7 +219,7 @@ change):
 
 ```bash
 cd server && make bundle
-launchctl stop com.cix.server  # KeepAlive will respawn the new binary
+launchctl kickstart -k gui/$(id -u)/com.cix.server  # restart onto the new binary
 ```
 
 (The installer's variant of this differs in one way: its plist runs a

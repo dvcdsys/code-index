@@ -131,6 +131,70 @@ wait_health() {
     return 1
 }
 
+# ── launchd helpers ───────────────────────────────────────────────────────
+# `launchctl bootout` is asynchronous: it returns while the job is still
+# draining out of the domain, and bootstrapping the same label inside that
+# window fails with "Input/output error". The legacy `launchctl load` fails
+# in exactly the same window but exits 0 — so no exit code here is worth
+# trusting. Every step below asks launchd whether the label is really there.
+LAUNCHD_DOMAIN="gui/$(id -u)"
+
+# launchd_loaded — true when the agent is present in the user domain.
+launchd_loaded() { launchctl print "$LAUNCHD_DOMAIN/$PLIST_LABEL" >/dev/null 2>&1; }
+
+# launchd_pid — pid of the running job; empty when it is registered but has
+# no process (never started, crashed, or on its way out of the domain).
+launchd_pid() {
+    launchctl print "$LAUNCHD_DOMAIN/$PLIST_LABEL" 2>/dev/null \
+        | awk -F' = ' '/^\tpid = /{print $2; exit}'
+}
+
+# launchd_unload — bootout, then wait (≤10 s) for the label to disappear.
+launchd_unload() {
+    launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_LABEL" >/dev/null 2>&1 || true
+    for _ in $(seq 1 50); do
+        launchd_loaded || return 0
+        sleep 0.2
+    done
+    return 1
+}
+
+# launchd_load — (re)load the agent from $PLIST_PATH and confirm it took.
+# The whole drain→bootstrap cycle is retried: a domain that was busy on the
+# first attempt is usually ready on the second.
+launchd_load() {
+    for _ in 1 2 3; do
+        # Only bootstrap into a domain we watched go empty — a job that is
+        # still draining answers `print` as well, so a presence check made
+        # after a failed bootstrap would happily report the OLD job.
+        if launchd_unload; then
+            launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST_PATH" >/dev/null 2>&1 \
+                || launchctl load "$PLIST_PATH" >/dev/null 2>&1 || true
+            if launchd_loaded; then
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# launchd_restart — restart an agent that is already loaded, in place. Fails
+# (so the caller can fall back to a full reload) unless a process is actually
+# running afterwards: a job that was on its way out of the domain accepts a
+# kickstart and then disappears anyway.
+launchd_restart() {
+    launchd_loaded || return 1
+    launchctl kickstart -k "$LAUNCHD_DOMAIN/$PLIST_LABEL" >/dev/null 2>&1 || return 1
+    for _ in $(seq 1 15); do
+        if [[ -n "$(launchd_pid)" ]]; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+
 # ── flags ─────────────────────────────────────────────────────────────────
 ORIG_ARGS=("$@")
 NON_INTERACTIVE=false
@@ -254,10 +318,12 @@ if [[ "$UNINSTALL" == true ]]; then
     step "Uninstalling cix-server"
     removed=false
     if [[ -f "$PLIST_PATH" ]]; then
-        if launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null; then
+        if ! launchd_loaded; then
+            warn "launchd agent was not running"
+        elif launchd_unload; then
             ok "launchd agent stopped"
         else
-            warn "launchd agent was not running"
+            warn "launchd agent is still draining — it will stop on its own"
         fi
         rm -f "$PLIST_PATH" "$LAUNCHER"
         ok "removed $PLIST_PATH"
@@ -576,7 +642,7 @@ exec "$BUNDLE_DIR/cix-server"
 EOF
         chmod 755 "$LAUNCHER"
 
-        cat > "$PLIST_PATH" <<EOF
+        NEW_PLIST=$(cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -589,13 +655,29 @@ EOF
   <key>StandardErrorPath</key><string>$LOG_DIR/cix-server.err</string>
 </dict></plist>
 EOF
+)
+        # launchd reads the plist at load time only, so an unchanged re-run
+        # has nothing to reload — compare before overwriting, and restart
+        # such an agent in place with kickstart. That skips the unload
+        # window (and its drain race) entirely for the common upgrade path.
+        PLIST_CHANGED=true
+        if [[ -f "$PLIST_PATH" ]] && [[ "$(cat "$PLIST_PATH")" == "$NEW_PLIST" ]]; then
+            PLIST_CHANGED=false
+        fi
+        printf '%s\n' "$NEW_PLIST" > "$PLIST_PATH"
 
-        # Restart cleanly if a previous agent exists; bootstrap is the
-        # modern load verb (falls back to load for older macOS).
-        launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
-        launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null \
-            || launchctl load "$PLIST_PATH"
-        ok "agent loaded — starts automatically at login, respawns on crash"
+        # The launcher is re-executed on restart, so a changed .env or a
+        # rebuilt binary is picked up by kickstart too.
+        if [[ "$PLIST_CHANGED" == false ]] && launchd_restart; then
+            ok "agent restarted — starts automatically at login, respawns on crash"
+        elif launchd_load; then
+            ok "agent loaded — starts automatically at login, respawns on crash"
+        else
+            die "launchd would not load $PLIST_LABEL. Load it by hand with:
+    launchctl bootout $LAUNCHD_DOMAIN/$PLIST_LABEL
+    launchctl bootstrap $LAUNCHD_DOMAIN $PLIST_PATH
+  then re-run this installer. Errors, if any: $LOG_DIR/cix-server.err"
+        fi
 
         step "Waiting for the server to come up"
         LOGS_CMD="tail -f $LOG_DIR/cix-server.err"
@@ -754,8 +836,8 @@ say ""
 if [[ "$MODE" == "native" && "$RUN_MODE" == "launchd" ]]; then
     say "  Manage the server:"
     say "    logs       tail -f $LOG_DIR/cix-server.err"
-    say "    restart    launchctl kickstart -k gui/$(id -u)/$PLIST_LABEL"
-    say "    stop       launchctl bootout gui/$(id -u)/$PLIST_LABEL"
+    say "    restart    launchctl kickstart -k $LAUNCHD_DOMAIN/$PLIST_LABEL"
+    say "    stop       launchctl bootout $LAUNCHD_DOMAIN/$PLIST_LABEL"
     say "    uninstall  ./install-server.sh --uninstall"
     say "    upgrade    git pull && ./install-server.sh   (data and settings are kept)"
 elif [[ "$MODE" != "native" ]]; then
