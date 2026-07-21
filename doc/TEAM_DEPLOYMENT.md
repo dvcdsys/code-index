@@ -73,6 +73,7 @@ See [`DOCKER_TAGS.md`](DOCKER_TAGS.md) for the full tag lifecycle.
 git clone https://github.com/dvcdsys/code-index.git
 cd code-index
 cp .env.example .env      # then edit — see §4
+docker compose pull       # `up -d` only pulls when the image is MISSING locally
 docker compose up -d
 docker compose logs -f code-index-api   # watch for "listening on :21847"
 ```
@@ -80,6 +81,7 @@ docker compose logs -f code-index-api   # watch for "listening on :21847"
 ### 3b. GPU (CUDA)
 
 ```bash
+docker compose -f docker-compose.cuda.yml pull
 docker compose -f docker-compose.cuda.yml up -d
 ```
 
