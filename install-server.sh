@@ -123,7 +123,9 @@ gen_secret() { # gen_secret <len> — unambiguous alphanumerics
 # before calling it a loop.
 container_failing() {
     local state
-    state=$(docker inspect --format '{{.State.Status}} {{.State.RestartCount}}' "$1" 2>/dev/null) || return 1
+    # RestartCount is a TOP-LEVEL field — {{.State.RestartCount}} does not
+    # exist and makes the whole template (and this check) fail silently.
+    state=$(docker inspect --format '{{.State.Status}} {{.RestartCount}}' "$1" 2>/dev/null) || return 1
     case "$state" in
         exited*|dead*)  return 0 ;;
         "restarting 0") return 1 ;;
@@ -388,7 +390,14 @@ if [[ "$UNINSTALL" == true ]]; then
     [[ "$removed" == false ]] && warn "nothing to uninstall (no launchd agent, no code-index container)"
     say ""
     say "Kept: your data directory and $ENV_FILE."
-    say "To wipe all indexed data too:  rm -rf ~/.cix/data   (irreversible)"
+    # After a Docker install on Linux the data directory belongs to the
+    # container uid, so a plain rm -rf fails halfway through.
+    WIPE_CMD="rm -rf ~/.cix/data   ${DIM}(irreversible)${RESET}"
+    if [[ "$(uname -s)" == "Linux" && -d "$HOME/.cix/data" \
+        && "$(stat -c %u "$HOME/.cix/data" 2>/dev/null || id -u)" != "$(id -u)" ]]; then
+        WIPE_CMD="sudo rm -rf ~/.cix/data   ${DIM}(irreversible; the container uid owns it)${RESET}"
+    fi
+    say "To wipe all indexed data too:  $WIPE_CMD"
     exit 0
 fi
 
