@@ -67,8 +67,9 @@ services:
     volumes:
       # Operator-managed bind for sqlite + chroma so backups and inspection
       # are one `cd` away on the host. The CPU image runs as
-      # nonroot:nonroot (uid 65532) — chown your bind directory to
-      # 65532:65532 OR add `user: "0:0"` to fall back to root. See
+      # nonroot:nonroot (uid 65532) — on Linux chown your bind directory to
+      # 65532:65532 OR add `user: "0:0"` to fall back to root (less safe).
+      # install-server.sh does the chown for you. See
       # doc/SECURITY_DEPLOYMENT.md.
       - ${HOME}/.cix/data:/data
       # Docker-managed named volume layered ON TOP of /data/models. This

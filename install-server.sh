@@ -116,19 +116,64 @@ gen_secret() { # gen_secret <len> — unambiguous alphanumerics
     LC_ALL=C tr -dc 'a-km-np-zA-HJ-NP-Z2-9' </dev/urandom | head -c "$1" || true
 }
 
-# wait_health <port> — poll /health for up to ~5 minutes.
+# container_failing <name> — true when the container has crashed and Docker
+# is restarting it (or has given up). A slow first boot stays "running", so
+# this never fires on the model download it is meant to be distinguished from.
+# "restarting 0" is the very first transition — one more cycle is granted
+# before calling it a loop.
+container_failing() {
+    local state
+    # RestartCount is a TOP-LEVEL field — {{.State.RestartCount}} does not
+    # exist and makes the whole template (and this check) fail silently.
+    state=$(docker inspect --format '{{.State.Status}} {{.RestartCount}}' "$1" 2>/dev/null) || return 1
+    case "$state" in
+        exited*|dead*)  return 0 ;;
+        "restarting 0") return 1 ;;
+        restarting*)    return 0 ;;
+        *)              return 1 ;;
+    esac
+}
+
+# wait_health <port> [container] — poll /health for up to ~5 minutes. With a
+# container name a crash loop ends the wait immediately: polling the full
+# five minutes and then blaming the model download is how two permission
+# bugs stayed invisible through an entire install.
 wait_health() {
-    local url="http://localhost:$1/health"
+    local url="http://localhost:$1/health" cname="${2:-}"
     say "${DIM}First boot downloads the embedding model (~600 MB) before serving — this can take a few minutes.${RESET}"
     for _ in $(seq 1 100); do
         if curl -fsS -m 2 "$url" >/dev/null 2>&1; then
             ok "server is healthy at $url"
             return 0
         fi
+        if [[ -n "$cname" ]] && container_failing "$cname"; then
+            warn "$cname is crash-looping — it will not come up on its own."
+            say "${DIM}last lines of  docker logs $cname:${RESET}"
+            docker logs --tail 12 "$cname" 2>&1 | sed 's/^/    /'
+            return 2
+        fi
         sleep 3
     done
     warn "server not answering yet — it may still be downloading the model."
     return 1
+}
+
+# chown_as_root <uid> <path> — chown -R to <uid>:<uid> without assuming the
+# caller has sudo. Passwordless sudo is used silently, an interactive sudo
+# shows the command it is about to run, and when there is no usable sudo the
+# Docker daemon (which is root) does it from a throwaway container — anyone
+# who can start the server can already do this.
+chown_as_root() {
+    local uid="$1" target="$2"
+    if command -v sudo >/dev/null 2>&1; then
+        if sudo -n true 2>/dev/null; then
+            if sudo chown -R "$uid:$uid" "$target"; then return 0; fi
+        elif [[ "$NON_INTERACTIVE" == false ]]; then
+            say "${DIM}running: sudo chown -R $uid:$uid $target${RESET}"
+            if sudo chown -R "$uid:$uid" "$target"; then return 0; fi
+        fi
+    fi
+    docker run --rm -v "$target:/target" busybox chown -R "$uid:$uid" /target >/dev/null 2>&1
 }
 
 # ── launchd helpers ───────────────────────────────────────────────────────
@@ -345,7 +390,14 @@ if [[ "$UNINSTALL" == true ]]; then
     [[ "$removed" == false ]] && warn "nothing to uninstall (no launchd agent, no code-index container)"
     say ""
     say "Kept: your data directory and $ENV_FILE."
-    say "To wipe all indexed data too:  rm -rf ~/.cix/data   (irreversible)"
+    # After a Docker install on Linux the data directory belongs to the
+    # container uid, so a plain rm -rf fails halfway through.
+    WIPE_CMD="rm -rf ~/.cix/data   ${DIM}(irreversible)${RESET}"
+    if [[ "$(uname -s)" == "Linux" && -d "$HOME/.cix/data" \
+        && "$(stat -c %u "$HOME/.cix/data" 2>/dev/null || id -u)" != "$(id -u)" ]]; then
+        WIPE_CMD="sudo rm -rf ~/.cix/data   ${DIM}(irreversible; the container uid owns it)${RESET}"
+    fi
+    say "To wipe all indexed data too:  $WIPE_CMD"
     exit 0
 fi
 
@@ -617,7 +669,8 @@ ensure_env() {
 
 # ── install per mode ──────────────────────────────────────────────────────
 # SERVER_STATE drives the honesty of the final summary: running | starting
-# (came up slow / still downloading the model) | not_started (manual mode).
+# (came up slow / still downloading the model) | crashed (container is
+# restart-looping, cause already printed) | not_started (manual mode).
 SERVER_STATE=not_started
 LOGS_CMD=""
 if [[ "$MODE" == "native" ]]; then
@@ -711,14 +764,51 @@ else
     ensure_env
     mkdir -p "$DATA_DIR"
 
-    # The container writes /data as a non-root uid; a Linux bind mount
-    # owned by someone else fails on first write. macOS Docker Desktop
-    # maps ownership transparently — no action needed there.
+    # A Linux bind mount keeps its host ownership, and the images run as a
+    # non-root uid (65532 CPU, 1001 CUDA). A data directory created by the
+    # login user (typically uid 1000) is therefore read-only to the server:
+    # it cannot create /data/sqlite and dies with "unable to open database
+    # file" on every restart. Warning and continuing was not enough — this
+    # is a guaranteed crash loop — so fix it, with consent, or stop here.
+    # macOS Docker Desktop maps ownership transparently; skip all of it.
     if [[ "$OS" == "Linux" ]]; then
         DIR_UID=$(stat -c %u "$DATA_DIR" 2>/dev/null || echo "?")
-        if [[ "$DIR_UID" != "$IMAGE_UID" ]]; then
-            warn "the image writes $DATA_DIR as uid $IMAGE_UID, but the directory is owned by uid $DIR_UID."
-            warn "If the container fails to start, run:  sudo chown -R $IMAGE_UID:$IMAGE_UID $DATA_DIR"
+        DIR_MODE=$(stat -c %a "$DATA_DIR" 2>/dev/null || echo 0)
+        # A world-writable directory works for any uid — leave it alone.
+        DIR_OTHER_W=$(( 8#$DIR_MODE & 2 ))
+        if [[ "$DIR_UID" != "$IMAGE_UID" && "$DIR_OTHER_W" -eq 0 ]]; then
+            warn "$DATA_DIR is owned by uid $DIR_UID, but the $MODE image runs as uid $IMAGE_UID and cannot write there."
+            if ask_yn "Fix it now (chown -R $IMAGE_UID:$IMAGE_UID $DATA_DIR)?" y; then
+                if chown_as_root "$IMAGE_UID" "$DATA_DIR"; then
+                    ok "$DATA_DIR now belongs to $IMAGE_UID:$IMAGE_UID"
+                else
+                    die "could not change the owner of $DATA_DIR. Run this and re-run the installer:  sudo chown -R $IMAGE_UID:$IMAGE_UID $DATA_DIR"
+                fi
+            else
+                die "not continuing — the container would crash-loop on its first write. Fix it with:  sudo chown -R $IMAGE_UID:$IMAGE_UID $DATA_DIR"
+            fi
+        fi
+
+        # The GGUF cache lives in the cix-models named volume. Docker copies
+        # the image's ownership onto a volume only while it is EMPTY (a fresh
+        # volume nested under the /data bind does inherit it — verified on
+        # Docker 28.4), so a volume an older ROOT-running image already
+        # filled stays root-owned forever and the model download dies with
+        # "permission denied". Same story when a host switches between the
+        # CPU (65532) and CUDA (1001) images. Fresh installs get the right
+        # uid for free, so this only runs when the volume already exists.
+        COMPOSE_PROJECT=$( (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} config 2>/dev/null | sed -n 's/^name: *//p' | tr -d '"' | head -1) || true )
+        if [[ -n "$COMPOSE_PROJECT" ]] && docker volume inspect "${COMPOSE_PROJECT}_cix-models" >/dev/null 2>&1; then
+            MODELS_VOL="${COMPOSE_PROJECT}_cix-models"
+            VOL_UID=$(docker run --rm -v "$MODELS_VOL:/v" busybox stat -c %u /v 2>/dev/null || echo "$IMAGE_UID")
+            if [[ "$VOL_UID" != "$IMAGE_UID" ]]; then
+                warn "the model cache volume $MODELS_VOL is owned by uid $VOL_UID, not $IMAGE_UID."
+                if docker run --rm -v "$MODELS_VOL:/v" busybox chown -R "$IMAGE_UID:$IMAGE_UID" /v >/dev/null 2>&1; then
+                    ok "model cache ownership fixed"
+                else
+                    warn "could not fix it — if the model download fails, run:  docker run --rm -v $MODELS_VOL:/v busybox chown -R $IMAGE_UID:$IMAGE_UID /v"
+                fi
+            fi
         fi
     fi
 
@@ -752,8 +842,12 @@ else
 
     step "Waiting for the server to come up"
     LOGS_CMD="docker logs -f code-index"
-    if wait_health "$PORT"; then
+    HEALTH_RC=0
+    wait_health "$PORT" code-index || HEALTH_RC=$?
+    if [[ "$HEALTH_RC" -eq 0 ]]; then
         SERVER_STATE=running
+    elif [[ "$HEALTH_RC" -eq 2 ]]; then
+        SERVER_STATE=crashed
     else
         SERVER_STATE=starting
         warn "Watch progress with:  $LOGS_CMD"
@@ -820,12 +914,21 @@ if [[ "$NON_INTERACTIVE" == false ]]; then
 fi
 
 # ── summary ───────────────────────────────────────────────────────────────
-step "Install complete 🟢"
+if [[ "$SERVER_STATE" == "crashed" ]]; then
+    step "Install incomplete 🔴"
+else
+    step "Install complete 🟢"
+fi
 say ""
 case "$SERVER_STATE" in
     running)
         say "  Server:      ${GREEN}running${RESET}"
         say "  Dashboard:   ${BOLD}http://localhost:$PORT/dashboard${RESET}"
+        ;;
+    crashed)
+        say "  Server:      ${RED}NOT running${RESET} — the container keeps crashing (cause printed above)"
+        say "               full logs:  $LOGS_CMD"
+        say "               fix the cause, then re-run:  ${BOLD}./install-server.sh${RESET}"
         ;;
     starting)
         say "  Server:      ${YELLOW}NOT ready yet${RESET} — still starting (first boot downloads the embedding model)"
@@ -857,6 +960,9 @@ if [[ "$SERVER_STATE" == "not_started" ]]; then
 elif [[ "$SERVER_STATE" == "starting" ]]; then
     say "    $N. Wait until the server is ready (watch: $LOGS_CMD)."
     N=$((N + 1))
+elif [[ "$SERVER_STATE" == "crashed" ]]; then
+    say "    $N. Fix the error above, then re-run:  ${BOLD}./install-server.sh${RESET}"
+    N=$((N + 1))
 fi
 say "    $N. Sign in to the dashboard and change the password when prompted."
 N=$((N + 1))
@@ -887,3 +993,8 @@ elif [[ "$MODE" != "native" ]]; then
 fi
 say "  Forgot the admin password later?   ./server/scripts/reset-password.sh <email>"
 say ""
+
+# A crash-looping container is a failed install, not a slow one — say so in
+# the exit status too, so scripted installs don't report success.
+[[ "$SERVER_STATE" == "crashed" ]] && exit 1
+exit 0
