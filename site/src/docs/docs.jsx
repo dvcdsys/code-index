@@ -108,10 +108,12 @@ git clone https://github.com/dvcdsys/code-index && cd code-index
             <CodeBlock>{`git clone https://github.com/dvcdsys/code-index && cd code-index
 cp .env.example .env
 # Edit .env: CIX_BOOTSTRAP_ADMIN_EMAIL, CIX_BOOTSTRAP_ADMIN_PASSWORD
+docker compose pull                  # up -d alone reuses any local image, however old
 docker compose up -d
 curl http://localhost:21847/health   # → {"status":"ok"}`}</CodeBlock>
             <p><b>Docker (CUDA / NVIDIA GPU)</b> — requires an NVIDIA driver ≥ 525 (CUDA 12.x) and the NVIDIA Container Toolkit; the CUDA image sets <code>CIX_N_GPU_LAYERS=99</code> for full GPU offload:</p>
-            <CodeBlock>{`docker compose -f docker-compose.cuda.yml up -d`}</CodeBlock>
+            <CodeBlock>{`docker compose -f docker-compose.cuda.yml pull
+docker compose -f docker-compose.cuda.yml up -d`}</CodeBlock>
             <p><b>Native macOS (Apple Silicon)</b> — Docker on macOS can't reach the Metal GPU; for full Metal offload build and run natively (Go 1.25+, Node.js, Xcode CLT):</p>
             <CodeBlock>{`cd server && make bundle             # builds server + downloads Metal-enabled llama-server
 cp ../.env.example ../.env           # set the bootstrap admin vars
