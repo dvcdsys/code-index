@@ -15,7 +15,7 @@
 # Flags (all optional — without them the script prompts interactively):
 #   --mode <m>           native | docker | docker-gpu
 #   --email <addr>       admin email for the first account
-#   --port <n>           HTTP port                      (default 21847)
+#   --port <n>           HTTP port        (default: the .env value, else 21847)
 #   --data-dir <path>    data directory, native mode    (default ~/.cix/data;
 #                        Docker modes always use ~/.cix/data — set in compose)
 #   --run-mode <m>       native mode only: launchd | manual
@@ -196,6 +196,15 @@ fi
 BUNDLE_DIR="$REPO_ROOT/server/dist/cix-darwin-arm64"
 ENV_FILE="$REPO_ROOT/.env"
 
+# env_get <KEY> — value of the last KEY= line in .env (quotes and stray
+# whitespace stripped), empty when the key or the file is absent.
+# || true: an absent key is normal here, but pipefail would turn grep's
+# exit 1 into a fatal error under set -e.
+env_get() {
+    [[ -f "$ENV_FILE" ]] || return 0
+    grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "'\"" | tr -d '[:space:]' || true
+}
+
 # ── clone freshness: don't install from a stale checkout ──────────────────
 # A user may clone, get distracted, and come back weeks later — meanwhile
 # the repo (and this very script) moved on. Offer a fast-forward update and
@@ -351,13 +360,31 @@ if [[ -f "$SQLITE_PATH" ]]; then
     say "${DIM}For a truly fresh start, move the data away first:  mv ~/.cix/data ~/.cix/data.bak${RESET}"
 fi
 
-ask PORT "HTTP port" "${ARG_PORT:-21847}"
+# Which key pins the port depends on the mode: native runs the server
+# itself (CIX_PORT is its listen port), while the Docker modes only map a
+# host port (the container always listens on 21847).
+PORT_KEY="PORT"
+[[ "$MODE" == "native" ]] && PORT_KEY="CIX_PORT"
+ENV_PORT="$(env_get "$PORT_KEY")"
+if [[ -n "$ENV_PORT" && ! "$ENV_PORT" =~ ^[0-9]+$ ]]; then
+    warn "$ENV_FILE pins a non-numeric $PORT_KEY ($ENV_PORT) — it will be replaced"
+    ENV_PORT=""
+fi
+[[ -n "$ENV_PORT" ]] && say "Current port in $ENV_FILE: ${BOLD}$ENV_PORT${RESET} ${DIM}(answer differently to change it)${RESET}"
+
+# An existing .env supplies the default, so Enter is a no-op on a re-run;
+# an explicit --port still wins. A different answer is written back to the
+# kept .env by sync_env_port — otherwise the question would be decorative
+# and the server would come up on the old port.
+ask PORT "HTTP port" "${ARG_PORT:-${ENV_PORT:-21847}}"
 [[ "$PORT" =~ ^[0-9]+$ ]] || die "port must be a number"
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    if [[ "$FRESH" == true ]]; then
-        die "port $PORT is already in use (lsof -i :$PORT) — pick another port or stop that process"
-    else
+    if [[ "$FRESH" == false && ( -z "$ENV_PORT" || "$PORT" == "$ENV_PORT" ) ]]; then
         warn "port $PORT is in use — assuming it's the running cix-server; it will be restarted"
+    else
+        # Fresh install, or a re-run moving to a DIFFERENT port: whatever is
+        # listening there is not the cix-server we are about to (re)start.
+        die "port $PORT is already in use (lsof -i :$PORT) — pick another port or stop that process"
     fi
 fi
 
@@ -439,6 +466,40 @@ write_env() {
     ok "wrote $ENV_FILE (mode 600)"
 }
 
+# sync_env_port — make a kept .env agree with the answered port. Without
+# this the port question is decorative on a re-run: .env wins, so the
+# server (re)starts on the old port while wait_health polls the new one for
+# five minutes and every URL in the summary points at nothing.
+sync_env_port() {
+    if ! grep -qE "^$PORT_KEY=" "$ENV_FILE"; then
+        {
+            echo ""
+            if [[ "$MODE" == "native" ]]; then
+                echo "# HTTP port, added by install-server.sh on $(date '+%Y-%m-%d %H:%M')."
+            else
+                echo "# Host port mapping used by docker-compose.yml (container stays on 21847)."
+            fi
+            echo "$PORT_KEY=$PORT"
+        } >> "$ENV_FILE"
+        ok "added $PORT_KEY=$PORT to the existing .env"
+    elif [[ "$ENV_PORT" != "$PORT" ]]; then
+        sed -i.bak "s|^$PORT_KEY=.*|$PORT_KEY=$PORT|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+        ok "updated $PORT_KEY in $ENV_FILE: ${ENV_PORT:-unset} → $PORT"
+    fi
+
+    # A .env left over from a NATIVE install still pins the server's own
+    # listen port. Reused for Docker, the container would listen on that
+    # port while compose maps host $PORT → 21847 — nothing answers, and the
+    # summary URL lies exactly like the bug this function fixes.
+    if [[ "$MODE" != "native" ]]; then
+        local inner
+        inner="$(env_get CIX_PORT)"
+        if [[ -n "$inner" && "$inner" != "21847" ]]; then
+            warn "$ENV_FILE sets CIX_PORT=$inner (left over from a native install) — the container would listen there while compose maps host $PORT → 21847. Delete that line before starting."
+        fi
+    fi
+}
+
 # ensure_env — write .env if absent; otherwise keep it, but never drop the
 # admin answers: a fresh DB + a pre-existing .env without the seed vars
 # (typical on dev machines) would make the server refuse to boot.
@@ -448,6 +509,7 @@ ensure_env() {
         return
     fi
     ok "keeping existing $ENV_FILE (delete it and re-run to regenerate)"
+    sync_env_port
     # An API key is optional for the server itself, but on first boot it is
     # imported as the admin's 'env-bootstrap' key — which is what lets the
     # CLI connect right after install. Guarantee one exists (and replace
