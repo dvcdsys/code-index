@@ -168,7 +168,11 @@ container_failing() {
 # bugs stayed invisible through an entire install.
 wait_health() {
     local url="http://localhost:$1/health" cname="${2:-}"
-    say "${DIM}First boot downloads the embedding model (~600 MB) before serving — this can take a few minutes.${RESET}"
+    # Size of the default model, awhiteside/CodeRankEmbed-Q8_0-GGUF: 139 MB of
+    # GGUF (doc/benchmark-q8-vs-fp16.md). Keep it honest — this line doubles as
+    # the excuse the timeout below prints, so an inflated number buys a broken
+    # install extra minutes of patience.
+    say "${DIM}First boot downloads the embedding model (~150 MB) before serving — this can take a few minutes.${RESET}"
     for _ in $(seq 1 100); do
         if curl -fsS -m 2 "$url" >/dev/null 2>&1; then
             ok "server is healthy at $url"
