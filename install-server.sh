@@ -358,6 +358,35 @@ compose() {
     fi
 }
 
+# Which compose file the docker modes use. Empty (= docker-compose.yml) until
+# the mode is known; the uninstall path runs before that and does not need it,
+# because compose identifies containers by project, not by file.
+COMPOSE_ARGS=()
+CF=""
+
+# compose_container — real name of this clone's cix container, empty when
+# there is none. The compose files no longer pin container_name (it collides
+# with any other cix on the host), so the name is <project>-<service>-1 and
+# has to be asked for. Compose matches its own labels rather than the name,
+# so this also finds containers created by older, container_name-pinned
+# versions of these files — and, unlike a name grep, never matches a cix that
+# belongs to somebody else's project.
+compose_container() {
+    local ids id name
+    docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null || return 1
+    # `ps -aq` (stopped containers included) postdates compose v2.0; the
+    # legacy binary lists them with a plain `ps -q` anyway.
+    ids=$( (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} ps -aq 2>/dev/null || true) )
+    [[ -z "$ids" ]] && ids=$( (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} ps -q 2>/dev/null || true) )
+    # First line only, without a `| head` — under pipefail that is a SIGPIPE
+    # (exit 141) waiting to kill the script.
+    id="${ids%%$'\n'*}"
+    [[ -n "$id" ]] || return 1
+    name=$(docker inspect "$id" --format '{{.Name}}' 2>/dev/null | sed 's|^/||')
+    [[ -n "$name" ]] || return 1
+    printf '%s' "$name"
+}
+
 # image_created <ref> — YYYY-MM-DD a local image was built, empty when the
 # image is not on this host. Used to date the image we fall back to when a
 # pull fails, so "reusing the local image" is never a silent claim.
@@ -383,11 +412,16 @@ if [[ "$UNINSTALL" == true ]]; then
         ok "removed $PLIST_PATH"
         removed=true
     fi
-    if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "code-index"; then
-        (cd "$REPO_ROOT" && compose down) && ok "docker container removed (named model volume kept)"
+    # Ask compose, not `docker ps | grep code-index`: on a host that runs a
+    # cix of its own (a Portainer stack, another clone) the name matched
+    # THEIR container, `compose down` then removed nothing from this project,
+    # and the uninstall reported success anyway.
+    if command -v docker >/dev/null && UNINSTALL_CONTAINER=$(compose_container); then
+        (cd "$REPO_ROOT" && compose down) \
+            && ok "docker container $UNINSTALL_CONTAINER removed (named model volume kept)"
         removed=true
     fi
-    [[ "$removed" == false ]] && warn "nothing to uninstall (no launchd agent, no code-index container)"
+    [[ "$removed" == false ]] && warn "nothing to uninstall (no launchd agent, no container from this clone)"
     say ""
     say "Kept: your data directory and $ENV_FILE."
     # After a Docker install on Linux the data directory belongs to the
@@ -756,6 +790,7 @@ else
     IMAGE_REF="dvcdsys/code-index:latest"
     if [[ "$MODE" == "docker-gpu" ]]; then
         COMPOSE_ARGS=(-f "$REPO_ROOT/docker-compose.cuda.yml")
+        CF=" -f docker-compose.cuda.yml"   # same, for the printed commands
         IMAGE_UID=1001
         IMAGE_REF="dvcdsys/code-index:cu128"
     fi
@@ -838,12 +873,17 @@ else
 
     step "Starting the container"
     (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} up -d)
-    ok "container started"
+    # Compose picks the name (<project>-<service>-1) — an install that ran
+    # before container_name was dropped keeps its old one. Either way, every
+    # command we print from here on has to use the name that actually exists.
+    CONTAINER=$(compose_container || true)
+    ok "container started${CONTAINER:+ — $CONTAINER}"
 
     step "Waiting for the server to come up"
-    LOGS_CMD="docker logs -f code-index"
+    LOGS_CMD="cd '$REPO_ROOT' && docker compose$CF logs -f"
+    [[ -n "$CONTAINER" ]] && LOGS_CMD="docker logs -f $CONTAINER"
     HEALTH_RC=0
-    wait_health "$PORT" code-index || HEALTH_RC=$?
+    wait_health "$PORT" "$CONTAINER" || HEALTH_RC=$?
     if [[ "$HEALTH_RC" -eq 0 ]]; then
         SERVER_STATE=running
     elif [[ "$HEALTH_RC" -eq 2 ]]; then
@@ -982,10 +1022,11 @@ if [[ "$MODE" == "native" && "$RUN_MODE" == "launchd" ]]; then
     say "    uninstall  ./install-server.sh --uninstall"
     say "    upgrade    git pull && ./install-server.sh   (data and settings are kept)"
 elif [[ "$MODE" != "native" ]]; then
-    CF=""
-    [[ "$MODE" == "docker-gpu" ]] && CF=" -f docker-compose.cuda.yml"
-    say "  Manage the server:"
-    say "    logs       docker logs -f code-index"
+    # The compose commands act on this clone's project, so they only mean
+    # what they say from the repo root — the container name is no longer
+    # fixed, and a second cix on this host has a project of its own.
+    say "  Manage the server:  ${DIM}(compose commands run from $REPO_ROOT)${RESET}"
+    say "    logs       $LOGS_CMD"
     say "    restart    docker compose$CF restart"
     say "    stop       docker compose$CF down          (data survives)"
     say "    uninstall  ./install-server.sh --uninstall"
