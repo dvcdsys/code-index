@@ -3,29 +3,41 @@
 # deployment mode (native macOS / Docker CPU / Docker GPU), asks a few
 # questions, and brings the server up.
 #
-# From a clone:
-#   git clone https://github.com/dvcdsys/code-index && cd code-index
-#   ./install-server.sh
-#
-# Or in one line (clones the repo for you, then continues inside it):
-#   curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
-#
-# Re-running is safe: an existing database and .env are detected and kept.
-#
-# Flags (all optional — without them the script prompts interactively):
-#   --mode <m>           native | docker | docker-gpu
-#   --email <addr>       admin email for the first account
-#   --port <n>           HTTP port        (default: the .env value, else 21847)
-#   --data-dir <path>    data directory, native mode    (default ~/.cix/data;
-#                        Docker modes always use ~/.cix/data — set in compose)
-#   --run-mode <m>       native mode only: launchd | manual
-#   --dir <path>         where to clone when run outside a repo (default ./code-index)
-#   --non-interactive    accept defaults, never prompt (requires --email on a
-#                        fresh install; generates the admin password)
-#   --uninstall          stop + remove the server (data and .env are kept)
-#   --help               this text
+# The usage text lives in usage() below, as a here-doc rather than a
+# self-read of this file: piped in (`curl … | bash -s -- --help`) there is no
+# file to read back.
 
 set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+install-server.sh — interactive installer for cix-server. Picks a
+deployment mode (native macOS / Docker CPU / Docker GPU), asks a few
+questions, and brings the server up.
+
+From a clone:
+  git clone https://github.com/dvcdsys/code-index && cd code-index
+  ./install-server.sh
+
+Or in one line (clones the repo for you, then continues inside it):
+  curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
+
+Re-running is safe: an existing database and .env are detected and kept.
+
+Flags (all optional — without them the script prompts interactively):
+  --mode <m>           native | docker | docker-gpu
+  --email <addr>       admin email for the first account
+  --port <n>           HTTP port        (default: the .env value, else 21847)
+  --data-dir <path>    data directory, native mode    (default ~/.cix/data;
+                       Docker modes always use ~/.cix/data — set in compose)
+  --run-mode <m>       native mode only: launchd | manual
+  --dir <path>         where to clone when run outside a repo (default ./code-index)
+  --non-interactive    accept defaults, never prompt (requires --email on a
+                       fresh install; generates the admin password)
+  --uninstall          stop + remove the server (data and .env are kept)
+  --help               this text
+EOF
+}
 
 REPO_URL="https://github.com/dvcdsys/code-index"
 PLIST_LABEL="com.cix.server"
@@ -33,6 +45,11 @@ PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 LAUNCHER_DIR="$HOME/.cix/launchd"
 LAUNCHER="$LAUNCHER_DIR/run-cix-server.sh"
 LOG_DIR="$HOME/.cix/logs"
+
+# Where prompts read from. Stays 0 when stdin is the terminal; becomes 3 when
+# stdin is a pipe and the terminal has to be opened separately (see below).
+PROMPT_FD=0
+PROMPTS_OK=true
 
 # ── ui helpers ────────────────────────────────────────────────────────────
 # tput exits non-zero on capability-poor terminals (TERM=dumb, some CI) —
@@ -49,6 +66,14 @@ ok()   { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
 warn() { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
 die()  { printf '%s✗ %s%s\n' "$RED" "$1" "$RESET" >&2; exit 1; }
 
+# require_tty — every prompt goes through here first: with no terminal a
+# `read` would swallow whatever stdin does carry (under `curl | bash` that is
+# the rest of this script), so die with an actionable message instead.
+require_tty() {
+    [[ "$PROMPTS_OK" == true ]] \
+        || die "no terminal available for prompts — pass --non-interactive (with --email on a fresh install)"
+}
+
 # ask VAR "Question" "default" — prompt with default; honors NON_INTERACTIVE.
 ask() {
     local __var="$1" __q="$2" __def="$3" __ans
@@ -56,7 +81,8 @@ ask() {
         printf -v "$__var" '%s' "$__def"
         return
     fi
-    read -r -p "$__q [$__def]: " __ans
+    require_tty
+    read -r -u "$PROMPT_FD" -p "$__q [$__def]: " __ans
     printf -v "$__var" '%s' "${__ans:-$__def}"
 }
 
@@ -71,6 +97,7 @@ ask_choice() {
         printf -v "$__var" '%s' "$__def"
         return
     fi
+    require_tty
     local __i __defnum=1
     say ""
     say "$__q"
@@ -80,7 +107,7 @@ ask_choice() {
     done
     local __ans
     while true; do
-        read -r -p "Choice [$__defnum]: " __ans
+        read -r -u "$PROMPT_FD" -p "Choice [$__defnum]: " __ans
         __ans="${__ans:-$__defnum}"
         if [[ "$__ans" =~ ^[0-9]+$ ]] && (( __ans >= 1 && __ans <= ${#__opts[@]} )); then
             printf -v "$__var" '%s' "${__opts[$((__ans - 1))]}"
@@ -105,7 +132,8 @@ ask_yn() {
         [[ "$__def" == "y" ]]
         return
     fi
-    read -r -p "$__q $__hint: " __ans
+    require_tty
+    read -r -u "$PROMPT_FD" -p "$__q $__hint: " __ans
     __ans="${__ans:-$__def}"
     [[ "$__ans" == "y" || "$__ans" == "Y" || "$__ans" == "yes" ]]
 }
@@ -257,19 +285,33 @@ while [[ $# -gt 0 ]]; do
         --dir)       ARG_CLONE_DIR="$2"; shift 2 ;;
         --non-interactive) NON_INTERACTIVE=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
-        --help|-h)   sed -n '2,27p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --help|-h)   usage; exit 0 ;;
         *) die "unknown flag: $1 (see --help)" ;;
     esac
 done
 
-# curl | bash leaves stdin on the pipe — rewire prompts to the terminal.
+# curl | bash leaves stdin on the pipe — point prompts at the terminal, on a
+# SEPARATE fd. `exec </dev/tty` looks tidier and is what this used to do, but
+# under `curl | bash` fd 0 *is* the script bash is still reading: replacing it
+# throws the unread remainder away, and the one-liner exits 0 having installed
+# nothing. Reading prompts from fd 3 leaves the source stream alone.
+#
+# Openability also has to be tested by opening: `-r /dev/tty` only reads the
+# device node's permission bits, so it passes with no controlling terminal —
+# where the open then fails and set -e kills the script with bash's raw
+# "Device not configured" instead of the message in require_tty.
 if [[ "$NON_INTERACTIVE" == false && ! -t 0 ]]; then
-    if [[ -r /dev/tty ]]; then
-        exec </dev/tty
+    if { exec 3</dev/tty; } 2>/dev/null; then
+        PROMPT_FD=3
     else
-        die "no terminal available for prompts — pass --non-interactive (with --email on a fresh install)"
+        PROMPTS_OK=false
     fi
 fi
+
+# An uninstall asks nothing, so a missing terminal must not stop it — CI and
+# agents drive it that way. Anything else will prompt: fail now rather than
+# part-way through an install.
+[[ "$UNINSTALL" == true ]] || require_tty
 
 # ── bootstrap: running outside a clone? clone, then delegate ──────────────
 SCRIPT_PATH="${BASH_SOURCE[0]:-}"
@@ -560,7 +602,7 @@ if [[ "$FRESH" == true ]]; then
     if [[ "$NON_INTERACTIVE" == true ]]; then
         ADMIN_PASSWORD="$(gen_secret 20)"; PASSWORD_GENERATED=true
     else
-        read -r -p "Admin password — leave empty to auto-generate a strong one []: " -s ADMIN_PASSWORD; echo
+        read -r -u "$PROMPT_FD" -p "Admin password — leave empty to auto-generate a strong one []: " -s ADMIN_PASSWORD; echo
         if [[ -z "$ADMIN_PASSWORD" ]]; then
             ADMIN_PASSWORD="$(gen_secret 20)"; PASSWORD_GENERATED=true
         else
@@ -573,7 +615,7 @@ if [[ "$FRESH" == true ]]; then
             if [[ "$ADMIN_PASSWORD" =~ [\'\"\\\$\`[:space:]\#] ]]; then
                 die "the temporary password must not contain quotes, backslashes, \$, backticks, # or spaces — it lives in .env briefly; you'll set your real password (no restrictions) at first login"
             fi
-            read -r -p "Repeat password: " -s CONFIRM; echo
+            read -r -u "$PROMPT_FD" -p "Repeat password: " -s CONFIRM; echo
             [[ "$ADMIN_PASSWORD" == "$CONFIRM" ]] || die "passwords do not match"
         fi
     fi
