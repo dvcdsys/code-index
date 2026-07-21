@@ -121,8 +121,9 @@ At the end it prints the dashboard URL and your admin login — and offers to in
 git clone https://github.com/dvcdsys/code-index && cd code-index
 cp .env.example .env
 # Edit .env — set CIX_API_KEY, CIX_BOOTSTRAP_ADMIN_EMAIL, CIX_BOOTSTRAP_ADMIN_PASSWORD
+docker compose pull                               # `up -d` alone reuses any local image, however old
 docker compose up -d                              # CPU
-# docker compose -f docker-compose.cuda.yml up -d # NVIDIA GPU
+# docker compose -f docker-compose.cuda.yml pull && docker compose -f docker-compose.cuda.yml up -d # NVIDIA GPU
 curl http://localhost:21847/health                # → {"status":"ok"}
 ```
 

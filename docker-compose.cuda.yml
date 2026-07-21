@@ -1,7 +1,12 @@
 services:
   code-index-api:
     image: dvcdsys/code-index:cu128
-    container_name: code-index
+    # No container_name on purpose. A fixed name is global to the docker
+    # daemon, so a second cix on the same host (a Portainer stack, another
+    # clone, a re-run from a different directory) dies with "the container
+    # name /code-index is already in use". Compose's own
+    # <project>-<service>-1 naming keeps them side by side; ask for the real
+    # name with `docker compose ps` when a command needs it.
     restart: unless-stopped
     ports:
       - "${PORT:-21847}:21847"
@@ -67,8 +72,10 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       # Operator-managed bind for sqlite + chroma so backups and inspection
-      # are one `cd` away on the host. Make sure the directory is owned by
-      # 1001:1001 OR use `user: "0:0"` — see CLAUDE.md.
+      # are one `cd` away on the host. On Linux the directory must be owned
+      # by 1001:1001 (`sudo chown -R 1001:1001 ~/.cix/data`) or the server
+      # cannot create its database; `user: "0:0"` is the less safe fallback.
+      # install-server.sh does the chown for you. See doc/TEAM_DEPLOYMENT.md.
       - ${HOME}/.cix/data:/data
       # Docker-managed named volume layered ON TOP of /data/models. This
       # isolates the GGUF cache from host-side bind permission issues and

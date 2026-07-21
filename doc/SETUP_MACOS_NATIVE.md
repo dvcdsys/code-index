@@ -38,7 +38,7 @@ them works):
 |---|---|
 | Mode | `native` on Apple Silicon |
 | Data directory | `~/.cix/data` |
-| HTTP port | `21847` |
+| HTTP port | `21847` (on a re-run: the port already in `.env`) |
 | Admin email | your `git config user.email` |
 | Admin password | auto-generated (printed at the end) |
 | Run mode | `launchd` (background, starts at login) |
@@ -80,6 +80,10 @@ second copy of the settings to keep in sync.
 ```bash
 ./install-server.sh    # checks the remote, offers to git pull, rebuilds; data, accounts and .env are kept
 ```
+
+The port question defaults to the port already in `.env`, so pressing
+Enter changes nothing. Answering differently (or passing `--port`)
+rewrites `CIX_PORT` in the kept `.env` and restarts the server there.
 
 ### Forgot the admin password?
 
@@ -200,9 +204,14 @@ and `YOUR_USER` placeholder before loading.
 Save as `~/Library/LaunchAgents/com.cix.server.plist`, then:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.cix.server.plist
-launchctl start com.cix.server
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cix.server.plist
+launchctl print gui/$(id -u)/com.cix.server   # confirm it really loaded
 ```
+
+Use `bootstrap`, not the legacy `launchctl load`: `load` prints its
+errors but still exits `0`, so a failed load looks like a successful
+one. Either way, `launchctl print` is the only trustworthy answer to
+"is it loaded?".
 
 After every `git pull` that updates `server/`, rebuild and the
 plist picks up the new binary automatically (the path doesn't
@@ -210,7 +219,7 @@ change):
 
 ```bash
 cd server && make bundle
-launchctl stop com.cix.server  # KeepAlive will respawn the new binary
+launchctl kickstart -k gui/$(id -u)/com.cix.server  # restart onto the new binary
 ```
 
 (The installer's variant of this differs in one way: its plist runs a
@@ -226,7 +235,7 @@ place instead of being duplicated into `EnvironmentVariables`.)
 | Installer stops at "Checking prerequisites" | Missing Go / Node / Xcode CLT. | Follow the `brew install` hint it prints, re-run. |
 | `make bundle` fails downloading llama-server | Network blocked, or upstream release moved. | Inspect `server/Makefile`'s download URL; report if upstream changed. |
 | Server starts but `/health` 404s | Wrong port. | `lsof -i :21847` to confirm. Check `CIX_PORT` in `.env`. |
-| Health check takes minutes on first boot | The embedding model (~600 MB) downloads before serving. | Watch `tail -f ~/.cix/logs/cix-server.err`; it's a one-time cost. |
+| Health check takes minutes on first boot | The embedding model (~150 MB) downloads before serving. | Watch `tail -f ~/.cix/logs/cix-server.err`; it's a one-time cost. |
 | GPU not used (CPU fallback) | `CIX_N_GPU_LAYERS=0` set in `.env`. | Remove it (macOS default offloads all layers) or set `99`. |
 | "killed: 9" on first llama-server launch | macOS amfid rejected the unsigned binary. | Re-run `make bundle` (or the installer) to refresh the local signature. |
 | Server starts via terminal but not via `launchd` | Launcher script or `.env` missing / unreadable. | Check `~/.cix/logs/cix-server.err`; re-run `./install-server.sh` to regenerate. |

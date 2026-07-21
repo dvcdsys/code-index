@@ -73,6 +73,7 @@ See [`DOCKER_TAGS.md`](DOCKER_TAGS.md) for the full tag lifecycle.
 git clone https://github.com/dvcdsys/code-index.git
 cd code-index
 cp .env.example .env      # then edit — see §4
+docker compose pull       # `up -d` only pulls when the image is MISSING locally
 docker compose up -d
 docker compose logs -f code-index-api   # watch for "listening on :21847"
 ```
@@ -80,6 +81,7 @@ docker compose logs -f code-index-api   # watch for "listening on :21847"
 ### 3b. GPU (CUDA)
 
 ```bash
+docker compose -f docker-compose.cuda.yml pull
 docker compose -f docker-compose.cuda.yml up -d
 ```
 
@@ -138,8 +140,8 @@ The compose files mount two things:
 - CPU image → `65532:65532`
 - CUDA image → `1001:1001`
 
-The bind directory must be writable by that uid, or the server can't open the
-DB. Either:
+On Linux the bind directory must be writable by that uid, or the server can't
+open the DB — it crash-loops on `unable to open database file`. Either:
 
 ```bash
 # CPU image
@@ -151,6 +153,20 @@ sudo chown -R 1001:1001 ~/.cix/data
 …or add `user: "0:0"` to the service to fall back to root (less safe). If you
 are migrating from an old root-owned volume, `chown` it **before** switching
 to the non-root image. See [`SECURITY_DEPLOYMENT.md`](SECURITY_DEPLOYMENT.md).
+`install-server.sh` performs this chown for you (it asks first) — the manual
+command is only needed when you drive compose directly. macOS Docker Desktop
+maps ownership transparently, so none of this applies there.
+
+**The named volume follows the same uid.** Docker copies the image's
+ownership onto `cix-models` only while the volume is still empty, so a cache
+that an older *root*-running image already filled stays root-owned and the
+next model download fails with `permission denied`. The same applies when one
+host switches between the CPU (65532) and CUDA (1001) images. Fix it without
+a shell in the image:
+
+```bash
+docker run --rm -v <project>_cix-models:/v busybox chown -R 1001:1001 /v
+```
 
 **Optional — seed the model offline.** Air-gapped hosts can skip the
 first-boot HuggingFace download by binding a `.gguf` read-only at
@@ -294,6 +310,7 @@ Full hardening guidance: [`SECURITY_DEPLOYMENT.md`](SECURITY_DEPLOYMENT.md).
 |---|---|
 | `no users in database and the bootstrap admin env vars are not set` | Set both bootstrap vars, restart. |
 | Server can't open the DB / read-only errors | `/data` bind not owned by the container uid — `chown` to 65532 (CPU) or 1001 (CUDA). |
+| `resolve gguf: mkdir /data/models/…: permission denied` | The `cix-models` volume was initialised by a root-running image (or the other image's uid) — chown it, see §5. |
 | GPU image runs but `nvidia-smi` shows no cix process | NVIDIA Container Toolkit missing, or silent CPU fallback — check logs for CUDA offload lines. |
 | Webhooks never fire | `CIX_PUBLIC_URL` unset or server behind NAT — use Managed Tunnels or polling. |
 | Search results changed/empty after upgrade | Reindex — the pipeline moved. |

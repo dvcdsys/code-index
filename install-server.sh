@@ -3,29 +3,41 @@
 # deployment mode (native macOS / Docker CPU / Docker GPU), asks a few
 # questions, and brings the server up.
 #
-# From a clone:
-#   git clone https://github.com/dvcdsys/code-index && cd code-index
-#   ./install-server.sh
-#
-# Or in one line (clones the repo for you, then continues inside it):
-#   curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
-#
-# Re-running is safe: an existing database and .env are detected and kept.
-#
-# Flags (all optional — without them the script prompts interactively):
-#   --mode <m>           native | docker | docker-gpu
-#   --email <addr>       admin email for the first account
-#   --port <n>           HTTP port                      (default 21847)
-#   --data-dir <path>    data directory, native mode    (default ~/.cix/data;
-#                        Docker modes always use ~/.cix/data — set in compose)
-#   --run-mode <m>       native mode only: launchd | manual
-#   --dir <path>         where to clone when run outside a repo (default ./code-index)
-#   --non-interactive    accept defaults, never prompt (requires --email on a
-#                        fresh install; generates the admin password)
-#   --uninstall          stop + remove the server (data and .env are kept)
-#   --help               this text
+# The usage text lives in usage() below, as a here-doc rather than a
+# self-read of this file: piped in (`curl … | bash -s -- --help`) there is no
+# file to read back.
 
 set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+install-server.sh — interactive installer for cix-server. Picks a
+deployment mode (native macOS / Docker CPU / Docker GPU), asks a few
+questions, and brings the server up.
+
+From a clone:
+  git clone https://github.com/dvcdsys/code-index && cd code-index
+  ./install-server.sh
+
+Or in one line (clones the repo for you, then continues inside it):
+  curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
+
+Re-running is safe: an existing database and .env are detected and kept.
+
+Flags (all optional — without them the script prompts interactively):
+  --mode <m>           native | docker | docker-gpu
+  --email <addr>       admin email for the first account
+  --port <n>           HTTP port        (default: the .env value, else 21847)
+  --data-dir <path>    data directory, native mode    (default ~/.cix/data;
+                       Docker modes always use ~/.cix/data — set in compose)
+  --run-mode <m>       native mode only: launchd | manual
+  --dir <path>         where to clone when run outside a repo (default ./code-index)
+  --non-interactive    accept defaults, never prompt (requires --email on a
+                       fresh install; generates the admin password)
+  --uninstall          stop + remove the server (data and .env are kept)
+  --help               this text
+EOF
+}
 
 REPO_URL="https://github.com/dvcdsys/code-index"
 PLIST_LABEL="com.cix.server"
@@ -33,6 +45,11 @@ PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 LAUNCHER_DIR="$HOME/.cix/launchd"
 LAUNCHER="$LAUNCHER_DIR/run-cix-server.sh"
 LOG_DIR="$HOME/.cix/logs"
+
+# Where prompts read from. Stays 0 when stdin is the terminal; becomes 3 when
+# stdin is a pipe and the terminal has to be opened separately (see below).
+PROMPT_FD=0
+PROMPTS_OK=true
 
 # ── ui helpers ────────────────────────────────────────────────────────────
 # tput exits non-zero on capability-poor terminals (TERM=dumb, some CI) —
@@ -49,6 +66,14 @@ ok()   { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
 warn() { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
 die()  { printf '%s✗ %s%s\n' "$RED" "$1" "$RESET" >&2; exit 1; }
 
+# require_tty — every prompt goes through here first: with no terminal a
+# `read` would swallow whatever stdin does carry (under `curl | bash` that is
+# the rest of this script), so die with an actionable message instead.
+require_tty() {
+    [[ "$PROMPTS_OK" == true ]] \
+        || die "no terminal available for prompts — pass --non-interactive (with --email on a fresh install)"
+}
+
 # ask VAR "Question" "default" — prompt with default; honors NON_INTERACTIVE.
 ask() {
     local __var="$1" __q="$2" __def="$3" __ans
@@ -56,7 +81,8 @@ ask() {
         printf -v "$__var" '%s' "$__def"
         return
     fi
-    read -r -p "$__q [$__def]: " __ans
+    require_tty
+    read -r -u "$PROMPT_FD" -p "$__q [$__def]: " __ans
     printf -v "$__var" '%s' "${__ans:-$__def}"
 }
 
@@ -71,6 +97,7 @@ ask_choice() {
         printf -v "$__var" '%s' "$__def"
         return
     fi
+    require_tty
     local __i __defnum=1
     say ""
     say "$__q"
@@ -80,7 +107,7 @@ ask_choice() {
     done
     local __ans
     while true; do
-        read -r -p "Choice [$__defnum]: " __ans
+        read -r -u "$PROMPT_FD" -p "Choice [$__defnum]: " __ans
         __ans="${__ans:-$__defnum}"
         if [[ "$__ans" =~ ^[0-9]+$ ]] && (( __ans >= 1 && __ans <= ${#__opts[@]} )); then
             printf -v "$__var" '%s' "${__opts[$((__ans - 1))]}"
@@ -105,7 +132,8 @@ ask_yn() {
         [[ "$__def" == "y" ]]
         return
     fi
-    read -r -p "$__q $__hint: " __ans
+    require_tty
+    read -r -u "$PROMPT_FD" -p "$__q $__hint: " __ans
     __ans="${__ans:-$__def}"
     [[ "$__ans" == "y" || "$__ans" == "Y" || "$__ans" == "yes" ]]
 }
@@ -116,18 +144,131 @@ gen_secret() { # gen_secret <len> — unambiguous alphanumerics
     LC_ALL=C tr -dc 'a-km-np-zA-HJ-NP-Z2-9' </dev/urandom | head -c "$1" || true
 }
 
-# wait_health <port> — poll /health for up to ~5 minutes.
+# container_failing <name> — true when the container has crashed and Docker
+# is restarting it (or has given up). A slow first boot stays "running", so
+# this never fires on the model download it is meant to be distinguished from.
+# "restarting 0" is the very first transition — one more cycle is granted
+# before calling it a loop.
+container_failing() {
+    local state
+    # RestartCount is a TOP-LEVEL field — {{.State.RestartCount}} does not
+    # exist and makes the whole template (and this check) fail silently.
+    state=$(docker inspect --format '{{.State.Status}} {{.RestartCount}}' "$1" 2>/dev/null) || return 1
+    case "$state" in
+        exited*|dead*)  return 0 ;;
+        "restarting 0") return 1 ;;
+        restarting*)    return 0 ;;
+        *)              return 1 ;;
+    esac
+}
+
+# wait_health <port> [container] — poll /health for up to ~5 minutes. With a
+# container name a crash loop ends the wait immediately: polling the full
+# five minutes and then blaming the model download is how two permission
+# bugs stayed invisible through an entire install.
 wait_health() {
-    local url="http://localhost:$1/health"
-    say "${DIM}First boot downloads the embedding model (~600 MB) before serving — this can take a few minutes.${RESET}"
+    local url="http://localhost:$1/health" cname="${2:-}"
+    # Size of the default model, awhiteside/CodeRankEmbed-Q8_0-GGUF: 139 MB of
+    # GGUF (doc/benchmark-q8-vs-fp16.md). Keep it honest — this line doubles as
+    # the excuse the timeout below prints, so an inflated number buys a broken
+    # install extra minutes of patience.
+    say "${DIM}First boot downloads the embedding model (~150 MB) before serving — this can take a few minutes.${RESET}"
     for _ in $(seq 1 100); do
         if curl -fsS -m 2 "$url" >/dev/null 2>&1; then
             ok "server is healthy at $url"
             return 0
         fi
+        if [[ -n "$cname" ]] && container_failing "$cname"; then
+            warn "$cname is crash-looping — it will not come up on its own."
+            say "${DIM}last lines of  docker logs $cname:${RESET}"
+            docker logs --tail 12 "$cname" 2>&1 | sed 's/^/    /'
+            return 2
+        fi
         sleep 3
     done
     warn "server not answering yet — it may still be downloading the model."
+    return 1
+}
+
+# chown_as_root <uid> <path> — chown -R to <uid>:<uid> without assuming the
+# caller has sudo. Passwordless sudo is used silently, an interactive sudo
+# shows the command it is about to run, and when there is no usable sudo the
+# Docker daemon (which is root) does it from a throwaway container — anyone
+# who can start the server can already do this.
+chown_as_root() {
+    local uid="$1" target="$2"
+    if command -v sudo >/dev/null 2>&1; then
+        if sudo -n true 2>/dev/null; then
+            if sudo chown -R "$uid:$uid" "$target"; then return 0; fi
+        elif [[ "$NON_INTERACTIVE" == false ]]; then
+            say "${DIM}running: sudo chown -R $uid:$uid $target${RESET}"
+            if sudo chown -R "$uid:$uid" "$target"; then return 0; fi
+        fi
+    fi
+    docker run --rm -v "$target:/target" busybox chown -R "$uid:$uid" /target >/dev/null 2>&1
+}
+
+# ── launchd helpers ───────────────────────────────────────────────────────
+# `launchctl bootout` is asynchronous: it returns while the job is still
+# draining out of the domain, and bootstrapping the same label inside that
+# window fails with "Input/output error". The legacy `launchctl load` fails
+# in exactly the same window but exits 0 — so no exit code here is worth
+# trusting. Every step below asks launchd whether the label is really there.
+LAUNCHD_DOMAIN="gui/$(id -u)"
+
+# launchd_loaded — true when the agent is present in the user domain.
+launchd_loaded() { launchctl print "$LAUNCHD_DOMAIN/$PLIST_LABEL" >/dev/null 2>&1; }
+
+# launchd_pid — pid of the running job; empty when it is registered but has
+# no process (never started, crashed, or on its way out of the domain).
+launchd_pid() {
+    launchctl print "$LAUNCHD_DOMAIN/$PLIST_LABEL" 2>/dev/null \
+        | awk -F' = ' '/^\tpid = /{print $2; exit}'
+}
+
+# launchd_unload — bootout, then wait (≤10 s) for the label to disappear.
+launchd_unload() {
+    launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_LABEL" >/dev/null 2>&1 || true
+    for _ in $(seq 1 50); do
+        launchd_loaded || return 0
+        sleep 0.2
+    done
+    return 1
+}
+
+# launchd_load — (re)load the agent from $PLIST_PATH and confirm it took.
+# The whole drain→bootstrap cycle is retried: a domain that was busy on the
+# first attempt is usually ready on the second.
+launchd_load() {
+    for _ in 1 2 3; do
+        # Only bootstrap into a domain we watched go empty — a job that is
+        # still draining answers `print` as well, so a presence check made
+        # after a failed bootstrap would happily report the OLD job.
+        if launchd_unload; then
+            launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST_PATH" >/dev/null 2>&1 \
+                || launchctl load "$PLIST_PATH" >/dev/null 2>&1 || true
+            if launchd_loaded; then
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# launchd_restart — restart an agent that is already loaded, in place. Fails
+# (so the caller can fall back to a full reload) unless a process is actually
+# running afterwards: a job that was on its way out of the domain accepts a
+# kickstart and then disappears anyway.
+launchd_restart() {
+    launchd_loaded || return 1
+    launchctl kickstart -k "$LAUNCHD_DOMAIN/$PLIST_LABEL" >/dev/null 2>&1 || return 1
+    for _ in $(seq 1 15); do
+        if [[ -n "$(launchd_pid)" ]]; then
+            return 0
+        fi
+        sleep 0.2
+    done
     return 1
 }
 
@@ -148,19 +289,33 @@ while [[ $# -gt 0 ]]; do
         --dir)       ARG_CLONE_DIR="$2"; shift 2 ;;
         --non-interactive) NON_INTERACTIVE=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
-        --help|-h)   sed -n '2,27p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --help|-h)   usage; exit 0 ;;
         *) die "unknown flag: $1 (see --help)" ;;
     esac
 done
 
-# curl | bash leaves stdin on the pipe — rewire prompts to the terminal.
+# curl | bash leaves stdin on the pipe — point prompts at the terminal, on a
+# SEPARATE fd. `exec </dev/tty` looks tidier and is what this used to do, but
+# under `curl | bash` fd 0 *is* the script bash is still reading: replacing it
+# throws the unread remainder away, and the one-liner exits 0 having installed
+# nothing. Reading prompts from fd 3 leaves the source stream alone.
+#
+# Openability also has to be tested by opening: `-r /dev/tty` only reads the
+# device node's permission bits, so it passes with no controlling terminal —
+# where the open then fails and set -e kills the script with bash's raw
+# "Device not configured" instead of the message in require_tty.
 if [[ "$NON_INTERACTIVE" == false && ! -t 0 ]]; then
-    if [[ -r /dev/tty ]]; then
-        exec </dev/tty
+    if { exec 3</dev/tty; } 2>/dev/null; then
+        PROMPT_FD=3
     else
-        die "no terminal available for prompts — pass --non-interactive (with --email on a fresh install)"
+        PROMPTS_OK=false
     fi
 fi
+
+# An uninstall asks nothing, so a missing terminal must not stop it — CI and
+# agents drive it that way. Anything else will prompt: fail now rather than
+# part-way through an install.
+[[ "$UNINSTALL" == true ]] || require_tty
 
 # ── bootstrap: running outside a clone? clone, then delegate ──────────────
 SCRIPT_PATH="${BASH_SOURCE[0]:-}"
@@ -195,6 +350,15 @@ fi
 
 BUNDLE_DIR="$REPO_ROOT/server/dist/cix-darwin-arm64"
 ENV_FILE="$REPO_ROOT/.env"
+
+# env_get <KEY> — value of the last KEY= line in .env (quotes and stray
+# whitespace stripped), empty when the key or the file is absent.
+# || true: an absent key is normal here, but pipefail would turn grep's
+# exit 1 into a fatal error under set -e.
+env_get() {
+    [[ -f "$ENV_FILE" ]] || return 0
+    grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "'\"" | tr -d '[:space:]' || true
+}
 
 # ── clone freshness: don't install from a stale checkout ──────────────────
 # A user may clone, get distracted, and come back weeks later — meanwhile
@@ -240,28 +404,80 @@ compose() {
     fi
 }
 
+# Which compose file the docker modes use. Empty (= docker-compose.yml) until
+# the mode is known; the uninstall path runs before that and does not need it,
+# because compose identifies containers by project, not by file.
+COMPOSE_ARGS=()
+CF=""
+
+# compose_container — real name of this clone's cix container, empty when
+# there is none. The compose files no longer pin container_name (it collides
+# with any other cix on the host), so the name is <project>-<service>-1 and
+# has to be asked for. Compose matches its own labels rather than the name,
+# so this also finds containers created by older, container_name-pinned
+# versions of these files — and, unlike a name grep, never matches a cix that
+# belongs to somebody else's project.
+compose_container() {
+    local ids id name
+    docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null || return 1
+    # `ps -aq` (stopped containers included) postdates compose v2.0; the
+    # legacy binary lists them with a plain `ps -q` anyway.
+    ids=$( (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} ps -aq 2>/dev/null || true) )
+    [[ -z "$ids" ]] && ids=$( (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} ps -q 2>/dev/null || true) )
+    # First line only, without a `| head` — under pipefail that is a SIGPIPE
+    # (exit 141) waiting to kill the script.
+    id="${ids%%$'\n'*}"
+    [[ -n "$id" ]] || return 1
+    name=$(docker inspect "$id" --format '{{.Name}}' 2>/dev/null | sed 's|^/||')
+    [[ -n "$name" ]] || return 1
+    printf '%s' "$name"
+}
+
+# image_created <ref> — YYYY-MM-DD a local image was built, empty when the
+# image is not on this host. Used to date the image we fall back to when a
+# pull fails, so "reusing the local image" is never a silent claim.
+image_created() {
+    local __c
+    __c=$(docker image inspect "$1" --format '{{.Created}}' 2>/dev/null || true)
+    printf '%s' "${__c%%T*}"
+}
+
 # ── uninstall ─────────────────────────────────────────────────────────────
 if [[ "$UNINSTALL" == true ]]; then
     step "Uninstalling cix-server"
     removed=false
     if [[ -f "$PLIST_PATH" ]]; then
-        if launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null; then
+        if ! launchd_loaded; then
+            warn "launchd agent was not running"
+        elif launchd_unload; then
             ok "launchd agent stopped"
         else
-            warn "launchd agent was not running"
+            warn "launchd agent is still draining — it will stop on its own"
         fi
         rm -f "$PLIST_PATH" "$LAUNCHER"
         ok "removed $PLIST_PATH"
         removed=true
     fi
-    if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "code-index"; then
-        (cd "$REPO_ROOT" && compose down) && ok "docker container removed (named model volume kept)"
+    # Ask compose, not `docker ps | grep code-index`: on a host that runs a
+    # cix of its own (a Portainer stack, another clone) the name matched
+    # THEIR container, `compose down` then removed nothing from this project,
+    # and the uninstall reported success anyway.
+    if command -v docker >/dev/null && UNINSTALL_CONTAINER=$(compose_container); then
+        (cd "$REPO_ROOT" && compose down) \
+            && ok "docker container $UNINSTALL_CONTAINER removed (named model volume kept)"
         removed=true
     fi
-    [[ "$removed" == false ]] && warn "nothing to uninstall (no launchd agent, no code-index container)"
+    [[ "$removed" == false ]] && warn "nothing to uninstall (no launchd agent, no container from this clone)"
     say ""
     say "Kept: your data directory and $ENV_FILE."
-    say "To wipe all indexed data too:  rm -rf ~/.cix/data   (irreversible)"
+    # After a Docker install on Linux the data directory belongs to the
+    # container uid, so a plain rm -rf fails halfway through.
+    WIPE_CMD="rm -rf ~/.cix/data   ${DIM}(irreversible)${RESET}"
+    if [[ "$(uname -s)" == "Linux" && -d "$HOME/.cix/data" \
+        && "$(stat -c %u "$HOME/.cix/data" 2>/dev/null || id -u)" != "$(id -u)" ]]; then
+        WIPE_CMD="sudo rm -rf ~/.cix/data   ${DIM}(irreversible; the container uid owns it)${RESET}"
+    fi
+    say "To wipe all indexed data too:  $WIPE_CMD"
     exit 0
 fi
 
@@ -351,13 +567,31 @@ if [[ -f "$SQLITE_PATH" ]]; then
     say "${DIM}For a truly fresh start, move the data away first:  mv ~/.cix/data ~/.cix/data.bak${RESET}"
 fi
 
-ask PORT "HTTP port" "${ARG_PORT:-21847}"
+# Which key pins the port depends on the mode: native runs the server
+# itself (CIX_PORT is its listen port), while the Docker modes only map a
+# host port (the container always listens on 21847).
+PORT_KEY="PORT"
+[[ "$MODE" == "native" ]] && PORT_KEY="CIX_PORT"
+ENV_PORT="$(env_get "$PORT_KEY")"
+if [[ -n "$ENV_PORT" && ! "$ENV_PORT" =~ ^[0-9]+$ ]]; then
+    warn "$ENV_FILE pins a non-numeric $PORT_KEY ($ENV_PORT) — it will be replaced"
+    ENV_PORT=""
+fi
+[[ -n "$ENV_PORT" ]] && say "Current port in $ENV_FILE: ${BOLD}$ENV_PORT${RESET} ${DIM}(answer differently to change it)${RESET}"
+
+# An existing .env supplies the default, so Enter is a no-op on a re-run;
+# an explicit --port still wins. A different answer is written back to the
+# kept .env by sync_env_port — otherwise the question would be decorative
+# and the server would come up on the old port.
+ask PORT "HTTP port" "${ARG_PORT:-${ENV_PORT:-21847}}"
 [[ "$PORT" =~ ^[0-9]+$ ]] || die "port must be a number"
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    if [[ "$FRESH" == true ]]; then
-        die "port $PORT is already in use (lsof -i :$PORT) — pick another port or stop that process"
-    else
+    if [[ "$FRESH" == false && ( -z "$ENV_PORT" || "$PORT" == "$ENV_PORT" ) ]]; then
         warn "port $PORT is in use — assuming it's the running cix-server; it will be restarted"
+    else
+        # Fresh install, or a re-run moving to a DIFFERENT port: whatever is
+        # listening there is not the cix-server we are about to (re)start.
+        die "port $PORT is already in use (lsof -i :$PORT) — pick another port or stop that process"
     fi
 fi
 
@@ -372,7 +606,7 @@ if [[ "$FRESH" == true ]]; then
     if [[ "$NON_INTERACTIVE" == true ]]; then
         ADMIN_PASSWORD="$(gen_secret 20)"; PASSWORD_GENERATED=true
     else
-        read -r -p "Admin password — leave empty to auto-generate a strong one []: " -s ADMIN_PASSWORD; echo
+        read -r -u "$PROMPT_FD" -p "Admin password — leave empty to auto-generate a strong one []: " -s ADMIN_PASSWORD; echo
         if [[ -z "$ADMIN_PASSWORD" ]]; then
             ADMIN_PASSWORD="$(gen_secret 20)"; PASSWORD_GENERATED=true
         else
@@ -385,7 +619,7 @@ if [[ "$FRESH" == true ]]; then
             if [[ "$ADMIN_PASSWORD" =~ [\'\"\\\$\`[:space:]\#] ]]; then
                 die "the temporary password must not contain quotes, backslashes, \$, backticks, # or spaces — it lives in .env briefly; you'll set your real password (no restrictions) at first login"
             fi
-            read -r -p "Repeat password: " -s CONFIRM; echo
+            read -r -u "$PROMPT_FD" -p "Repeat password: " -s CONFIRM; echo
             [[ "$ADMIN_PASSWORD" == "$CONFIRM" ]] || die "passwords do not match"
         fi
     fi
@@ -439,6 +673,40 @@ write_env() {
     ok "wrote $ENV_FILE (mode 600)"
 }
 
+# sync_env_port — make a kept .env agree with the answered port. Without
+# this the port question is decorative on a re-run: .env wins, so the
+# server (re)starts on the old port while wait_health polls the new one for
+# five minutes and every URL in the summary points at nothing.
+sync_env_port() {
+    if ! grep -qE "^$PORT_KEY=" "$ENV_FILE"; then
+        {
+            echo ""
+            if [[ "$MODE" == "native" ]]; then
+                echo "# HTTP port, added by install-server.sh on $(date '+%Y-%m-%d %H:%M')."
+            else
+                echo "# Host port mapping used by docker-compose.yml (container stays on 21847)."
+            fi
+            echo "$PORT_KEY=$PORT"
+        } >> "$ENV_FILE"
+        ok "added $PORT_KEY=$PORT to the existing .env"
+    elif [[ "$ENV_PORT" != "$PORT" ]]; then
+        sed -i.bak "s|^$PORT_KEY=.*|$PORT_KEY=$PORT|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+        ok "updated $PORT_KEY in $ENV_FILE: ${ENV_PORT:-unset} → $PORT"
+    fi
+
+    # A .env left over from a NATIVE install still pins the server's own
+    # listen port. Reused for Docker, the container would listen on that
+    # port while compose maps host $PORT → 21847 — nothing answers, and the
+    # summary URL lies exactly like the bug this function fixes.
+    if [[ "$MODE" != "native" ]]; then
+        local inner
+        inner="$(env_get CIX_PORT)"
+        if [[ -n "$inner" && "$inner" != "21847" ]]; then
+            warn "$ENV_FILE sets CIX_PORT=$inner (left over from a native install) — the container would listen there while compose maps host $PORT → 21847. Delete that line before starting."
+        fi
+    fi
+}
+
 # ensure_env — write .env if absent; otherwise keep it, but never drop the
 # admin answers: a fresh DB + a pre-existing .env without the seed vars
 # (typical on dev machines) would make the server refuse to boot.
@@ -448,6 +716,7 @@ ensure_env() {
         return
     fi
     ok "keeping existing $ENV_FILE (delete it and re-run to regenerate)"
+    sync_env_port
     # An API key is optional for the server itself, but on first boot it is
     # imported as the admin's 'env-bootstrap' key — which is what lets the
     # CLI connect right after install. Guarantee one exists (and replace
@@ -480,7 +749,8 @@ ensure_env() {
 
 # ── install per mode ──────────────────────────────────────────────────────
 # SERVER_STATE drives the honesty of the final summary: running | starting
-# (came up slow / still downloading the model) | not_started (manual mode).
+# (came up slow / still downloading the model) | crashed (container is
+# restart-looping, cause already printed) | not_started (manual mode).
 SERVER_STATE=not_started
 LOGS_CMD=""
 if [[ "$MODE" == "native" ]]; then
@@ -514,7 +784,7 @@ exec "$BUNDLE_DIR/cix-server"
 EOF
         chmod 755 "$LAUNCHER"
 
-        cat > "$PLIST_PATH" <<EOF
+        NEW_PLIST=$(cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -527,13 +797,29 @@ EOF
   <key>StandardErrorPath</key><string>$LOG_DIR/cix-server.err</string>
 </dict></plist>
 EOF
+)
+        # launchd reads the plist at load time only, so an unchanged re-run
+        # has nothing to reload — compare before overwriting, and restart
+        # such an agent in place with kickstart. That skips the unload
+        # window (and its drain race) entirely for the common upgrade path.
+        PLIST_CHANGED=true
+        if [[ -f "$PLIST_PATH" ]] && [[ "$(cat "$PLIST_PATH")" == "$NEW_PLIST" ]]; then
+            PLIST_CHANGED=false
+        fi
+        printf '%s\n' "$NEW_PLIST" > "$PLIST_PATH"
 
-        # Restart cleanly if a previous agent exists; bootstrap is the
-        # modern load verb (falls back to load for older macOS).
-        launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
-        launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null \
-            || launchctl load "$PLIST_PATH"
-        ok "agent loaded — starts automatically at login, respawns on crash"
+        # The launcher is re-executed on restart, so a changed .env or a
+        # rebuilt binary is picked up by kickstart too.
+        if [[ "$PLIST_CHANGED" == false ]] && launchd_restart; then
+            ok "agent restarted — starts automatically at login, respawns on crash"
+        elif launchd_load; then
+            ok "agent loaded — starts automatically at login, respawns on crash"
+        else
+            die "launchd would not load $PLIST_LABEL. Load it by hand with:
+    launchctl bootout $LAUNCHD_DOMAIN/$PLIST_LABEL
+    launchctl bootstrap $LAUNCHD_DOMAIN $PLIST_PATH
+  then re-run this installer. Errors, if any: $LOG_DIR/cix-server.err"
+        fi
 
         step "Waiting for the server to come up"
         LOGS_CMD="tail -f $LOG_DIR/cix-server.err"
@@ -547,34 +833,107 @@ EOF
 else
     COMPOSE_ARGS=()
     IMAGE_UID=65532
+    IMAGE_REF="dvcdsys/code-index:latest"
     if [[ "$MODE" == "docker-gpu" ]]; then
         COMPOSE_ARGS=(-f "$REPO_ROOT/docker-compose.cuda.yml")
+        CF=" -f docker-compose.cuda.yml"   # same, for the printed commands
         IMAGE_UID=1001
+        IMAGE_REF="dvcdsys/code-index:cu128"
     fi
 
     step "Writing configuration"
     ensure_env
     mkdir -p "$DATA_DIR"
 
-    # The container writes /data as a non-root uid; a Linux bind mount
-    # owned by someone else fails on first write. macOS Docker Desktop
-    # maps ownership transparently — no action needed there.
+    # A Linux bind mount keeps its host ownership, and the images run as a
+    # non-root uid (65532 CPU, 1001 CUDA). A data directory created by the
+    # login user (typically uid 1000) is therefore read-only to the server:
+    # it cannot create /data/sqlite and dies with "unable to open database
+    # file" on every restart. Warning and continuing was not enough — this
+    # is a guaranteed crash loop — so fix it, with consent, or stop here.
+    # macOS Docker Desktop maps ownership transparently; skip all of it.
     if [[ "$OS" == "Linux" ]]; then
         DIR_UID=$(stat -c %u "$DATA_DIR" 2>/dev/null || echo "?")
-        if [[ "$DIR_UID" != "$IMAGE_UID" ]]; then
-            warn "the image writes $DATA_DIR as uid $IMAGE_UID, but the directory is owned by uid $DIR_UID."
-            warn "If the container fails to start, run:  sudo chown -R $IMAGE_UID:$IMAGE_UID $DATA_DIR"
+        DIR_MODE=$(stat -c %a "$DATA_DIR" 2>/dev/null || echo 0)
+        # A world-writable directory works for any uid — leave it alone.
+        DIR_OTHER_W=$(( 8#$DIR_MODE & 2 ))
+        if [[ "$DIR_UID" != "$IMAGE_UID" && "$DIR_OTHER_W" -eq 0 ]]; then
+            warn "$DATA_DIR is owned by uid $DIR_UID, but the $MODE image runs as uid $IMAGE_UID and cannot write there."
+            if ask_yn "Fix it now (chown -R $IMAGE_UID:$IMAGE_UID $DATA_DIR)?" y; then
+                if chown_as_root "$IMAGE_UID" "$DATA_DIR"; then
+                    ok "$DATA_DIR now belongs to $IMAGE_UID:$IMAGE_UID"
+                else
+                    die "could not change the owner of $DATA_DIR. Run this and re-run the installer:  sudo chown -R $IMAGE_UID:$IMAGE_UID $DATA_DIR"
+                fi
+            else
+                die "not continuing — the container would crash-loop on its first write. Fix it with:  sudo chown -R $IMAGE_UID:$IMAGE_UID $DATA_DIR"
+            fi
+        fi
+
+        # The GGUF cache lives in the cix-models named volume. Docker copies
+        # the image's ownership onto a volume only while it is EMPTY (a fresh
+        # volume nested under the /data bind does inherit it — verified on
+        # Docker 28.4), so a volume an older ROOT-running image already
+        # filled stays root-owned forever and the model download dies with
+        # "permission denied". Same story when a host switches between the
+        # CPU (65532) and CUDA (1001) images. Fresh installs get the right
+        # uid for free, so this only runs when the volume already exists.
+        COMPOSE_PROJECT=$( (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} config 2>/dev/null | sed -n 's/^name: *//p' | tr -d '"' | head -1) || true )
+        if [[ -n "$COMPOSE_PROJECT" ]] && docker volume inspect "${COMPOSE_PROJECT}_cix-models" >/dev/null 2>&1; then
+            MODELS_VOL="${COMPOSE_PROJECT}_cix-models"
+            VOL_UID=$(docker run --rm -v "$MODELS_VOL:/v" busybox stat -c %u /v 2>/dev/null || echo "$IMAGE_UID")
+            if [[ "$VOL_UID" != "$IMAGE_UID" ]]; then
+                warn "the model cache volume $MODELS_VOL is owned by uid $VOL_UID, not $IMAGE_UID."
+                if docker run --rm -v "$MODELS_VOL:/v" busybox chown -R "$IMAGE_UID:$IMAGE_UID" /v >/dev/null 2>&1; then
+                    ok "model cache ownership fixed"
+                else
+                    warn "could not fix it — if the model download fails, run:  docker run --rm -v $MODELS_VOL:/v busybox chown -R $IMAGE_UID:$IMAGE_UID /v"
+                fi
+            fi
         fi
     fi
 
-    step "Pulling the image and starting the container"
+    # The literals above are only for messages; ask compose what it will
+    # actually run so a tag change in the compose file can't make us lie.
+    # Older compose builds lack `config --images` — then the literal stands.
+    IMAGE_FROM_COMPOSE=$( (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} config --images 2>/dev/null | head -1) || true )
+    [[ -n "$IMAGE_FROM_COMPOSE" ]] && IMAGE_REF="$IMAGE_FROM_COMPOSE"
+
+    # `up -d` only pulls when the image is MISSING locally, so without an
+    # explicit pull any host that ever pulled this tag installs whatever it
+    # happens to have — silently, health check and all.
+    step "Pulling the image"
+    if (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} pull); then
+        IMAGE_BUILT=$(image_created "$IMAGE_REF")
+        ok "$IMAGE_REF is current${IMAGE_BUILT:+ (built $IMAGE_BUILT)}"
+    else
+        # Offline, or the registry is down. Starting from the local image is
+        # the right degradation — the rest of this script degrades the same
+        # way — but it must be visible, and dated, not a silent stale run.
+        IMAGE_BUILT=$(image_created "$IMAGE_REF")
+        [[ -n "$IMAGE_BUILT" ]] \
+            || die "could not pull $IMAGE_REF and no local copy exists — check the network (or Docker Hub) and re-run"
+        warn "could not pull $IMAGE_REF — starting from the local image, built $IMAGE_BUILT"
+        warn "That may be several releases behind. Re-run the installer once the network is back to upgrade."
+    fi
+
+    step "Starting the container"
     (cd "$REPO_ROOT" && compose ${COMPOSE_ARGS[@]+"${COMPOSE_ARGS[@]}"} up -d)
-    ok "container started"
+    # Compose picks the name (<project>-<service>-1) — an install that ran
+    # before container_name was dropped keeps its old one. Either way, every
+    # command we print from here on has to use the name that actually exists.
+    CONTAINER=$(compose_container || true)
+    ok "container started${CONTAINER:+ — $CONTAINER}"
 
     step "Waiting for the server to come up"
-    LOGS_CMD="docker logs -f code-index"
-    if wait_health "$PORT"; then
+    LOGS_CMD="cd '$REPO_ROOT' && docker compose$CF logs -f"
+    [[ -n "$CONTAINER" ]] && LOGS_CMD="docker logs -f $CONTAINER"
+    HEALTH_RC=0
+    wait_health "$PORT" "$CONTAINER" || HEALTH_RC=$?
+    if [[ "$HEALTH_RC" -eq 0 ]]; then
         SERVER_STATE=running
+    elif [[ "$HEALTH_RC" -eq 2 ]]; then
+        SERVER_STATE=crashed
     else
         SERVER_STATE=starting
         warn "Watch progress with:  $LOGS_CMD"
@@ -641,12 +1000,21 @@ if [[ "$NON_INTERACTIVE" == false ]]; then
 fi
 
 # ── summary ───────────────────────────────────────────────────────────────
-step "Install complete 🟢"
+if [[ "$SERVER_STATE" == "crashed" ]]; then
+    step "Install incomplete 🔴"
+else
+    step "Install complete 🟢"
+fi
 say ""
 case "$SERVER_STATE" in
     running)
         say "  Server:      ${GREEN}running${RESET}"
         say "  Dashboard:   ${BOLD}http://localhost:$PORT/dashboard${RESET}"
+        ;;
+    crashed)
+        say "  Server:      ${RED}NOT running${RESET} — the container keeps crashing (cause printed above)"
+        say "               full logs:  $LOGS_CMD"
+        say "               fix the cause, then re-run:  ${BOLD}./install-server.sh${RESET}"
         ;;
     starting)
         say "  Server:      ${YELLOW}NOT ready yet${RESET} — still starting (first boot downloads the embedding model)"
@@ -678,6 +1046,9 @@ if [[ "$SERVER_STATE" == "not_started" ]]; then
 elif [[ "$SERVER_STATE" == "starting" ]]; then
     say "    $N. Wait until the server is ready (watch: $LOGS_CMD)."
     N=$((N + 1))
+elif [[ "$SERVER_STATE" == "crashed" ]]; then
+    say "    $N. Fix the error above, then re-run:  ${BOLD}./install-server.sh${RESET}"
+    N=$((N + 1))
 fi
 say "    $N. Sign in to the dashboard and change the password when prompted."
 N=$((N + 1))
@@ -692,15 +1063,16 @@ say ""
 if [[ "$MODE" == "native" && "$RUN_MODE" == "launchd" ]]; then
     say "  Manage the server:"
     say "    logs       tail -f $LOG_DIR/cix-server.err"
-    say "    restart    launchctl kickstart -k gui/$(id -u)/$PLIST_LABEL"
-    say "    stop       launchctl bootout gui/$(id -u)/$PLIST_LABEL"
+    say "    restart    launchctl kickstart -k $LAUNCHD_DOMAIN/$PLIST_LABEL"
+    say "    stop       launchctl bootout $LAUNCHD_DOMAIN/$PLIST_LABEL"
     say "    uninstall  ./install-server.sh --uninstall"
     say "    upgrade    git pull && ./install-server.sh   (data and settings are kept)"
 elif [[ "$MODE" != "native" ]]; then
-    CF=""
-    [[ "$MODE" == "docker-gpu" ]] && CF=" -f docker-compose.cuda.yml"
-    say "  Manage the server:"
-    say "    logs       docker logs -f code-index"
+    # The compose commands act on this clone's project, so they only mean
+    # what they say from the repo root — the container name is no longer
+    # fixed, and a second cix on this host has a project of its own.
+    say "  Manage the server:  ${DIM}(compose commands run from $REPO_ROOT)${RESET}"
+    say "    logs       $LOGS_CMD"
     say "    restart    docker compose$CF restart"
     say "    stop       docker compose$CF down          (data survives)"
     say "    uninstall  ./install-server.sh --uninstall"
@@ -708,3 +1080,8 @@ elif [[ "$MODE" != "native" ]]; then
 fi
 say "  Forgot the admin password later?   ./server/scripts/reset-password.sh <email>"
 say ""
+
+# A crash-looping container is a failed install, not a slow one — say so in
+# the exit status too, so scripted installs don't report success.
+[[ "$SERVER_STATE" == "crashed" ]] && exit 1
+exit 0
