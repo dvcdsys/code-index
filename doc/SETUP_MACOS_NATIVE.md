@@ -38,7 +38,7 @@ them works):
 |---|---|
 | Mode | `native` on Apple Silicon |
 | Data directory | `~/.cix/data` |
-| HTTP port | `21847` |
+| HTTP port | `21847` (on a re-run: the port already in `.env`) |
 | Admin email | your `git config user.email` |
 | Admin password | auto-generated (printed at the end) |
 | Run mode | `launchd` (background, starts at login) |
@@ -80,6 +80,10 @@ second copy of the settings to keep in sync.
 ```bash
 ./install-server.sh    # checks the remote, offers to git pull, rebuilds; data, accounts and .env are kept
 ```
+
+The port question defaults to the port already in `.env`, so pressing
+Enter changes nothing. Answering differently (or passing `--port`)
+rewrites `CIX_PORT` in the kept `.env` and restarts the server there.
 
 ### Forgot the admin password?
 
