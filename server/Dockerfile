@@ -37,20 +37,36 @@ RUN cd dashboard && \
 # ── Stage: fetch the cloudflared binary (Managed Tunnels feature) ──────────
 # Pinned static binary, fetched per target arch. The tunnel is OFF by default
 # (CIX_TUNNEL_ENABLED unset) — this only bundles the binary so operators can
-# opt in without rebuilding. Bump CLOUDFLARED_VERSION deliberately and re-run
-# `make scout-cpu` before any prod push. Optionally pass CLOUDFLARED_SHA256 to
-# verify the download.
+# opt in without rebuilding.
+#
+# THE PIN ROTS SILENTLY. Dependabot only tracks `FROM` images, and CI scans
+# the source tree — neither ever sees a binary fetched at image-build time.
+# The 2025.2.1 pin sat here unbumped from 2026-05-20 until 2026-07-24 and was
+# carrying 46 of the image's 50 HIGH/CRITICAL findings on its own (Go 1.22.10
+# stdlib, x/crypto 0.31.0, coredns 1.11.3). When bumping:
+#   1. update BOTH Dockerfiles AND `cloudflaredVersion` in
+#      internal/tunnels/installer.go (the managed installer downloads its own
+#      copy — a stale const there silently re-installs the old binary),
+#   2. refresh the checksums below and `pinnedSHA256` in installer.go,
+#   3. re-run `make scout-cpu` / `make scout-cuda` before any prod push.
 FROM alpine:3.24 AS cloudflared
 ARG TARGETARCH
-ARG CLOUDFLARED_VERSION=2025.2.1
-ARG CLOUDFLARED_SHA256=""
+ARG CLOUDFLARED_VERSION=2026.7.3
+# SHA-256 of the release artifact, per arch. Cloudflare publishes no checksum
+# file, so these are computed from the downloaded assets and pinned here —
+# keep them in sync with pinnedSHA256 in internal/tunnels/installer.go.
+ARG CLOUDFLARED_SHA256_AMD64=9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4972098d19f770f17
+ARG CLOUDFLARED_SHA256_ARM64=65259e652a7bea08bf5df603233ab22b8bf3116af8df9f9206209af6a1b955c0
 RUN apk add --no-cache curl ca-certificates
-RUN curl -fsSL \
+RUN case "${TARGETARCH}" in \
+      amd64) want="${CLOUDFLARED_SHA256_AMD64}" ;; \
+      arm64) want="${CLOUDFLARED_SHA256_ARM64}" ;; \
+      *) echo "no pinned cloudflared sha256 for arch '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL \
       "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${TARGETARCH}" \
       -o /cloudflared && \
-    if [ -n "${CLOUDFLARED_SHA256}" ]; then \
-      echo "${CLOUDFLARED_SHA256}  /cloudflared" | sha256sum -c - ; \
-    fi && \
+    echo "${want}  /cloudflared" | sha256sum -c - && \
     chmod 0755 /cloudflared
 
 # ── Stage: fetch the ngrok agent (Managed Tunnels — ngrok provider) ────────

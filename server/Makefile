@@ -142,10 +142,21 @@ test-gate:
 	CIX_GGUF_PATH="$$(cat bench/results/reference_gguf_path.txt)" \
 	$(GO) test -tags=embed_gate -v -run TestEmbeddingParity ./internal/embeddings/...
 
+# NGROK_NOCACHE forces the `ngrok` stage to re-run on every build. ngrok is
+# served from a floating "v3-stable" channel with no per-version URL, so its
+# RUN layer would otherwise sit in the builder cache indefinitely and keep
+# baking in whatever build first populated it — "floating" is not the same as
+# "fresh" once buildx caches the download. The cloudflared stage needs no such
+# flag: its ARG is an exact version, so a bump invalidates the layer by itself.
+# CI builds run on clean runners with no layer cache, so this is a
+# local/dev-builder concern only.
+NGROK_NOCACHE := --no-cache-filter=ngrok
+
 docker-build-cuda:
 	docker buildx build \
 	  --builder $(BUILDER) \
 	  --platform linux/amd64 \
+	  $(NGROK_NOCACHE) \
 	  --pull \
 	  --provenance=mode=max \
 	  --sbom=true \
@@ -169,6 +180,7 @@ docker-build-cuda-dev:
 	docker buildx build \
 	  --builder $(BUILDER) \
 	  --platform linux/amd64 \
+	  $(NGROK_NOCACHE) \
 	  --pull \
 	  --provenance=mode=max \
 	  --sbom=true \
@@ -196,6 +208,7 @@ scout-cuda:
 	docker buildx build \
 	  --builder $(BUILDER) \
 	  --platform linux/amd64 \
+	  $(NGROK_NOCACHE) \
 	  --pull \
 	  --provenance=mode=max \
 	  --sbom=true \
@@ -222,6 +235,7 @@ scout-cpu:
 	@echo "→ Building CPU image locally"
 	docker buildx build \
 	  --load \
+	  $(NGROK_NOCACHE) \
 	  --build-arg VERSION=$(VERSION) \
 	  --build-context openapi=$(ROOT)/../doc \
 	  -t $(IMAGE_REPO):scout-cpu-tmp \

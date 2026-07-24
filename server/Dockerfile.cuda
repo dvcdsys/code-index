@@ -61,19 +61,24 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     ./cmd/cix-server
 
 # ── Stage 1b: fetch cloudflared (Managed Tunnels feature, off by default) ──
-# Static amd64 binary (this image is amd64-only). Bump CLOUDFLARED_VERSION
-# deliberately and re-run `make scout-cuda` before any prod push. Optionally
-# pass CLOUDFLARED_SHA256 to verify the download.
+# Static amd64 binary (this image is amd64-only).
+#
+# THE PIN ROTS SILENTLY — Dependabot only tracks `FROM` images and CI scans the
+# source tree, so nothing watches a binary fetched at image-build time. See the
+# full note in server/Dockerfile; when bumping, update BOTH Dockerfiles, the
+# checksum below, and `cloudflaredVersion` + `pinnedSHA256` in
+# internal/tunnels/installer.go, then re-run `make scout-cuda`.
 FROM --platform=linux/amd64 alpine:3.24 AS cloudflared
-ARG CLOUDFLARED_VERSION=2025.2.1
-ARG CLOUDFLARED_SHA256=""
+ARG CLOUDFLARED_VERSION=2026.7.3
+# SHA-256 of cloudflared-linux-amd64 for the pinned version. Cloudflare
+# publishes no checksum file, so this is computed from the downloaded asset —
+# keep it in sync with pinnedSHA256 in internal/tunnels/installer.go.
+ARG CLOUDFLARED_SHA256=9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4972098d19f770f17
 RUN apk add --no-cache curl ca-certificates
 RUN curl -fsSL \
       "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
       -o /cloudflared && \
-    if [ -n "${CLOUDFLARED_SHA256}" ]; then \
-      echo "${CLOUDFLARED_SHA256}  /cloudflared" | sha256sum -c - ; \
-    fi && \
+    echo "${CLOUDFLARED_SHA256}  /cloudflared" | sha256sum -c - && \
     chmod 0755 /cloudflared
 
 # ── Stage 1c: fetch the ngrok agent (Managed Tunnels — ngrok provider) ─────
