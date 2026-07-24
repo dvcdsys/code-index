@@ -22,7 +22,11 @@ import (
 // downloads. Pinned (not "latest") for reproducibility — keep it in sync
 // with the CLOUDFLARED_VERSION arg in server/Dockerfile*. ngrok is fetched
 // from its "v3-stable" channel (ngrok publishes no per-version URLs).
-const cloudflaredVersion = "2025.2.1"
+//
+// This const is the SECOND half of the pin: bumping only the Dockerfiles
+// ships a fresh bundled binary while an operator who clicks "Update" in the
+// dashboard still gets the old one. Bump both, and refresh pinnedSHA256.
+const cloudflaredVersion = "2026.7.3"
 
 // maxBinaryBytes caps a managed download to guard against a decompression
 // bomb / runaway response. Comfortably above the real agents (~35 MB).
@@ -32,9 +36,23 @@ const maxBinaryBytes = 300 << 20 // 300 MiB
 // hex SHA-256 of the downloaded artifact (raw binary for cloudflared/linux,
 // the .tgz for archived assets). When an entry exists the download is
 // verified against it; when absent the installer logs a warning with the
-// computed sum so an operator can pin it. Populate from the vendor's
-// published checksums.
-var pinnedSHA256 = map[string]string{}
+// computed sum so an operator can pin it.
+//
+// cloudflared is pinned to an exact version, so every platform it supports is
+// listed here. Cloudflare publishes no checksum file — these were computed
+// from the release assets and must be refreshed together with
+// cloudflaredVersion.
+//
+// ngrok is deliberately ABSENT: it is served from a floating "v3-stable"
+// channel with no per-version URL, so any sum pinned here would start
+// rejecting legitimate downloads the moment ngrok publishes. Those downloads
+// fall through to the warn-and-accept path (HTTPS from the official CDN).
+var pinnedSHA256 = map[string]string{
+	"cloudflare/2026.7.3/linux/amd64":  "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4972098d19f770f17",
+	"cloudflare/2026.7.3/linux/arm64":  "65259e652a7bea08bf5df603233ab22b8bf3116af8df9f9206209af6a1b955c0",
+	"cloudflare/2026.7.3/darwin/amd64": "70d1c8684fa6d14b5843787ec8d1ea8e18b23650e424f4ea43d849a506487c3b",
+	"cloudflare/2026.7.3/darwin/arm64": "90c5a4f914d705fd70c135dba6d80b1791d254b08d6d4136301941f88330dd09",
+}
 
 // BinaryStatus describes a provider's agent binary for the dashboard, so it
 // can render install instructions (local) or Install/Update buttons
