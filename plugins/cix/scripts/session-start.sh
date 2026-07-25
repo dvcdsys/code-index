@@ -92,12 +92,35 @@ find "$CACHE_DIR" -maxdepth 1 -type f \
     \( -name 'cix-aware-*' -o -name 'cix-grep-count-*' \) \
     -mtime +30 -delete 2>/dev/null || true
 
+# ── Emit additionalContext JSON for SessionStart ──────────────────────────────
+emit_additional_context() {
+    local msg="$1"
+    if command -v jq >/dev/null 2>&1; then
+        jq -n --arg msg "$msg" \
+            '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $msg}}'
+    else
+        local esc
+        esc=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+        printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$esc"
+    fi
+}
+
+# One-line setup hint for the "plugin installed but no server anywhere"
+# state. Shown only when NO cix server is configured on this machine —
+# a configured-but-unreachable server or a merely-unindexed project stays
+# silent as before. Without this, the plugin fails with cryptic errors on
+# first use and the user never learns the missing piece is the server.
+NO_SERVER_MESSAGE='cix plugin: no cix server is configured on this machine. The plugin is a client for a self-hosted cix (CodeIndeX) server — without one, /cix commands and skills have nothing to talk to. Setup takes ~10 minutes: https://codeindex.app — or connect to an existing server with `cix config set api.url <url>` + `cix config set api.key <key>`. If the user asks about cix or tries /cix commands, surface this. Otherwise do not bring it up on your own.'
+
 # ── Resolve a working `cix` binary ────────────────────────────────────────────
 CIX_BIN="$(cix_resolve_bin)"
 
 if [ -z "$CIX_BIN" ]; then
     # CLI not yet installed (would auto-bootstrap on first call). Mark off.
     printf '0' > "$CACHE_FILE"
+    if ! cix_server_configured; then
+        emit_additional_context "$NO_SERVER_MESSAGE"
+    fi
     exit 0
 fi
 
@@ -112,8 +135,13 @@ if [ "$VERDICT" = "unknown" ]; then
 fi
 
 if [ "$VERDICT" != "1" ]; then
-    # Definitive "not indexed". Stay silent for the session in this project.
+    # Definitive "not indexed". Stay silent for the session in this project —
+    # unless there is no server configured at all, which deserves the
+    # one-line setup hint (the plugin is unusable in every project then).
     printf '0' > "$CACHE_FILE"
+    if ! cix_server_configured; then
+        emit_additional_context "$NO_SERVER_MESSAGE"
+    fi
     exit 0
 fi
 
@@ -122,12 +150,6 @@ printf '1' > "$CACHE_FILE"
 
 MESSAGE='💡 This project has a cix semantic code index. For semantic queries — finding code by meaning, cross-file lookups, symbol navigation, "where is X used", "how does Y work" — use the CLI: `cix search`, `cix def`, `cix refs` (via Bash). Activate the /cix SKILL for guidance. Use Grep only for exact strings (error messages, config keys, import paths). Run `cix status` if results seem stale.'
 
-if command -v jq >/dev/null 2>&1; then
-    jq -n --arg msg "$MESSAGE" \
-        '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $msg}}'
-else
-    ESC=$(printf '%s' "$MESSAGE" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-    printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$ESC"
-fi
+emit_additional_context "$MESSAGE"
 
 exit 0

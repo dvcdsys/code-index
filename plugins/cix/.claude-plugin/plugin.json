@@ -1,8 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "cix",
-  "version": "0.3.0",
-  "description": "Semantic code search and navigation for Claude Code via the cix index. Single-repo cix skill + commands (incl. cix file / cix tree for external projects), plus the experimental cix-workspace skill and cix-workspace-investigator sub-agent for cross-project research across cix workspaces.",
+  "version": "0.3.1",
+  "description": "Semantic code search for Claude Code. Requires a self-hosted cix (CodeIndeX) server — free, MIT, ~10-minute install (https://codeindex.app) on your machine, LAN box, or GPU server; the plugin is the client. Ships the cix CLI, slash commands (incl. cix file / cix tree for external projects), behavioral hooks, the cix skill, plus the experimental cix-workspace skill and cix-workspace-investigator sub-agent for cross-project research.",
   "author": {
     "name": "dvcdsys",
     "email": "dvcdsys@gmail.com"
@@ -12,6 +12,7 @@
   "license": "MIT",
   "keywords": [
     "search",
+    "self-hosted",
     "code-search",
     "semantic",
     "navigation",

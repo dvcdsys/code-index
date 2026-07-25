@@ -3,6 +3,23 @@
 Semantic code search and navigation for Claude Code, powered by the
 [cix](https://github.com/dvcdsys/code-index) index.
 
+## Requires a self-hosted cix server
+
+This plugin is a **client**. All indexing and search happen on a
+[cix (CodeIndeX)](https://codeindex.app) server that **you deploy
+yourself** — on your laptop, a LAN box, or a GPU server. Free, MIT,
+~10 minutes with the interactive installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
+```
+
+Already have a server on your network? Point the CLI at it instead:
+`cix config set api.url <url>` and `cix config set api.key <key>` — or
+paste the ready-made connect command from the dashboard's API-keys
+dialog. Without a reachable server, the slash commands and skills have
+nothing to talk to.
+
 ## What you get
 
 - **`/cix:search`, `/cix:def`, `/cix:refs`, `/cix:init`, `/cix:status`,

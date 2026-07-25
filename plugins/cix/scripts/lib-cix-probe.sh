@@ -15,6 +15,20 @@
 # which silenced the nudge for the ENTIRE session even if the cix server
 # came up seconds later. "unknown" lets the next Grep re-probe and recover.
 
+# cix_server_configured — exit 0 when this machine has any cix server
+# configured (env override or a url in ~/.cix/config.yaml), nonzero
+# otherwise. Used by session-start.sh to tell "no server at all" (worth a
+# one-time setup hint) apart from "server exists, project not indexed"
+# (stay silent). A heuristic on purpose: any `url:` key counts, whether a
+# named server entry or a legacy api.url — false positives just suppress
+# the hint, which is the safe direction.
+cix_server_configured() {
+    [ -n "${CIX_API_URL:-}" ] && return 0
+    local cfg="${HOME:-}/.cix/config.yaml"
+    [ -f "$cfg" ] && grep -qE 'url:[[:space:]]*[^[:space:]#]' "$cfg" && return 0
+    return 1
+}
+
 # cix_resolve_bin — echo a usable cix binary path, or empty string.
 # Prefers the plugin-bundled wrapper so behavior matches the slash commands.
 cix_resolve_bin() {
