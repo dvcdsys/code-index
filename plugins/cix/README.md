@@ -15,10 +15,11 @@ curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-ser
 ```
 
 Already have a server on your network? Point the CLI at it instead:
-`cix config set api.url <url>` and `cix config set api.key <key>` — or
-paste the ready-made connect command from the dashboard's API-keys
-dialog. Without a reachable server, the slash commands and skills have
-nothing to talk to.
+`cix config set server.main.url <url>` and
+`cix config set server.main.key <key>` (the first server added becomes
+the default) — or paste the ready-made connect command from the
+dashboard's API-keys dialog. Without a reachable server, the slash
+commands and skills have nothing to talk to.
 
 ## What you get
 

@@ -8,7 +8,7 @@ teardown() { teardown_test_env; }
 
 # ─── Functional ───────────────────────────────────────────────────────────────
 
-@test "indexed project: writes cache=1 and emits reminder" {
+@test "indexed project: writes cache=1 and emits reminder (never the setup hint)" {
     export MOCK_CIX_EXIT=0
     run_hook session-start.sh "sess-A" "$TEST_PROJECT_DIR"
 
@@ -16,6 +16,7 @@ teardown() { teardown_test_env; }
     [[ "$output" == *"hookSpecificOutput"* ]]
     [[ "$output" == *"SessionStart"* ]]
     [[ "$output" == *"semantic code index"* ]]
+    [[ "$output" != *"no cix server is configured"* ]]
     [ "$(read_cache 'sess-A' "$TEST_PROJECT_DIR")" = "1" ]
 }
 
@@ -38,6 +39,44 @@ teardown() { teardown_test_env; }
     [[ "$output" == *"hookSpecificOutput"* ]]
     [[ "$output" == *"no cix server is configured"* ]]
     [ "$(read_cache 'sess-B2' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
+@test "setup hint is rate-limited: second session within 7 days stays silent" {
+    export MOCK_CIX_EXIT=1
+    run_hook session-start.sh "sess-RL1" "$TEST_PROJECT_DIR"
+    [[ "$output" == *"no cix server is configured"* ]]
+
+    # Same cache dir → marker exists and is fresh → no second hint.
+    run_hook session-start.sh "sess-RL2" "$TEST_PROJECT_DIR"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ -f "$TEST_CACHE_DIR/cix-setup-hint" ]
+    [ "$(read_cache 'sess-RL2' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
+@test "config.yaml without any url: counts as NOT configured — hint fires" {
+    mkdir -p "$TEST_HOME/.cix"
+    printf 'watcher:\n  enabled: true\n' > "$TEST_HOME/.cix/config.yaml"
+    export MOCK_CIX_EXIT=1
+    run_hook session-start.sh "sess-noUrl" "$TEST_PROJECT_DIR"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no cix server is configured"* ]]
+}
+
+@test "non-indexed project, CIX_API_KEY set (implicit localhost default): stays silent" {
+    export MOCK_CIX_EXIT=1
+    run env \
+        PATH="$TEST_MOCK_BIN:$PATH" \
+        HOME="$TEST_HOME" \
+        CIX_API_KEY="cix_testkey" \
+        CLAUDE_PLUGIN_DATA="$TEST_CACHE_DIR" \
+        CLAUDE_PROJECT_DIR="$TEST_PROJECT_DIR" \
+        bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"sess-B4\"}"
+
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(read_cache 'sess-B4' "$TEST_PROJECT_DIR")" = "0" ]
 }
 
 @test "non-indexed project, CIX_API_URL set: writes cache=0 and stays silent" {
@@ -177,6 +216,7 @@ teardown() { teardown_test_env; }
 
     touch -t "$old_ts" "$TEST_CACHE_DIR/cix-aware-old-aaaa1111"
     touch -t "$old_ts" "$TEST_CACHE_DIR/cix-grep-count-old-bbbb2222"
+    touch -t "$old_ts" "$TEST_CACHE_DIR/cix-setup-hint"
     touch "$TEST_CACHE_DIR/cix-aware-new-cccc3333"  # recent, must be kept
 
     export MOCK_CIX_EXIT=0
@@ -184,6 +224,7 @@ teardown() { teardown_test_env; }
 
     [ ! -f "$TEST_CACHE_DIR/cix-aware-old-aaaa1111" ]
     [ ! -f "$TEST_CACHE_DIR/cix-grep-count-old-bbbb2222" ]
+    [ ! -f "$TEST_CACHE_DIR/cix-setup-hint" ]
     [ -f "$TEST_CACHE_DIR/cix-aware-new-cccc3333" ]
 }
 
