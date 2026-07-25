@@ -19,13 +19,40 @@ teardown() { teardown_test_env; }
     [ "$(read_cache 'sess-A' "$TEST_PROJECT_DIR")" = "1" ]
 }
 
-@test "non-indexed project: writes cache=0 and stays silent" {
+@test "non-indexed project, server configured: writes cache=0 and stays silent" {
+    make_server_config
     export MOCK_CIX_EXIT=1
     run_hook session-start.sh "sess-B" "$TEST_PROJECT_DIR"
 
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     [ "$(read_cache 'sess-B' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
+@test "non-indexed project, NO server configured: writes cache=0 and emits setup hint" {
+    # TEST_HOME has no .cix/config.yaml and CIX_API_URL is unset.
+    export MOCK_CIX_EXIT=1
+    run_hook session-start.sh "sess-B2" "$TEST_PROJECT_DIR"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hookSpecificOutput"* ]]
+    [[ "$output" == *"no cix server is configured"* ]]
+    [ "$(read_cache 'sess-B2' "$TEST_PROJECT_DIR")" = "0" ]
+}
+
+@test "non-indexed project, CIX_API_URL set: writes cache=0 and stays silent" {
+    export MOCK_CIX_EXIT=1
+    run env \
+        PATH="$TEST_MOCK_BIN:$PATH" \
+        HOME="$TEST_HOME" \
+        CIX_API_URL="http://localhost:21847" \
+        CLAUDE_PLUGIN_DATA="$TEST_CACHE_DIR" \
+        CLAUDE_PROJECT_DIR="$TEST_PROJECT_DIR" \
+        bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"sess-B3\"}"
+
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(read_cache 'sess-B3' "$TEST_PROJECT_DIR")" = "0" ]
 }
 
 @test "missing session_id: silent, no cache written" {
@@ -41,7 +68,7 @@ teardown() { teardown_test_env; }
     [ -z "$(ls "$TEST_CACHE_DIR"/cix-aware-* 2>/dev/null)" ]
 }
 
-@test "cix CLI not on PATH: writes cache=0, silent" {
+@test "cix CLI not on PATH, server configured: writes cache=0, silent" {
     # Use /tmp as cache dir so the guard accepts it without TMPDIR set.
     # Use a PATH that excludes both our mock and any system-installed cix.
     local tmp_cache="/tmp/cix-test-noCix-$$"
@@ -57,9 +84,11 @@ teardown() { teardown_test_env; }
         fi
     fi
 
+    make_server_config
+
     run env -i \
         PATH="/usr/bin:/bin" \
-        HOME="$HOME" \
+        HOME="$TEST_HOME" \
         CLAUDE_PLUGIN_DATA="$tmp_cache" \
         CLAUDE_PROJECT_DIR="$TEST_PROJECT_DIR" \
         bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"sess-noCix\"}"
@@ -70,6 +99,37 @@ teardown() { teardown_test_env; }
     local hash
     hash=$(printf '%s' "$TEST_PROJECT_DIR" | shasum -a 256 | cut -c1-8)
     [ "$(cat "$tmp_cache/cix-aware-sess-noCix-$hash" 2>/dev/null)" = "0" ]
+
+    rm -rf "$tmp_cache"
+}
+
+@test "cix CLI not on PATH, NO server configured: writes cache=0 and emits setup hint" {
+    local tmp_cache="/tmp/cix-test-noCixHint-$$"
+    mkdir -p "$tmp_cache"
+
+    if command -v cix >/dev/null 2>&1; then
+        local sys_cix
+        sys_cix=$(command -v cix)
+        if [[ "$sys_cix" == /usr/bin/* || "$sys_cix" == /bin/* || "$sys_cix" == /sbin/* || "$sys_cix" == /usr/sbin/* ]]; then
+            rm -rf "$tmp_cache"
+            skip "system cix is in $sys_cix — can't reliably remove from PATH for this test"
+        fi
+    fi
+
+    # TEST_HOME has no .cix/config.yaml; env -i drops CIX_API_URL.
+    run env -i \
+        PATH="/usr/bin:/bin" \
+        HOME="$TEST_HOME" \
+        CLAUDE_PLUGIN_DATA="$tmp_cache" \
+        CLAUDE_PROJECT_DIR="$TEST_PROJECT_DIR" \
+        bash "$TEST_PLUGIN_ROOT/scripts/session-start.sh" <<<"{\"session_id\":\"sess-noCixHint\"}"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hookSpecificOutput"* ]]
+    [[ "$output" == *"no cix server is configured"* ]]
+    local hash
+    hash=$(printf '%s' "$TEST_PROJECT_DIR" | shasum -a 256 | cut -c1-8)
+    [ "$(cat "$tmp_cache/cix-aware-sess-noCixHint-$hash" 2>/dev/null)" = "0" ]
 
     rm -rf "$tmp_cache"
 }
