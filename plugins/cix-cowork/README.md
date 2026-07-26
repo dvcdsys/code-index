@@ -8,7 +8,10 @@ This plugin is **skills only**: no MCP server, no CLI, no hooks. It teaches the
 agent *how* to use the cix tools well (cix-vs-grep judgment, choosing the
 cheapest tool, query writing, the cross-project workflow, and the workspace
 trust rules). The tools themselves come from the cix MCP server, which you
-register separately.
+register separately — and everything ultimately talks to a
+**self-hosted [cix (CodeIndeX) server](https://codeindex.app)** that you
+deploy yourself (free, MIT, ~10-minute install). No server → nothing to
+search.
 
 ## Two steps
 

@@ -89,8 +89,31 @@ CACHE_FILE="$CACHE_DIR/cix-aware-$SESSION_ID-$DIR_HASH"
 # A file outside this prefix is invisible to find — it's never even
 # considered for deletion, regardless of how the cache dir is configured.
 find "$CACHE_DIR" -maxdepth 1 -type f \
-    \( -name 'cix-aware-*' -o -name 'cix-grep-count-*' \) \
+    \( -name 'cix-aware-*' -o -name 'cix-grep-count-*' -o -name 'cix-setup-hint' \) \
     -mtime +30 -delete 2>/dev/null || true
+
+# Setup hint for the "plugin installed but no server anywhere" state.
+# Shown only when NO cix server is configured on this machine — a
+# configured-but-unreachable server or a merely-unindexed project stays
+# silent as before. Without this, the plugin fails with cryptic errors on
+# first use and the user never learns the missing piece is the server.
+# Rate-limited to once per 7 days per machine via the cix-setup-hint
+# marker's mtime (see maybe_emit_no_server_hint), so it is a pointer,
+# not a nag; the 30-day GC above may reap the marker, which merely lets
+# the hint reappear — same order of magnitude, no harm.
+NO_SERVER_MESSAGE='cix plugin: no cix server is configured on this machine. The plugin is a client for a self-hosted cix (CodeIndeX) server — without one, /cix commands and skills have nothing to talk to. Setup takes ~10 minutes: https://codeindex.app — or connect to an existing server with `cix config set server.main.url <url>` + `cix config set server.main.key <key>`. If the user asks about cix or tries /cix commands, surface this. Otherwise do not bring it up on your own.'
+
+# maybe_emit_no_server_hint — emit NO_SERVER_MESSAGE when no server is
+# configured anywhere AND the hint has not fired in the last 7 days.
+maybe_emit_no_server_hint() {
+    cix_server_configured && return 0
+    local marker="$CACHE_DIR/cix-setup-hint"
+    if [ -n "$(find "$CACHE_DIR" -maxdepth 1 -type f -name 'cix-setup-hint' -mtime -7 2>/dev/null)" ]; then
+        return 0
+    fi
+    touch "$marker" 2>/dev/null || true
+    cix_emit_context "SessionStart" "$NO_SERVER_MESSAGE"
+}
 
 # ── Resolve a working `cix` binary ────────────────────────────────────────────
 CIX_BIN="$(cix_resolve_bin)"
@@ -98,6 +121,7 @@ CIX_BIN="$(cix_resolve_bin)"
 if [ -z "$CIX_BIN" ]; then
     # CLI not yet installed (would auto-bootstrap on first call). Mark off.
     printf '0' > "$CACHE_FILE"
+    maybe_emit_no_server_hint
     exit 0
 fi
 
@@ -112,8 +136,11 @@ if [ "$VERDICT" = "unknown" ]; then
 fi
 
 if [ "$VERDICT" != "1" ]; then
-    # Definitive "not indexed". Stay silent for the session in this project.
+    # Definitive "not indexed". Stay silent for the session in this project —
+    # unless there is no server configured at all, which deserves the
+    # rate-limited setup hint (the plugin is unusable in every project then).
     printf '0' > "$CACHE_FILE"
+    maybe_emit_no_server_hint
     exit 0
 fi
 
@@ -122,12 +149,6 @@ printf '1' > "$CACHE_FILE"
 
 MESSAGE='💡 This project has a cix semantic code index. For semantic queries — finding code by meaning, cross-file lookups, symbol navigation, "where is X used", "how does Y work" — use the CLI: `cix search`, `cix def`, `cix refs` (via Bash). Activate the /cix SKILL for guidance. Use Grep only for exact strings (error messages, config keys, import paths). Run `cix status` if results seem stale.'
 
-if command -v jq >/dev/null 2>&1; then
-    jq -n --arg msg "$MESSAGE" \
-        '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $msg}}'
-else
-    ESC=$(printf '%s' "$MESSAGE" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-    printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$ESC"
-fi
+cix_emit_context "SessionStart" "$MESSAGE"
 
 exit 0

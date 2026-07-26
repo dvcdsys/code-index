@@ -19,6 +19,7 @@ TEST_CACHE_DIR=""
 TEST_MOCK_BIN=""
 TEST_LOG_FILE=""
 TEST_PROJECT_DIR=""
+TEST_HOME=""
 
 setup_test_env() {
     # Plugin root = repo's plugins/cix directory, so scripts find their
@@ -31,6 +32,12 @@ setup_test_env() {
 
     # Per-test scratch project dir.
     TEST_PROJECT_DIR="$(mktemp -d "${BATS_TMPDIR}/cix-proj-XXXXXX")"
+
+    # Per-test scratch HOME so hook behavior never depends on the real
+    # user's ~/.cix/config.yaml (session-start.sh consults it via
+    # cix_server_configured). Tests that need "a server is configured"
+    # call make_server_config to opt in.
+    TEST_HOME="$(mktemp -d "${BATS_TMPDIR}/cix-home-XXXXXX")"
 
     # Per-test cix invocation log.
     TEST_LOG_FILE="$(mktemp "${BATS_TMPDIR}/cix-log-XXXXXX")"
@@ -49,8 +56,17 @@ teardown_test_env() {
     [ -n "$TEST_CACHE_DIR" ] && [ -d "$TEST_CACHE_DIR" ] && rm -rf "$TEST_CACHE_DIR"
     [ -n "$TEST_PROJECT_DIR" ] && [ -d "$TEST_PROJECT_DIR" ] && rm -rf "$TEST_PROJECT_DIR"
     [ -n "$TEST_LOG_FILE" ] && [ -f "$TEST_LOG_FILE" ] && rm -f "$TEST_LOG_FILE"
+    [ -n "$TEST_HOME" ] && [ -d "$TEST_HOME" ] && rm -rf "$TEST_HOME"
     unset MOCK_CIX_EXIT MOCK_CIX_DELAY MOCK_CIX_LOG_FILE MOCK_CIX_STDOUT_LINES
-    unset TEST_PLUGIN_ROOT TEST_CACHE_DIR TEST_MOCK_BIN TEST_LOG_FILE TEST_PROJECT_DIR
+    unset TEST_PLUGIN_ROOT TEST_CACHE_DIR TEST_MOCK_BIN TEST_LOG_FILE TEST_PROJECT_DIR TEST_HOME
+}
+
+# Write a minimal ~/.cix/config.yaml with a server url into TEST_HOME.
+# Tests call this to simulate "a cix server IS configured on this machine".
+make_server_config() {
+    mkdir -p "$TEST_HOME/.cix"
+    printf 'servers:\n  local:\n    url: http://localhost:21847\n' \
+        > "$TEST_HOME/.cix/config.yaml"
 }
 
 # Run a hook script with controlled env. Usage:
@@ -85,8 +101,11 @@ run_hook() {
     # We deliberately do NOT pre-empt CLAUDE_PLUGIN_ROOT/bin/cix here —
     # the wrapper has its own resolution logic that prefers it; for hook
     # tests we want the mock to win.
+    # HOME points at the per-test scratch home (see setup_test_env) so the
+    # real user's ~/.cix/config.yaml never leaks into hook behavior.
     run env \
         PATH="$TEST_MOCK_BIN:$PATH" \
+        HOME="$TEST_HOME" \
         CLAUDE_PLUGIN_DATA="$TEST_CACHE_DIR" \
         CLAUDE_PROJECT_DIR="$project_dir" \
         bash "$TEST_PLUGIN_ROOT/scripts/$script" <<<"$payload"

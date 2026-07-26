@@ -159,7 +159,7 @@ export function Agent() {
           <div className="card agent-card">
             <span className="sticker">Claude Code plugin · v{PLUGIN_VERSION}</span>
             <h3 style={{ marginTop: 14 }}>Two commands. Hooks register themselves.</h3>
-            <p>The plugin ships the CLI, eight slash commands, two lazy-loading skills, a workspace-research sub-agent, and five behavioral hooks. SessionStart checks if your project is indexed; a PostToolUse hook nudges Claude — with exponential backoff — to reach for cix instead of Grep.</p>
+            <p>The plugin is a thin client for your <b>self-hosted cix server</b> — deploy that first (see <a href="#quickstart">Quick start</a>); without it the commands have nothing to talk to. The plugin ships the CLI, eight slash commands, two lazy-loading skills, a workspace-research sub-agent, and five behavioral hooks. SessionStart checks if your project is indexed; a PostToolUse hook nudges Claude — with exponential backoff — to reach for cix instead of Grep.</p>
             <p>The skills aren't guessed prompts. They were distilled from dozens of recorded agent sessions on large codebases — VS Code among them — where grep-vs-semantic outcomes were scored retrospectively and the winning strategies became the skill text.</p>
             <pre className="code-block" style={{ margin: '12px 0' }}>
               <span className="prompt">$</span> claude plugin marketplace add dvcdsys/code-index{'\n'}

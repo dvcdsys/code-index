@@ -20,6 +20,10 @@
 
 set -euo pipefail
 
+# Shared helpers (cix_emit_context).
+# shellcheck source=lib-cix-probe.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-cix-probe.sh"
+
 INPUT=$(cat 2>/dev/null || echo "{}")
 if command -v jq >/dev/null 2>&1; then
     SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
@@ -51,12 +55,6 @@ fi
 # ── Re-inject the SessionStart reminder ───────────────────────────────────────
 MESSAGE='💡 (Post-compact reminder) This project has a cix semantic code index. For semantic queries — finding code by meaning, cross-file lookups, symbol navigation, "where is X used", "how does Y work" — use the CLI: `cix search`, `cix def`, `cix refs` (via Bash). Activate the /cix SKILL for guidance. Use Grep only for exact strings (error messages, config keys, import paths).'
 
-if command -v jq >/dev/null 2>&1; then
-    jq -n --arg msg "$MESSAGE" \
-        '{hookSpecificOutput: {hookEventName: "PostCompact", additionalContext: $msg}}'
-else
-    ESC=$(printf '%s' "$MESSAGE" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-    printf '{"hookSpecificOutput":{"hookEventName":"PostCompact","additionalContext":"%s"}}\n' "$ESC"
-fi
+cix_emit_context "PostCompact" "$MESSAGE"
 
 exit 0
