@@ -162,12 +162,6 @@ fi
 # ── Emit nudge ────────────────────────────────────────────────────────────────
 MESSAGE="💡 You just ran a file/text search in this project (call #$COUNT this session). This project has a cix semantic index — next time, for queries by meaning (find by concept, cross-file lookups, symbol navigation, locating files by symbol name), the CLI commands \`cix search\` / \`cix def\` / \`cix refs\` outperform grep/find. grep and find are best for exact strings or filename patterns (error messages, config keys, import paths, glob extensions). Recommended to activate /cix SKILL to use cix effectively"
 
-if command -v jq >/dev/null 2>&1; then
-    jq -n --arg msg "$MESSAGE" \
-        '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $msg}}'
-else
-    ESC=$(printf '%s' "$MESSAGE" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-    printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$ESC"
-fi
+cix_emit_context "PostToolUse" "$MESSAGE"
 
 exit 0

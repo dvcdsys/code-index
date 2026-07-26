@@ -15,6 +15,39 @@
 # which silenced the nudge for the ENTIRE session even if the cix server
 # came up seconds later. "unknown" lets the next Grep re-probe and recover.
 
+# cix_server_configured — exit 0 when this machine has any cix server
+# configured (env override or a url in ~/.cix/config.yaml), nonzero
+# otherwise. Used by session-start.sh to tell "no server at all" (worth a
+# setup hint) apart from "server exists, project not indexed" (stay
+# silent). A heuristic on purpose: any `url:` key counts, whether a named
+# server entry or a legacy api.url — false positives just suppress the
+# hint, which is the safe direction. CIX_API_KEY alone also counts: the
+# CLI falls back to the implicit localhost default server, so a key with
+# no config file is a working setup.
+cix_server_configured() {
+    [ -n "${CIX_API_URL:-}" ] && return 0
+    [ -n "${CIX_API_KEY:-}" ] && return 0
+    local cfg="${HOME:-}/.cix/config.yaml"
+    [ -f "$cfg" ] && grep -qE 'url:[[:space:]]*[^[:space:]#]' "$cfg" && return 0
+    return 1
+}
+
+# cix_emit_context <hookEventName> <message>
+# Emit the hookSpecificOutput JSON that feeds additionalContext back to
+# Claude. Single implementation for every hook (SessionStart, PostToolUse,
+# PostCompact); prefers jq, falls back to a sed escape for jq-less hosts.
+cix_emit_context() {
+    local event="$1" msg="$2"
+    if command -v jq >/dev/null 2>&1; then
+        jq -n --arg ev "$event" --arg msg "$msg" \
+            '{hookSpecificOutput: {hookEventName: $ev, additionalContext: $msg}}'
+    else
+        local esc
+        esc=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+        printf '{"hookSpecificOutput":{"hookEventName":"%s","additionalContext":"%s"}}\n' "$event" "$esc"
+    fi
+}
+
 # cix_resolve_bin — echo a usable cix binary path, or empty string.
 # Prefers the plugin-bundled wrapper so behavior matches the slash commands.
 cix_resolve_bin() {
