@@ -42,5 +42,14 @@
 <body>
   <div id="root"></div>
   <script type="module" src="/src/landing/main.jsx"></script>
+
+  <!-- Cloudflare Web Analytics. Installed by hand rather than by the zone's
+       "automatic setup": that injection happens in the zone HTML rewriter,
+       which never sees responses served by Pages, so the beacon simply never
+       appeared. The token is not a secret — it is public in the page source of
+       every site using Web Analytics. Cookie-free, so no consent banner.
+       Keep this in sync with docs/index.html, and note that CSP in
+       public/_headers must allow static.cloudflareinsights.com. -->
+  <script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "4c84e5500d4a403f9a322a8c66505ec7"}'></script>
 </body>
 </html>

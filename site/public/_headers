@@ -1,8 +1,17 @@
+# Cloudflare Web Analytics loads a beacon from
+# https://static.cloudflareinsights.com/beacon.min.js, hand-installed in
+# index.html and docs/index.html — the zone's "automatic setup" injects at the
+# edge in the HTML rewriter, which never sees responses served by Pages, so on
+# this site it silently does nothing. Being a third-party script, a bare
+# `script-src 'self'` blocks it and the site then reports zero traffic.
+# The beacon POSTs measurements to cloudflareinsights.com, hence the
+# connect-src entry. Both hosts are exactly what the analytics needs and
+# nothing more — no cookies, no ad network.
 /*
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   X-Frame-Options: DENY
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
