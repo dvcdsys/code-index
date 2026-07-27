@@ -2,7 +2,7 @@ import { CixAscii } from '../shared/ascii.jsx';
 import { Foot } from '../shared/foot.jsx';
 import { SERVER_VERSION, CLI_VERSION, GITHUB_URL } from '../shared/versions.js';
 import { HeroTerminal } from './terminal.jsx';
-import { Why, Features, Playground, Workspaces, Agent, CaseStudy, QuickStart, FAQ } from './sections.jsx';
+import { Fit, Why, Features, Playground, Workspaces, Agent, CaseStudy, QuickStart, FAQ } from './sections.jsx';
 
 export function App() {
   return (
@@ -11,6 +11,7 @@ export function App() {
       <main>
         <Hero />
         <div className="zigzag" />
+        <Fit />
         <Why />
         <Features />
         <Playground />

@@ -681,6 +681,20 @@ h3 { font-size: clamp(20px, 2vw, 24px); }
 .why-card h3 { font-size: 22px; margin-bottom: 8px; }
 .why-card p { color: var(--ink-soft); margin: 0; font-size: 15px; }
 
+/* Who it's for — same grid as Why, quieter marker so the two sections
+   don't read as one long numbered list. */
+.fit-card { padding: 28px; }
+.fit-card .mark {
+  font-family: var(--font-display);
+  font-size: 30px;
+  color: var(--red);
+  line-height: 1;
+  display: block;
+  margin-bottom: 12px;
+}
+.fit-card h3 { font-size: 20px; margin-bottom: 8px; }
+.fit-card p { color: var(--ink-soft); margin: 0; font-size: 15px; }
+
 /* Features grid */
 .feat-grid {
   display: grid;
