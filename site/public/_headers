@@ -1,8 +1,15 @@
+# Cloudflare Web Analytics is enabled on the Pages project (Settings -> Web
+# Analytics), which injects <script src="https://static.cloudflareinsights.com/
+# beacon.min.js"> into every HTML response at the edge. That injected tag is a
+# third-party script, so `script-src 'self'` alone silently blocks it and the
+# site reports zero traffic. The beacon then POSTs measurements to
+# cloudflareinsights.com, hence the connect-src entry. Both hosts are exactly
+# what the analytics needs and nothing more — no cookies, no ad network.
 /*
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   X-Frame-Options: DENY
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
