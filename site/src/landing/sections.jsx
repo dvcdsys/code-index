@@ -3,6 +3,37 @@ import { WorkspaceDemo } from './workspace-demo.jsx';
 import { GITHUB_URL, PLUGIN_VERSION } from '../shared/versions.js';
 import { TeamDiagram } from '../shared/team-diagram.jsx';
 
+export function Fit() {
+  return (
+    <section className="section" id="fit">
+      <div className="wrap">
+        <div className="section-head">
+          <span className="eyebrow">Who it's for</span>
+          <h2>If any of this is your week,<br/>cix was built for it.</h2>
+          <p className="lead">Three situations it was made for — and one server behind all of them.</p>
+        </div>
+        <div className="why-grid">
+          <div className="card fit-card">
+            <span className="mark" aria-hidden>→</span>
+            <h3>Your agent should already know the codebase.</h3>
+            <p>No pasted file paths, no “read these first”. Hooks nudge Claude toward the index and the skills teach it the five search modes — context arrives with the question instead of after three rounds of prompting.</p>
+          </div>
+          <div className="card fit-card">
+            <span className="mark" aria-hidden>→</span>
+            <h3>You research code you didn't write.</h3>
+            <p>Large, unfamiliar, half-remembered — the kind of repo where nobody agrees what a thing is called. Ask in plain language, get ranked <code>file:line</code> answers, across one repo or a whole workspace of them.</p>
+          </div>
+          <div className="card fit-card">
+            <span className="mark" aria-hidden>→</span>
+            <h3>Your team is spread out. So are its agents.</h3>
+            <p>One shared server rather than a per-seat sidecar: the same index for every developer, terminal and agent, with roles, view-groups and per-user API keys deciding who sees what.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function Why() {
   return (
     <section className="section" id="why">
