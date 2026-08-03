@@ -93,7 +93,7 @@ rm -f "$DEST_DIR"/* 2>/dev/null || true
 # fixed list produced a bundle whose llama-server died at dyld load time with
 # "Library not loaded: @rpath/libllama-server-impl.dylib". The same lesson is
 # already encoded in Dockerfile/Dockerfile.cuda (`COPY /app/*.so*`). The other
-# tools' impl dylibs cost ~1 MB out of a ~42 MB bundle — far cheaper than a
+# tools' impl dylibs cost ~1 MB out of a ~52 MB bundle — far cheaper than a
 # broken bundle. Standalone binaries (llama-cli, llama-bench, llama-quantize,
 # ggml-rpc-server, mtmd-*, …) are still dropped.
 cp -p "$INNER_DIR/llama-server" "$DEST_DIR/"

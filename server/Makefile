@@ -93,6 +93,13 @@ fetch-llama:
 bundle: fetch-llama build
 	@# Copy the llama/ directory next to cix-server so the runtime's
 	@# filepath.Dir(os.Executable())/llama default resolves correctly.
+	@# Wipe it first: `cp -R` merges, so without this the bundle accumulates
+	@# every dylib of every version ever built here. fetch-llama.sh cleans its
+	@# own staging dir for exactly this reason ("stale dylibs could get picked
+	@# up by DYLD") — but the bundle is the directory that actually ships and
+	@# runs. A b8914 bundle upgraded in place kept 9 stale dylibs (13 MB),
+	@# including libllama.0.0.8914.dylib, sitting next to the b10238 set.
+	rm -rf $(BUNDLE_DIR)/llama
 	mkdir -p $(BUNDLE_DIR)/llama
 	cp -R $(LLAMA_DIR)/. $(BUNDLE_DIR)/llama/
 ifeq ($(OS),darwin)
