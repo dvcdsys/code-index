@@ -55,7 +55,13 @@ jobs:
           _Auto-filed by the weekly \`llama.cpp pin freshness\` workflow._
           EOF
           )"
-          existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          # Exact-title match against the open issues, NOT `--search`. The
+          # title contains "(" and ":" — GitHub's search parser reads
+          # "chore(server/cuda):" as a (bogus) qualifier and matches nothing,
+          # so every weekly run filed a fresh duplicate instead of commenting
+          # on the existing reminder (that is how #170 and #205 both existed).
+          existing="$(gh issue list --state open --limit 200 --json number,title \
+            | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')"
           if [ -n "$existing" ]; then
             echo "Updating existing issue #$existing"
             gh issue comment "$existing" --body "$body"

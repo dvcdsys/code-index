@@ -5,7 +5,7 @@
 # commit — the new SHA256 must be appended to scripts/llama-checksums.txt and
 # the parity gate re-run before shipping.
 
-LLAMA_VERSION ?= b8914
+LLAMA_VERSION ?= b10238
 LLAMA_REPO    ?= ggml-org/llama.cpp
 
 # `make bundle OS=... ARCH=...` supports only darwin-arm64 in Phase 3.
