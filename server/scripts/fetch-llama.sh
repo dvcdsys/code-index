@@ -112,11 +112,34 @@ fi
 # DEST_DIR. Without this the breakage only surfaces at runtime, on the
 # operator's machine, as a dyld abort — exactly how the b10238 layout change
 # was found. Fail the fetch instead.
+#
+# The check must not pass vacuously. otool exits 0 even when handed a
+# non-Mach-O file (it prints "… is not an object file" and returns success),
+# and an absent otool would simply feed the loop an empty list — either way
+# an empty dependency list reads as "nothing missing" on exactly the broken
+# bundle this exists to reject. So: require the tool, require it to succeed,
+# and reject output that is not a dependency listing.
+if ! command -v otool >/dev/null 2>&1; then
+    echo "fetch-llama: otool not found — install the Xcode Command Line Tools (xcode-select --install)" >&2
+    exit 1
+fi
+if ! DEPS="$(otool -L "$DEST_DIR/llama-server" 2>&1)"; then
+    echo "fetch-llama: otool -L failed on $DEST_DIR/llama-server:" >&2
+    printf '%s\n' "$DEPS" >&2
+    exit 1
+fi
+case "$DEPS" in
+    ""|*"is not an object file"*|*"can't open file"*)
+        echo "fetch-llama: $DEST_DIR/llama-server is not a Mach-O binary — the upstream asset layout may have changed:" >&2
+        printf '%s\n' "$DEPS" >&2
+        exit 1
+        ;;
+esac
 missing=()
 while read -r dep; do
     [[ -n "$dep" ]] || continue
     [[ -e "$DEST_DIR/$dep" ]] || missing+=("$dep")
-done < <(otool -L "$DEST_DIR/llama-server" | awk '/@rpath\//{sub(/^.*@rpath\//, "", $1); print $1}')
+done < <(printf '%s\n' "$DEPS" | awk '/@rpath\//{sub(/^.*@rpath\//, "", $1); print $1}')
 if [[ ${#missing[@]} -gt 0 ]]; then
     echo "fetch-llama: llama-server has unresolved @rpath dependencies:" >&2
     printf '  %s\n' "${missing[@]}" >&2
