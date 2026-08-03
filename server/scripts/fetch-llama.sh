@@ -87,42 +87,63 @@ mkdir -p "$DEST_DIR"
 # Clean out any previous fetch — stale dylibs could get picked up by DYLD.
 rm -f "$DEST_DIR"/* 2>/dev/null || true
 
-# Files we ship. llama-server is the only binary we need; dylibs are its
-# runtime deps. We deliberately drop llama-cli, llama-bench, llama-quantize,
-# rpc-server, llama-server's *-debug variants, mtmd-*, etc. to keep the
-# bundle lean.
-SHIP=(
-    "llama-server"
-    "libllama.dylib"
-    "libllama-common.dylib"
-    "libmtmd.dylib"
-    "libggml.dylib"
-    "libggml-base.dylib"
-    "libggml-cpu.dylib"
-    "libggml-metal.dylib"
-    "libggml-blas.dylib"
-    "libggml-rpc.dylib"
-)
-# Versioned dylib aliases — dyld resolves these via symlink/rpath. Include
-# everything that matches the base names so @rpath lookups do not break.
-for base in "${SHIP[@]}"; do
-    # Copy the bare file if present.
-    if [[ -e "$INNER_DIR/$base" ]]; then
-        cp -p "$INNER_DIR/$base" "$DEST_DIR/"
-    fi
-    # Copy any versioned variants (libfoo.0.dylib, libfoo.0.0.1234.dylib, ...)
-    # that begin with the same stem. Loose glob: for each dylib name stem we
-    # look for "<stem>.*.dylib".
-    stem="${base%.dylib}"
-    for match in "$INNER_DIR/$stem".*.dylib; do
-        [[ -e "$match" ]] || continue
-        cp -p "$match" "$DEST_DIR/"
-    done
+# Files we ship: llama-server plus the WHOLE dylib set, not a hand-maintained
+# list. Upstream periodically refactors the shared-library layout — b10238
+# moved each tool's logic into its own libllama-<tool>-impl.dylib, so the old
+# fixed list produced a bundle whose llama-server died at dyld load time with
+# "Library not loaded: @rpath/libllama-server-impl.dylib". The same lesson is
+# already encoded in Dockerfile/Dockerfile.cuda (`COPY /app/*.so*`). The other
+# tools' impl dylibs cost ~1 MB out of a ~52 MB bundle — far cheaper than a
+# broken bundle. Standalone binaries (llama-cli, llama-bench, llama-quantize,
+# ggml-rpc-server, mtmd-*, …) are still dropped.
+cp -p "$INNER_DIR/llama-server" "$DEST_DIR/"
+for match in "$INNER_DIR"/*.dylib; do
+    [[ -e "$match" ]] || continue
+    cp -p "$match" "$DEST_DIR/"
 done
 
 # Sanity: llama-server must be present and executable.
 if [[ ! -x "$DEST_DIR/llama-server" ]]; then
     echo "fetch-llama: llama-server missing or not executable in $DEST_DIR" >&2
+    exit 1
+fi
+
+# Sanity: every @rpath dependency of llama-server must have landed in
+# DEST_DIR. Without this the breakage only surfaces at runtime, on the
+# operator's machine, as a dyld abort — exactly how the b10238 layout change
+# was found. Fail the fetch instead.
+#
+# The check must not pass vacuously. otool exits 0 even when handed a
+# non-Mach-O file (it prints "… is not an object file" and returns success),
+# and an absent otool would simply feed the loop an empty list — either way
+# an empty dependency list reads as "nothing missing" on exactly the broken
+# bundle this exists to reject. So: require the tool, require it to succeed,
+# and reject output that is not a dependency listing.
+if ! command -v otool >/dev/null 2>&1; then
+    echo "fetch-llama: otool not found — install the Xcode Command Line Tools (xcode-select --install)" >&2
+    exit 1
+fi
+if ! DEPS="$(otool -L "$DEST_DIR/llama-server" 2>&1)"; then
+    echo "fetch-llama: otool -L failed on $DEST_DIR/llama-server:" >&2
+    printf '%s\n' "$DEPS" >&2
+    exit 1
+fi
+case "$DEPS" in
+    ""|*"is not an object file"*|*"can't open file"*)
+        echo "fetch-llama: $DEST_DIR/llama-server is not a Mach-O binary — the upstream asset layout may have changed:" >&2
+        printf '%s\n' "$DEPS" >&2
+        exit 1
+        ;;
+esac
+missing=()
+while read -r dep; do
+    [[ -n "$dep" ]] || continue
+    [[ -e "$DEST_DIR/$dep" ]] || missing+=("$dep")
+done < <(printf '%s\n' "$DEPS" | awk '/@rpath\//{sub(/^.*@rpath\//, "", $1); print $1}')
+if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "fetch-llama: llama-server has unresolved @rpath dependencies:" >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    echo "fetch-llama: upstream $LLAMA_VERSION likely changed its library layout — inspect the release archive." >&2
     exit 1
 fi
 

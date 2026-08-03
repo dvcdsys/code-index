@@ -115,17 +115,20 @@ dist/cix-darwin-arm64/
   cix-server
   llama/
     llama-server
-    libllama.dylib
-    libllama-common.dylib
-    libmtmd.dylib
-    libggml.dylib
-    libggml-base.dylib
-    libggml-cpu.dylib
-    libggml-metal.dylib
-    libggml-blas.dylib
-    libggml-rpc.dylib
-    (versioned *.0.dylib, *.0.0.X.dylib aliases)
+    *.dylib          — every shared library from the upstream archive
 ```
+
+`scripts/fetch-llama.sh` copies `llama-server` plus the **whole** `*.dylib`
+set, deliberately not a curated list of names. Upstream refactors that layout
+periodically — b10238 moved each tool's logic into its own
+`libllama-<tool>-impl.dylib`, and a hand-maintained list silently omitted
+`libllama-server-impl.dylib`, producing a bundle that aborted at dyld load.
+`Dockerfile`/`Dockerfile.cuda` encode the same rule as `COPY /app/*.so*`. The
+other tools' impl dylibs are the only overhead, and the fetch fails if any
+`@rpath` dependency of `llama-server` is missing from the directory.
+
+Standalone binaries (`llama-cli`, `llama-bench`, `llama-quantize`,
+`ggml-rpc-server`, `mtmd-*`, …) are still dropped.
 
 ### macOS Gatekeeper
 

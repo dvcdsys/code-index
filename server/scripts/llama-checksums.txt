@@ -1,5 +1,12 @@
 # llama.cpp release checksums — SHA256  filename
 # Updated by scripts/fetch-llama.sh on first-run for each new LLAMA_VERSION.
 # Bumping LLAMA_VERSION in the Makefile MUST be accompanied by a commit that
-# records the new row here. CI fails hard on SHA mismatch.
+# records the new row here.
+#
+# Where this is enforced: scripts/fetch-llama.sh fails hard on a SHA mismatch.
+# NOTE that no CI workflow runs it — the macOS bundle path (`make fetch-llama`
+# / `make bundle` / `make run` / `make test-gate`) only ever executes on a
+# developer's Mac, so this gate is local-only. Treat a bundle bump as
+# hand-verified, not CI-verified.
 cd70e17321b822820f757a250c2f8128c69290f43048f6e7bc79ec8822a1a5c5  llama-b8914-bin-macos-arm64.tar.gz
+1bc2c461b1c64f8f71c99deb55a21d5e43e2deeea1d398f8bb0a1969eb1306aa  llama-b10238-bin-macos-arm64.tar.gz
