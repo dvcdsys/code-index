@@ -3,3 +3,4 @@
 # Bumping LLAMA_VERSION in the Makefile MUST be accompanied by a commit that
 # records the new row here. CI fails hard on SHA mismatch.
 cd70e17321b822820f757a250c2f8128c69290f43048f6e7bc79ec8822a1a5c5  llama-b8914-bin-macos-arm64.tar.gz
+1bc2c461b1c64f8f71c99deb55a21d5e43e2deeea1d398f8bb0a1969eb1306aa  llama-b10238-bin-macos-arm64.tar.gz
