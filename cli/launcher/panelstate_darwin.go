@@ -10,8 +10,12 @@ import (
 // panelState is the one object panel.html renders from. Field names are the
 // contract with the JavaScript side; change them in both places or not at all.
 type panelState struct {
-	State     string `json:"state"` // "running" | "starting" | "stopped"
-	Busy      bool   `json:"busy"`
+	State string `json:"state"` // "running" | "starting" | "stopped"
+	Busy  bool   `json:"busy"`
+	// BusyLabel names the operation holding busy, for the loader button —
+	// "Stopping the server…" and "Applying the setting…" are the same wait
+	// with very different explanations.
+	BusyLabel string `json:"busyLabel,omitempty"`
 	Managed   bool   `json:"managed"`
 	Port      int    `json:"port"`
 	PID       int    `json:"pid,omitempty"`
@@ -35,9 +39,10 @@ type panelState struct {
 
 // buildPanelState folds a poller snapshot and the menu's own busy flag into
 // what the panel shows.
-func buildPanelState(s snapshot, busy bool) panelState {
+func buildPanelState(s snapshot, busy bool, busyLabel string) panelState {
 	ps := panelState{
 		Busy:       busy,
+		BusyLabel:  busyLabel,
 		Managed:    s.Managed,
 		Port:       s.Port,
 		PID:        s.PID,

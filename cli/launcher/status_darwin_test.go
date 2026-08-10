@@ -42,7 +42,7 @@ func TestBuildPanelState(t *testing.T) {
 		},
 		EmbeddingsOK: true,
 	}
-	ps := buildPanelState(running, false)
+	ps := buildPanelState(running, false, "")
 	if ps.State != "running" || ps.PID != 4242 || ps.Port != 21847 {
 		t.Errorf("state/pid/port = %q/%d/%d, want running/4242/21847", ps.State, ps.PID, ps.Port)
 	}
@@ -66,18 +66,20 @@ func TestBuildPanelState(t *testing.T) {
 
 	// Provider details from a server that is not answering are stale by
 	// definition, so none are claimed.
-	starting := buildPanelState(snapshot{State: stateStarting, Managed: true}, false)
+	starting := buildPanelState(snapshot{State: stateStarting, Managed: true}, false, "")
 	if starting.State != "starting" || starting.Engine != "" || starting.Model != "" {
 		t.Errorf("starting = %+v, want no provider details", starting)
 	}
 
-	// The busy flag is the menu's, not the poller's; it must pass through, and
-	// it is what the panel disables its controls on.
-	if !buildPanelState(running, true).Busy {
-		t.Error("busy flag lost on the way through")
+	// The busy flag is the menu's, not the poller's; it must pass through with
+	// its label — the flag is what the panel disables its controls on, and the
+	// label is the only thing telling the user which slow operation is running.
+	busy := buildPanelState(running, true, "Stopping the server…")
+	if !busy.Busy || busy.BusyLabel != "Stopping the server…" {
+		t.Errorf("busy/label = %v/%q, want them passed through", busy.Busy, busy.BusyLabel)
 	}
 
-	stopped := buildPanelState(snapshot{State: stateStopped, Managed: false}, false)
+	stopped := buildPanelState(snapshot{State: stateStopped, Managed: false}, false, "")
 	if stopped.State != "stopped" || stopped.Managed {
 		t.Errorf("stopped external = %+v", stopped)
 	}

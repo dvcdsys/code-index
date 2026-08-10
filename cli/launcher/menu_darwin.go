@@ -42,18 +42,26 @@ type menu struct {
 	// the control that would produce it, says what is actually happening.
 	busy atomic.Bool
 
+	// busyLabel names the operation that holds busy, in the words the panel's
+	// loader shows ("Stopping the server…"). Written only by the goroutine
+	// that won the busy CAS, read by render on any goroutine.
+	busyLabel atomic.Value
+
 	// retireOnce drops the bootstrap password from server.env the first time
 	// this process sees a running server. See retireBootstrapPassword.
 	retireOnce sync.Once
 }
 
-// beginBusy claims the right to restart the server. False means something else
-// already has it, and the caller must do nothing.
-func (m *menu) beginBusy() bool {
+// beginBusy claims the right to restart the server, and names the operation —
+// every server operation renders the same loader, and the label is the only
+// thing telling the user WHICH slow thing is happening. False means something
+// else already has the claim, and the caller must do nothing.
+func (m *menu) beginBusy(label string) bool {
 	if !m.busy.CompareAndSwap(false, true) {
 		logf("ignored a panel action: another server operation is already running")
 		return false
 	}
+	m.busyLabel.Store(label)
 	m.render(m.poll.snapshotNow())
 	return true
 }
@@ -61,6 +69,13 @@ func (m *menu) beginBusy() bool {
 func (m *menu) endBusy() {
 	m.busy.Store(false)
 	m.poll.refresh()
+}
+
+func (m *menu) currentBusyLabel() string {
+	if s, ok := m.busyLabel.Load().(string); ok {
+		return s
+	}
+	return ""
 }
 
 func runMenu(b bundle, u *updater) {
@@ -153,7 +168,7 @@ func (m *menu) render(s snapshot) {
 		// has no further use.
 		m.retireOnce.Do(retireBootstrapPassword)
 	}
-	panelSetState(buildPanelState(s, m.busy.Load()))
+	panelSetState(buildPanelState(s, m.busy.Load(), m.currentBusyLabel()))
 }
 
 // toggleAutostart flips RunAtLoad on the launchd agent.
@@ -167,7 +182,7 @@ func (m *menu) toggleAutostart() {
 	if !s.Managed {
 		return
 	}
-	if !m.beginBusy() {
+	if !m.beginBusy("Applying the setting…") {
 		// The switch already flipped visually on the click; put it back.
 		m.render(s)
 		return
@@ -237,7 +252,7 @@ func (m *menu) checkForUpdates(explicit bool) {
 
 	// Claimed only now, not around the check: the check is HTTP and touches
 	// nothing, while installing stops and starts the server like the toggles do.
-	if !m.beginBusy() {
+	if !m.beginBusy("Installing the update…") {
 		_ = alert("cix is busy", "Another server operation is still running. Try the update again once it has finished.")
 		return
 	}
@@ -269,7 +284,14 @@ func (m *menu) toggleServer() {
 	if !s.Managed {
 		return
 	}
-	if !m.beginBusy() {
+	label := "Starting the server…"
+	if s.State == stateRunning {
+		label = "Stopping the server…"
+	}
+	if !m.beginBusy(label) {
+		// The panel showed a loader optimistically on the click; a refused
+		// claim must put the real state back rather than leave it spinning.
+		m.render(m.poll.snapshotNow())
 		return
 	}
 	defer m.endBusy()
@@ -361,7 +383,7 @@ func (m *menu) toggleNetworkAccess() {
 		_ = alert("cix", "cix is not set up yet.")
 		return
 	}
-	if !m.beginBusy() {
+	if !m.beginBusy("Applying the setting…") {
 		m.render(m.poll.snapshotNow())
 		return
 	}

@@ -155,6 +155,17 @@
   }
   .btn.destructive .ext { color: #F7EEDC; }
 
+  /* Loader: three pulsing square cells — the same blocky language as the
+     progress bar, never a rounded spinner. */
+  .loadcells { display: inline-flex; gap: 3px; margin-right: 4px; }
+  .loadcells span {
+    width: 8px; height: 8px; background: currentColor;
+    opacity: 0.25; animation: pulse 900ms linear infinite;
+  }
+  .loadcells span:nth-child(2) { animation-delay: 150ms; }
+  .loadcells span:nth-child(3) { animation-delay: 300ms; }
+  @keyframes pulse { 0%, 60%, 100% { opacity: 0.25; } 30% { opacity: 1; } }
+
   /* -- toggles ------------------------------------------------------------ */
   #toggles { padding: 12px 18px; display: flex; flex-direction: column; gap: 10px; }
   .toggle {
@@ -360,7 +371,9 @@ function renderActions(s) {
   var html = '';
 
   if (s.busy) {
-    html += btn('Working…', '', 'primary disabled', null);
+    // Every slow server operation — start, stop, a toggle's restart, an
+    // update — renders this same loader; the label says which one it is.
+    html += loaderBtn(s.busyLabel || 'Working…');
   } else if (!s.managed) {
     // Observe-only: someone else's server. Offer the dashboard, touch nothing.
     if (s.state === 'running') {
@@ -370,7 +383,7 @@ function renderActions(s) {
     html += btn('Stop Server', '', 'destructive', 'toggle-server');
     html += btn('Open Dashboard', '↗', '', 'dashboard');
   } else if (s.state === 'starting') {
-    html += btn('Starting…', '', 'primary disabled', null);
+    html += loaderBtn('Starting…');
   } else {
     html += btn('Start Server', '', 'primary', 'toggle-server');
   }
@@ -384,6 +397,12 @@ function btn(label, ext, cls, action) {
   return '<button class="btn ' + cls + '"' +
     (action ? ' data-action="' + action + '"' : '') + '>' + esc(label) +
     (ext ? '<span class="ext">' + ext + '</span>' : '') + '</button>';
+}
+
+function loaderBtn(label) {
+  return '<button class="btn primary disabled">' +
+    '<span class="loadcells"><span></span><span></span><span></span></span>' +
+    esc(label) + '</button>';
 }
 
 function renderToggles(s) {
@@ -427,11 +446,25 @@ document.addEventListener('click', function (e) {
   var el = e.target.closest('[data-action]');
   if (!el || el.classList.contains('disabled')) { return; }
   var action = el.getAttribute('data-action');
-  // Toggles stay open so the switch is seen flipping; everything else
-  // dismisses like a menu item.
-  var dismiss = action.indexOf('toggle-network') !== 0 &&
-                action.indexOf('toggle-autostart') !== 0;
-  post({ action: action, dismiss: dismiss });
+
+  // Server operations keep the panel open — their whole feedback is the
+  // loader and the state flip, and closing the window would hide both. Only
+  // actions that hand off to another surface (the dashboard, a dialog, quit)
+  // dismiss like a menu item.
+  var staysOpen = action === 'toggle-server' ||
+                  action === 'toggle-network' ||
+                  action === 'toggle-autostart';
+
+  if (action === 'toggle-server') {
+    // Optimistic: show the loader on the click itself, not a state-push
+    // round-trip later. The next render replaces this with the real thing
+    // (including the refused-because-busy case, which puts the button back).
+    var stopping = el.classList.contains('destructive');
+    document.getElementById('actions').innerHTML =
+      loaderBtn(stopping ? 'Stopping the server…' : 'Starting the server…');
+  }
+
+  post({ action: action, dismiss: !staysOpen });
 });
 
 document.addEventListener('keydown', function (e) {
