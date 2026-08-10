@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -135,6 +136,34 @@ func serverPort(vars map[string]string) int {
 		}
 	}
 	return defaultServerPort
+}
+
+// Bind addresses the network toggle switches between.
+//
+// The server's own default is an empty CIX_BIND_ADDR, meaning every interface —
+// that is what containers need and every existing deployment already has, so it
+// stays. A desktop install is a different situation: the app writes loopback at
+// first run, because "everyone on the café Wi-Fi can query my code index" is
+// rarely what someone installing a menu bar app had in mind.
+const (
+	bindLocalOnly     = "127.0.0.1"
+	bindAllInterfaces = "0.0.0.0"
+)
+
+// isLocalOnly reports whether the configured bind address is loopback.
+//
+// An absent CIX_BIND_ADDR is NOT local-only: it is the server's all-interfaces
+// default. Reading it the other way would show a reassuring "local only" on
+// exactly the installs that are exposed.
+func isLocalOnly(vars map[string]string) bool {
+	addr := strings.TrimSpace(vars["CIX_BIND_ADDR"])
+	if addr == "" {
+		return false
+	}
+	if ip := net.ParseIP(addr); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(addr, "localhost")
 }
 
 // dashboardURL is built from the server.env port, never from the CLI config.

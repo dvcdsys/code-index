@@ -618,7 +618,7 @@ func run() error {
 	})
 
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
+		Addr:         cfg.ListenAddr(),
 		Handler:      handler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,

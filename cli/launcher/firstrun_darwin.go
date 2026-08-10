@@ -91,6 +91,11 @@ func runFirstRun(b bundle) error {
 		"CIX_PORT":        strconv.Itoa(defaultServerPort),
 		"CIX_DATA_DIR":    dataDir,
 		"CIX_SQLITE_PATH": filepath.Join(dataDir, "cix.db"),
+		// Loopback by default, unlike the server's own all-interfaces default.
+		// A container has to be reachable from outside itself; a desktop app
+		// does not, and exposing a code index to the local network is a choice
+		// someone should make on purpose. The menu has a toggle for it.
+		"CIX_BIND_ADDR": bindLocalOnly,
 		// The .app owns updating itself. Leaving the server's own check on
 		// would mean two different components offering the user two different
 		// "update available" prompts for two different tag streams.

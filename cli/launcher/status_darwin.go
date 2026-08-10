@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,10 @@ type snapshot struct {
 	// Managed is false when the launchd agent belongs to install-server.sh
 	// rather than to this app; Start/Stop are then disabled.
 	Managed bool
+
+	// LocalOnly reflects CIX_BIND_ADDR: true when the server is bound to
+	// loopback and therefore unreachable from other machines.
+	LocalOnly bool
 }
 
 // providerLabel turns the wire provider kind into something a person can act
@@ -81,16 +86,71 @@ func providerLabel(kind string) string {
 	}
 }
 
+// maxRowRunes caps every menu row.
+//
+// An NSMenu is exactly as wide as its widest row, so an untruncated model id
+// (`ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF`, 41 characters) stretched the
+// whole menu to fit one line nobody needs to read in full. Capping every row at
+// the same width makes the menu a predictable size instead of a function of
+// whichever model happens to be configured; the full value goes in the tooltip.
+const maxRowRunes = 34
+
+// ellipsize shortens s to at most maxRunes, cutting from the middle.
+//
+// Middle rather than tail because these values are qualified names —
+// "awhiteside/CodeRankEmbed-Q8_0-GGUF" — where both ends carry information and
+// the middle is the least missed. Tail truncation would leave every Hugging
+// Face model rendered as its owner.
+func ellipsize(s string, maxRunes int) string {
+	r := []rune(s)
+	if len(r) <= maxRunes || maxRunes < 3 {
+		return s
+	}
+	keep := maxRunes - 1 // one rune for the ellipsis
+	head := (keep + 1) / 2
+	tail := keep - head
+	return string(r[:head]) + "…" + string(r[len(r)-tail:])
+}
+
+// row renders "label + value", ellipsizing the value so the whole row fits.
+func row(label, value string) string {
+	return label + ellipsize(value, maxRowRunes-len([]rune(label)))
+}
+
 // EmbeddingsLine renders the provider row of the menu.
+//
+// Readiness is carried by the row's dot, not by a "— ready" suffix: the words
+// cost menu width that the model name needs, and a coloured indicator is how
+// macOS status apps say this.
 func (s snapshot) EmbeddingsLine() string {
 	if s.State != stateRunning || s.Status == nil {
 		return "Embeddings: unknown"
 	}
-	label := providerLabel(s.Status.EmbeddingProvider)
-	if s.EmbeddingsOK {
-		return "Embeddings: " + label + " — ready"
+	return row("Embeddings: ", providerLabel(s.Status.EmbeddingProvider))
+}
+
+// EmbeddingsDot is the indicator colour for the provider row.
+func (s snapshot) EmbeddingsDot() color.NRGBA {
+	switch {
+	case s.State != stateRunning || s.Status == nil:
+		return dotGrey
+	case s.EmbeddingsOK:
+		return dotGreen
+	default:
+		return dotRed
 	}
-	return "Embeddings: " + label + " — not ready"
+}
+
+// ServerDot is the indicator colour for the server row.
+func (s snapshot) ServerDot() color.NRGBA {
+	switch s.State {
+	case stateRunning:
+		return dotGreen
+	case stateStarting:
+		return dotAmber
+	default:
+		return dotRed
+	}
 }
 
 // ServerLine renders the top row of the menu.
@@ -102,10 +162,67 @@ func (s snapshot) ServerLine() string {
 		return "cix-server: Starting…"
 	default:
 		if !s.Managed {
-			return "cix-server: Stopped (managed externally)"
+			// "(managed externally)" spelled out is 40 characters and would set
+			// the width of the whole menu on its own. The tooltip explains.
+			return "cix-server: Stopped (external)"
 		}
 		return "cix-server: Stopped"
 	}
+}
+
+// Detail rows — the information the truncated rows cannot carry, shown in a
+// submenu on the server row rather than in tooltips.
+//
+// Native menu-item tooltips were tried and removed. Two AppKit behaviours make
+// them unusable here and neither has an API: once any tooltip in the app has
+// appeared, every subsequent one shows with no delay at all; and they are
+// positioned against the menu item rather than the pointer. Fixing either means
+// giving every row a custom NSView with its own tracking area — that is,
+// writing the menu in Objective-C instead of using systray. A submenu gets
+// native timing and placement for free.
+
+// DetailProcess reports the running process, or that there is none.
+func (s snapshot) DetailProcess() string {
+	if s.PID == 0 {
+		return "Process: not running"
+	}
+	return fmt.Sprintf("Process: %d", s.PID)
+}
+
+func (s snapshot) DetailPort() string {
+	return fmt.Sprintf("Port: %d", s.Port)
+}
+
+// DetailNetwork states the exposure in plain terms. "127.0.0.1" is precise and
+// means nothing to most people; "this Mac only" is the fact they care about.
+func (s snapshot) DetailNetwork() string {
+	if s.LocalOnly {
+		return "Network: this Mac only"
+	}
+	return "Network: reachable from your network"
+}
+
+// DetailModel is the full, untruncated model id — the value the row had to cut.
+func (s snapshot) DetailModel() string {
+	if name := s.ModelName(); name != "" {
+		return "Model: " + name
+	}
+	return ""
+}
+
+func (s snapshot) DetailVersion() string {
+	if s.Status == nil || s.Status.ServerVersion == "" {
+		return ""
+	}
+	return "Server " + s.Status.ServerVersion
+}
+
+// DetailManaged explains a disabled Start/Stop, which is otherwise inexplicable.
+func (s snapshot) DetailManaged() string {
+	if s.Managed {
+		return ""
+	}
+	return "Managed by install-server.sh"
 }
 
 // ModelLine renders the model row, or an empty string when there is nothing to
@@ -118,11 +235,23 @@ func (s snapshot) ModelLine() string {
 	// the provider kind ("ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF"). The row
 	// above already names the provider, and the prefix is the same misleading
 	// name providerLabel exists to avoid — so show the model alone.
+	return row("Model: ", s.ModelName())
+}
+
+// ModelName is the untruncated model, for the tooltip.
+func (s snapshot) ModelName() string {
+	if s.Status == nil {
+		return ""
+	}
+	// The server reports the provider's fingerprint ID, which is prefixed with
+	// the provider kind ("ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF"). The row
+	// above already names the provider, and the prefix is the same misleading
+	// name providerLabel exists to avoid — so show the model alone.
 	model := s.Status.EmbeddingModel
 	if _, rest, ok := strings.Cut(model, ":"); ok && rest != "" {
 		model = rest
 	}
-	return "Model: " + model
+	return model
 }
 
 type poller struct {
@@ -229,6 +358,7 @@ func (p *poller) pollHealth() {
 	p.snap.PID = pid
 	p.snap.Port = port
 	p.snap.Managed = managed
+	p.snap.LocalOnly = isLocalOnly(vars)
 	if state != stateRunning {
 		// Provider information from a server that is no longer answering is
 		// stale by definition.

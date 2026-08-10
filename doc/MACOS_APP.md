@@ -130,19 +130,46 @@ macOS announces any newly registered background agent.
 ## The menu
 
 ```
-cix-server: Running (:21847)
-Embeddings: llama.cpp (bundled) — ready
-Model: awhiteside/CodeRankEmbed-Q8_0-GGUF
+● cix-server: Running (:21847)
+● Embeddings: llama.cpp (bundled)
+  Model: awhiteside/Co…bed-Q8_0-GGUF
 ─────────────
 Stop Server
 Open Dashboard
 ─────────────
+Allow Network Access          ✓
+─────────────
 Quit cix
 ```
+
+The dot carries the state: green running, amber starting, red stopped, grey
+unknown. Rows are truncated so the menu stays a predictable width instead of
+being as wide as whichever model happens to be configured — hover a row for the
+full value and for details that do not fit, such as the pid and whether the
+server is reachable from your network.
 
 **Starting…** is its own state, distinct from Running and Stopped. A cold start
 loads the embedding model and can take anywhere from 30 seconds to several
 minutes, in silence — a server showing "Starting…" is working, not stuck.
+
+### Allow Network Access
+
+Off, the server binds to `127.0.0.1` and only this Mac can reach it. On, it
+binds to every interface and any machine that can reach this Mac on its port can
+too — useful for querying your index from a laptop or a phone on the same
+network, and not something to leave on by accident. Turning it **on** asks for
+confirmation; turning it off does not.
+
+Accounts and API keys apply either way; this does not disable authentication. It
+decides whether the login page and the API are reachable at all.
+
+The setting is `CIX_BIND_ADDR` in `server.env`, and it is read once at process
+start, so changing it restarts the server.
+
+> The server's own default (and every container's) is to bind all interfaces.
+> The app deliberately differs: a fresh desktop install starts loopback-only.
+> An install that predates this setting keeps whatever it had — the app does not
+> silently narrow a server you already rely on.
 
 **Quit cix** quits the menu bar app only. The server is a launchd agent and
 keeps running; use **Stop Server** first if you want it down.
