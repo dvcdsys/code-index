@@ -7,8 +7,8 @@ The app sits in the menu bar and shows whether the server is running and what
 its embedding provider is doing, with start/stop and a link to the dashboard.
 There is no Dock icon and no window.
 
-> **Not in this release yet:** self-update. Everything else — start/stop,
-> autostart, password recovery, network exposure — is in the menu.
+It keeps itself up to date, checks its downloads, and never asks for an
+administrator password to do it.
 
 ## Requirements
 
@@ -142,6 +142,8 @@ Start at Login                ✓
 Allow Network Access          ✓
 Reset Password…
 ─────────────
+Check for Updates…
+─────────────
 Quit (server keeps running)
 ```
 
@@ -185,6 +187,37 @@ The underlying command prints every account in the database when it does not
 recognise an address, which is reasonable at a terminal and not something to put
 on screen. The dialog says only "No account with that email address."; the full
 output goes to `~/.cix/logs/launcher.log` (mode 0600).
+
+### Check for Updates…
+
+cix looks for a newer `mac/v*` release when it starts and at most every 30
+minutes after that, and only speaks up when there is one. The menu item does the
+same check immediately.
+
+Accepting downloads the disk image and its `checksums.txt`, verifies the
+SHA-256, copies the application out to a staging directory beside the installed
+one, and only then replaces it. Anything that fails before that point leaves the
+installed app untouched. The server is stopped first — its executable is inside
+the bundle being replaced, and macOS kills a process whose signed binary is
+swapped underneath it — and started again afterwards if it had been running.
+
+The whole `.app` is replaced, never individual files. The three binaries inside
+are built and tested as one thing, and the bundle's signature seals all of them,
+so replacing one would both create an untested combination and break
+verification. It is also why updating the app updates the `cix` command: the
+one on your `PATH` is a symlink into the bundle.
+
+If the folder containing cix.app is not writable by you, the update stops before
+downloading anything and tells you to install the new version by hand. It will
+not ask for an administrator password — an unsigned app requesting admin rights
+to overwrite itself is exactly what malware looks like, and it is not a habit
+worth teaching.
+
+> The checksum proves the download arrived intact. It is not a trust anchor:
+> `checksums.txt` travels the same path as the image, so anyone who can replace
+> one can replace the other. Without a Developer ID signature there is nothing
+> stronger available here — a detached signature over the checksums would be
+> the next step.
 
 ### Allow Network Access
 

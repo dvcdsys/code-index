@@ -91,6 +91,10 @@ func main() {
 		if err := writeLaunchdFiles(b, autostartEnabled()); err != nil {
 			logf("could not refresh launchd files: %v", err)
 		}
+		// Ordered after the plist rewrite, not before: an update replaced the
+		// binary the agent points at, and starting the server first would run
+		// the previous version's path.
+		resumeAfterUpdate()
 	}
 
 	runMenu(b)

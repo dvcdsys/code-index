@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -408,5 +410,80 @@ func TestIsUserCancelled(t *testing.T) {
 		if isUserCancelled(s) {
 			t.Errorf("isUserCancelled(%q) = true, want false", s)
 		}
+	}
+}
+
+func TestChecksumFor(t *testing.T) {
+	// The release workflow generates this with `shasum -a 256 ./*.dmg`, which
+	// records a leading "./" — a plain equality check on the filename would
+	// find nothing and abort every update.
+	sums := "" +
+		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ./cix-0.3.1-arm64.dmg\n" +
+		"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08  ./checksums-other.txt\n"
+
+	got, err := checksumFor(sums, "cix-0.3.1-arm64.dmg")
+	if err != nil {
+		t.Fatalf("checksumFor: %v", err)
+	}
+	if got != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Errorf("checksumFor() = %q", got)
+	}
+
+	// A name that is not listed must be an error, never a silent pass: the
+	// checksum is the only integrity check an unnotarised download gets.
+	if _, err := checksumFor(sums, "cix-9.9.9-arm64.dmg"); err == nil {
+		t.Error("checksumFor() on a missing entry returned no error")
+	}
+	if _, err := checksumFor("", "anything.dmg"); err == nil {
+		t.Error("checksumFor() on empty input returned no error")
+	}
+}
+
+func TestVerifyChecksum(t *testing.T) {
+	dir := t.TempDir()
+	payload := filepath.Join(dir, "cix-0.3.1-arm64.dmg")
+	if err := os.WriteFile(payload, []byte("pretend disk image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("pretend disk image"))
+	sums := filepath.Join(dir, "checksums.txt")
+	if err := os.WriteFile(sums, fmt.Appendf(nil, "%x  ./cix-0.3.1-arm64.dmg\n", sum), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := verifyChecksum(payload, sums, "cix-0.3.1-arm64.dmg"); err != nil {
+		t.Errorf("verifyChecksum on a matching file = %v, want nil", err)
+	}
+
+	// A truncated or tampered download must not install.
+	if err := os.WriteFile(payload, []byte("pretend disk imag"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyChecksum(payload, sums, "cix-0.3.1-arm64.dmg"); err == nil {
+		t.Error("verifyChecksum accepted a file whose contents changed")
+	}
+}
+
+func TestParseMountPoint(t *testing.T) {
+	// hdiutil prints one line per partition; the volume is on the last one.
+	out := "/dev/disk4          \tGUID_partition_scheme          \t\n" +
+		"/dev/disk4s1        \tApple_HFS                      \t/Volumes/cix\n"
+	if got, want := parseMountPoint(out), "/Volumes/cix"; got != want {
+		t.Errorf("parseMountPoint() = %q, want %q", got, want)
+	}
+	if got := parseMountPoint("/dev/disk9\tGUID_partition_scheme\t\n"); got != "" {
+		t.Errorf("parseMountPoint() with no volume = %q, want empty", got)
+	}
+}
+
+func TestCheckWritable(t *testing.T) {
+	if err := checkWritable(t.TempDir()); err != nil {
+		t.Errorf("checkWritable on a temp dir = %v, want nil", err)
+	}
+	// The point of the preflight: find out before spending a download, while
+	// the installed app is still untouched and the advice can be "drag the new
+	// one over the old one".
+	if err := checkWritable("/usr/bin"); err == nil {
+		t.Skip("running as root, or /usr/bin is writable — preflight cannot be exercised")
 	}
 }

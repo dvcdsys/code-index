@@ -19,6 +19,16 @@ type prefs struct {
 	// install-server.sh was found under the same launchd label: "takeover" or
 	// "keep". Empty means the question has not been asked yet.
 	Takeover string `json:"takeover,omitempty"`
+
+	// UpdateETag is GitHub's ETag from the last release listing. Replaying it
+	// turns an unchanged check into a 304, which does not count against the
+	// unauthenticated hourly limit — so it is worth surviving a restart.
+	UpdateETag string `json:"update_etag,omitempty"`
+
+	// RestartServerAfterUpdate carries one bit across the update: the process
+	// that stops the server is replaced before the one that should start it
+	// again exists, so the intent has to live on disk in between.
+	RestartServerAfterUpdate bool `json:"restart_server_after_update,omitempty"`
 }
 
 const (

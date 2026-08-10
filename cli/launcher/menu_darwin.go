@@ -35,6 +35,9 @@ type menu struct {
 	autostartItem  *systray.MenuItem
 	networkItem    *systray.MenuItem
 	resetPWItem    *systray.MenuItem
+	updateItem     *systray.MenuItem
+
+	updater *updater
 
 	// detail holds the submenu rows under the server row. They are created
 	// once and retitled on every render: systray has no way to remove an item,
@@ -47,7 +50,7 @@ type menu struct {
 const detailRows = 6
 
 func runMenu(b bundle) {
-	m := &menu{bundle: b, poll: newPoller(), stop: make(chan struct{})}
+	m := &menu{bundle: b, poll: newPoller(), stop: make(chan struct{}), updater: newUpdater(b)}
 	systray.Run(m.onReady, m.onExit)
 }
 
@@ -98,6 +101,9 @@ func (m *menu) onReady() {
 	m.resetPWItem = systray.AddMenuItem("Reset Password…", "")
 
 	systray.AddSeparator()
+	m.updateItem = systray.AddMenuItem("Check for Updates…", "")
+
+	systray.AddSeparator()
 	// Spelled out rather than left to a tooltip. Quit here closes the menu bar
 	// app and leaves the launchd agent running, which is the opposite of what
 	// Quit means in most menu bar apps — a surprise worth 22 characters.
@@ -105,6 +111,11 @@ func (m *menu) onReady() {
 
 	go m.poll.run(m.stop)
 	go m.watch()
+
+	// A quiet background check. It only speaks up when there is something to
+	// offer, and it is throttled and ETag-cached, so an app left open all day
+	// costs a handful of 304s.
+	go m.checkForUpdates(false)
 
 	go func() {
 		for {
@@ -119,6 +130,8 @@ func (m *menu) onReady() {
 				go m.toggleNetworkAccess()
 			case <-m.resetPWItem.ClickedCh:
 				go m.resetPasswordFlow()
+			case <-m.updateItem.ClickedCh:
+				go m.checkForUpdates(true)
 			case <-quitItem.ClickedCh:
 				systray.Quit()
 				return
@@ -238,6 +251,74 @@ func (m *menu) toggleAutostart() {
 		}
 	}
 	m.poll.refresh()
+}
+
+// checkForUpdates looks for a newer release and, if the user agrees, installs
+// it. `explicit` distinguishes the menu item from the background check: a
+// background check that finds nothing says nothing.
+func (m *menu) checkForUpdates(explicit bool) {
+	if isDevBuild() {
+		if explicit {
+			_ = alert("cix", "This is a development build, so there is nothing to update it to.\n\n"+
+				"Released builds check for updates automatically.")
+		}
+		return
+	}
+
+	rel, newer := m.updater.check(explicit)
+	if !newer {
+		if explicit {
+			_ = alert("cix is up to date", fmt.Sprintf("You are running version %s.", version))
+		}
+		return
+	}
+
+	ok, err := ask("A new version of cix is available",
+		fmt.Sprintf("cix %s is available. You are running %s.\n\n"+
+			"The update is downloaded, checked, and installed in place. "+
+			"cix will restart, and the server will be stopped and started again with it.",
+			rel.Version, version),
+		"Update Now", "Not Now")
+	if err != nil || !ok {
+		return
+	}
+
+	// "Is there a process", not "is it answering". A server still loading its
+	// embedding model has a pid and no /health yet; treating that as stopped
+	// would skip the shutdown and then replace the bundle out from under a live
+	// cix-server, which macOS answers by killing it. Captured before anything
+	// is touched, because after the swap this process no longer exists to
+	// remember it.
+	wasRunning := m.poll.snapshotNow().PID != 0
+
+	if err := m.updater.install(rel, wasRunning); err != nil {
+		logf("update to %s failed: %v", rel.Version, err)
+		_ = alert("Could not install the update", err.Error())
+		m.poll.refresh()
+		return
+	}
+
+	// From here the swap helper owns the outcome: it waits for this process to
+	// exit before moving anything, so quitting is the last required step.
+	systray.Quit()
+}
+
+// resumeAfterUpdate restarts the server when the update that just completed
+// had stopped a running one.
+func resumeAfterUpdate() {
+	p := loadPrefs()
+	if !p.RestartServerAfterUpdate {
+		return
+	}
+	p.RestartServerAfterUpdate = false
+	if err := savePrefs(p); err != nil {
+		logf("could not clear the post-update restart flag: %v", err)
+	}
+	if err := startServer(); err != nil {
+		logf("could not restart the server after the update: %v", err)
+		return
+	}
+	logf("server restarted after the update")
 }
 
 // renderDetail fills the submenu under the server row. Slots with nothing to
