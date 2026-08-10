@@ -460,19 +460,11 @@ func (m *menu) toggleServer() {
 	// log nobody has open, so the button appears to do nothing at all. Offer
 	// the thing that would actually help.
 	if needsFirstRun() {
-		ok, err := confirm("Set cix up again?",
-			"There is no cix database. If you deleted it, the server cannot start until an "+
-				"administrator account is created again.\n\n"+
-				"Setting up again creates a new account and a new, empty index. Anything that "+
-				"was indexed before is already gone with the database.",
-			"Set Up")
-		if err != nil || !ok {
-			return
-		}
-		if err := runFirstRun(m.updater); err != nil && !errors.Is(err, errCancelled) {
-			logf("re-running setup failed: %v", err)
-			_ = alert("Setup failed", fmt.Sprintf("cix could not set itself up again.\n\n%v", err))
-		}
+		m.offerSetupAgain(
+			"There is no cix database. If you deleted it, the server cannot start until an " +
+				"administrator account is created again.\n\n" +
+				"Setting up again creates a new account and a new, empty index. Anything that " +
+				"was indexed before is already gone with the database.")
 		m.poll.refresh()
 		return
 	}
@@ -494,10 +486,40 @@ func (m *menu) toggleServer() {
 	// a deleted database looked like a broken Start button.
 	if detail := serverDiedOnStart(); detail != "" {
 		logf("the server exited immediately after Start: %s", detail)
+		// One refusal deserves better than its log text: no admin account. The
+		// needsFirstRun check above cannot see this case, because the failed
+		// start itself recreated an empty cix.db — the file exists, the
+		// accounts do not. The server's own words are the reliable signal, so
+		// route them to setup instead of printing them.
+		if isBootstrapRefusal(detail) {
+			m.offerSetupAgain(
+				"The cix database exists but has no accounts — this is what deleting the data " +
+					"directory looks like after a start attempt recreates an empty database.\n\n" +
+					"The server will not start until an administrator account is created again. " +
+					"Setting up again creates a new account and a new, empty index.")
+			m.poll.refresh()
+			return
+		}
 		_ = alert("The server stopped straight away", detail+
 			"\n\nThe full log is in ~/.cix/logs/cix-server.err.")
 	}
 	m.poll.refresh()
+}
+
+// offerSetupAgain proposes re-running the setup wizard and runs it on consent.
+//
+// Shared by the two ways a gutted installation shows itself: the database file
+// is missing outright (needsFirstRun), or it exists, freshly recreated and
+// empty, and the server refused to start against it (isBootstrapRefusal).
+func (m *menu) offerSetupAgain(message string) {
+	ok, err := confirm("Set cix up again?", message, "Set Up")
+	if err != nil || !ok {
+		return
+	}
+	if err := runFirstRun(m.updater); err != nil && !errors.Is(err, errCancelled) {
+		logf("re-running setup failed: %v", err)
+		_ = alert("Setup failed", fmt.Sprintf("cix could not set itself up again.\n\n%v", err))
+	}
 }
 
 // toggleNetworkAccess switches CIX_BIND_ADDR between loopback and all
