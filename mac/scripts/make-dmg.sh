@@ -110,6 +110,29 @@ hdiutil create \
     "$RW_DMG"
 
 echo "make-dmg: mounting"
+# A volume called cix already mounted — a previous build, or simply the last
+# DMG still open in Finder — makes hdiutil mount this one at "/Volumes/cix 1".
+# The Finder layout below addresses the disk BY NAME, and with two volumes of
+# that name it styles the wrong one. Silently: osascript still exits 0, so the
+# build reports "layout applied" and ships an image with no .DS_Store, hence no
+# background and no icon positions. Bisected: same script and inputs, occupied
+# /Volumes/cix produces no .DS_Store, clean /Volumes produces one.
+#
+# Only a disk image is detached here. A real volume that happens to be called
+# cix is somebody's disk, and ejecting it to build a DMG would be outrageous —
+# so that case stops the build instead.
+stale_mount="/Volumes/$VOLNAME"
+if [[ -d "$stale_mount" ]]; then
+    if hdiutil info | sed -n 's|.*\(/Volumes/.*\)$|\1|p' | grep -qxF "$stale_mount"; then
+        echo "make-dmg: detaching a leftover disk image at $stale_mount"
+        hdiutil detach "$stale_mount" -force -quiet || true
+    else
+        echo "make-dmg: $stale_mount exists and is not a disk image — refusing to touch it." >&2
+        echo "make-dmg: eject or rename that volume and run again." >&2
+        exit 1
+    fi
+fi
+
 ATTACH_OUT="$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG")"
 ATTACHED_DEV="$(printf '%s\n' "$ATTACH_OUT" | awk '/^\/dev\// { print $1; exit }')"
 MOUNT_POINT="$(printf '%s\n' "$ATTACH_OUT" | sed -n 's|.*\(/Volumes/.*\)$|\1|p' | tail -1)"
@@ -119,6 +142,16 @@ if [[ -z "$ATTACHED_DEV" || -z "$MOUNT_POINT" ]]; then
     exit 1
 fi
 echo "make-dmg: mounted $ATTACHED_DEV at $MOUNT_POINT"
+
+# Belt and braces to the detach above. If the image still landed on a suffixed
+# path, another volume of this name appeared between then and now, and the
+# Finder step would style it instead of this one — producing an unstyled image
+# and reporting success. Stop rather than ship that.
+if [[ "$MOUNT_POINT" != "/Volumes/$VOLNAME" ]]; then
+    echo "make-dmg: mounted at $MOUNT_POINT, expected /Volumes/$VOLNAME." >&2
+    echo "make-dmg: another volume named $VOLNAME is in the way; the window layout would be applied to it." >&2
+    exit 1
+fi
 
 # --- Window layout ----------------------------------------------------------
 # This is the one step that needs Finder, and Finder needs a real GUI session.
