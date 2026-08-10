@@ -43,6 +43,7 @@
     --primary-text: #F7EEDC;
     --primary-hover: #3A2519;
     --knob: #F7EEDC;
+    --scrim: rgba(31, 20, 15, 0.45);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -63,6 +64,7 @@
       --primary-text: #171412;
       --primary-hover: #E3D4B6;
       --knob: #171412;
+      --scrim: rgba(0, 0, 0, 0.55);
     }
   }
 
@@ -209,17 +211,34 @@
 
   /* -- in-panel dialog --------------------------------------------------- */
   /* Replaces every osascript window: alerts, confirmations, text prompts and
-     the password display all render as an area that takes over the panel,
-     Docker-Desktop-style, instead of opening a separate window. While open,
-     the normal sections are hidden and the panel's height follows the dialog. */
+     the password display render as a modal card OVER the panel's own content,
+     Docker-Desktop-style. The main window stays visible underneath, dimmed by
+     a scrim that also swallows its clicks; the card is the only live surface
+     while a question is open. */
+  #panel { position: relative; }
   #dialog { display: none; }
-  #panel.dlg > :not(#dialog) { display: none; }
-  #panel.dlg #dialog { display: flex; flex-direction: column; gap: 12px; padding: 16px 18px 14px; }
+  #panel.dlg #dialog {
+    display: flex; position: absolute; inset: 0; z-index: 10;
+    align-items: center; justify-content: center; padding: 22px 18px;
+    background: var(--scrim);
+  }
+  #dialog .dcard {
+    display: flex; flex-direction: column; gap: 12px;
+    width: 100%; max-width: 330px;
+    background: var(--surface); border: 1.5px solid var(--border);
+    padding: 16px 16px 14px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+    animation: dcard-in 120ms ease-out;
+  }
+  @keyframes dcard-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+  }
   #dialog .dtitle { font-size: 15px; font-weight: 700; }
   #dialog .dmsg { font-size: 13px; line-height: 1.5; color: var(--text2); white-space: pre-wrap; }
   #dialog .dsecret {
     font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
-    font-size: 14px; padding: 10px 12px;
+    font-size: 13px; padding: 10px 12px;
     border: 1.5px solid var(--border); background: var(--sunken);
     -webkit-user-select: text; user-select: text; word-break: break-all;
   }
@@ -514,13 +533,14 @@ window.cixDialog = function (d) {
     dlgOpen = false;
     dlgAnswer = null;
     panel.classList.remove('dlg');
+    panel.style.minHeight = '';
     dlg.innerHTML = '';
     reportHeight();
     return;
   }
   dlgOpen = true;
 
-  var html = '<div class="dtitle">' + esc(d.title) + '</div>';
+  var html = '<div class="dcard"><div class="dtitle">' + esc(d.title) + '</div>';
   if (d.message) { html += '<div class="dmsg">' + esc(d.message) + '</div>'; }
   if (d.kind === 'secret') {
     html += '<div class="dsecret">' + esc(d.secret) + '</div>';
@@ -534,12 +554,19 @@ window.cixDialog = function (d) {
   if (d.kind === 'confirm' || d.kind === 'prompt') {
     html += '<button class="btn" id="dcancel">' + esc(d.cancelLabel || 'Cancel') + '</button>';
   }
-  html += '<button class="btn primary" id="dok">' + esc(d.okLabel || 'OK') + '</button></div>';
+  html += '<button class="btn primary" id="dok">' + esc(d.okLabel || 'OK') + '</button></div></div>';
 
   dlg.innerHTML = html;
-  panel.classList.remove('fade');
-  void panel.offsetWidth;
-  panel.classList.add('fade', 'dlg');
+  panel.classList.add('dlg');
+
+  // The card floats over the panel's own content, which stays visible under
+  // the scrim — so the panel must be at least tall enough to hold the card.
+  // The 44px is the overlay's vertical padding on both sides.
+  var card = dlg.querySelector('.dcard');
+  var need = card.offsetHeight + 44;
+  if (panel.offsetHeight < need) {
+    panel.style.minHeight = need + 'px';
+  }
 
   var input = document.getElementById('dinput');
   var answer = function (ok) {
@@ -547,6 +574,10 @@ window.cixDialog = function (d) {
     window.cixDialog(null);
   };
   dlgAnswer = answer;
+  // A click on the scrim — outside the card — declines, like Esc.
+  dlg.addEventListener('mousedown', function (e) {
+    if (e.target === dlg && dlgAnswer) { dlgAnswer(false); }
+  });
   document.getElementById('dok').addEventListener('click', function () { answer(true); });
   var cancel = document.getElementById('dcancel');
   if (cancel) { cancel.addEventListener('click', function () { answer(false); }); }
