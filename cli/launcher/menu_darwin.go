@@ -1,166 +1,247 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
-
-	"fyne.io/systray"
 )
 
-// The menu bar UI.
+// The menu bar UI — a custom panel, not an NSMenu.
 //
-// systray.Run takes over the calling goroutine and must own the main one — on
-// macOS the status item lives on the AppKit main thread. Everything else here
-// runs in goroutines and only touches systray through its setters, which are
-// safe to call from anywhere.
-//
-// Layout follows the platform rather than inventing one: disabled rows carrying
-// state with a coloured indicator, then actions, then a checkbox for the one
-// setting, then Quit. Every row is width-capped (see maxRowRunes) because an
-// NSMenu is as wide as its widest row.
+// The AppKit half lives in panel_darwin.m and the look in panel.html; this
+// file is the behaviour. It reacts to poller changes by pushing a fresh
+// panelState into the webview, and to panel actions by running the same
+// operations the old menu ran. The design brief that replaced the NSMenu is
+// under the repo's design notes: status as a header instead of disabled rows,
+// actions weighted by importance, toggles that read as toggles.
 
 type menu struct {
 	bundle bundle
 	poll   *poller
 	stop   chan struct{}
 
-	statusItem     *systray.MenuItem
-	embeddingsItem *systray.MenuItem
-	modelItem      *systray.MenuItem
-	startStopItem  *systray.MenuItem
-	dashboardItem  *systray.MenuItem
-	autostartItem  *systray.MenuItem
-	networkItem    *systray.MenuItem
-	resetPWItem    *systray.MenuItem
-	updateItem     *systray.MenuItem
-
 	updater *updater
 
-	// detail holds the submenu rows under the server row. They are created
-	// once and retitled on every render: systray has no way to remove an item,
-	// so rebuilding the submenu per update would grow it without bound.
-	detail [detailRows]*systray.MenuItem
+	// busy is held while something is restarting the server, and it exists
+	// because several of these actions are not independent.
+	//
+	// Launch at Login and Allow Network Access both restart the server, each
+	// in its own goroutine, and each drives the same launchd label: one boots
+	// the job out while the other is waiting for its pid to disappear and then
+	// bootstraps it itself. Two bootstraps of one label leave either a failure
+	// or two processes racing for the port — from the outside, a server that
+	// went away and did not come back.
+	//
+	// Serialising them would only queue the second restart behind the first,
+	// which is not what anyone clicking meant. Refusing the click, and greying
+	// the control that would produce it, says what is actually happening.
+	busy atomic.Bool
+
+	// busyLabel names the operation that holds busy, in the words the panel's
+	// loader shows ("Stopping the server…"). Written only by the goroutine
+	// that won the busy CAS, read by render on any goroutine.
+	busyLabel atomic.Value
+
+	// retireOnce drops the bootstrap password from server.env the first time
+	// this process sees a running server. See retireBootstrapPassword.
+	retireOnce sync.Once
 }
 
-// detailRows is the fixed number of submenu slots. Rows with nothing to say are
-// hidden rather than left blank.
-const detailRows = 7
+// beginBusy claims the right to restart the server, and names the operation —
+// every server operation renders the same loader, and the label is the only
+// thing telling the user WHICH slow thing is happening. False means something
+// else already has the claim, and the caller must do nothing.
+func (m *menu) beginBusy(label string) bool {
+	if !m.busy.CompareAndSwap(false, true) {
+		logf("ignored a panel action: another server operation is already running")
+		return false
+	}
+	m.busyLabel.Store(label)
+	m.render(m.poll.snapshotNow())
+	return true
+}
+
+func (m *menu) endBusy() {
+	m.busy.Store(false)
+	m.poll.refresh()
+}
+
+func (m *menu) currentBusyLabel() string {
+	if s, ok := m.busyLabel.Load().(string); ok {
+		return s
+	}
+	return ""
+}
 
 func runMenu(b bundle, u *updater) {
 	m := &menu{bundle: b, poll: newPoller(), stop: make(chan struct{}), updater: u}
-	systray.Run(m.onReady, m.onExit)
+
+	panelHooks.onReady = m.onReady
+	panelHooks.onExit = m.onExit
+	panelHooks.onAction = m.onAction
+
+	// Never returns until quit; must own the main thread (see main_darwin.go).
+	panelRun(filepath.Join(b.Resources, "cixTemplate.png"))
 }
 
 // setProgress puts a word next to the menu bar icon while something slow is
 // happening, and clears it when passed "".
 //
 // The alternative was a modal dialog, and it is the wrong shape: a runtime
-// download takes tens of seconds, during which a menu bar app that shows nothing
-// reads as hung and one that blocks with an alert cannot be dismissed. AppKit
-// draws this text beside the template icon, so it is visible without being in
-// the way.
+// download takes tens of seconds, during which a menu bar app that shows
+// nothing reads as hung and one that blocks with an alert cannot be dismissed.
+// AppKit draws this text beside the template icon, so it is visible without
+// being in the way.
 func (m *menu) setProgress(msg string) {
-	systray.SetTitle(msg)
+	panelSetTitle(msg)
 	if msg != "" {
 		logf("%s", msg)
 	}
 }
 
 func (m *menu) onReady() {
-	if icon, err := os.ReadFile(filepath.Join(m.bundle.Resources, "cixTemplate@2x.png")); err == nil {
-		// SetTemplateIcon, not SetIcon: macOS recolours a template image for
-		// dark mode, for a tinted menu bar and for the pressed state, using
-		// only its alpha channel. A coloured icon here is a smudge at 18 px and
-		// unreadable in dark mode.
-		systray.SetTemplateIcon(icon, icon)
-	} else {
-		systray.SetTitle("cix")
-	}
-	// No tooltips anywhere, including on the status item itself. AppKit's are
-	// not usable here: once any one of them has appeared, every subsequent one
-	// shows with no delay at all, and they are positioned against the element
-	// rather than the pointer. Neither has an API — changing either means
-	// giving every row a custom NSView with its own tracking area, i.e. writing
-	// the menu in Objective-C instead of using systray. Everything a tooltip
-	// would have said is in the details submenu, where the timing and placement
-	// are the system's own and correct.
-	//
-	// The empty second argument to AddMenuItem is that tooltip. Leave it empty.
-
-	// The server row is the one enabled row in the status group, because it
-	// carries the details submenu — a parent has to be enabled for macOS to
-	// open its submenu. The disclosure arrow reads as "there is more here"
-	// rather than "this does something", which is what it is.
-	m.statusItem = systray.AddMenuItem("cix-server: …", "")
-	for i := range m.detail {
-		m.detail[i] = m.statusItem.AddSubMenuItem("", "")
-		m.detail[i].Disable()
-	}
-
-	m.embeddingsItem = systray.AddMenuItem("Embeddings: …", "")
-	m.embeddingsItem.Disable()
-	m.modelItem = systray.AddMenuItem("", "")
-	m.modelItem.Disable()
-	m.modelItem.Hide()
-
-	systray.AddSeparator()
-	m.startStopItem = systray.AddMenuItem("Start Server", "")
-	m.dashboardItem = systray.AddMenuItem("Open Dashboard", "")
-
-	systray.AddSeparator()
-	m.autostartItem = systray.AddMenuItemCheckbox("Start at Login", "", false)
-	m.networkItem = systray.AddMenuItemCheckbox("Allow Network Access", "", false)
-	m.resetPWItem = systray.AddMenuItem("Reset Password…", "")
-
-	systray.AddSeparator()
-	m.updateItem = systray.AddMenuItem("Check for Updates…", "")
-
-	systray.AddSeparator()
-	// Spelled out rather than left to a tooltip. Quit here closes the menu bar
-	// app and leaves the launchd agent running, which is the opposite of what
-	// Quit means in most menu bar apps — a surprise worth 22 characters.
-	quitItem := systray.AddMenuItem("Quit (server keeps running)", "")
-
 	go m.poll.run(m.stop)
 	go m.watch()
 
-	// A quiet background check. It only speaks up when there is something to
-	// offer, and it is throttled and ETag-cached, so an app left open all day
-	// costs a handful of 304s.
-	go m.checkForUpdates(false)
-
 	go func() {
-		for {
-			select {
-			case <-m.startStopItem.ClickedCh:
-				go m.toggleServer()
-			case <-m.dashboardItem.ClickedCh:
-				go m.openDashboard()
-			case <-m.autostartItem.ClickedCh:
-				go m.toggleAutostart()
-			case <-m.networkItem.ClickedCh:
-				go m.toggleNetworkAccess()
-			case <-m.resetPWItem.ClickedCh:
-				go m.resetPasswordFlow()
-			case <-m.updateItem.ClickedCh:
-				go m.checkForUpdates(true)
-			case <-quitItem.ClickedCh:
-				systray.Quit()
-				return
+		m.startupFlow()
+		// A quiet background check, strictly after setup — its "update
+		// available" question must not interleave with the wizard's. It only
+		// speaks up when there is something to offer, and it is throttled and
+		// ETag-cached, so an app left open all day costs a handful of 304s.
+		m.checkForUpdates(false)
+	}()
+}
+
+// startupFlow is first-launch setup, run once the panel exists so its dialogs
+// render inside it (Docker-Desktop-style) rather than as separate windows.
+//
+// Order matters here. A machine that already runs cix from a checkout has a
+// launchd agent under our label and a server holding our port, so the
+// first-run wizard must never get a look at it — it would set up a second
+// server that cannot bind, against a second, empty database.
+//
+// The whole flow holds the busy claim: it downloads and starts things, and a
+// Start click landing in the middle of setup is exactly what busy exists to
+// refuse.
+func (m *menu) startupFlow() {
+	if !m.beginBusy("Setting up…") {
+		return // cannot happen at startup; nothing sane to do if it did
+	}
+	defer m.endBusy()
+
+	switch {
+	case foreignAgent():
+		// Asks once, remembers the answer, and defaults to leaving it alone.
+		// When the user declines, the app stays in observe-only mode: status
+		// and the dashboard work, Start/Stop do not.
+		//
+		// No runtime is installed on this path. Observing somebody else's server
+		// needs no binaries of our own, and downloading 90 MB to watch an
+		// install the user asked us not to touch would be presumptuous. The one
+		// feature that does need it — password reset — offers the download when
+		// it is used.
+		handleForeignAgent(m.updater)
+
+	case needsFirstRun():
+		if err := runFirstRun(m.updater); err != nil {
+			if errors.Is(err, errCancelled) {
+				// Setup is resumable: the app stays in the menu bar with Start
+				// disabled, and the next launch offers the wizard again.
+				_ = alert("Setup cancelled",
+					"cix has not been set up yet, so the server cannot start.\n\n"+
+						"Quit and reopen cix when you want to finish setting it up.")
+			} else {
+				logf("first-run setup failed: %v", err)
+				_ = alert("Setup failed", fmt.Sprintf("cix could not complete first-time setup.\n\n%v", err))
 			}
 		}
-	}()
+
+	default:
+		// A configured install with no runtime is the first launch after
+		// upgrading from a version that carried its server inside the bundle:
+		// the old app is gone, and with it the binary the launchd wrapper was
+		// pointing at. Say so before spending a minute on a download, because
+		// otherwise this is a menu bar app that appears to do nothing at all.
+		//
+		// Not said when a local tarball is supplied: there is no download to
+		// warn about, and this is the path a developer takes on every build.
+		if !runtimeReady() && os.Getenv("CIX_RUNTIME_TARBALL") == "" {
+			_ = alert("cix needs to finish updating",
+				"cix now keeps its server outside the application, so it updates without restarting.\n\n"+
+					"It will download that part now — around 40 MB, once.")
+		}
+		showPanelBusy("Downloading the cix server…")
+		if err := ensureRuntime(m.updater, m.setProgress); err != nil {
+			logf("could not install the runtime: %v", err)
+			_ = alert("cix could not install its server",
+				fmt.Sprintf("%v\n\nThe menu bar app still works, but the server cannot start until this succeeds.", err))
+			return
+		}
+		m.setProgress("")
+		clearPanelBusy()
+		// Only after the runtime exists: pointing the launchd wrapper at a
+		// binary that is not there would break a working install rather than
+		// leave it alone.
+		//
+		// Nothing is started here. An app update no longer stops the server —
+		// the bundle holds none of what it runs — so there is no interrupted
+		// state to resume, and starting a server the user had deliberately
+		// stopped would be the app overriding them.
+		if err := writeLaunchdFiles(autostartEnabled()); err != nil {
+			logf("could not refresh launchd files: %v", err)
+		}
+	}
 }
 
 func (m *menu) onExit() {
 	close(m.stop)
 }
 
-// watch redraws the menu whenever the poller reports a change.
+// onAction is the panel's dispatcher. Each handler blocks (dialogs, server
+// restarts) and arrives on its own goroutine — see goPanelAction.
+func (m *menu) onAction(a panelAction) {
+	switch a.Action {
+	case "opened":
+		// The panel just became visible; answer with a fresh poll so the
+		// uptime and status shown are seconds old, not up to a tick old. The
+		// log line doubles as the proof-of-life for the whole ObjC bridge —
+		// it only appears if the status item, the panel and the webview all
+		// actually came up.
+		logf("panel opened")
+		m.poll.refresh()
+	case "dialog-result":
+		resolvePanelDialog(panelDialogResult{OK: a.OK, Text: a.Text})
+	case "panel-closed":
+		// A dialog whose panel disappeared is a dialog nobody can answer any
+		// more; count it as declined so the waiting goroutine moves on.
+		resolvePanelDialog(panelDialogResult{OK: false})
+	case "toggle-server":
+		m.toggleServer()
+	case "dashboard":
+		m.openDashboard()
+	case "toggle-network":
+		m.toggleNetworkAccess()
+	case "toggle-autostart":
+		m.toggleAutostart()
+	case "reset-password":
+		m.resetPasswordFlow()
+	case "check-updates":
+		m.checkForUpdates(true)
+	case "quit":
+		panelQuit()
+	default:
+		logf("panel sent an unknown action %q", a.Action)
+	}
+}
+
+// watch redraws the panel whenever the poller reports a change.
 func (m *menu) watch() {
 	for {
 		select {
@@ -173,71 +254,13 @@ func (m *menu) watch() {
 }
 
 func (m *menu) render(s snapshot) {
-	m.statusItem.SetTitle(s.ServerLine())
-	m.statusItem.SetIcon(dotPNG(s.ServerDot()))
-	m.renderDetail(s)
-
-	m.embeddingsItem.SetTitle(s.EmbeddingsLine())
-	m.embeddingsItem.SetIcon(dotPNG(s.EmbeddingsDot()))
-
-	if line := s.ModelLine(); line != "" {
-		m.modelItem.SetTitle(line)
-		// A transparent spacer, not a missing icon: AppKit indents a title by
-		// its image width, so without one this row would start left of the two
-		// above it and the group would read as ragged.
-		m.modelItem.SetIcon(dotPNG(dotBlank))
-		m.modelItem.Show()
-	} else {
-		m.modelItem.Hide()
-	}
-
-	switch {
-	case !s.Managed:
-		// Another installation owns the launchd label. Showing an enabled
-		// Start button that would fight it — or worse, silently repoint it — is
-		// the wrong behaviour; observing is useful, interfering is not.
-		m.startStopItem.SetTitle("Start Server")
-		m.startStopItem.Disable()
-	case s.State == stateRunning:
-		m.startStopItem.SetTitle("Stop Server")
-		m.startStopItem.Enable()
-	case s.State == stateStarting:
-		m.startStopItem.SetTitle("Starting…")
-		m.startStopItem.Disable()
-	default:
-		m.startStopItem.SetTitle("Start Server")
-		m.startStopItem.Enable()
-	}
-
 	if s.State == stateRunning {
-		m.dashboardItem.Enable()
-	} else {
-		m.dashboardItem.Disable()
+		// Bootstrap runs before the listener opens, so a server that answers is
+		// a server whose admin account exists — and the password that seeded it
+		// has no further use.
+		m.retireOnce.Do(retireBootstrapPassword)
 	}
-
-	if s.LocalOnly {
-		m.networkItem.Uncheck()
-	} else {
-		m.networkItem.Check()
-	}
-	if s.Autostart {
-		m.autostartItem.Check()
-	} else {
-		m.autostartItem.Uncheck()
-	}
-
-	if s.Managed {
-		m.networkItem.Enable()
-		m.autostartItem.Enable()
-		m.resetPWItem.Enable()
-	} else {
-		// These live in files this app does not own — except the password
-		// reset, which only needs the database and is therefore still useful
-		// against an install-server.sh deployment.
-		m.networkItem.Disable()
-		m.autostartItem.Disable()
-		m.resetPWItem.Enable()
-	}
+	panelSetState(buildPanelState(s, m.busy.Load(), m.currentBusyLabel()))
 }
 
 // toggleAutostart flips RunAtLoad on the launchd agent.
@@ -251,6 +274,12 @@ func (m *menu) toggleAutostart() {
 	if !s.Managed {
 		return
 	}
+	if !m.beginBusy("Applying the setting…") {
+		// The switch already flipped visually on the click; put it back.
+		m.render(s)
+		return
+	}
+	defer m.endBusy()
 	enable := !s.Autostart
 
 	if err := setAutostart(enable); err != nil {
@@ -269,15 +298,38 @@ func (m *menu) toggleAutostart() {
 	m.poll.refresh()
 }
 
+// upToDateMessage reports what is installed when there is nothing to offer.
+//
+// Both halves, named and versioned. The wording this replaced folded them into
+// one sentence and never said "app" at all, which read as a server-only check
+// and made the launcher's own self-update look like a feature nobody had
+// written — it is written, it just has nothing to compare against on a build
+// that came from source.
+func upToDateMessage() string {
+	msg := fmt.Sprintf("cix app\n%s\n\ncix server\n%s",
+		displayVersion(), strings.TrimPrefix(runtimeSummary(), "Server "))
+	if isDevBuild() {
+		msg += "\n\nThis app was built from source, so it does not replace " +
+			"itself — only released builds update the app. The server updates either way."
+	}
+	return msg
+}
+
 // checkForUpdates looks for a newer release and, if the user agrees, installs
-// it. `explicit` distinguishes the menu item from the background check: a
+// it. `explicit` distinguishes the footer link from the background check: a
 // background check that finds nothing says nothing.
 func (m *menu) checkForUpdates(explicit bool) {
+	if explicit {
+		// The check takes a network round-trip; the card with a loader is what
+		// says the click worked. Every path out of here ends in a dialog that
+		// replaces it — except a decline, where the card is already gone with
+		// the question — so it never needs an explicit clear.
+		showPanelBusy("Checking for updates…")
+	}
 	av := m.updater.check(explicit)
 	if !av.any() {
 		if explicit {
-			_ = alert("cix is up to date", fmt.Sprintf(
-				"You are running cix %s with %s.", displayVersion(), strings.ToLower(runtimeSummary())))
+			_ = alert("cix is up to date", upToDateMessage())
 		}
 		return
 	}
@@ -293,10 +345,10 @@ func (m *menu) checkForUpdates(explicit bool) {
 		what = fmt.Sprintf("cix server %s is available. You are running %s.", av.Runtime.Version, currentRuntimeVersion())
 		effect = "The server will be updated and restarted. This app stays open, and if the new server does not start, cix goes back to the current one."
 	case av.Runtime.Version == "":
-		what = fmt.Sprintf("cix %s is available. You are running %s.", av.App.Version, displayVersion())
+		what = fmt.Sprintf("cix app %s is available. You are running %s.", av.App.Version, displayVersion())
 		effect = "cix will close and reopen. The server keeps running throughout."
 	default:
-		what = fmt.Sprintf("cix %s and cix server %s are available.", av.App.Version, av.Runtime.Version)
+		what = fmt.Sprintf("cix app %s and cix server %s are available.", av.App.Version, av.Runtime.Version)
 		effect = "The server will be updated and restarted, then cix will close and reopen."
 	}
 
@@ -312,6 +364,14 @@ func (m *menu) checkForUpdates(explicit bool) {
 	// would skip the shutdown and swap the runtime under a live cix-server,
 	// leaving it with a llama sidecar from a different version.
 	wasRunning := m.poll.snapshotNow().PID != 0
+
+	// Claimed only now, not around the check: the check is HTTP and touches
+	// nothing, while installing stops and starts the server like the toggles do.
+	if !m.beginBusy("Installing the update…") {
+		_ = alert("cix is busy", "Another server operation is still running. Try the update again once it has finished.")
+		return
+	}
+	defer m.endBusy()
 
 	quit, err := m.updater.install(av, wasRunning, m.setProgress)
 	if err != nil {
@@ -331,32 +391,7 @@ func (m *menu) checkForUpdates(explicit bool) {
 
 	// From here the swap helper owns the outcome: it waits for this process to
 	// exit before moving anything, so quitting is the last required step.
-	systray.Quit()
-}
-
-// renderDetail fills the submenu under the server row. Slots with nothing to
-// say are hidden, so the submenu never shows an empty line.
-func (m *menu) renderDetail(s snapshot) {
-	lines := [detailRows]string{
-		s.DetailProcess(),
-		s.DetailPort(),
-		s.DetailNetwork(),
-		s.DetailModel(),
-		s.DetailVersion(),
-		// What is installed, as opposed to what the running server reports. The
-		// row above is empty whenever the server is not answering — which is
-		// exactly when someone wants to know which server is on disk.
-		runtimeSummary(),
-		s.DetailManaged(),
-	}
-	for i, line := range lines {
-		if line == "" {
-			m.detail[i].Hide()
-			continue
-		}
-		m.detail[i].SetTitle(line)
-		m.detail[i].Show()
-	}
+	panelQuit()
 }
 
 func (m *menu) toggleServer() {
@@ -364,32 +399,98 @@ func (m *menu) toggleServer() {
 	if !s.Managed {
 		return
 	}
-
-	var err error
+	label := "Starting the server…"
 	if s.State == stateRunning {
-		err = stopServer()
-	} else {
-		// Rewrite the wrapper before starting. It is generated, not edited, and
-		// something else may have replaced it — install-server.sh most obviously.
-		if err = writeLaunchdFiles(autostartEnabled()); err == nil {
-			err = startServer()
+		label = "Stopping the server…"
+	}
+	if !m.beginBusy(label) {
+		// The panel showed a loader optimistically on the click; a refused
+		// claim must put the real state back rather than leave it spinning.
+		m.render(m.poll.snapshotNow())
+		return
+	}
+	defer m.endBusy()
+
+	if s.State == stateRunning {
+		if err := stopServer(); err != nil {
+			_ = alert("cix", fmt.Sprintf("Could not stop the server.\n\n%v", err))
 		}
+		m.poll.refresh()
+		return
+	}
+
+	// A missing database is not something Start can fix. The server refuses to
+	// boot without an admin account to create — correctly — and says so in a
+	// log nobody has open, so the button appears to do nothing at all. Offer
+	// the thing that would actually help.
+	if needsFirstRun() {
+		m.offerSetupAgain(
+			"There is no cix database. If you deleted it, the server cannot start until an " +
+				"administrator account is created again.\n\n" +
+				"Setting up again creates a new account and a new, empty index. Anything that " +
+				"was indexed before is already gone with the database.")
+		m.poll.refresh()
+		return
+	}
+
+	// Rewrite the wrapper before starting. It is generated, not edited, and
+	// something else may have replaced it — install-server.sh most obviously.
+	err := writeLaunchdFiles(autostartEnabled())
+	if err == nil {
+		err = startServer()
 	}
 	if err != nil {
-		verb := "start"
-		if s.State == stateRunning {
-			verb = "stop"
+		_ = alert("cix", fmt.Sprintf("Could not start the server.\n\n%v", err))
+		return
+	}
+
+	// launchctl reports success for having spawned the process, not for the
+	// process surviving. A server that exits on a configuration it cannot
+	// accept leaves the panel saying "Stopped" and nothing else — which is how
+	// a deleted database looked like a broken Start button.
+	if detail := serverDiedOnStart(); detail != "" {
+		logf("the server exited immediately after Start: %s", detail)
+		// One refusal deserves better than its log text: no admin account. The
+		// needsFirstRun check above cannot see this case, because the failed
+		// start itself recreated an empty cix.db — the file exists, the
+		// accounts do not. The server's own words are the reliable signal, so
+		// route them to setup instead of printing them.
+		if isBootstrapRefusal(detail) {
+			m.offerSetupAgain(
+				"The cix database exists but has no accounts — this is what deleting the data " +
+					"directory looks like after a start attempt recreates an empty database.\n\n" +
+					"The server will not start until an administrator account is created again. " +
+					"Setting up again creates a new account and a new, empty index.")
+			m.poll.refresh()
+			return
 		}
-		_ = alert("cix", fmt.Sprintf("Could not %s the server.\n\n%v", verb, err))
+		_ = alert("The server stopped straight away", detail+
+			"\n\nThe full log is in ~/.cix/logs/cix-server.err.")
 	}
 	m.poll.refresh()
+}
+
+// offerSetupAgain proposes re-running the setup wizard and runs it on consent.
+//
+// Shared by the two ways a gutted installation shows itself: the database file
+// is missing outright (needsFirstRun), or it exists, freshly recreated and
+// empty, and the server refused to start against it (isBootstrapRefusal).
+func (m *menu) offerSetupAgain(message string) {
+	ok, err := confirm("Set cix up again?", message, "Set Up")
+	if err != nil || !ok {
+		return
+	}
+	if err := runFirstRun(m.updater); err != nil && !errors.Is(err, errCancelled) {
+		logf("re-running setup failed: %v", err)
+		_ = alert("Setup failed", fmt.Sprintf("cix could not set itself up again.\n\n%v", err))
+	}
 }
 
 // toggleNetworkAccess switches CIX_BIND_ADDR between loopback and all
 // interfaces, then restarts the server so the change takes effect.
 //
-// Widening access asks first. Nothing else in this menu changes what the
-// machine exposes to the network, and a checkbox is an easy thing to hit by
+// Widening access asks first. Nothing else in this panel changes what the
+// machine exposes to the network, and a switch is an easy thing to hit by
 // accident; narrowing access needs no confirmation because it can only be safe.
 func (m *menu) toggleNetworkAccess() {
 	vars, err := readServerEnv()
@@ -397,6 +498,11 @@ func (m *menu) toggleNetworkAccess() {
 		_ = alert("cix", "cix is not set up yet.")
 		return
 	}
+	if !m.beginBusy("Applying the setting…") {
+		m.render(m.poll.snapshotNow())
+		return
+	}
+	defer m.endBusy()
 
 	wasRunning := m.poll.snapshotNow().State == stateRunning
 	local := isLocalOnly(vars)
@@ -410,7 +516,7 @@ func (m *menu) toggleNetworkAccess() {
 				"The server will restart.", serverPort(vars)),
 			"Allow")
 		if err != nil || !ok {
-			// Put the checkbox back: the click already toggled it visually.
+			// Put the switch back: the click already toggled it visually.
 			m.render(m.poll.snapshotNow())
 			return
 		}

@@ -58,3 +58,8 @@ func logf(format string, args ...any) {
 
 	fmt.Fprintf(logFile, "%s  %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
 }
+
+// logProgress is the progress sink for slow work with no better surface —
+// paths that run before the menu exists, or that never got a menu reference.
+// The log is where anyone investigating a slow first launch looks anyway.
+func logProgress(msg string) { logf("%s", msg) }

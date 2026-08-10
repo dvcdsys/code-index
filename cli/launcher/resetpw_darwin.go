@@ -51,11 +51,13 @@ func (m *menu) resetPasswordFlow() {
 		if err != nil || !ok {
 			return
 		}
+		showPanelBusy("Downloading the cix server…")
 		if err := ensureRuntime(m.updater, m.setProgress); err != nil {
 			_ = alert("Could not install the cix server", err.Error())
 			return
 		}
 		m.setProgress("")
+		clearPanelBusy()
 	}
 
 	server, err := runtimeServerPath()
@@ -70,10 +72,11 @@ func (m *menu) resetPasswordFlow() {
 		return
 	}
 
-	_ = alert("Password reset", fmt.Sprintf(
+	_ = alertWithSecret("Password reset", fmt.Sprintf(
 		"Account:\n%s\n\nTemporary password:\n%s\n\n"+
 			"You will be asked to change it at the next sign-in. Other sessions for this "+
-			"account have been signed out.", email, password))
+			"account have been signed out.", email, password),
+		password, "password")
 }
 
 // runResetPassword executes the reset and returns the generated password.

@@ -1,0 +1,246 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// writeTestEnv lays down a server.env like the wizard's, pointing at dbPath.
+func writeTestEnv(t *testing.T, home, dbPath string, extra map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".cix"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	vars := map[string]string{
+		"CIX_BOOTSTRAP_ADMIN_EMAIL":    "someone@example.com",
+		"CIX_BOOTSTRAP_ADMIN_PASSWORD": "generated-once",
+		"CIX_API_KEY":                  "cix_testkey",
+		"CIX_PORT":                     "21847",
+		"CIX_SQLITE_PATH":              dbPath,
+		"CIX_BIND_ADDR":                bindLocalOnly,
+	}
+	for k, v := range extra {
+		if v == "" {
+			delete(vars, k)
+			continue
+		}
+		vars[k] = v
+	}
+	if err := writeServerEnv(vars); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func touch(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not really sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Setup is needed when the database is gone, not only when the config is.
+//
+// Keying on server.env alone meant that deleting ~/.cix/data left the app
+// believing it was configured — and the server then minted a fresh admin from
+// the bootstrap credentials still in that file, using the original generated
+// password rather than whatever the user had set since.
+func TestNeedsFirstRun(t *testing.T) {
+	t.Run("no server.env", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if !needsFirstRun() {
+			t.Error("needsFirstRun() = false with no server.env")
+		}
+	})
+
+	t.Run("server.env but no database", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		writeTestEnv(t, home, filepath.Join(home, ".cix", "data", "cix.db"), nil)
+		if !needsFirstRun() {
+			t.Error("needsFirstRun() = false with a configured database that does not exist")
+		}
+	})
+
+	t.Run("both present", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		db := filepath.Join(home, ".cix", "data", "cix.db")
+		writeTestEnv(t, home, db, nil)
+		touch(t, db)
+		if needsFirstRun() {
+			t.Error("needsFirstRun() = true on a complete installation")
+		}
+	})
+
+	t.Run("hand-edited env with no database path", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		writeTestEnv(t, home, "", map[string]string{"CIX_SQLITE_PATH": ""})
+		// Nothing to check against, so nothing to conclude. Running the wizard
+		// here would overwrite a file somebody edited on purpose.
+		if needsFirstRun() {
+			t.Error("needsFirstRun() = true on an env file with no CIX_SQLITE_PATH")
+		}
+	})
+}
+
+// The two refusals bootstrapAuth emits on a user-less database must route to
+// setup, and other startup failures must not — a port clash is not a reason to
+// offer wiping anyone's configuration. The strings are copied from
+// server/cmd/cix-server/bootstrap.go; if the server rewords them, this test is
+// the tripwire.
+func TestIsBootstrapRefusal(t *testing.T) {
+	refusals := []string{
+		"cix-server: bootstrap auth: incomplete bootstrap configuration: " +
+			"CIX_BOOTSTRAP_ADMIN_EMAIL is set but CIX_BOOTSTRAP_ADMIN_PASSWORD is empty.",
+		"cix-server: bootstrap auth: no users in database and the bootstrap admin " +
+			"env vars are not set: refuse to start.",
+	}
+	for _, tail := range refusals {
+		if !isBootstrapRefusal(tail) {
+			t.Errorf("isBootstrapRefusal(%q) = false, want true", tail)
+		}
+	}
+
+	others := []string{
+		"listen tcp 127.0.0.1:21847: bind: address already in use",
+		"open database: unable to open database file",
+		"", // no log at all
+	}
+	for _, tail := range others {
+		if isBootstrapRefusal(tail) {
+			t.Errorf("isBootstrapRefusal(%q) = true, want false", tail)
+		}
+	}
+}
+
+func TestRetireBootstrapPassword(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	db := filepath.Join(home, ".cix", "data", "cix.db")
+	writeTestEnv(t, home, db, map[string]string{"CIX_BIND_ADDR": bindAllInterfaces})
+	touch(t, db)
+
+	retireBootstrapPassword()
+
+	vars, err := readServerEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := vars["CIX_BOOTSTRAP_ADMIN_PASSWORD"]; ok {
+		t.Error("the bootstrap password survived")
+	}
+	// The email is what the reset-password dialog offers as a default, and it
+	// is not a credential.
+	if vars["CIX_BOOTSTRAP_ADMIN_EMAIL"] != "someone@example.com" {
+		t.Errorf("email = %q, want it kept", vars["CIX_BOOTSTRAP_ADMIN_EMAIL"])
+	}
+	// Nothing else may be lost on the way through: the API key is what the CLI
+	// authenticates with, and the bind address is a choice the user made.
+	if vars["CIX_API_KEY"] != "cix_testkey" {
+		t.Errorf("api key = %q, want it kept", vars["CIX_API_KEY"])
+	}
+	if vars["CIX_BIND_ADDR"] != bindAllInterfaces {
+		t.Errorf("bind addr = %q, want it kept", vars["CIX_BIND_ADDR"])
+	}
+
+	// The file still holds an API key, so the mode still matters.
+	path, _ := serverEnvPath()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != envFileMode {
+		t.Errorf("server.env mode = %v, want %v", perm, os.FileMode(envFileMode))
+	}
+
+	// Idempotent: the menu calls this whenever it first sees a running server.
+	retireBootstrapPassword()
+	if vars, err := readServerEnv(); err != nil || vars["CIX_API_KEY"] != "cix_testkey" {
+		t.Errorf("second call damaged the file: %v %v", vars, err)
+	}
+}
+
+// The wizard runs again after a database is deleted, and on that path it must
+// not quietly revert settings chosen since the first run — the network toggle
+// most of all, because reverting it changes what the machine exposes.
+func TestSetDefaultKeepsExistingChoices(t *testing.T) {
+	vars := map[string]string{
+		"CIX_BIND_ADDR": bindAllInterfaces,
+		"CIX_PORT":      "  ", // whitespace is not a choice
+	}
+	setDefault(vars, "CIX_BIND_ADDR", bindLocalOnly)
+	setDefault(vars, "CIX_PORT", "21847")
+	setDefault(vars, "CIX_VERSION_CHECK_ENABLED", "false")
+
+	if vars["CIX_BIND_ADDR"] != bindAllInterfaces {
+		t.Errorf("bind addr = %q, want the existing choice kept", vars["CIX_BIND_ADDR"])
+	}
+	if vars["CIX_PORT"] != "21847" {
+		t.Errorf("port = %q, want the blank value replaced", vars["CIX_PORT"])
+	}
+	if vars["CIX_VERSION_CHECK_ENABLED"] != "false" {
+		t.Errorf("version check = %q, want the default filled in", vars["CIX_VERSION_CHECK_ENABLED"])
+	}
+}
+
+// When the server exits on a configuration it will not accept, its own words
+// are the only useful thing to show — the menu otherwise says "Stopped" and
+// nothing more, which is how a deleted database looked like a broken button.
+func TestLastServerError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logs := filepath.Join(home, ".cix", "logs")
+	if err := os.MkdirAll(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("reports the tail", func(t *testing.T) {
+		body := "cix-server is ready\n\n\nbootstrap auth: incomplete bootstrap configuration:\n" +
+			"  CIX_BOOTSTRAP_ADMIN_EMAIL is set but CIX_BOOTSTRAP_ADMIN_PASSWORD is empty.\n"
+		if err := os.WriteFile(filepath.Join(logs, "cix-server.err"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := lastServerError()
+		if !strings.Contains(got, "incomplete bootstrap configuration") {
+			t.Errorf("lastServerError() = %q, want the refusal in it", got)
+		}
+		// Blank lines carry nothing into a dialog.
+		if strings.Contains(got, "\n\n") {
+			t.Errorf("lastServerError() kept blank lines: %q", got)
+		}
+	})
+
+	t.Run("bounded", func(t *testing.T) {
+		var sb strings.Builder
+		for i := range 500 {
+			fmt.Fprintf(&sb, "line %d with a good deal of text after it so the cap is reached\n", i)
+		}
+		if err := os.WriteFile(filepath.Join(logs, "cix-server.err"), []byte(sb.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := lastServerError()
+		if n := len([]rune(got)); n > 901 {
+			t.Errorf("lastServerError() returned %d runes, want it capped", n)
+		}
+		if !strings.Contains(got, "line 499") {
+			t.Error("lastServerError() dropped the most recent line")
+		}
+	})
+
+	t.Run("no log at all", func(t *testing.T) {
+		if err := os.Remove(filepath.Join(logs, "cix-server.err")); err != nil {
+			t.Fatal(err)
+		}
+		if got := lastServerError(); got == "" {
+			t.Error("lastServerError() = \"\", want something to show the user")
+		}
+	})
+}

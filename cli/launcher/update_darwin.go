@@ -301,16 +301,28 @@ func serverSurvivedRestart(baseURL string, timeout time.Duration) bool {
 // launchd wrapper all live under ~/.cix — so replacing the .app is invisible to
 // it. Updating the app no longer interrupts indexing.
 func (u *updater) updateLauncher(rel release.Release, progress func(string)) error {
+	staged, err := u.stageUpdate(rel, progress)
+	if err != nil {
+		return err
+	}
+	return u.launchSwap(staged)
+}
+
+// stageUpdate downloads and validates the new .app, leaving it beside the
+// installed one ready to be moved into place. Split from updateLauncher so
+// everything that can fail is reachable from a test: the swap itself ends the
+// process, and a test cannot wait for its own exit.
+func (u *updater) stageUpdate(rel release.Release, progress func(string)) (string, error) {
 	defer progress("")
 	progress("Downloading the cix update…")
 
 	dmgAsset, ok := rel.AssetBySuffix(".dmg")
 	if !ok {
-		return fmt.Errorf("release %s has no disk image attached", rel.TagName)
+		return "", fmt.Errorf("release %s has no disk image attached", rel.TagName)
 	}
 	sumsAsset, ok := rel.AssetByName("checksums.txt")
 	if !ok {
-		return fmt.Errorf("release %s has no checksums.txt attached", rel.TagName)
+		return "", fmt.Errorf("release %s has no checksums.txt attached", rel.TagName)
 	}
 
 	// Preflight before spending a download. Writing into the bundle's parent is
@@ -318,43 +330,42 @@ func (u *updater) updateLauncher(rel release.Release, progress func(string)) err
 	// and the message can still be "reinstall from the DMG".
 	parent := filepath.Dir(u.bundle.Root)
 	if err := checkWritable(parent); err != nil {
-		return fmt.Errorf("cix cannot update itself because %s is not writable by you.\n\n"+
+		return "", fmt.Errorf("cix cannot update itself because %s is not writable by you.\n\n"+
 			"Download the new version and drag it over the old one instead.", parent)
 	}
 
 	cacheDir, err := updatesCacheDir()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(cacheDir)
 
 	dmgPath := filepath.Join(cacheDir, dmgAsset.Name)
 	if err := download(dmgAsset.URL, dmgPath); err != nil {
-		return fmt.Errorf("could not download the update: %w", err)
+		return "", fmt.Errorf("could not download the update: %w", err)
 	}
 	sumsPath := filepath.Join(cacheDir, "checksums.txt")
 	if err := download(sumsAsset.URL, sumsPath); err != nil {
-		return fmt.Errorf("could not download the checksums: %w", err)
+		return "", fmt.Errorf("could not download the checksums: %w", err)
 	}
 
 	if err := verifyChecksum(dmgPath, sumsPath, dmgAsset.Name); err != nil {
 		// With no Developer ID signature this checksum is the entire integrity
 		// story, so a mismatch is fatal and loud rather than a warning.
 		logf("checksum verification failed for %s: %v", dmgAsset.Name, err)
-		return fmt.Errorf("the downloaded update failed its checksum check and was discarded.\n\n%v", err)
+		return "", fmt.Errorf("the downloaded update failed its checksum check and was discarded.\n\n%v", err)
 	}
 
 	staged := filepath.Join(parent, ".cix.app.new")
 	os.RemoveAll(staged)
 	if err := stageFromDMG(dmgPath, staged); err != nil {
 		os.RemoveAll(staged)
-		return err
+		return "", err
 	}
-
-	return u.launchSwap(staged)
+	return staged, nil
 }
 
 // launchSwap writes the swap script to a temp file and starts it detached.

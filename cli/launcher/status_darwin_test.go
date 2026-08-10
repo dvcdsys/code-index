@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/dvcdsys/code-index/cli/internal/client"
 )
@@ -29,114 +27,80 @@ func TestProviderLabel(t *testing.T) {
 	}
 }
 
-func TestSnapshotLines(t *testing.T) {
+// buildPanelState is the whole contract between the poller and panel.html —
+// every field the JavaScript renders comes through it.
+func TestBuildPanelState(t *testing.T) {
 	running := snapshot{
-		State:   stateRunning,
-		Port:    21847,
-		Managed: true,
+		State: stateRunning, PID: 4242, Port: 21847,
+		Managed: true, LocalOnly: true, Autostart: true,
 		Status: &client.StatusResponse{
-			EmbeddingProvider: "ollama",
-			EmbeddingModel:    "ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF",
+			ServerVersion:      "0.12.9",
+			EmbeddingProvider:  "ollama",
+			EmbeddingModel:     "ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF",
+			ActiveIndexingJobs: 2,
+			Projects:           14,
 		},
 		EmbeddingsOK: true,
 	}
+	ps := buildPanelState(running, false, "")
+	if ps.State != "running" || ps.PID != 4242 || ps.Port != 21847 {
+		t.Errorf("state/pid/port = %q/%d/%d, want running/4242/21847", ps.State, ps.PID, ps.Port)
+	}
+	// The provider kind is translated, and the model loses the misleading
+	// provider prefix — same reasoning as providerLabel.
+	if ps.Engine != "llama.cpp (bundled)" || !ps.EngineReady {
+		t.Errorf("engine = %q ready=%v, want the bundled label and ready", ps.Engine, ps.EngineReady)
+	}
+	if ps.Model != "awhiteside/CodeRankEmbed-Q8_0-GGUF" {
+		t.Errorf("model = %q, want the prefix stripped", ps.Model)
+	}
+	if ps.ServerVersion != "0.12.9" || ps.IndexingJobs != 2 || ps.Projects != 14 {
+		t.Errorf("version/jobs/projects = %q/%d/%d", ps.ServerVersion, ps.IndexingJobs, ps.Projects)
+	}
+	if !ps.LocalOnly || ps.LanAddr != "" {
+		t.Errorf("a loopback-bound server must not advertise a LAN address, got %q", ps.LanAddr)
+	}
+	if !ps.Autostart {
+		t.Error("autostart lost on the way through")
+	}
 
-	if got, want := running.ServerLine(), "cix-server: Running (:21847)"; got != want {
-		t.Errorf("ServerLine() = %q, want %q", got, want)
-	}
-	// Readiness is on the dot, not in the text: the words "— ready" cost menu
-	// width, and an NSMenu is as wide as its widest row.
-	if got, want := running.EmbeddingsLine(), "Embeddings: llama.cpp (bundled)"; got != want {
-		t.Errorf("EmbeddingsLine() = %q, want %q", got, want)
-	}
-	// The provider prefix is stripped — the row above already names the
-	// provider, and repeating the misleading kind defeats providerLabel — and
-	// the remainder is middle-truncated to the width cap.
-	if got, want := running.ModelLine(), "Model: awhiteside/Co…bed-Q8_0-GGUF"; got != want {
-		t.Errorf("ModelLine() = %q, want %q", got, want)
-	}
-	if got, want := running.ModelName(), "awhiteside/CodeRankEmbed-Q8_0-GGUF"; got != want {
-		t.Errorf("ModelName() = %q, want %q (the details submenu keeps the full id)", got, want)
-	}
-}
-
-func TestSnapshotLines_NotRunning(t *testing.T) {
-	// A cold start loads the embedding model in silence for up to a few
-	// minutes. Calling that "Stopped" is what makes people kill and restart a
-	// server that was nearly ready, so it gets its own state.
-	starting := snapshot{State: stateStarting, Managed: true}
-	if got, want := starting.ServerLine(), "cix-server: Starting…"; got != want {
-		t.Errorf("ServerLine() = %q, want %q", got, want)
-	}
 	// Provider details from a server that is not answering are stale by
-	// definition, so no row claims otherwise.
-	if got, want := starting.ModelLine(), ""; got != want {
-		t.Errorf("ModelLine() = %q, want %q (hidden)", got, want)
-	}
-	if got, want := starting.EmbeddingsLine(), "Embeddings: unknown"; got != want {
-		t.Errorf("EmbeddingsLine() = %q, want %q", got, want)
+	// definition, so none are claimed.
+	starting := buildPanelState(snapshot{State: stateStarting, Managed: true}, false, "")
+	if starting.State != "starting" || starting.Engine != "" || starting.Model != "" {
+		t.Errorf("starting = %+v, want no provider details", starting)
 	}
 
-	// An agent installed by install-server.sh owns the same launchd label. The
-	// app observes it but must not offer to drive it. Abbreviated in the row
-	// because spelled out it is 40 characters and would set the menu's width on
-	// its own; the details submenu carries the explanation.
-	external := snapshot{State: stateStopped, Managed: false}
-	if got, want := external.ServerLine(), "cix-server: Stopped (external)"; got != want {
-		t.Errorf("ServerLine() = %q, want %q", got, want)
+	// The busy flag is the menu's, not the poller's; it must pass through with
+	// its label — the flag is what the panel disables its controls on, and the
+	// label is the only thing telling the user which slow operation is running.
+	busy := buildPanelState(running, true, "Stopping the server…")
+	if !busy.Busy || busy.BusyLabel != "Stopping the server…" {
+		t.Errorf("busy/label = %v/%q, want them passed through", busy.Busy, busy.BusyLabel)
 	}
-	// A disabled Start/Stop is otherwise inexplicable, so the reason is in the
-	// details submenu.
-	if !strings.Contains(external.DetailManaged(), "install-server.sh") {
-		t.Errorf("DetailManaged() should name the external installer, got %q", external.DetailManaged())
+
+	stopped := buildPanelState(snapshot{State: stateStopped, Managed: false}, false, "")
+	if stopped.State != "stopped" || stopped.Managed {
+		t.Errorf("stopped external = %+v", stopped)
 	}
 }
 
-func TestDetailRows(t *testing.T) {
-	// The details submenu replaced menu-item tooltips: once any AppKit tooltip
-	// has shown, every later one appears with no delay, and they are positioned
-	// against the item rather than the pointer. Neither has an API.
-	s := snapshot{
-		State: stateRunning, PID: 4242, Port: 21847, Managed: true, LocalOnly: true,
-		Status: &client.StatusResponse{
-			ServerVersion:  "0.12.4",
-			EmbeddingModel: "ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF",
-		},
+// formatEtime parses everything ps -o etime is documented to print.
+func TestFormatEtime(t *testing.T) {
+	tests := map[string]string{
+		"04:12":       "4m",
+		"00:42":       "0m",
+		"4:12:33":     "4h 12m",
+		"04:12:33":    "4h 12m",
+		"2-03:04:05":  "2d 3h",
+		"12-00:00:01": "12d 0h",
+		"":            "",
+		"garbage":     "",
 	}
-	if got, want := s.DetailProcess(), "Process: 4242"; got != want {
-		t.Errorf("DetailProcess() = %q, want %q", got, want)
-	}
-	if got, want := s.DetailPort(), "Port: 21847"; got != want {
-		t.Errorf("DetailPort() = %q, want %q", got, want)
-	}
-	// "127.0.0.1" is precise and means nothing to most people; the exposure is
-	// what they need to know.
-	if got, want := s.DetailNetwork(), "Network: this Mac only"; got != want {
-		t.Errorf("DetailNetwork() = %q, want %q", got, want)
-	}
-	// The full id, which the truncated row could not carry — the whole reason
-	// this submenu exists.
-	if got, want := s.DetailModel(), "Model: awhiteside/CodeRankEmbed-Q8_0-GGUF"; got != want {
-		t.Errorf("DetailModel() = %q, want %q", got, want)
-	}
-	if got, want := s.DetailVersion(), "Server 0.12.4"; got != want {
-		t.Errorf("DetailVersion() = %q, want %q", got, want)
-	}
-	if got := s.DetailManaged(); got != "" {
-		t.Errorf("DetailManaged() = %q, want empty for an app-managed agent", got)
-	}
-
-	// Rows with nothing to say are hidden, never blank.
-	stopped := snapshot{State: stateStopped, Port: 21847, Managed: true}
-	if got, want := stopped.DetailProcess(), "Process: not running"; got != want {
-		t.Errorf("DetailProcess() = %q, want %q", got, want)
-	}
-	if stopped.DetailModel() != "" || stopped.DetailVersion() != "" {
-		t.Error("model and version rows should be empty when the server is not answering")
-	}
-	exposed := snapshot{State: stateRunning, Port: 21847, Managed: true, LocalOnly: false}
-	if got, want := exposed.DetailNetwork(), "Network: reachable from your network"; got != want {
-		t.Errorf("DetailNetwork() = %q, want %q", got, want)
+	for in, want := range tests {
+		if got := formatEtime(in); got != want {
+			t.Errorf("formatEtime(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -196,80 +160,17 @@ func TestPollerTrustsHTTPProviders(t *testing.T) {
 	}
 }
 
-func TestEllipsize(t *testing.T) {
-	tests := []struct {
-		in   string
-		max  int
-		want string
-	}{
-		{"short", 10, "short"},
-		{"exactly-10", 10, "exactly-10"},
-		// Middle, not tail: both ends of a qualified name carry information,
-		// and tail truncation renders every Hugging Face model as its owner.
-		{"awhiteside/CodeRankEmbed-Q8_0-GGUF", 27, "awhiteside/Co…d-Q8_0-GGUF"},
-		{"abcdefghij", 5, "abc…j"},
-		// Multi-byte input must be cut on rune boundaries, not bytes.
-		{"привіт-світе-довгий-рядок", 10, "привіт…ядок"},
-	}
-	for _, tc := range tests {
-		got := ellipsize(tc.in, tc.max)
-		if len([]rune(got)) > tc.max && len([]rune(tc.in)) > tc.max {
-			t.Errorf("ellipsize(%q, %d) = %q, %d runes — over the cap", tc.in, tc.max, got, len([]rune(got)))
-		}
-		if !utf8.ValidString(got) {
-			t.Errorf("ellipsize(%q, %d) produced invalid UTF-8: %q", tc.in, tc.max, got)
-		}
-	}
-}
-
-func TestRowsFitTheWidthCap(t *testing.T) {
-	// An NSMenu is exactly as wide as its widest row, so a long model id used
-	// to stretch the whole menu. Every row must stay inside the cap.
-	s := snapshot{
-		State:   stateRunning,
-		Port:    21847,
-		Managed: true,
-		Status: &client.StatusResponse{
-			EmbeddingProvider: "ollama",
-			EmbeddingModel:    "ollama:some-extremely-long-organisation/an-even-longer-model-name-v2",
-		},
-		EmbeddingsOK: true,
-	}
-	for name, line := range map[string]string{
-		"ServerLine":     s.ServerLine(),
-		"EmbeddingsLine": s.EmbeddingsLine(),
-		"ModelLine":      s.ModelLine(),
-	} {
-		if n := len([]rune(line)); n > maxRowRunes {
-			t.Errorf("%s = %q is %d runes, over the %d cap", name, line, n, maxRowRunes)
-		}
-	}
-	// The untruncated value is still available for the details submenu.
+// ModelName keeps the untruncated id — panel.html shows it whole and relies on
+// CSS to fit it, so the only transformation allowed here is the prefix strip.
+func TestModelName(t *testing.T) {
+	s := snapshot{Status: &client.StatusResponse{
+		EmbeddingModel: "ollama:some-extremely-long-organisation/an-even-longer-model-name-v2",
+	}}
 	if got, want := s.ModelName(), "some-extremely-long-organisation/an-even-longer-model-name-v2"; got != want {
 		t.Errorf("ModelName() = %q, want %q", got, want)
 	}
-}
-
-func TestDots(t *testing.T) {
-	running := snapshot{State: stateRunning, Status: &client.StatusResponse{}, EmbeddingsOK: true}
-	if running.ServerDot() != dotGreen || running.EmbeddingsDot() != dotGreen {
-		t.Error("a running server with a ready provider should be green on both rows")
-	}
-	// Starting is amber, not red: a cold start loading a model is working, and
-	// red is what makes people kill it.
-	if (snapshot{State: stateStarting}).ServerDot() != dotAmber {
-		t.Error("starting should be amber")
-	}
-	if (snapshot{State: stateStopped}).ServerDot() != dotRed {
-		t.Error("stopped should be red")
-	}
-	// Nothing is known about the provider when the server is down; grey says
-	// "unknown", red would claim it is broken.
-	if (snapshot{State: stateStopped}).EmbeddingsDot() != dotGrey {
-		t.Error("provider state should be grey when the server is not answering")
-	}
-	if len(dotPNG(dotGreen)) == 0 {
-		t.Error("dotPNG returned no bytes")
+	if got := (snapshot{}).ModelName(); got != "" {
+		t.Errorf("ModelName() with no status = %q, want empty", got)
 	}
 }
 
