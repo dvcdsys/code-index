@@ -1,0 +1,164 @@
+name: "Release: macOS app"
+
+# Triggered by macOS-app tags (e.g. `mac/v0.1.0`). This is a third, independent
+# tag stream alongside `server/v*` and `cli/v*`, and it releases exactly one
+# thing: the menu bar app, ~4 MB, holding a single executable.
+#
+# The server it manages is NOT built here. It ships from the server/v* tag
+# stream — the same tag and the same workflow run that publishes the Docker
+# images (see release-server.yml's macos-runtime job) — so a Mac install and a
+# container on the same version are the same server. cix.app downloads it into
+# ~/.cix/runtime/ and updates it independently of itself.
+#
+# That means this workflow no longer needs a server/v* or cli/v* tag to be
+# reachable: nothing here is stamped with them.
+on:
+  push:
+    tags:
+      - "mac/v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to build (branch, tag, or SHA)"
+        required: true
+      version:
+        description: "App version, without the mac/v prefix (e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build cix.app + DMG
+    # The bundled llama-server is macOS arm64 only (upstream ships no macOS
+    # x86_64 asset), so the whole app is Apple Silicon only and must be built
+    # natively. macos-latest is arm64.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MAC_VERSION="${{ github.event.inputs.version }}"
+          else
+            MAC_VERSION="${GITHUB_REF_NAME#mac/v}"
+          fi
+          echo "mac=$MAC_VERSION" >> "$GITHUB_OUTPUT"
+          echo "app=$MAC_VERSION"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Only the CLI module is built here — the launcher lives in it.
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Build cix.app
+        env:
+          MAC_VERSION: ${{ steps.ver.outputs.mac }}
+        run: mac/scripts/build-app.sh
+
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          APP=mac/dist/cix.app
+
+          # Ad-hoc signatures do not satisfy Gatekeeper, but they do have to be
+          # internally consistent — --strict is what catches a bundle whose
+          # sealed resources drifted from what is on disk.
+          codesign --verify --strict --verbose=2 "$APP"
+
+          # Reports the launcher's own version, and that no runtime is installed
+          # — correct on a build machine, where the two halves have not met yet.
+          "$APP/Contents/MacOS/cix-launcher" -report
+
+          # The app must contain exactly one executable. A leftover cix-server
+          # or llama/ from a pre-split build would be sealed into the signature
+          # and shipped as ~90 MB nobody uses.
+          found="$(find "$APP/Contents/MacOS" -type f | wc -l | tr -d ' ')"
+          if [ "$found" != "1" ]; then
+            echo "::error title=Unexpected bundle contents::Contents/MacOS holds $found files, expected only cix-launcher"
+            find "$APP/Contents/MacOS" -type f
+            exit 1
+          fi
+
+      - name: Build DMG
+        env:
+          MAC_VERSION: ${{ steps.ver.outputs.mac }}
+        run: mac/scripts/make-dmg.sh
+
+      - name: Compute checksums
+        working-directory: mac/dist
+        # The updater verifies the download against this file. Without a
+        # Developer ID signature it is the only integrity check there is.
+        run: shasum -a 256 ./*.dmg > checksums.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cix-macos-arm64
+          path: |
+            mac/dist/*.dmg
+            mac/dist/checksums.txt
+
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          name: "macOS app ${{ steps.ver.outputs.mac }}"
+          files: |
+            mac/dist/*.dmg
+            mac/dist/checksums.txt
+          generate_release_notes: true
+          # Server releases own the "latest" pointer — the Docker image is the
+          # primary deliverable of this project. Mac installs filter by the
+          # `mac/` tag prefix.
+          make_latest: "false"
+          body: |
+            ## cix for macOS — Apple Silicon
+
+            A menu bar app for a local cix server: start and stop it, see what
+            its embedding provider is doing, and open the dashboard. Everything
+            runs on your machine.
+
+            ### Install
+
+            1. Download the `.dmg` below and open it.
+            2. Drag **cix.app** onto **Applications**.
+            3. Open it from Applications.
+
+            On first launch the app downloads the server itself — `cix-server`,
+            the `cix` CLI and a Metal-accelerated `llama-server`, about 40 MB —
+            from the newest [server release](https://github.com/dvcdsys/code-index/releases?q=server%2Fv).
+            That is the same build the Docker images are cut from, and it
+            updates on its own schedule: a new server does not need a new app.
+
+            ### First launch will be blocked — this is expected
+
+            cix is open source and is **not** signed with a paid Apple Developer
+            certificate, so macOS refuses the first launch with "cix cannot be
+            verified".
+
+            To allow it: **System Settings → Privacy & Security**, scroll to
+            **Security**, then click **Open Anyway** next to the message about cix.
+
+            On macOS 15 and later the old right-click → Open shortcut no longer
+            works — you have to use System Settings. You only need to do this
+            once per installed version.
+
+            ### Verify the download
+
+            ```bash
+            shasum -a 256 -c checksums.txt
+            ```
+
+            Requires macOS 13 or later on Apple Silicon. There is no Intel build:
+            upstream llama.cpp publishes no macOS x86_64 release asset.

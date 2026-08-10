@@ -156,6 +156,88 @@ jobs:
             openapi=doc
           tags: ${{ steps.tags.outputs.tags }}
 
+  macos-runtime:
+    name: Build macOS runtime (arm64)
+    # The same server, packaged for a Mac instead of a container: cix-server,
+    # the cix CLI and a Metal llama-server, installed by cix.app into
+    # ~/.cix/runtime/<version>/. It ships from THIS tag, not from mac/v*, so a
+    # Mac and a container on the same version are running the same server.
+    #
+    # macos-latest is arm64, and it has to be: upstream llama.cpp publishes one
+    # macOS asset, macos-arm64, so there is no x86_64 build to make.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          # Full history: the CLI version comes from `git describe` against a
+          # tag that is not the tag being built.
+          fetch-depth: 0
+
+      - name: Resolve versions
+        id: ver
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SERVER_VERSION="${{ github.event.inputs.version }}"
+          else
+            SERVER_VERSION="${GITHUB_REF_NAME#server/}"
+          fi
+          # The Docker tags are v-prefixed; the runtime version is not. It
+          # becomes a directory name under ~/.cix/runtime/ and is compared
+          # against the tag stream with the prefix already stripped.
+          SERVER_VERSION="${SERVER_VERSION#v}"
+
+          CLI_TAG="$(git describe --tags --match 'cli/v*' --abbrev=0 2>/dev/null || true)"
+          if [ -z "$CLI_TAG" ]; then
+            echo "::error title=No CLI version::The runtime bundles the cix CLI, and no cli/v* tag is reachable from this commit — it would ship stamped 0.0.0-dev. Cut server/v* tags on main."
+            exit 1
+          fi
+
+          {
+            echo "server=$SERVER_VERSION"
+            echo "cli=${CLI_TAG#cli/v}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "server=$SERVER_VERSION cli=$CLI_TAG"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: |
+            server/go.sum
+            cli/go.sum
+
+      - name: Set up Node
+        # The server binary embeds the built dashboard via go:embed, so this
+        # needs the frontend toolchain even though nothing here is JavaScript.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/dashboard/package-lock.json
+
+      - name: Build the runtime
+        env:
+          SERVER_VERSION: ${{ steps.ver.outputs.server }}
+          CLI_VERSION: ${{ steps.ver.outputs.cli }}
+        # The script round-trips the tarball it writes before returning:
+        # extract, codesign --verify --strict every Mach-O, check llama-server's
+        # @rpath dependencies, and exec the server. That check is in the script
+        # rather than here so local builds get it too, and because the failure
+        # it catches is silent — a signature the kernel rejects is SIGKILL with
+        # empty stderr.
+        run: mac/scripts/build-runtime.sh
+
+      - name: Upload the runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: cix-runtime-darwin-arm64
+          path: mac/dist/*.tar.gz
+
   prune:
     name: Prune stale Docker Hub tags
     needs: [docker-cpu, docker-cuda]
@@ -178,7 +260,10 @@ jobs:
 
   release:
     name: Publish release
-    needs: [docker-cpu, docker-cuda]
+    # macos-runtime is a hard dependency, not a nicety: cix.app installs its
+    # server from this release's assets, so a release published without the
+    # runtime attached is one no Mac can install or update to.
+    needs: [docker-cpu, docker-cuda, macos-runtime]
     runs-on: ubuntu-latest
     # Skip GitHub release creation on manual rebuilds — the release
     # already exists for the version being rebuilt.
@@ -191,11 +276,30 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#server/}" >> "$GITHUB_OUTPUT"
 
+      - name: Download the macOS runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: cix-runtime-darwin-arm64
+          path: dist
+
+      - name: Compute checksums
+        working-directory: dist
+        # cix.app verifies its download against this file. Without a Developer
+        # ID signature it is the only integrity check there is.
+        #
+        # sha256sum, not shasum: this job runs on ubuntu, and that is what
+        # release-cli.yml uses there. The macOS jobs use shasum because macOS
+        # ships no sha256sum. Same output format either way.
+        run: sha256sum ./*.tar.gz > checksums.txt
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           name: "Server ${{ steps.ver.outputs.version }}"
           generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
           body: |
             ## Docker Images
 
@@ -203,6 +307,17 @@ jobs:
             |---|---|
             | CPU (multi-arch) | `dvcdsys/code-index:${{ steps.ver.outputs.version }}` |
             | CUDA 12.8 | `dvcdsys/code-index:${{ steps.ver.outputs.version }}-cu128` |
+
+            ## macOS (Apple Silicon)
+
+            The same server for a Mac, installed and managed by
+            [cix.app](https://github.com/dvcdsys/code-index/releases?q=mac%2Fv).
+            The app downloads it on its own — the tarball is attached so the
+            checksums cover it, not because it needs downloading by hand.
+
+            | Asset | Contents |
+            |---|---|
+            | `cix-runtime-*-darwin-arm64.tar.gz` | `cix-server`, the `cix` CLI, Metal `llama-server` |
 
   site-version:
     name: Check the site advertises this release

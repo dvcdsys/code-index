@@ -47,6 +47,13 @@ cli/dist/
 # Server build artifacts + runtime logs
 server/dist/
 server/exec.log
+
+# macOS app build artifacts (mac/scripts/build-app.sh, make-dmg.sh).
+# The committed inputs live in mac/Resources/ and mac/Info.plist.in; everything
+# under mac/dist/ is generated. Disk images are never tracked — the release
+# workflow publishes them as GitHub release assets.
+mac/dist/
+*.dmg
 # Root scratch dir only — anchored: a bare "tmp" would silently ignore any
 # nested file/dir named tmp (same pitfall as the docs/ pattern below).
 /tmp/

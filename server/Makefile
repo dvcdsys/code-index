@@ -23,7 +23,29 @@ GOFLAGS ?=
 
 IMAGE_REPO  ?= dvcdsys/code-index
 IMAGE_TAG   ?= go-cu128
-VERSION     ?= $(shell git describe --tags --always 2>/dev/null || echo "0.0.0-dev")
+
+# Version stamped into the binary (-X main.version) and into Docker images.
+#
+# The tag stream must be filtered. `git describe --tags` without --match picks
+# whichever namespace happens to be nearest, and this repo has three of them
+# (server/v*, cli/v*, mac/v*) — on develop it resolved to a CLI tag, so every
+# locally built *server* image was labelled with a *CLI* version. CI never hit
+# this (release-server.yml passes VERSION= explicitly from the tag), which is
+# why it went unnoticed; `make build` / `bundle` / `docker-build-cuda*` did.
+#
+# Note the tag must be reachable from HEAD for describe to see it. Release
+# workflows always pass the version in explicitly rather than deriving it.
+SERVER_VERSION ?= $(shell git describe --tags --match 'server/v*' 2>/dev/null | sed 's|^server/v||')
+ifeq ($(strip $(SERVER_VERSION)),)
+SERVER_VERSION := 0.0.0-dev
+endif
+VERSION     ?= $(SERVER_VERSION)
+
+# -w drops DWARF only. Do NOT add -s: govulncheck -mode=binary needs the Go
+# symbol table for symbol-level analysis; on a stripped binary it falls back to
+# module-level reporting and flags advisories for packages that are not linked.
+# Same rationale, and same flags, as server/Dockerfile:98-106 and release-cli.yml.
+LDFLAGS     ?= -w -X main.version=$(SERVER_VERSION)
 
 # Floating dev tag — overwritten on every `docker-build-cuda-dev` push. Used
 # by the operator to deploy "current local work" onto the RTX 3090 box for
@@ -51,9 +73,9 @@ DASHBOARD_OUT := $(ROOT)/internal/httpapi/dashboard/dist
 
 help:
 	@echo "Targets:"
-	@echo "  build              — dashboard-build + go build cmd/cix-server into dist/$(BUNDLE_NAME)/cix-server"
+	@echo "  build              — dashboard-build + go build cmd/cix-server into dist/$(BUNDLE_NAME)/cix-server (stamps version $(SERVER_VERSION))"
 	@echo "  test               — go test ./... (no llama-server required)"
-	@echo "  fetch-llama        — download + SHA256-verify llama.cpp $(LLAMA_VERSION) for $(OS)-$(ARCH)"
+	@echo "  fetch-llama        — download + SHA256-verify llama.cpp $(LLAMA_VERSION) for $(OS)-$(ARCH) (LLAMA_STRICT=1 to require a recorded checksum)"
 	@echo "  bundle             — build + fetch-llama, assemble dist/$(BUNDLE_NAME)/ tree"
 	@echo "  run                — bundle + launch cix-server (reads .env from repo root, sets CIX_LLAMA_BIN_DIR)"
 	@echo "  test-gate          — run the Phase 3 parity gate (requires fetch-llama + GGUF)"
@@ -74,18 +96,28 @@ help:
 
 # `go build` embeds internal/httpapi/dashboard/dist/ via go:embed — the
 # dashboard must be built first so the binary picks up fresh assets.
+#
+# The ldflags are not optional cosmetics: without them `cix-server -v` reports
+# the zero value of main.version, so every non-Docker build (make bundle, the
+# macOS .app, install-server.sh --mode native) shipped an unidentifiable binary.
 build: dashboard-build
 	mkdir -p $(BUNDLE_DIR)
-	$(GO) build $(GOFLAGS) -o $(BUNDLE_DIR)/cix-server ./cmd/cix-server
+	$(GO) build $(GOFLAGS) -trimpath -ldflags "$(LDFLAGS)" -o $(BUNDLE_DIR)/cix-server ./cmd/cix-server
 
 test:
 	$(GO) test ./...
+
+# LLAMA_STRICT=1 turns the first-run "record the checksum" convenience into a
+# hard failure. Release builds set it so an upstream asset that was swapped
+# after the pin was recorded cannot be silently shipped.
+LLAMA_STRICT ?= 0
 
 fetch-llama:
 	LLAMA_VERSION=$(LLAMA_VERSION) \
 	LLAMA_REPO=$(LLAMA_REPO) \
 	LLAMA_OS=$(OS) \
 	LLAMA_ARCH=$(ARCH) \
+	LLAMA_STRICT=$(LLAMA_STRICT) \
 	DEST_DIR=$(LLAMA_DIR) \
 	CHECKSUMS_FILE=$(ROOT)/scripts/llama-checksums.txt \
 	$(ROOT)/scripts/fetch-llama.sh
