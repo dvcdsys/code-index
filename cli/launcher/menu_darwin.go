@@ -3,52 +3,36 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"fyne.io/systray"
 )
 
-// The menu bar UI.
+// The menu bar UI — a custom panel, not an NSMenu.
 //
-// systray.Run takes over the calling goroutine and must own the main one — on
-// macOS the status item lives on the AppKit main thread. Everything else here
-// runs in goroutines and only touches systray through its setters, which are
-// safe to call from anywhere.
-//
-// Layout follows the platform rather than inventing one: disabled rows carrying
-// state with a coloured indicator, then actions, then a checkbox for the one
-// setting, then Quit. Every row is width-capped (see maxRowRunes) because an
-// NSMenu is as wide as its widest row.
+// The AppKit half lives in panel_darwin.m and the look in panel.html; this
+// file is the behaviour. It reacts to poller changes by pushing a fresh
+// panelState into the webview, and to panel actions by running the same
+// operations the old menu ran. The design brief that replaced the NSMenu is
+// under the repo's design notes: status as a header instead of disabled rows,
+// actions weighted by importance, toggles that read as toggles.
 
 type menu struct {
 	bundle bundle
 	poll   *poller
 	stop   chan struct{}
 
-	statusItem     *systray.MenuItem
-	embeddingsItem *systray.MenuItem
-	modelItem      *systray.MenuItem
-	startStopItem  *systray.MenuItem
-	dashboardItem  *systray.MenuItem
-	autostartItem  *systray.MenuItem
-	networkItem    *systray.MenuItem
-	resetPWItem    *systray.MenuItem
-	updateItem     *systray.MenuItem
-
 	updater *updater
 
 	// busy is held while something is restarting the server, and it exists
-	// because two of these menu items are not independent.
+	// because several of these actions are not independent.
 	//
-	// Start at Login and Allow Network Access both restart the server, each in
-	// its own goroutine, and each drives the same launchd label: one boots the
-	// job out while the other is waiting for its pid to disappear and then
+	// Launch at Login and Allow Network Access both restart the server, each
+	// in its own goroutine, and each drives the same launchd label: one boots
+	// the job out while the other is waiting for its pid to disappear and then
 	// bootstraps it itself. Two bootstraps of one label leave either a failure
 	// or two processes racing for the port — from the outside, a server that
 	// went away and did not come back.
@@ -61,18 +45,13 @@ type menu struct {
 	// retireOnce drops the bootstrap password from server.env the first time
 	// this process sees a running server. See retireBootstrapPassword.
 	retireOnce sync.Once
-
-	// detail holds the submenu rows under the server row. They are created
-	// once and retitled on every render: systray has no way to remove an item,
-	// so rebuilding the submenu per update would grow it without bound.
-	detail [detailRows]*systray.MenuItem
 }
 
 // beginBusy claims the right to restart the server. False means something else
 // already has it, and the caller must do nothing.
 func (m *menu) beginBusy() bool {
 	if !m.busy.CompareAndSwap(false, true) {
-		logf("ignored a menu action: another server operation is already running")
+		logf("ignored a panel action: another server operation is already running")
 		return false
 	}
 	m.render(m.poll.snapshotNow())
@@ -84,85 +63,33 @@ func (m *menu) endBusy() {
 	m.poll.refresh()
 }
 
-// detailRows is the fixed number of submenu slots. Rows with nothing to say are
-// hidden rather than left blank.
-const detailRows = 7
-
 func runMenu(b bundle, u *updater) {
 	m := &menu{bundle: b, poll: newPoller(), stop: make(chan struct{}), updater: u}
-	systray.Run(m.onReady, m.onExit)
+
+	panelHooks.onReady = m.onReady
+	panelHooks.onExit = m.onExit
+	panelHooks.onAction = m.onAction
+
+	// Never returns until quit; must own the main thread (see main_darwin.go).
+	panelRun(filepath.Join(b.Resources, "cixTemplate.png"))
 }
 
 // setProgress puts a word next to the menu bar icon while something slow is
 // happening, and clears it when passed "".
 //
 // The alternative was a modal dialog, and it is the wrong shape: a runtime
-// download takes tens of seconds, during which a menu bar app that shows nothing
-// reads as hung and one that blocks with an alert cannot be dismissed. AppKit
-// draws this text beside the template icon, so it is visible without being in
-// the way.
+// download takes tens of seconds, during which a menu bar app that shows
+// nothing reads as hung and one that blocks with an alert cannot be dismissed.
+// AppKit draws this text beside the template icon, so it is visible without
+// being in the way.
 func (m *menu) setProgress(msg string) {
-	systray.SetTitle(msg)
+	panelSetTitle(msg)
 	if msg != "" {
 		logf("%s", msg)
 	}
 }
 
 func (m *menu) onReady() {
-	if icon, err := os.ReadFile(filepath.Join(m.bundle.Resources, "cixTemplate@2x.png")); err == nil {
-		// SetTemplateIcon, not SetIcon: macOS recolours a template image for
-		// dark mode, for a tinted menu bar and for the pressed state, using
-		// only its alpha channel. A coloured icon here is a smudge at 18 px and
-		// unreadable in dark mode.
-		systray.SetTemplateIcon(icon, icon)
-	} else {
-		systray.SetTitle("cix")
-	}
-	// No tooltips anywhere, including on the status item itself. AppKit's are
-	// not usable here: once any one of them has appeared, every subsequent one
-	// shows with no delay at all, and they are positioned against the element
-	// rather than the pointer. Neither has an API — changing either means
-	// giving every row a custom NSView with its own tracking area, i.e. writing
-	// the menu in Objective-C instead of using systray. Everything a tooltip
-	// would have said is in the details submenu, where the timing and placement
-	// are the system's own and correct.
-	//
-	// The empty second argument to AddMenuItem is that tooltip. Leave it empty.
-
-	// The server row is the one enabled row in the status group, because it
-	// carries the details submenu — a parent has to be enabled for macOS to
-	// open its submenu. The disclosure arrow reads as "there is more here"
-	// rather than "this does something", which is what it is.
-	m.statusItem = systray.AddMenuItem("cix-server: …", "")
-	for i := range m.detail {
-		m.detail[i] = m.statusItem.AddSubMenuItem("", "")
-		m.detail[i].Disable()
-	}
-
-	m.embeddingsItem = systray.AddMenuItem("Embeddings: …", "")
-	m.embeddingsItem.Disable()
-	m.modelItem = systray.AddMenuItem("", "")
-	m.modelItem.Disable()
-	m.modelItem.Hide()
-
-	systray.AddSeparator()
-	m.startStopItem = systray.AddMenuItem("Start Server", "")
-	m.dashboardItem = systray.AddMenuItem("Open Dashboard", "")
-
-	systray.AddSeparator()
-	m.autostartItem = systray.AddMenuItemCheckbox("Start at Login", "", false)
-	m.networkItem = systray.AddMenuItemCheckbox("Allow Network Access", "", false)
-	m.resetPWItem = systray.AddMenuItem("Reset Password…", "")
-
-	systray.AddSeparator()
-	m.updateItem = systray.AddMenuItem("Check for Updates…", "")
-
-	systray.AddSeparator()
-	// Spelled out rather than left to a tooltip. Quit here closes the menu bar
-	// app and leaves the launchd agent running, which is the opposite of what
-	// Quit means in most menu bar apps — a surprise worth 22 characters.
-	quitItem := systray.AddMenuItem("Quit (server keeps running)", "")
-
 	go m.poll.run(m.stop)
 	go m.watch()
 
@@ -170,35 +97,44 @@ func (m *menu) onReady() {
 	// offer, and it is throttled and ETag-cached, so an app left open all day
 	// costs a handful of 304s.
 	go m.checkForUpdates(false)
-
-	go func() {
-		for {
-			select {
-			case <-m.startStopItem.ClickedCh:
-				go m.toggleServer()
-			case <-m.dashboardItem.ClickedCh:
-				go m.openDashboard()
-			case <-m.autostartItem.ClickedCh:
-				go m.toggleAutostart()
-			case <-m.networkItem.ClickedCh:
-				go m.toggleNetworkAccess()
-			case <-m.resetPWItem.ClickedCh:
-				go m.resetPasswordFlow()
-			case <-m.updateItem.ClickedCh:
-				go m.checkForUpdates(true)
-			case <-quitItem.ClickedCh:
-				systray.Quit()
-				return
-			}
-		}
-	}()
 }
 
 func (m *menu) onExit() {
 	close(m.stop)
 }
 
-// watch redraws the menu whenever the poller reports a change.
+// onAction is the panel's dispatcher. Each handler blocks (dialogs, server
+// restarts) and arrives on its own goroutine — see goPanelAction.
+func (m *menu) onAction(a panelAction) {
+	switch a.Action {
+	case "opened":
+		// The panel just became visible; answer with a fresh poll so the
+		// uptime and status shown are seconds old, not up to a tick old. The
+		// log line doubles as the proof-of-life for the whole ObjC bridge —
+		// it only appears if the status item, the panel and the webview all
+		// actually came up.
+		logf("panel opened")
+		m.poll.refresh()
+	case "toggle-server":
+		m.toggleServer()
+	case "dashboard":
+		m.openDashboard()
+	case "toggle-network":
+		m.toggleNetworkAccess()
+	case "toggle-autostart":
+		m.toggleAutostart()
+	case "reset-password":
+		m.resetPasswordFlow()
+	case "check-updates":
+		m.checkForUpdates(true)
+	case "quit":
+		panelQuit()
+	default:
+		logf("panel sent an unknown action %q", a.Action)
+	}
+}
+
+// watch redraws the panel whenever the poller reports a change.
 func (m *menu) watch() {
 	for {
 		select {
@@ -211,97 +147,13 @@ func (m *menu) watch() {
 }
 
 func (m *menu) render(s snapshot) {
-	m.statusItem.SetTitle(s.ServerLine())
-	m.statusItem.SetIcon(dotPNG(s.ServerDot()))
-	m.renderDetail(s)
-
-	m.embeddingsItem.SetTitle(s.EmbeddingsLine())
-	m.embeddingsItem.SetIcon(dotPNG(s.EmbeddingsDot()))
-
-	if line := s.ModelLine(); line != "" {
-		m.modelItem.SetTitle(line)
-		// A transparent spacer, not a missing icon: AppKit indents a title by
-		// its image width, so without one this row would start left of the two
-		// above it and the group would read as ragged.
-		m.modelItem.SetIcon(dotPNG(dotBlank))
-		m.modelItem.Show()
-	} else {
-		m.modelItem.Hide()
-	}
-
-	// Anything that would restart the server is off the table while one restart
-	// is already under way, and while the server is on its way up: a cold start
-	// loads an embedding model and takes minutes, and a second restart landing
-	// in the middle of it is precisely what leaves the job wedged.
-	settling := m.busy.Load() || s.State == stateStarting
-
 	if s.State == stateRunning {
 		// Bootstrap runs before the listener opens, so a server that answers is
 		// a server whose admin account exists — and the password that seeded it
 		// has no further use.
 		m.retireOnce.Do(retireBootstrapPassword)
 	}
-
-	switch {
-	case !s.Managed:
-		// Another installation owns the launchd label. Showing an enabled
-		// Start button that would fight it — or worse, silently repoint it — is
-		// the wrong behaviour; observing is useful, interfering is not.
-		m.startStopItem.SetTitle("Start Server")
-		m.startStopItem.Disable()
-	case m.busy.Load():
-		m.startStopItem.SetTitle("Working…")
-		m.startStopItem.Disable()
-	case s.State == stateRunning:
-		m.startStopItem.SetTitle("Stop Server")
-		m.startStopItem.Enable()
-	case s.State == stateStarting:
-		m.startStopItem.SetTitle("Starting…")
-		m.startStopItem.Disable()
-	default:
-		m.startStopItem.SetTitle("Start Server")
-		m.startStopItem.Enable()
-	}
-
-	if s.State == stateRunning {
-		m.dashboardItem.Enable()
-	} else {
-		m.dashboardItem.Disable()
-	}
-
-	if s.LocalOnly {
-		m.networkItem.Uncheck()
-	} else {
-		m.networkItem.Check()
-	}
-	if s.Autostart {
-		m.autostartItem.Check()
-	} else {
-		m.autostartItem.Uncheck()
-	}
-
-	if s.Managed && !settling {
-		m.networkItem.Enable()
-		m.autostartItem.Enable()
-	} else {
-		// Not managed: these live in files this app does not own. Settling: both
-		// of them restart the server, and that is the click this guard exists to
-		// refuse.
-		m.networkItem.Disable()
-		m.autostartItem.Disable()
-	}
-
-	// The password reset needs neither a running server nor a restart — it opens
-	// the database directly — so it stays available in both cases, including
-	// against an install-server.sh deployment.
-	m.resetPWItem.Enable()
-
-	// An update restarts the server too, and downloads before it does.
-	if settling {
-		m.updateItem.Disable()
-	} else {
-		m.updateItem.Enable()
-	}
+	panelSetState(buildPanelState(s, m.busy.Load()))
 }
 
 // toggleAutostart flips RunAtLoad on the launchd agent.
@@ -316,7 +168,7 @@ func (m *menu) toggleAutostart() {
 		return
 	}
 	if !m.beginBusy() {
-		// The checkbox already flipped visually on the click; put it back.
+		// The switch already flipped visually on the click; put it back.
 		m.render(s)
 		return
 	}
@@ -340,7 +192,7 @@ func (m *menu) toggleAutostart() {
 }
 
 // checkForUpdates looks for a newer release and, if the user agrees, installs
-// it. `explicit` distinguishes the menu item from the background check: a
+// it. `explicit` distinguishes the footer link from the background check: a
 // background check that finds nothing says nothing.
 func (m *menu) checkForUpdates(explicit bool) {
 	av := m.updater.check(explicit)
@@ -409,32 +261,7 @@ func (m *menu) checkForUpdates(explicit bool) {
 
 	// From here the swap helper owns the outcome: it waits for this process to
 	// exit before moving anything, so quitting is the last required step.
-	systray.Quit()
-}
-
-// renderDetail fills the submenu under the server row. Slots with nothing to
-// say are hidden, so the submenu never shows an empty line.
-func (m *menu) renderDetail(s snapshot) {
-	lines := [detailRows]string{
-		s.DetailProcess(),
-		s.DetailPort(),
-		s.DetailNetwork(),
-		s.DetailModel(),
-		s.DetailVersion(),
-		// What is installed, as opposed to what the running server reports. The
-		// row above is empty whenever the server is not answering — which is
-		// exactly when someone wants to know which server is on disk.
-		runtimeSummary(),
-		s.DetailManaged(),
-	}
-	for i, line := range lines {
-		if line == "" {
-			m.detail[i].Hide()
-			continue
-		}
-		m.detail[i].SetTitle(line)
-		m.detail[i].Show()
-	}
+	panelQuit()
 }
 
 func (m *menu) toggleServer() {
@@ -482,7 +309,7 @@ func (m *menu) toggleServer() {
 
 	// launchctl reports success for having spawned the process, not for the
 	// process surviving. A server that exits on a configuration it cannot
-	// accept leaves the menu saying "Stopped" and nothing else — which is how
+	// accept leaves the panel saying "Stopped" and nothing else — which is how
 	// a deleted database looked like a broken Start button.
 	if detail := serverDiedOnStart(); detail != "" {
 		logf("the server exited immediately after Start: %s", detail)
@@ -525,8 +352,8 @@ func (m *menu) offerSetupAgain(message string) {
 // toggleNetworkAccess switches CIX_BIND_ADDR between loopback and all
 // interfaces, then restarts the server so the change takes effect.
 //
-// Widening access asks first. Nothing else in this menu changes what the
-// machine exposes to the network, and a checkbox is an easy thing to hit by
+// Widening access asks first. Nothing else in this panel changes what the
+// machine exposes to the network, and a switch is an easy thing to hit by
 // accident; narrowing access needs no confirmation because it can only be safe.
 func (m *menu) toggleNetworkAccess() {
 	vars, err := readServerEnv()
@@ -552,7 +379,7 @@ func (m *menu) toggleNetworkAccess() {
 				"The server will restart.", serverPort(vars)),
 			"Allow")
 		if err != nil || !ok {
-			// Put the checkbox back: the click already toggled it visually.
+			// Put the switch back: the click already toggled it visually.
 			m.render(m.poll.snapshotNow())
 			return
 		}

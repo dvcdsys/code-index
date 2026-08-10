@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<!--
+  panel.html — the entire look of the menu bar panel.
+
+  Loaded once into a WKWebView by panel_darwin.m; no network, no external
+  resources. Go pushes one state object into cixRender() after every poll, and
+  every control posts one {action} message back through
+  webkit.messageHandlers.cix. All values shown here come from that state
+  object — nothing in this file knows how to talk to the server.
+
+  Design source: the "cix menu bar panel" spec (tokens.json). Deviations from
+  the spec are deliberate and follow the implemented functionality:
+    - a STARTING state exists (cold start loads an embedding model for
+      minutes) and renders like INDEXING with an indeterminate progress sweep;
+    - INDEXING keeps the port as the hero — the server reports a job count,
+      not a percentage, so the 62% hero has nothing true to show;
+    - the stopped state keeps a small data table (what is installed on disk)
+      and the toggles, because both work without a running server;
+    - the footer's right side holds Reset Password / Updates, which this app
+      has instead of a Settings window.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --surface: #F7EEDC;
+    --sunken: #EFE2C8;
+    --border: #1F140F;
+    --divider: #1F140F;
+    --text: #1F140F;
+    --text2: #6B5340;
+    --muted: #8B7358;
+    --faint: #A4906F;
+    --accent: #D73E2C;
+    --accent-hover: #C2331F;
+    --ok: #2F7A55;
+    --idle: #A4906F;
+    --idle-word: #8B7358;
+    --track-off: #E3D4B6;
+    --ghost-border: #1F140F;
+    --primary-fill: #1F140F;
+    --primary-text: #F7EEDC;
+    --primary-hover: #3A2519;
+    --knob: #F7EEDC;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #171412;
+      --sunken: #221C17;
+      --border: #000000;
+      --divider: #33291F;
+      --text: #F1E6CF;
+      --text2: #A4906F;
+      --muted: #8B7358;
+      --faint: #6B5340;
+      --ok: #4FB07E;
+      --idle: #6B5340;
+      --idle-word: #8B7358;
+      --track-off: #33291F;
+      --ghost-border: #4A3B2C;
+      --primary-fill: #F1E6CF;
+      --primary-text: #171412;
+      --primary-hover: #E3D4B6;
+      --knob: #171412;
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: transparent; }
+  body {
+    font-family: 'Helvetica Neue', Helvetica, system-ui, sans-serif;
+    color: var(--text);
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+    overflow: hidden;
+  }
+  .mono { font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace; }
+
+  #panel {
+    width: 392px;
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .section { border-top: 1.5px solid var(--divider); }
+  .section[hidden] { display: none; }
+
+  /* -- status header ------------------------------------------------------ */
+  #hd { padding: 16px 18px 14px; display: flex; flex-direction: column; gap: 12px; }
+  #hd .statusline { display: flex; align-items: center; gap: 10px; }
+  #hd .dot { width: 9px; height: 9px; flex: none; }
+  #hd .word {
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.14em;
+  }
+  #hd .fact {
+    margin-left: auto;
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 11px; color: var(--muted);
+  }
+  #hd .heroline { display: flex; align-items: baseline; gap: 10px; }
+  #hd .hero {
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 30px; font-weight: 700; letter-spacing: -0.02em;
+  }
+  #hd .caption { font-size: 13px; color: var(--text2); }
+  #hd .sentence { font-size: 14px; line-height: 1.5; color: var(--text2); max-width: 330px; }
+
+  /* -- progress (indeterminate sweep) ------------------------------------- */
+  #progress { display: flex; gap: 3px; }
+  #progress .cell {
+    flex: 1; height: 10px;
+    background: var(--track-off);
+    border: 1.5px solid var(--border);
+  }
+  #progress .cell.on { background: var(--accent); }
+
+  /* -- data table --------------------------------------------------------- */
+  #table {
+    padding: 12px 18px;
+    display: grid; grid-template-columns: auto 1fr; gap: 7px 16px;
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 12px;
+  }
+  #table .k { color: var(--muted); }
+  #table .v {
+    text-align: right; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; direction: rtl;
+    -webkit-user-select: text; user-select: text;
+  }
+  #table .v.warn { color: var(--accent); }
+
+  /* -- actions ------------------------------------------------------------ */
+  #actions { padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; }
+  .btn {
+    all: unset; box-sizing: border-box; cursor: pointer;
+    height: 38px; display: flex; align-items: center; justify-content: center; gap: 8px;
+    border: 1.5px solid var(--ghost-border);
+    font-family: 'Helvetica Neue', Helvetica, system-ui, sans-serif;
+    font-size: 14px; font-weight: 600; letter-spacing: 0.01em;
+    color: var(--text); background: transparent;
+  }
+  .btn:hover { background: var(--sunken); }
+  .btn.primary { background: var(--primary-fill); color: var(--primary-text); border-color: var(--border); }
+  .btn.primary:hover { background: var(--primary-hover); }
+  .btn.destructive { background: var(--accent); color: #F7EEDC; border-color: var(--border); }
+  .btn.destructive:hover { background: var(--accent-hover); }
+  .btn.disabled { opacity: 0.45; pointer-events: none; }
+  .btn .ext {
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 12px; color: var(--muted);
+  }
+  .btn.destructive .ext { color: #F7EEDC; }
+
+  /* -- toggles ------------------------------------------------------------ */
+  #toggles { padding: 12px 18px; display: flex; flex-direction: column; gap: 10px; }
+  .toggle {
+    display: flex; align-items: center; gap: 12px; cursor: pointer;
+    min-height: 30px;
+  }
+  .toggle.disabled { cursor: default; opacity: 0.45; pointer-events: none; }
+  .track {
+    width: 34px; height: 18px; flex: none; position: relative;
+    background: var(--track-off); border: 1.5px solid var(--border);
+    transition: background 100ms linear;
+  }
+  .toggle.on .track { background: var(--ok); }
+  .knob {
+    position: absolute; top: 1px; left: 1px; width: 14px; height: 12px;
+    background: var(--knob);
+    transition: left 100ms linear;
+  }
+  .toggle.on .knob { left: 17px; }
+  .toggle .lbl { display: flex; flex-direction: column; gap: 2px; }
+  .toggle .name { font-size: 13.5px; font-weight: 600; }
+  .toggle .hint {
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 11px; color: var(--muted);
+  }
+
+  /* -- footer ------------------------------------------------------------- */
+  #ft { padding: 10px 18px 12px; display: flex; align-items: center; gap: 8px; }
+  .link {
+    all: unset; cursor: pointer; font-size: 13px; color: var(--text2);
+    font-family: 'Helvetica Neue', Helvetica, system-ui, sans-serif;
+    white-space: nowrap;
+  }
+  .link:hover { color: var(--text); }
+  .link.disabled { opacity: 0.45; pointer-events: none; }
+  #ft .note {
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 11px; color: var(--faint); white-space: nowrap;
+  }
+  #ft .spacer { flex: 1; min-width: 8px; }
+
+  /* state-flip crossfade — the spec's 120 ms */
+  #panel.fade { animation: fade 120ms ease-out; }
+  @keyframes fade { from { opacity: 0.4; } to { opacity: 1; } }
+</style>
+</head>
+<body>
+<div id="panel">
+  <header id="hd"></header>
+  <div id="table" class="section" hidden></div>
+  <div id="actions" class="section" hidden></div>
+  <div id="toggles" class="section" hidden></div>
+  <footer id="ft" class="section"></footer>
+</div>
+
+<script>
+'use strict';
+
+function post(msg) {
+  window.webkit.messageHandlers.cix.postMessage(msg);
+}
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+var lastState = null;   // for detecting state flips (crossfade)
+var sweepTimer = null;  // indeterminate progress animation
+var sweepPos = 0;
+
+// One place decides which sections exist in which state; render() fills them.
+window.cixRender = function (s) {
+  var panel = document.getElementById('panel');
+  if (lastState !== null && lastState !== s.state) {
+    panel.classList.remove('fade');
+    void panel.offsetWidth; // restart the animation
+    panel.classList.add('fade');
+  }
+  lastState = s.state;
+
+  renderHeader(s);
+  renderTable(s);
+  renderActions(s);
+  renderToggles(s);
+  renderFooter(s);
+  reportHeight();
+};
+
+function statusWord(s) {
+  if (s.state === 'running') { return s.indexingJobs > 0 ? 'INDEXING' : 'RUNNING'; }
+  if (s.state === 'starting') { return 'STARTING'; }
+  return 'STOPPED';
+}
+
+function statusColor(s) {
+  var w = statusWord(s);
+  if (w === 'RUNNING') { return 'var(--ok)'; }
+  if (w === 'INDEXING' || w === 'STARTING') { return 'var(--accent)'; }
+  return 'var(--idle-word)';
+}
+
+function renderHeader(s) {
+  var hd = document.getElementById('hd');
+  var word = statusWord(s);
+  var color = statusColor(s);
+  var dotColor = word === 'STOPPED' ? 'var(--idle)' : color;
+
+  var fact = '';
+  if (word === 'RUNNING' && s.uptime) { fact = 'uptime ' + esc(s.uptime); }
+  if (word === 'INDEXING') {
+    fact = s.indexingJobs + (s.indexingJobs === 1 ? ' job' : ' jobs') +
+      (s.projects ? ' · ' + s.projects + ' projects' : '');
+  }
+
+  var html =
+    '<div class="statusline">' +
+      '<span class="dot" style="background:' + dotColor + '"></span>' +
+      '<span class="word" style="color:' + color + '">' + word + '</span>' +
+      (fact ? '<span class="fact">' + fact + '</span>' : '') +
+    '</div>';
+
+  if (word === 'RUNNING' || word === 'INDEXING') {
+    var caption = s.localOnly ? 'localhost only' : 'reachable on your network';
+    if (!s.managed) { caption += ' · managed externally'; }
+    html +=
+      '<div class="heroline">' +
+        '<span class="hero">:' + esc(s.port) + '</span>' +
+        '<span class="caption">' + esc(caption) + '</span>' +
+      '</div>';
+  } else if (word === 'STARTING') {
+    html += '<div class="sentence">Starting — loading the embedding model ' +
+            'can take a few minutes on a cold start.</div>';
+  } else {
+    var why = s.managed
+      ? 'The server is not running. Search and the dashboard are unavailable.'
+      : 'The server is managed by install-server.sh, not by this app.';
+    html += '<div class="sentence">' + why + '</div>';
+  }
+
+  if (word === 'STARTING' || word === 'INDEXING') {
+    html += '<div id="progress">' +
+      new Array(8).fill('<div class="cell"></div>').join('') + '</div>';
+    startSweep();
+  } else {
+    stopSweep();
+  }
+
+  hd.innerHTML = html;
+}
+
+// The spec's progress bar fills discretely from a percentage. The server does
+// not report one, so the cells sweep instead: three lit cells marching across,
+// unmistakably "in progress", never pretending a number it does not have.
+function startSweep() {
+  if (sweepTimer) { return; }
+  sweepTimer = setInterval(function () {
+    var cells = document.querySelectorAll('#progress .cell');
+    if (!cells.length) { return; }
+    sweepPos = (sweepPos + 1) % 8;
+    cells.forEach(function (c, i) {
+      var lit = ((i - sweepPos + 8) % 8) < 3;
+      c.classList.toggle('on', lit);
+    });
+  }, 220);
+}
+
+function stopSweep() {
+  if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
+}
+
+function renderTable(s) {
+  var t = document.getElementById('table');
+  var rows = [];
+
+  if (s.state === 'running') {
+    if (s.pid) { rows.push(['process', String(s.pid), '']); }
+    if (s.engine) {
+      rows.push(['engine', s.engine + (s.engineReady ? '' : ' · loading'),
+                 s.engineReady ? '' : 'warn']);
+    }
+    if (s.model) { rows.push(['model', s.model, '']); }
+    if (s.serverVersion) { rows.push(['version', s.serverVersion, '']); }
+  } else {
+    // Nothing is answering, so show what is on disk — the question a stopped
+    // panel gets asked is "what would start".
+    if (s.runtime) { rows.push(['installed', s.runtime, '']); }
+    if (s.appVersion) { rows.push(['app', s.appVersion, '']); }
+  }
+
+  if (!rows.length) { t.hidden = true; return; }
+  t.hidden = false;
+  t.innerHTML = rows.map(function (r) {
+    return '<span class="k">' + esc(r[0]) + '</span>' +
+           '<span class="v ' + r[2] + '" title="' + esc(r[1]) + '">' +
+           esc(r[1]) + '</span>';
+  }).join('');
+}
+
+function renderActions(s) {
+  var a = document.getElementById('actions');
+  var html = '';
+
+  if (s.busy) {
+    html += btn('Working…', '', 'primary disabled', null);
+  } else if (!s.managed) {
+    // Observe-only: someone else's server. Offer the dashboard, touch nothing.
+    if (s.state === 'running') {
+      html += btn('Open Dashboard', '↗', '', 'dashboard');
+    }
+  } else if (s.state === 'running') {
+    html += btn('Stop Server', '', 'destructive', 'toggle-server');
+    html += btn('Open Dashboard', '↗', '', 'dashboard');
+  } else if (s.state === 'starting') {
+    html += btn('Starting…', '', 'primary disabled', null);
+  } else {
+    html += btn('Start Server', '', 'primary', 'toggle-server');
+  }
+
+  if (!html) { a.hidden = true; return; }
+  a.hidden = false;
+  a.innerHTML = html;
+}
+
+function btn(label, ext, cls, action) {
+  return '<button class="btn ' + cls + '"' +
+    (action ? ' data-action="' + action + '"' : '') + '>' + esc(label) +
+    (ext ? '<span class="ext">' + ext + '</span>' : '') + '</button>';
+}
+
+function renderToggles(s) {
+  var t = document.getElementById('toggles');
+  if (!s.managed) { t.hidden = true; return; }
+  t.hidden = false;
+
+  var settling = s.busy || s.state === 'starting';
+  var dis = settling ? ' disabled' : '';
+
+  var netHint = s.localOnly
+    ? '127.0.0.1:' + esc(s.port) + ' · this Mac only'
+    : esc(s.lanAddr || 'all interfaces');
+
+  t.innerHTML =
+    '<div class="toggle' + (s.localOnly ? '' : ' on') + dis + '" data-action="toggle-network">' +
+      '<span class="track"><span class="knob"></span></span>' +
+      '<span class="lbl"><span class="name">Allow network access</span>' +
+      '<span class="hint">' + netHint + '</span></span>' +
+    '</div>' +
+    '<div class="toggle' + (s.autostart ? ' on' : '') + dis + '" data-action="toggle-autostart">' +
+      '<span class="track"><span class="knob"></span></span>' +
+      '<span class="lbl"><span class="name">Launch at login</span></span>' +
+    '</div>';
+}
+
+function renderFooter(s) {
+  var f = document.getElementById('ft');
+  var settling = s.busy || s.state === 'starting';
+  f.innerHTML =
+    '<button class="link" data-action="quit">Quit cix</button>' +
+    '<span class="note">server keeps running</span>' +
+    '<span class="spacer"></span>' +
+    '<button class="link" data-action="reset-password">Password…</button>' +
+    '<button class="link' + (settling ? ' disabled' : '') +
+      '" data-action="check-updates">Updates…</button>';
+}
+
+// One listener for everything: buttons and toggles carry data-action.
+document.addEventListener('click', function (e) {
+  var el = e.target.closest('[data-action]');
+  if (!el || el.classList.contains('disabled')) { return; }
+  var action = el.getAttribute('data-action');
+  // Toggles stay open so the switch is seen flipping; everything else
+  // dismisses like a menu item.
+  var dismiss = action.indexOf('toggle-network') !== 0 &&
+                action.indexOf('toggle-autostart') !== 0;
+  post({ action: action, dismiss: dismiss });
+});
+
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') { post({ action: 'close' }); }
+});
+
+function reportHeight() {
+  var h = document.getElementById('panel').offsetHeight;
+  post({ action: 'height', value: h });
+}
+
+new ResizeObserver(reportHeight).observe(document.getElementById('panel'));
+
+// Before the first state arrives the panel is a bare surface; keep it tiny.
+renderFooter({});
+reportHeight();
+</script>
+</body>
+</html>
