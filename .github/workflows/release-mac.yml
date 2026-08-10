@@ -129,11 +129,44 @@ jobs:
             its embedding provider is doing, and open the dashboard. Everything
             runs on your machine.
 
-            ### Install
+            ### Install — fastest, no dialogs
 
-            1. Download the `.dmg` below and open it.
-            2. Drag **cix.app** onto **Applications**.
-            3. Open it from Applications.
+            macOS blocks this download twice: once for the disk image, once for
+            the app inside it. It only inspects files carrying a "downloaded
+            from the internet" mark, and the app inherits that mark from the
+            image at the moment you copy it out — so clearing it on the image
+            first means neither block ever happens:
+
+            ```bash
+            xattr -d com.apple.quarantine ~/Downloads/cix-*-arm64.dmg
+            ```
+
+            Then open the image and drag **cix.app** onto **Applications**.
+
+            Already dragged the app across and hit the block? Clear it in place
+            instead:
+
+            ```bash
+            xattr -dr com.apple.quarantine /Applications/cix.app
+            ```
+
+            `No such xattr` in either case just means it was already clear.
+
+            ### Or click through it
+
+            1. **Open the `.dmg`.** macOS says it "could not verify" the file.
+               Choose **Done** — never *Move to Bin*, which deletes the download.
+            2. **System Settings → Privacy & Security**, scroll to **Security**.
+               A line names the blocked file, with **Open Anyway** beside it.
+               Click it and confirm with Touch ID or your password.
+               That button appears only *after* step 1 — going there first shows
+               nothing.
+            3. **The image opens.** Drag **cix.app** onto **Applications**.
+            4. **Open cix from Applications.** Blocked again, for the app this
+               time — repeat step 2 for **cix.app**.
+
+            On macOS 15 and later the old right-click → Open shortcut works for
+            neither block. You do this once per installed version.
 
             On first launch the app downloads the server itself — `cix-server`,
             the `cix` CLI and a Metal-accelerated `llama-server`, about 40 MB —
@@ -141,21 +174,12 @@ jobs:
             That is the same build the Docker images are cut from, and it
             updates on its own schedule: a new server does not need a new app.
 
-            ### macOS will block it twice — this is expected
+            ### Why it is blocked at all
 
             cix is open source and is **not** signed with a paid Apple Developer
-            certificate, so it is not notarized. macOS refuses both the disk
-            image and the app inside it with "Apple could not verify…". Nothing
-            is wrong with the download — choose **Done**, never *Move to Bin*.
-
-            Clear each one the same way: **System Settings → Privacy & Security**,
-            scroll to **Security**, then **Open Anyway** next to the message.
-            Once for the `.dmg` when you open it, and once for **cix.app** the
-            first time you launch it — the app inherits the quarantine flag from
-            the image, so clearing the first does not clear the second.
-
-            On macOS 15 and later the old right-click → Open shortcut no longer
-            works for either. You do this once per installed version.
+            certificate, so macOS cannot verify it and treats the download as
+            unknown. Nothing is wrong with the file. Integrity is covered by the
+            checksum instead.
 
             ### Verify the download
 
