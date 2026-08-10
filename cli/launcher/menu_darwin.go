@@ -177,6 +177,7 @@ func (m *menu) startupFlow() {
 				"cix now keeps its server outside the application, so it updates without restarting.\n\n"+
 					"It will download that part now — around 40 MB, once.")
 		}
+		showPanelBusy("Downloading the cix server…")
 		if err := ensureRuntime(m.updater, m.setProgress); err != nil {
 			logf("could not install the runtime: %v", err)
 			_ = alert("cix could not install its server",
@@ -184,6 +185,7 @@ func (m *menu) startupFlow() {
 			return
 		}
 		m.setProgress("")
+		clearPanelBusy()
 		// Only after the runtime exists: pointing the launchd wrapper at a
 		// binary that is not there would break a working install rather than
 		// leave it alone.
@@ -300,6 +302,13 @@ func (m *menu) toggleAutostart() {
 // it. `explicit` distinguishes the footer link from the background check: a
 // background check that finds nothing says nothing.
 func (m *menu) checkForUpdates(explicit bool) {
+	if explicit {
+		// The check takes a network round-trip; the card with a loader is what
+		// says the click worked. Every path out of here ends in a dialog that
+		// replaces it — except a decline, where the card is already gone with
+		// the question — so it never needs an explicit clear.
+		showPanelBusy("Checking for updates…")
+	}
 	av := m.updater.check(explicit)
 	if !av.any() {
 		if explicit {

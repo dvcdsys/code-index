@@ -256,6 +256,7 @@
   #dialog input:focus { background: var(--sunken); }
   #dialog .dbtns { display: flex; gap: 8px; margin-top: 2px; }
   #dialog .dbtns .btn { flex: 1; }
+  #dialog .dbusy { display: flex; justify-content: center; padding: 8px 0 4px; color: var(--muted); }
 
   /* state-flip crossfade — the spec's 120 ms */
   #panel.fade { animation: fade 120ms ease-out; }
@@ -498,13 +499,11 @@ document.addEventListener('click', function (e) {
   if (!el || el.classList.contains('disabled')) { return; }
   var action = el.getAttribute('data-action');
 
-  // Server operations keep the panel open — their whole feedback is the
-  // loader and the state flip, and closing the window would hide both. Only
-  // actions that hand off to another surface (the dashboard, a dialog, quit)
-  // dismiss like a menu item.
-  var staysOpen = action === 'toggle-server' ||
-                  action === 'toggle-network' ||
-                  action === 'toggle-autostart';
+  // Almost everything keeps the panel open: server operations show their
+  // loader here, and dialogs render inside this window now — closing it on
+  // the click that is about to open one produces a close-then-reopen blink.
+  // Only actions that genuinely hand off to another surface dismiss.
+  var staysOpen = action !== 'dashboard' && action !== 'quit';
 
   if (action === 'toggle-server') {
     // Optimistic: show the loader on the click itself, not a state-push
@@ -523,9 +522,12 @@ var dlgOpen = false;
 var dlgAnswer = null; // set while a dialog is open; answers and hides it
 
 // cixDialog(d) shows one dialog; cixDialog(null) hides it. d:
-//   {kind: 'alert'|'confirm'|'prompt'|'secret', title, message,
+//   {kind: 'alert'|'confirm'|'prompt'|'secret'|'busy', title, message,
 //    okLabel, cancelLabel, defaultAnswer, secret, note}
 // The answer goes back as one {action:'dialog-result', ok, text} message.
+// 'busy' is the exception: a card with a loader and no buttons, shown while
+// something is being checked; it answers nothing and is replaced (or cleared)
+// by whatever the check produces.
 window.cixDialog = function (d) {
   var panel = document.getElementById('panel');
   var dlg = document.getElementById('dialog');
@@ -550,11 +552,15 @@ window.cixDialog = function (d) {
     html += '<input id="dinput" type="text" spellcheck="false" ' +
             'autocapitalize="off" autocorrect="off" value="' + esc(d.defaultAnswer) + '">';
   }
-  html += '<div class="dbtns">';
-  if (d.kind === 'confirm' || d.kind === 'prompt') {
-    html += '<button class="btn" id="dcancel">' + esc(d.cancelLabel || 'Cancel') + '</button>';
+  if (d.kind === 'busy') {
+    html += '<div class="dbusy"><span class="loadcells"><span></span><span></span><span></span></span></div></div>';
+  } else {
+    html += '<div class="dbtns">';
+    if (d.kind === 'confirm' || d.kind === 'prompt') {
+      html += '<button class="btn" id="dcancel">' + esc(d.cancelLabel || 'Cancel') + '</button>';
+    }
+    html += '<button class="btn primary" id="dok">' + esc(d.okLabel || 'OK') + '</button></div></div>';
   }
-  html += '<button class="btn primary" id="dok">' + esc(d.okLabel || 'OK') + '</button></div></div>';
 
   dlg.innerHTML = html;
   panel.classList.add('dlg');
@@ -566,6 +572,13 @@ window.cixDialog = function (d) {
   var need = card.offsetHeight + 44;
   if (panel.offsetHeight < need) {
     panel.style.minHeight = need + 'px';
+  }
+
+  if (d.kind === 'busy') {
+    // Nothing to answer: the card is a placeholder for a result on its way.
+    dlgAnswer = null;
+    reportHeight();
+    return;
   }
 
   var input = document.getElementById('dinput');

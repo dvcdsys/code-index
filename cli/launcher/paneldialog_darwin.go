@@ -98,6 +98,30 @@ func showPanelDialog(spec panelDialogSpec) (panelDialogResult, error) {
 	}
 }
 
+// showPanelBusy puts up a modal card with a loader and no buttons — the
+// placeholder for a result that is on its way (an update check, most of all).
+// It answers nothing and blocks nobody; the next real dialog replaces it, and
+// clearPanelBusy removes it on paths that end without one. No-op before the
+// panel exists.
+func showPanelBusy(title string) {
+	if !panelUIUp.Load() {
+		return
+	}
+	b, err := json.Marshal(panelDialogSpec{Kind: "busy", Title: title})
+	if err != nil {
+		return
+	}
+	pushDialogJSON(string(b))
+	panelOpen()
+}
+
+func clearPanelBusy() {
+	if !panelUIUp.Load() {
+		return
+	}
+	pushDialogJSON("null")
+}
+
 // resolvePanelDialog delivers an answer from the webview (or a panel-closed
 // event). Safe to call when nothing is pending.
 func resolvePanelDialog(r panelDialogResult) {

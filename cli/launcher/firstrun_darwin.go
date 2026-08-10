@@ -164,9 +164,12 @@ func runFirstRun(u *updater) error {
 	// for reasons outside this machine, and a setup that wrote server.env and a
 	// launchd agent pointing at a server that was never downloaded would look
 	// complete and be broken.
+	showPanelBusy("Downloading the cix server…")
 	if err := ensureRuntime(u, logProgress); err != nil {
+		clearPanelBusy()
 		return fmt.Errorf("could not install the cix server: %w", err)
 	}
+	clearPanelBusy()
 
 	password, err := generatePassword()
 	if err != nil {

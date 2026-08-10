@@ -51,11 +51,13 @@ func (m *menu) resetPasswordFlow() {
 		if err != nil || !ok {
 			return
 		}
+		showPanelBusy("Downloading the cix server…")
 		if err := ensureRuntime(m.updater, m.setProgress); err != nil {
 			_ = alert("Could not install the cix server", err.Error())
 			return
 		}
 		m.setProgress("")
+		clearPanelBusy()
 	}
 
 	server, err := runtimeServerPath()
