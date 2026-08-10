@@ -90,10 +90,27 @@ var ErrNotModified = fmt.Errorf("not modified")
 // Returns a zero Release and no error when the stream has no releases yet —
 // that is a normal state for a new tag stream, not a failure.
 func (c *Client) Latest(ctx context.Context) (Release, error) {
+	releases, err := c.list(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+
+	var best Release
+	for _, rel := range releases {
+		if best.Version != "" && CompareSemver(rel.Version, best.Version) <= 0 {
+			continue
+		}
+		best = rel
+	}
+	return best, nil
+}
+
+// list fetches the published releases of this stream, newest page first.
+func (c *Client) list(ctx context.Context) ([]Release, error) {
 	url := fmt.Sprintf("%s/repos/%s/releases?per_page=30", c.BaseURL, c.Repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return Release{}, err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -103,21 +120,21 @@ func (c *Client) Latest(ctx context.Context) (Release, error) {
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return Release{}, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		return Release{}, ErrNotModified
+		return nil, ErrNotModified
 	case http.StatusOK:
 	case http.StatusForbidden, http.StatusTooManyRequests:
 		// Distinguished from a generic failure because it is self-healing and
 		// the caller should stay quiet about it rather than alarm the user.
-		return Release{}, fmt.Errorf("github rate limit reached (resets hourly)")
+		return nil, fmt.Errorf("github rate limit reached (resets hourly)")
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return Release{}, fmt.Errorf("github returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("github returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
 	var raw []struct {
@@ -132,11 +149,11 @@ func (c *Client) Latest(ctx context.Context) (Release, error) {
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&raw); err != nil {
-		return Release{}, fmt.Errorf("decode releases: %w", err)
+		return nil, fmt.Errorf("decode releases: %w", err)
 	}
 	c.ETag = resp.Header.Get("ETag")
 
-	var best Release
+	var out []Release
 	for _, r := range raw {
 		if r.Draft || r.Prerelease {
 			continue
@@ -150,14 +167,11 @@ func (c *Client) Latest(ctx context.Context) (Release, error) {
 		if strings.ContainsAny(version, "-+") {
 			continue
 		}
-		if best.Version != "" && CompareSemver(version, best.Version) <= 0 {
-			continue
-		}
 		rel := Release{Version: version, TagName: r.TagName, HTMLURL: r.HTMLURL}
 		for _, a := range r.Assets {
 			rel.Assets = append(rel.Assets, Asset{Name: a.Name, URL: a.URL, Size: a.Size})
 		}
-		best = rel
+		out = append(out, rel)
 	}
-	return best, nil
+	return out, nil
 }

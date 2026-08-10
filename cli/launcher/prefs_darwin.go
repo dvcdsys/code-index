@@ -20,16 +20,21 @@ type prefs struct {
 	// "keep". Empty means the question has not been asked yet.
 	Takeover string `json:"takeover,omitempty"`
 
-	// UpdateETag is GitHub's ETag from the last release listing. Replaying it
-	// turns an unchanged check into a 304, which does not count against the
-	// unauthenticated hourly limit — so it is worth surviving a restart.
-	UpdateETag string `json:"update_etag,omitempty"`
-
-	// RestartServerAfterUpdate carries one bit across the update: the process
-	// that stops the server is replaced before the one that should start it
-	// again exists, so the intent has to live on disk in between.
-	RestartServerAfterUpdate bool `json:"restart_server_after_update,omitempty"`
+	// UpdateETag and RuntimeETag are GitHub's ETags from the last listing of the
+	// mac/v* and server/v* streams. Replaying one turns an unchanged check into
+	// a 304, which does not count against the unauthenticated hourly limit — so
+	// they are worth surviving a restart. Two streams, two ETags: the app and
+	// the server it manages are released separately.
+	UpdateETag  string `json:"update_etag,omitempty"`
+	RuntimeETag string `json:"runtime_etag,omitempty"`
 }
+
+// There used to be a third field here, restart_server_after_update, carrying one
+// bit across a launcher swap: the process that stopped the server was replaced
+// before the one that should start it again existed. Moving the runtime out of
+// the bundle removed the reason for it — an app update no longer touches the
+// server at all, and a runtime update restarts it within a single process. An
+// old file that still carries the key is simply ignored.
 
 const (
 	takeoverAdopt = "takeover"

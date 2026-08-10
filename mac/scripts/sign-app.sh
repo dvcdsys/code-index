@@ -14,18 +14,18 @@
 #
 # Why not --deep
 # --------------
-# `codesign --deep` is deprecated by Apple and unreliable for a bundle like this
-# one, which carries four executables and a pile of dylibs directly in
-# Contents/MacOS rather than as nested .app/.framework bundles. Signing bottom
-# up is explicit, ordered, and each step is verifiable.
+# `codesign --deep` is deprecated by Apple and unreliable in general. It is not
+# needed here at all now that the bundle holds a single executable — the ordered
+# dylib-then-executable signing this used to do moved to build-runtime.sh, which
+# is where the dylibs went.
 #
 # Why xattr -cr first
 # -------------------
 # server/Makefile records the failure this prevents: on macOS 26, amfid SIGKILLs
-# an ad-hoc-signed binary whose linked dylibs carry a stale signature or a
-# com.apple.provenance xattr, and it does so with EMPTY STDERR — the process
-# just dies. Every `cp` into the staging tree recreates those conditions, so the
-# strip has to happen on every build, not once at install time.
+# an ad-hoc-signed binary carrying a stale signature or a com.apple.provenance
+# xattr, and it does so with EMPTY STDERR — the process just dies. Every `cp`
+# into the staging tree recreates those conditions, so the strip has to happen
+# on every build, not once at install time.
 set -euo pipefail
 
 APP="${1:-}"
@@ -43,34 +43,28 @@ xattr -cr "$APP"
 
 MACOS_DIR="$APP/Contents/MacOS"
 
-sign_one() {
-    local target="$1"
-    [[ -e "$target" ]] || { echo "sign-app: missing signing target: $target" >&2; exit 1; }
-    codesign --force --sign - "$target"
-}
+# 1. The executable.
+LAUNCHER="$MACOS_DIR/cix-launcher"
+[[ -e "$LAUNCHER" ]] || { echo "sign-app: missing signing target: $LAUNCHER" >&2; exit 1; }
 
-# 1. Libraries. llama-server links these by @rpath; if a dylib's signature is
-#    stale relative to the executable that loads it, the load fails at dyld
-#    time — after codesign has happily reported success on the executable.
-shopt -s nullglob
-dylibs=("$MACOS_DIR"/llama/*.dylib)
-shopt -u nullglob
-if [[ ${#dylibs[@]} -eq 0 ]]; then
-    echo "sign-app: no dylibs found under $MACOS_DIR/llama — the bundle is incomplete" >&2
+# The bundle should carry exactly one executable. Anything else means a stale
+# tree — most likely a cix-server, cix or llama/ left over from a build that
+# predates the runtime split, which would then be sealed into the signature and
+# shipped as ~90 MB of dead weight.
+shopt -s nullglob extglob
+extra=("$MACOS_DIR"/!(cix-launcher))
+shopt -u nullglob extglob
+if [[ ${#extra[@]} -gt 0 ]]; then
+    echo "sign-app: unexpected files in Contents/MacOS — this bundle was not built from scratch:" >&2
+    printf '  %s\n' "${extra[@]}" >&2
     exit 1
 fi
-echo "sign-app: signing ${#dylibs[@]} dylib(s)"
-for lib in "${dylibs[@]}"; do
-    sign_one "$lib"
-done
 
-# 2. Executables, leaf-most first.
-for bin in llama/llama-server cix cix-server cix-launcher; do
-    echo "sign-app: signing $bin"
-    sign_one "$MACOS_DIR/$bin"
-done
+echo "sign-app: signing cix-launcher"
+codesign --force --sign - "$LAUNCHER"
 
-# 3. The bundle last — this seals everything above into Contents/_CodeSignature.
+# 2. The bundle last — this seals the executable and the resources into
+#    Contents/_CodeSignature.
 echo "sign-app: signing bundle"
 codesign --force --sign - "$APP"
 

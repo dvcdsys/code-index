@@ -38,7 +38,33 @@ func (m *menu) resetPasswordFlow() {
 		return
 	}
 
-	password, err := runResetPassword(m.bundle, vars, email)
+	// The reset runs cix-server against the database directly, so it needs the
+	// runtime. In observe-only mode — where another installation owns the agent
+	// and we never installed one — this is the only feature that does, so the
+	// download is offered here rather than forced at startup.
+	if !runtimeReady() {
+		ok, err := confirm("Download the cix server?",
+			"Resetting a password runs cix-server against the database directly, and it is not "+
+				"installed on this Mac yet.\n\nDownloading it is about 40 MB and changes nothing "+
+				"about the installation you already have.",
+			"Download")
+		if err != nil || !ok {
+			return
+		}
+		if err := ensureRuntime(m.updater, m.setProgress); err != nil {
+			_ = alert("Could not install the cix server", err.Error())
+			return
+		}
+		m.setProgress("")
+	}
+
+	server, err := runtimeServerPath()
+	if err != nil {
+		_ = alert("cix", fmt.Sprintf("Could not locate the cix server.\n\n%v", err))
+		return
+	}
+
+	password, err := runResetPassword(server, vars, email)
 	if err != nil {
 		_ = alert("Could not reset the password", err.Error())
 		return
@@ -58,11 +84,11 @@ func (m *menu) resetPasswordFlow() {
 // at a terminal who already holds the DB file, and indefensible in a GUI alert,
 // where a typo would enumerate accounts to whoever is looking at the screen. So
 // the full output goes to the log and the dialog gets one sentence.
-func runResetPassword(b bundle, vars map[string]string, email string) (string, error) {
+func runResetPassword(server string, vars map[string]string, email string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, b.Server, "-reset-password", email)
+	cmd := exec.CommandContext(ctx, server, "-reset-password", email)
 
 	// The subprocess reads config from the environment, so it must see the same
 	// database the server uses. Without these it would fall back to the default

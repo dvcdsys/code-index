@@ -1,14 +1,17 @@
 name: "Release: macOS app"
 
 # Triggered by macOS-app tags (e.g. `mac/v0.1.0`). This is a third, independent
-# tag stream alongside `server/v*` and `cli/v*`: the .app is versioned by what
-# the app itself does, not by the versions of the two binaries it happens to
-# bundle. Those are stamped separately (see the "Resolve versions" step) and
-# recorded in the bundle's Info.plist.
+# tag stream alongside `server/v*` and `cli/v*`, and it releases exactly one
+# thing: the menu bar app, ~4 MB, holding a single executable.
 #
-# Cut these tags on `main`. `git describe` walks ancestors, so a tag cut on
-# develop resolves to whatever server/v* is reachable from there — which on this
-# repo has been several releases behind what actually shipped.
+# The server it manages is NOT built here. It ships from the server/v* tag
+# stream — the same tag and the same workflow run that publishes the Docker
+# images (see release-server.yml's macos-runtime job) — so a Mac install and a
+# container on the same version are the same server. cix.app downloads it into
+# ~/.cix/runtime/ and updates it independently of itself.
+#
+# That means this workflow no longer needs a server/v* or cli/v* tag to be
+# reachable: nothing here is stamped with them.
 on:
   push:
     tags:
@@ -37,11 +40,8 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
-          # Full history: the server and CLI versions come from `git describe`
-          # against tags that are not the tag being built.
-          fetch-depth: 0
 
-      - name: Resolve versions
+      - name: Resolve version
         id: ver
         run: |
           set -euo pipefail
@@ -51,51 +51,19 @@ jobs:
           else
             MAC_VERSION="${GITHUB_REF_NAME#mac/v}"
           fi
-
-          SERVER_TAG="$(git describe --tags --match 'server/v*' --abbrev=0 2>/dev/null || true)"
-          CLI_TAG="$(git describe --tags --match 'cli/v*' --abbrev=0 2>/dev/null || true)"
-
-          # Guard, not a nicety. Without a reachable tag on each stream the
-          # binaries would ship stamped 0.0.0-dev, which is indistinguishable
-          # from a local developer build and useless in a bug report.
-          if [ -z "$SERVER_TAG" ] || [ -z "$CLI_TAG" ]; then
-            echo "::error title=Unreleasable commit::A mac/v* tag must be cut from a commit with both a server/v* and a cli/v* tag reachable. Found server='${SERVER_TAG:-none}' cli='${CLI_TAG:-none}'. Cut the tag on main."
-            exit 1
-          fi
-
-          {
-            echo "mac=$MAC_VERSION"
-            echo "server=${SERVER_TAG#server/v}"
-            echo "cli=${CLI_TAG#cli/v}"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "app=$MAC_VERSION server=$SERVER_TAG cli=$CLI_TAG"
+          echo "mac=$MAC_VERSION" >> "$GITHUB_OUTPUT"
+          echo "app=$MAC_VERSION"
 
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          # The server module has the higher `go` directive of the two, and a
-          # newer toolchain builds the CLI module fine. One install, both builds.
-          go-version-file: server/go.mod
-          cache-dependency-path: |
-            server/go.sum
-            cli/go.sum
-
-      - name: Set up Node
-        # The server binary embeds the built dashboard via go:embed, so a
-        # release build needs the frontend toolchain even though nothing about
-        # the .app is JavaScript.
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: server/dashboard/package-lock.json
+          # Only the CLI module is built here — the launcher lives in it.
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
 
       - name: Build cix.app
         env:
           MAC_VERSION: ${{ steps.ver.outputs.mac }}
-          SERVER_VERSION: ${{ steps.ver.outputs.server }}
-          CLI_VERSION: ${{ steps.ver.outputs.cli }}
         run: mac/scripts/build-app.sh
 
       - name: Verify the bundle
@@ -108,22 +76,19 @@ jobs:
           # sealed resources drifted from what is on disk.
           codesign --verify --strict --verbose=2 "$APP"
 
-          # Each binary reports its own version. This is the check that catches
-          # a bundle assembled from stale server/dist artefacts.
+          # Reports the launcher's own version, and that no runtime is installed
+          # — correct on a build machine, where the two halves have not met yet.
           "$APP/Contents/MacOS/cix-launcher" -report
 
-          # Every @rpath dependency of llama-server must be present. Missing
-          # ones only fail at dyld load time, on the user's machine, with an
-          # abort — which is how the b10238 library-layout change was found.
-          missing=0
-          for dep in $(otool -L "$APP/Contents/MacOS/llama/llama-server" \
-                        | awk '/@rpath\//{sub(/^.*@rpath\//,"",$1); print $1}'); do
-            if [ ! -e "$APP/Contents/MacOS/llama/$dep" ]; then
-              echo "::error title=Broken bundle::llama-server dependency not bundled: $dep"
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ]
+          # The app must contain exactly one executable. A leftover cix-server
+          # or llama/ from a pre-split build would be sealed into the signature
+          # and shipped as ~90 MB nobody uses.
+          found="$(find "$APP/Contents/MacOS" -type f | wc -l | tr -d ' ')"
+          if [ "$found" != "1" ]; then
+            echo "::error title=Unexpected bundle contents::Contents/MacOS holds $found files, expected only cix-launcher"
+            find "$APP/Contents/MacOS" -type f
+            exit 1
+          fi
 
       - name: Build DMG
         env:
@@ -132,9 +97,8 @@ jobs:
 
       - name: Compute checksums
         working-directory: mac/dist
-        # The self-updater (a later release) verifies a downloaded DMG against
-        # this file. Without a Developer ID signature it is the only integrity
-        # check there is, so it ships from the first release onward.
+        # The updater verifies the download against this file. Without a
+        # Developer ID signature it is the only integrity check there is.
         run: shasum -a 256 ./*.dmg > checksums.txt
 
       - name: Upload artifacts
@@ -161,15 +125,21 @@ jobs:
           body: |
             ## cix for macOS — Apple Silicon
 
-            Bundles `cix-server` ${{ steps.ver.outputs.server }}, the `cix` CLI
-            ${{ steps.ver.outputs.cli }}, and a Metal-accelerated `llama-server`
-            for local embeddings. Everything runs on your machine.
+            A menu bar app for a local cix server: start and stop it, see what
+            its embedding provider is doing, and open the dashboard. Everything
+            runs on your machine.
 
             ### Install
 
             1. Download the `.dmg` below and open it.
             2. Drag **cix.app** onto **Applications**.
             3. Open it from Applications.
+
+            On first launch the app downloads the server itself — `cix-server`,
+            the `cix` CLI and a Metal-accelerated `llama-server`, about 40 MB —
+            from the newest [server release](https://github.com/dvcdsys/code-index/releases?q=server%2Fv).
+            That is the same build the Docker images are cut from, and it
+            updates on its own schedule: a new server does not need a new app.
 
             ### First launch will be blocked — this is expected
 

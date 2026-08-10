@@ -27,6 +27,12 @@
   LSBackgroundOnly (that would hide the menu bar item too), and any login-item
   keys — autostart is launchd's job, configured at runtime, not baked into the
   bundle.
+
+  Also deliberately absent, and once present: CIXServerVersion, CIXCLIVersion
+  and CIXLlamaVersion. Those three now live outside the app, in
+  ~/.cix/runtime/current/runtime.json, and update without this bundle changing.
+  A version recorded here would be a claim about somebody else's files, wrong
+  the first time either half is updated on its own.
 -->
 <plist version="1.0">
 <dict>
@@ -62,11 +68,5 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT licensed. https://github.com/dvcdsys/code-index</string>
-	<key>CIXServerVersion</key>
-	<string>@SERVER_VERSION@</string>
-	<key>CIXCLIVersion</key>
-	<string>@CLI_VERSION@</string>
-	<key>CIXLlamaVersion</key>
-	<string>@LLAMA_VERSION@</string>
 </dict>
 </plist>

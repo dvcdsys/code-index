@@ -23,7 +23,7 @@ import (
 
 // handleForeignAgent asks (once) what to do about an agent this app did not
 // create, and acts on the answer. Returns true when the app now owns the agent.
-func handleForeignAgent(b bundle) bool {
+func handleForeignAgent(u *updater) bool {
 	p := loadPrefs()
 
 	if p.Takeover == "" {
@@ -56,7 +56,7 @@ func handleForeignAgent(b bundle) bool {
 		return false
 	}
 
-	if err := adoptForeignAgent(b); err != nil {
+	if err := adoptForeignAgent(u); err != nil {
 		logf("takeover failed: %v", err)
 		_ = alert("Could not take over the existing installation",
 			fmt.Sprintf("%v\n\nThe existing installation was left untouched. "+
@@ -72,10 +72,18 @@ func handleForeignAgent(b bundle) bool {
 
 // adoptForeignAgent migrates the existing configuration, backs up what it
 // replaces, and installs this app's wrapper and plist.
-func adoptForeignAgent(b bundle) error {
+func adoptForeignAgent(u *updater) error {
 	envPath, err := foreignEnvPath()
 	if err != nil {
 		return err
+	}
+
+	// The wrapper written below execs ~/.cix/runtime/current/cix-server, so the
+	// runtime has to exist before the old agent is unloaded. Doing it first also
+	// means a failed download costs nothing: the existing installation is still
+	// running its own server, untouched.
+	if err := ensureRuntime(u, logProgress); err != nil {
+		return fmt.Errorf("could not install the cix server: %w", err)
 	}
 
 	// Migrate first. Taking over an agent and then pointing it at a fresh,
@@ -98,7 +106,7 @@ func adoptForeignAgent(b bundle) error {
 	if err := launchdBootout(); err != nil {
 		return fmt.Errorf("could not unload the existing agent: %w", err)
 	}
-	if err := writeLaunchdFiles(b, autostartEnabled()); err != nil {
+	if err := writeLaunchdFiles(autostartEnabled()); err != nil {
 		return err
 	}
 	if err := launchdBootstrap(); err != nil {

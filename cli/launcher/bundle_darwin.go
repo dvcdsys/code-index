@@ -12,22 +12,17 @@ import (
 
 // bundle describes the .app this launcher is running from.
 //
-// The layout is fixed by mac/scripts/build-app.sh and by one hard runtime
-// constraint: cix-server resolves its llama-server via
-// filepath.Dir(os.Executable())/llama, so llama/ must sit next to cix-server,
-// which means every executable lives in Contents/MacOS/ — Resources/ is not an
-// option (codesign --verify --strict rejects executables there).
+// The .app contains the launcher and nothing else that runs. cix-server, the
+// cix CLI and llama-server live in ~/.cix/runtime/ — see runtime_darwin.go for
+// why they were moved out and how they are managed.
 //
 //	cix.app/Contents/
-//	  MacOS/  cix-launcher  cix-server  cix  llama/{llama-server,*.dylib}
-//	  Resources/  AppIcon.icns  menubar.png  menubar@2x.png
+//	  MacOS/      cix-launcher
+//	  Resources/  cix.icns  cixTemplate.png  cixTemplate@2x.png
 type bundle struct {
 	Root      string // …/cix.app
 	MacOS     string // …/cix.app/Contents/MacOS
 	Resources string // …/cix.app/Contents/Resources
-	Server    string // …/Contents/MacOS/cix-server
-	CLI       string // …/Contents/MacOS/cix
-	LlamaDir  string // …/Contents/MacOS/llama
 }
 
 // errNotBundled is returned when the launcher runs from a plain directory
@@ -60,9 +55,6 @@ func locateBundle() (bundle, error) {
 		Root:      root,
 		MacOS:     macOS,
 		Resources: filepath.Join(contents, "Resources"),
-		Server:    filepath.Join(macOS, "cix-server"),
-		CLI:       filepath.Join(macOS, "cix"),
-		LlamaDir:  filepath.Join(macOS, "llama"),
 	}, nil
 }
 

@@ -42,10 +42,11 @@ func needsFirstRun() bool {
 //
 // Returns errCancelled if the user backs out, which is not an error condition —
 // the app stays running with Start disabled until they complete setup.
-func runFirstRun(b bundle) error {
+func runFirstRun(u *updater) error {
 	intro := "cix needs an administrator account before it can start.\n\n" +
 		"Enter the email address to sign in with. A password will be generated for you, " +
-		"and you will be asked to change it the first time you log in."
+		"and you will be asked to change it the first time you log in.\n\n" +
+		"Setup then downloads the cix server itself — around 40 MB — which takes a moment."
 
 	email, err := prompt("Set up cix", intro, "")
 	if err != nil {
@@ -61,6 +62,14 @@ func runFirstRun(b bundle) error {
 			return err
 		}
 		email = strings.TrimSpace(email)
+	}
+
+	// Before anything is written: the runtime is the one step here that can fail
+	// for reasons outside this machine, and a setup that wrote server.env and a
+	// launchd agent pointing at a server that was never downloaded would look
+	// complete and be broken.
+	if err := ensureRuntime(u, logProgress); err != nil {
+		return fmt.Errorf("could not install the cix server: %w", err)
 	}
 
 	password, err := generatePassword()
@@ -105,7 +114,7 @@ func runFirstRun(b bundle) error {
 		return fmt.Errorf("write server.env: %w", err)
 	}
 
-	if err := writeLaunchdFiles(b, false); err != nil {
+	if err := writeLaunchdFiles(false); err != nil {
 		return fmt.Errorf("write launchd files: %w", err)
 	}
 	if err := startServer(); err != nil {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"fyne.io/systray"
@@ -47,11 +48,26 @@ type menu struct {
 
 // detailRows is the fixed number of submenu slots. Rows with nothing to say are
 // hidden rather than left blank.
-const detailRows = 6
+const detailRows = 7
 
-func runMenu(b bundle) {
-	m := &menu{bundle: b, poll: newPoller(), stop: make(chan struct{}), updater: newUpdater(b)}
+func runMenu(b bundle, u *updater) {
+	m := &menu{bundle: b, poll: newPoller(), stop: make(chan struct{}), updater: u}
 	systray.Run(m.onReady, m.onExit)
+}
+
+// setProgress puts a word next to the menu bar icon while something slow is
+// happening, and clears it when passed "".
+//
+// The alternative was a modal dialog, and it is the wrong shape: a runtime
+// download takes tens of seconds, during which a menu bar app that shows nothing
+// reads as hung and one that blocks with an alert cannot be dismissed. AppKit
+// draws this text beside the template icon, so it is visible without being in
+// the way.
+func (m *menu) setProgress(msg string) {
+	systray.SetTitle(msg)
+	if msg != "" {
+		logf("%s", msg)
+	}
 }
 
 func (m *menu) onReady() {
@@ -237,7 +253,7 @@ func (m *menu) toggleAutostart() {
 	}
 	enable := !s.Autostart
 
-	if err := setAutostart(m.bundle, enable); err != nil {
+	if err := setAutostart(enable); err != nil {
 		_ = alert("cix", fmt.Sprintf("Could not change the start-at-login setting.\n\n%v", err))
 		m.render(m.poll.snapshotNow())
 		return
@@ -257,27 +273,35 @@ func (m *menu) toggleAutostart() {
 // it. `explicit` distinguishes the menu item from the background check: a
 // background check that finds nothing says nothing.
 func (m *menu) checkForUpdates(explicit bool) {
-	if isDevBuild() {
+	av := m.updater.check(explicit)
+	if !av.any() {
 		if explicit {
-			_ = alert("cix", "This is a development build, so there is nothing to update it to.\n\n"+
-				"Released builds check for updates automatically.")
+			_ = alert("cix is up to date", fmt.Sprintf(
+				"You are running cix %s with %s.", displayVersion(), strings.ToLower(runtimeSummary())))
 		}
 		return
 	}
 
-	rel, newer := m.updater.check(explicit)
-	if !newer {
-		if explicit {
-			_ = alert("cix is up to date", fmt.Sprintf("You are running version %s.", version))
-		}
-		return
+	// The app and the server are separate releases and feel completely
+	// different to update: the server restarts and the app never goes away, the
+	// app closes and reopens while the server keeps running. Naming which one
+	// is happening is the difference between an expected restart and an
+	// unexplained one.
+	var what, effect string
+	switch {
+	case av.App.Version == "":
+		what = fmt.Sprintf("cix server %s is available. You are running %s.", av.Runtime.Version, currentRuntimeVersion())
+		effect = "The server will be updated and restarted. This app stays open, and if the new server does not start, cix goes back to the current one."
+	case av.Runtime.Version == "":
+		what = fmt.Sprintf("cix %s is available. You are running %s.", av.App.Version, displayVersion())
+		effect = "cix will close and reopen. The server keeps running throughout."
+	default:
+		what = fmt.Sprintf("cix %s and cix server %s are available.", av.App.Version, av.Runtime.Version)
+		effect = "The server will be updated and restarted, then cix will close and reopen."
 	}
 
-	ok, err := ask("A new version of cix is available",
-		fmt.Sprintf("cix %s is available. You are running %s.\n\n"+
-			"The update is downloaded, checked, and installed in place. "+
-			"cix will restart, and the server will be stopped and started again with it.",
-			rel.Version, version),
+	ok, err := ask("An update is available",
+		fmt.Sprintf("%s\n\nEverything is downloaded and checked before anything is replaced. %s", what, effect),
 		"Update Now", "Not Now")
 	if err != nil || !ok {
 		return
@@ -285,40 +309,29 @@ func (m *menu) checkForUpdates(explicit bool) {
 
 	// "Is there a process", not "is it answering". A server still loading its
 	// embedding model has a pid and no /health yet; treating that as stopped
-	// would skip the shutdown and then replace the bundle out from under a live
-	// cix-server, which macOS answers by killing it. Captured before anything
-	// is touched, because after the swap this process no longer exists to
-	// remember it.
+	// would skip the shutdown and swap the runtime under a live cix-server,
+	// leaving it with a llama sidecar from a different version.
 	wasRunning := m.poll.snapshotNow().PID != 0
 
-	if err := m.updater.install(rel, wasRunning); err != nil {
-		logf("update to %s failed: %v", rel.Version, err)
+	quit, err := m.updater.install(av, wasRunning, m.setProgress)
+	if err != nil {
+		logf("update failed: %v", err)
 		_ = alert("Could not install the update", err.Error())
 		m.poll.refresh()
+		return
+	}
+	if !quit {
+		// Server-only update: the app is not going anywhere, so it has to say
+		// the update finished. The launcher path says nothing here because it
+		// is about to disappear and reappear, which speaks for itself.
+		m.poll.refresh()
+		_ = alert("cix server updated", fmt.Sprintf("The cix server is now running %s.", av.Runtime.Version))
 		return
 	}
 
 	// From here the swap helper owns the outcome: it waits for this process to
 	// exit before moving anything, so quitting is the last required step.
 	systray.Quit()
-}
-
-// resumeAfterUpdate restarts the server when the update that just completed
-// had stopped a running one.
-func resumeAfterUpdate() {
-	p := loadPrefs()
-	if !p.RestartServerAfterUpdate {
-		return
-	}
-	p.RestartServerAfterUpdate = false
-	if err := savePrefs(p); err != nil {
-		logf("could not clear the post-update restart flag: %v", err)
-	}
-	if err := startServer(); err != nil {
-		logf("could not restart the server after the update: %v", err)
-		return
-	}
-	logf("server restarted after the update")
 }
 
 // renderDetail fills the submenu under the server row. Slots with nothing to
@@ -330,6 +343,10 @@ func (m *menu) renderDetail(s snapshot) {
 		s.DetailNetwork(),
 		s.DetailModel(),
 		s.DetailVersion(),
+		// What is installed, as opposed to what the running server reports. The
+		// row above is empty whenever the server is not answering — which is
+		// exactly when someone wants to know which server is on disk.
+		runtimeSummary(),
 		s.DetailManaged(),
 	}
 	for i, line := range lines {
@@ -352,9 +369,9 @@ func (m *menu) toggleServer() {
 	if s.State == stateRunning {
 		err = stopServer()
 	} else {
-		// Re-point the agent at this bundle before starting. The app may have
-		// been moved or replaced by an update since the files were written.
-		if err = writeLaunchdFiles(m.bundle, autostartEnabled()); err == nil {
+		// Rewrite the wrapper before starting. It is generated, not edited, and
+		// something else may have replaced it — install-server.sh most obviously.
+		if err = writeLaunchdFiles(autostartEnabled()); err == nil {
 			err = startServer()
 		}
 	}

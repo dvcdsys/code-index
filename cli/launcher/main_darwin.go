@@ -45,6 +45,11 @@ func main() {
 		return
 	}
 
+	// One updater for the process: it owns the cached ETag and the release
+	// client, and both the runtime installer and the menu's update check need
+	// them. Two of these would mean two ETags racing over one preferences file.
+	u := newUpdater(b)
+
 	if isTranslocated(b) {
 		// Gatekeeper is running the app from a randomised read-only copy, which
 		// it does to any quarantined app opened from outside /Applications.
@@ -67,10 +72,16 @@ func main() {
 		// Asks once, remembers the answer, and defaults to leaving it alone.
 		// When the user declines, the app stays in observe-only mode: status
 		// and the dashboard work, Start/Stop do not.
-		handleForeignAgent(b)
+		//
+		// No runtime is installed on this path. Observing somebody else's server
+		// needs no binaries of our own, and downloading 90 MB to watch an
+		// install the user asked us not to touch would be presumptuous. The one
+		// feature that does need it — password reset — offers the download when
+		// it is used.
+		handleForeignAgent(u)
 
 	case needsFirstRun():
-		if err := runFirstRun(b); err != nil {
+		if err := runFirstRun(u); err != nil {
 			if errors.Is(err, errCancelled) {
 				// Setup is resumable: the app stays in the menu bar with Start
 				// disabled, and the next launch offers the wizard again.
@@ -84,21 +95,45 @@ func main() {
 		}
 
 	default:
-		// Re-point the launchd agent at this bundle, preserving the user's
-		// autostart choice. An app that was moved, or replaced by an update,
-		// would otherwise keep a job aimed at a path that no longer holds the
-		// binary.
-		if err := writeLaunchdFiles(b, autostartEnabled()); err != nil {
+		// A configured install with no runtime is the first launch after
+		// upgrading from a version that carried its server inside the bundle:
+		// the old app is gone, and with it the binary the launchd wrapper was
+		// pointing at. Say so before spending a minute on a download, because
+		// otherwise this is a menu bar app that appears to do nothing at all.
+		//
+		// Not said when a local tarball is supplied: there is no download to
+		// warn about, and this is the path a developer takes on every build.
+		if !runtimeReady() && os.Getenv("CIX_RUNTIME_TARBALL") == "" {
+			_ = alert("cix needs to finish updating",
+				"cix now keeps its server outside the application, so it updates without restarting.\n\n"+
+					"It will download that part now — around 40 MB, once. The menu bar icon appears when it is done.")
+		}
+		if err := ensureRuntime(u, logProgress); err != nil {
+			logf("could not install the runtime: %v", err)
+			_ = alert("cix could not install its server",
+				fmt.Sprintf("%v\n\nThe menu bar app still works, but the server cannot start until this succeeds.", err))
+			break
+		}
+		// Only after the runtime exists: pointing the launchd wrapper at a
+		// binary that is not there would break a working install rather than
+		// leave it alone.
+		//
+		// Nothing is started here. An app update no longer stops the server —
+		// the bundle holds none of what it runs — so there is no interrupted
+		// state to resume, and starting a server the user had deliberately
+		// stopped would be the app overriding them.
+		if err := writeLaunchdFiles(autostartEnabled()); err != nil {
 			logf("could not refresh launchd files: %v", err)
 		}
-		// Ordered after the plist rewrite, not before: an update replaced the
-		// binary the agent points at, and starting the server first would run
-		// the previous version's path.
-		resumeAfterUpdate()
 	}
 
-	runMenu(b)
+	runMenu(b, u)
 }
+
+// logProgress is the progress sink for work that happens before the menu bar
+// item exists. There is nowhere to show it, so it goes in the log — which is
+// where anyone investigating a slow first launch will look.
+func logProgress(msg string) { logf("%s", msg) }
 
 // stripQuarantine clears com.apple.quarantine from the whole bundle, once.
 //
@@ -116,21 +151,37 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// bundleReport asks each bundled binary for its own version rather than
-// printing what the build script believed it packaged. That difference is the
-// point: it catches a bundle assembled from stale dist/ artefacts, which is the
-// failure this pipeline is most likely to produce.
+// bundleReport prints what this installation actually consists of: the app, and
+// whichever runtime it is pointing at.
+//
+// The runtime half asks the binaries for their own versions rather than
+// trusting runtime.json, because the difference is the point — it catches a
+// runtime assembled from stale dist/ artefacts, which is the failure this
+// pipeline is most likely to produce. CI runs this against a freshly built app,
+// where the answer is "no runtime", and that is correct: the two halves of a
+// release are built separately and only meet on a user's machine.
 func bundleReport(b bundle) string {
 	var sb strings.Builder
 
 	fmt.Fprintf(&sb, "Launcher:   cix-launcher %s\n", version)
-	fmt.Fprintf(&sb, "Server:     %s\n", binaryVersion(b.Server, "-v"))
-	fmt.Fprintf(&sb, "CLI:        %s\n", binaryVersion(b.CLI, "--version"))
+	fmt.Fprintf(&sb, "Bundle:     %s\n", b.Root)
 
-	if _, err := os.Stat(b.LlamaDir); err == nil {
-		sb.WriteString("Embeddings: bundled llama-server (Metal)\n")
+	if !runtimeReady() {
+		sb.WriteString("Runtime:    not installed\n")
+		return sb.String()
+	}
+
+	dir, _ := runtimeCurrentDir()
+	fmt.Fprintf(&sb, "Runtime:    %s (%s)\n", currentRuntimeVersion(), dir)
+	fmt.Fprintf(&sb, "Server:     %s\n", binaryVersion(filepath.Join(dir, "cix-server"), "-v"))
+	fmt.Fprintf(&sb, "CLI:        %s\n", binaryVersion(filepath.Join(dir, "cix"), "--version"))
+
+	llama := filepath.Join(dir, "llama")
+	if _, err := os.Stat(llama); err == nil {
+		info, _ := readRuntimeInfo()
+		fmt.Fprintf(&sb, "Embeddings: llama-server %s (Metal)\n", info.LlamaVersion)
 	} else {
-		fmt.Fprintf(&sb, "Embeddings: MISSING — %s not found\n", b.LlamaDir)
+		fmt.Fprintf(&sb, "Embeddings: MISSING — %s not found\n", llama)
 	}
 
 	return sb.String()
