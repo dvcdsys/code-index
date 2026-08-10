@@ -226,11 +226,11 @@ func runFirstRun(u *updater) error {
 		retireBootstrapPassword()
 	}
 
-	return alertWithCopy("cix is set up", fmt.Sprintf(
+	return alertWithSecret("cix is set up", fmt.Sprintf(
 		"Sign in at %s\n\nEmail:\n%s\n\nTemporary password:\n%s\n\n"+
 			"You will be asked to change this password on first login.%s%s",
 		dashboardURL(vars), email, password, waitNote, cliNote),
-		password, "Copy Password")
+		password, "password")
 }
 
 // registerWithCLI adds (or updates) the local server in ~/.cix/config.yaml.
