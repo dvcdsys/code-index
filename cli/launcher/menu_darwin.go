@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/systray"
@@ -40,10 +42,45 @@ type menu struct {
 
 	updater *updater
 
+	// busy is held while something is restarting the server, and it exists
+	// because two of these menu items are not independent.
+	//
+	// Start at Login and Allow Network Access both restart the server, each in
+	// its own goroutine, and each drives the same launchd label: one boots the
+	// job out while the other is waiting for its pid to disappear and then
+	// bootstraps it itself. Two bootstraps of one label leave either a failure
+	// or two processes racing for the port — from the outside, a server that
+	// went away and did not come back.
+	//
+	// Serialising them would only queue the second restart behind the first,
+	// which is not what anyone clicking meant. Refusing the click, and greying
+	// the control that would produce it, says what is actually happening.
+	busy atomic.Bool
+
+	// retireOnce drops the bootstrap password from server.env the first time
+	// this process sees a running server. See retireBootstrapPassword.
+	retireOnce sync.Once
+
 	// detail holds the submenu rows under the server row. They are created
 	// once and retitled on every render: systray has no way to remove an item,
 	// so rebuilding the submenu per update would grow it without bound.
 	detail [detailRows]*systray.MenuItem
+}
+
+// beginBusy claims the right to restart the server. False means something else
+// already has it, and the caller must do nothing.
+func (m *menu) beginBusy() bool {
+	if !m.busy.CompareAndSwap(false, true) {
+		logf("ignored a menu action: another server operation is already running")
+		return false
+	}
+	m.render(m.poll.snapshotNow())
+	return true
+}
+
+func (m *menu) endBusy() {
+	m.busy.Store(false)
+	m.poll.refresh()
 }
 
 // detailRows is the fixed number of submenu slots. Rows with nothing to say are
@@ -191,12 +228,28 @@ func (m *menu) render(s snapshot) {
 		m.modelItem.Hide()
 	}
 
+	// Anything that would restart the server is off the table while one restart
+	// is already under way, and while the server is on its way up: a cold start
+	// loads an embedding model and takes minutes, and a second restart landing
+	// in the middle of it is precisely what leaves the job wedged.
+	settling := m.busy.Load() || s.State == stateStarting
+
+	if s.State == stateRunning {
+		// Bootstrap runs before the listener opens, so a server that answers is
+		// a server whose admin account exists — and the password that seeded it
+		// has no further use.
+		m.retireOnce.Do(retireBootstrapPassword)
+	}
+
 	switch {
 	case !s.Managed:
 		// Another installation owns the launchd label. Showing an enabled
 		// Start button that would fight it — or worse, silently repoint it — is
 		// the wrong behaviour; observing is useful, interfering is not.
 		m.startStopItem.SetTitle("Start Server")
+		m.startStopItem.Disable()
+	case m.busy.Load():
+		m.startStopItem.SetTitle("Working…")
 		m.startStopItem.Disable()
 	case s.State == stateRunning:
 		m.startStopItem.SetTitle("Stop Server")
@@ -226,17 +279,27 @@ func (m *menu) render(s snapshot) {
 		m.autostartItem.Uncheck()
 	}
 
-	if s.Managed {
+	if s.Managed && !settling {
 		m.networkItem.Enable()
 		m.autostartItem.Enable()
-		m.resetPWItem.Enable()
 	} else {
-		// These live in files this app does not own — except the password
-		// reset, which only needs the database and is therefore still useful
-		// against an install-server.sh deployment.
+		// Not managed: these live in files this app does not own. Settling: both
+		// of them restart the server, and that is the click this guard exists to
+		// refuse.
 		m.networkItem.Disable()
 		m.autostartItem.Disable()
-		m.resetPWItem.Enable()
+	}
+
+	// The password reset needs neither a running server nor a restart — it opens
+	// the database directly — so it stays available in both cases, including
+	// against an install-server.sh deployment.
+	m.resetPWItem.Enable()
+
+	// An update restarts the server too, and downloads before it does.
+	if settling {
+		m.updateItem.Disable()
+	} else {
+		m.updateItem.Enable()
 	}
 }
 
@@ -251,6 +314,12 @@ func (m *menu) toggleAutostart() {
 	if !s.Managed {
 		return
 	}
+	if !m.beginBusy() {
+		// The checkbox already flipped visually on the click; put it back.
+		m.render(s)
+		return
+	}
+	defer m.endBusy()
 	enable := !s.Autostart
 
 	if err := setAutostart(enable); err != nil {
@@ -313,6 +382,14 @@ func (m *menu) checkForUpdates(explicit bool) {
 	// leaving it with a llama sidecar from a different version.
 	wasRunning := m.poll.snapshotNow().PID != 0
 
+	// Claimed only now, not around the check: the check is HTTP and touches
+	// nothing, while installing stops and starts the server like the toggles do.
+	if !m.beginBusy() {
+		_ = alert("cix is busy", "Another server operation is still running. Try the update again once it has finished.")
+		return
+	}
+	defer m.endBusy()
+
 	quit, err := m.updater.install(av, wasRunning, m.setProgress)
 	if err != nil {
 		logf("update failed: %v", err)
@@ -364,6 +441,10 @@ func (m *menu) toggleServer() {
 	if !s.Managed {
 		return
 	}
+	if !m.beginBusy() {
+		return
+	}
+	defer m.endBusy()
 
 	var err error
 	if s.State == stateRunning {
@@ -397,6 +478,11 @@ func (m *menu) toggleNetworkAccess() {
 		_ = alert("cix", "cix is not set up yet.")
 		return
 	}
+	if !m.beginBusy() {
+		m.render(m.poll.snapshotNow())
+		return
+	}
+	defer m.endBusy()
 
 	wasRunning := m.poll.snapshotNow().State == stateRunning
 	local := isLocalOnly(vars)

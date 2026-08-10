@@ -185,3 +185,11 @@ func dashboardURL(vars map[string]string) string {
 func localBaseURL(vars map[string]string) string {
 	return fmt.Sprintf("http://localhost:%d", serverPort(vars))
 }
+
+// setDefault fills a key only when it has no value yet, so re-running setup
+// keeps whatever the user has chosen since the first time.
+func setDefault(vars map[string]string, key, value string) {
+	if strings.TrimSpace(vars[key]) == "" {
+		vars[key] = value
+	}
+}
