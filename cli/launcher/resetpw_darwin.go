@@ -70,11 +70,11 @@ func (m *menu) resetPasswordFlow() {
 		return
 	}
 
-	_ = alertWithCopy("Password reset", fmt.Sprintf(
+	_ = alertWithSecret("Password reset", fmt.Sprintf(
 		"Account:\n%s\n\nTemporary password:\n%s\n\n"+
 			"You will be asked to change it at the next sign-in. Other sessions for this "+
 			"account have been signed out.", email, password),
-		password, "Copy Password")
+		password, "password")
 }
 
 // runResetPassword executes the reset and returns the generated password.

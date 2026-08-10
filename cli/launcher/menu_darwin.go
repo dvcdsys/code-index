@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -446,22 +447,55 @@ func (m *menu) toggleServer() {
 	}
 	defer m.endBusy()
 
-	var err error
 	if s.State == stateRunning {
-		err = stopServer()
-	} else {
-		// Rewrite the wrapper before starting. It is generated, not edited, and
-		// something else may have replaced it — install-server.sh most obviously.
-		if err = writeLaunchdFiles(autostartEnabled()); err == nil {
-			err = startServer()
+		if err := stopServer(); err != nil {
+			_ = alert("cix", fmt.Sprintf("Could not stop the server.\n\n%v", err))
 		}
+		m.poll.refresh()
+		return
+	}
+
+	// A missing database is not something Start can fix. The server refuses to
+	// boot without an admin account to create — correctly — and says so in a
+	// log nobody has open, so the button appears to do nothing at all. Offer
+	// the thing that would actually help.
+	if needsFirstRun() {
+		ok, err := confirm("Set cix up again?",
+			"There is no cix database. If you deleted it, the server cannot start until an "+
+				"administrator account is created again.\n\n"+
+				"Setting up again creates a new account and a new, empty index. Anything that "+
+				"was indexed before is already gone with the database.",
+			"Set Up")
+		if err != nil || !ok {
+			return
+		}
+		if err := runFirstRun(m.updater); err != nil && !errors.Is(err, errCancelled) {
+			logf("re-running setup failed: %v", err)
+			_ = alert("Setup failed", fmt.Sprintf("cix could not set itself up again.\n\n%v", err))
+		}
+		m.poll.refresh()
+		return
+	}
+
+	// Rewrite the wrapper before starting. It is generated, not edited, and
+	// something else may have replaced it — install-server.sh most obviously.
+	err := writeLaunchdFiles(autostartEnabled())
+	if err == nil {
+		err = startServer()
 	}
 	if err != nil {
-		verb := "start"
-		if s.State == stateRunning {
-			verb = "stop"
-		}
-		_ = alert("cix", fmt.Sprintf("Could not %s the server.\n\n%v", verb, err))
+		_ = alert("cix", fmt.Sprintf("Could not start the server.\n\n%v", err))
+		return
+	}
+
+	// launchctl reports success for having spawned the process, not for the
+	// process surviving. A server that exits on a configuration it cannot
+	// accept leaves the menu saying "Stopped" and nothing else — which is how
+	// a deleted database looked like a broken Start button.
+	if detail := serverDiedOnStart(); detail != "" {
+		logf("the server exited immediately after Start: %s", detail)
+		_ = alert("The server stopped straight away", detail+
+			"\n\nThe full log is in ~/.cix/logs/cix-server.err.")
 	}
 	m.poll.refresh()
 }

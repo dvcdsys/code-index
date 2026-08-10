@@ -65,43 +65,23 @@ func alert(title, message string) error {
 	return runOsascript(2*time.Minute, script)
 }
 
-// alertWithCopy is alert() plus a button that puts secret on the clipboard.
+// alertWithSecret shows a credential and puts it on the clipboard.
 //
-// AppleScript cannot make a run of text clickable — `display dialog` draws one
-// static string — so the click target has to be a button. That is the whole
-// reason this is not simply "click the password".
-//
-// It re-shows the dialog after copying rather than dismissing. A password
-// displayed once is exactly the thing someone reaches for a second time, and a
-// window that disappears on the first attempt is how people end up reading
-// credentials off a screenshot. The loop always terminates: every turn of it
-// waits for a click.
-func alertWithCopy(title, message, secret, copyLabel string) error {
-	body := message
-	for {
-		script := fmt.Sprintf(
-			`display dialog %s with title %s %s buttons {%s, "Done"} default button "Done"`,
-			quoteAS(body), quoteAS(title), iconClause(), quoteAS(copyLabel),
-		)
-		out, err := outputOsascript(5*time.Minute, script)
-		if err != nil {
-			// Dismissing the window is a perfectly good way to say "I have it".
-			if errors.Is(err, errCancelled) {
-				return nil
-			}
-			return err
-		}
-		if !strings.Contains(out, copyLabel) {
-			return nil
-		}
-
-		if err := copyToClipboard(secret); err != nil {
-			logf("could not copy to the clipboard: %v", err)
-			body = message + "\n\nCould not copy to the clipboard."
-			continue
-		}
-		body = message + "\n\nCopied to the clipboard."
+// The copying happens before the window opens, not on a button, and the message
+// says so. A button was tried and was worse: AppleScript cannot make a run of
+// text clickable — `display dialog` is modal and returns only when it closes —
+// so "copy" meant closing the window and opening it again, which on screen is
+// a flash. Copying up front removes the flash and the click at once, and there
+// is nothing to be coy about: this is a password the app generated seconds ago
+// and is showing on purpose, and reaching for the clipboard is the next thing
+// anyone does with it.
+func alertWithSecret(title, message, secret, secretName string) error {
+	note := fmt.Sprintf("\n\nThe %s is on your clipboard.", secretName)
+	if err := copyToClipboard(secret); err != nil {
+		logf("could not copy the %s to the clipboard: %v", secretName, err)
+		note = fmt.Sprintf("\n\nThe %s could not be copied to your clipboard — select it above.", secretName)
 	}
+	return alert(title, message+note)
 }
 
 // copyToClipboard pipes a value to pbcopy.

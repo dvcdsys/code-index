@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -157,4 +159,58 @@ func TestSetDefaultKeepsExistingChoices(t *testing.T) {
 	if vars["CIX_VERSION_CHECK_ENABLED"] != "false" {
 		t.Errorf("version check = %q, want the default filled in", vars["CIX_VERSION_CHECK_ENABLED"])
 	}
+}
+
+// When the server exits on a configuration it will not accept, its own words
+// are the only useful thing to show — the menu otherwise says "Stopped" and
+// nothing more, which is how a deleted database looked like a broken button.
+func TestLastServerError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logs := filepath.Join(home, ".cix", "logs")
+	if err := os.MkdirAll(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("reports the tail", func(t *testing.T) {
+		body := "cix-server is ready\n\n\nbootstrap auth: incomplete bootstrap configuration:\n" +
+			"  CIX_BOOTSTRAP_ADMIN_EMAIL is set but CIX_BOOTSTRAP_ADMIN_PASSWORD is empty.\n"
+		if err := os.WriteFile(filepath.Join(logs, "cix-server.err"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := lastServerError()
+		if !strings.Contains(got, "incomplete bootstrap configuration") {
+			t.Errorf("lastServerError() = %q, want the refusal in it", got)
+		}
+		// Blank lines carry nothing into a dialog.
+		if strings.Contains(got, "\n\n") {
+			t.Errorf("lastServerError() kept blank lines: %q", got)
+		}
+	})
+
+	t.Run("bounded", func(t *testing.T) {
+		var sb strings.Builder
+		for i := range 500 {
+			fmt.Fprintf(&sb, "line %d with a good deal of text after it so the cap is reached\n", i)
+		}
+		if err := os.WriteFile(filepath.Join(logs, "cix-server.err"), []byte(sb.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := lastServerError()
+		if n := len([]rune(got)); n > 901 {
+			t.Errorf("lastServerError() returned %d runes, want it capped", n)
+		}
+		if !strings.Contains(got, "line 499") {
+			t.Error("lastServerError() dropped the most recent line")
+		}
+	})
+
+	t.Run("no log at all", func(t *testing.T) {
+		if err := os.Remove(filepath.Join(logs, "cix-server.err")); err != nil {
+			t.Fatal(err)
+		}
+		if got := lastServerError(); got == "" {
+			t.Error("lastServerError() = \"\", want something to show the user")
+		}
+	})
 }
