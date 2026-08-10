@@ -312,8 +312,17 @@ func (m *menu) checkForUpdates(explicit bool) {
 	av := m.updater.check(explicit)
 	if !av.any() {
 		if explicit {
-			_ = alert("cix is up to date", fmt.Sprintf(
-				"You are running cix %s with %s.", displayVersion(), strings.ToLower(runtimeSummary())))
+			// Both halves, named and versioned. The old wording folded them
+			// into one sentence and never said "app" at all, which read as if
+			// the check only covered the server — and made the launcher's own
+			// self-update look like a feature nobody had written.
+			msg := fmt.Sprintf("cix app\n%s\n\ncix server\n%s",
+				displayVersion(), strings.TrimPrefix(runtimeSummary(), "Server "))
+			if isDevBuild() {
+				msg += "\n\nThis app was built from source, so it does not replace " +
+					"itself — only released builds update the app. The server updates either way."
+			}
+			_ = alert("cix is up to date", msg)
 		}
 		return
 	}
@@ -329,10 +338,10 @@ func (m *menu) checkForUpdates(explicit bool) {
 		what = fmt.Sprintf("cix server %s is available. You are running %s.", av.Runtime.Version, currentRuntimeVersion())
 		effect = "The server will be updated and restarted. This app stays open, and if the new server does not start, cix goes back to the current one."
 	case av.Runtime.Version == "":
-		what = fmt.Sprintf("cix %s is available. You are running %s.", av.App.Version, displayVersion())
+		what = fmt.Sprintf("cix app %s is available. You are running %s.", av.App.Version, displayVersion())
 		effect = "cix will close and reopen. The server keeps running throughout."
 	default:
-		what = fmt.Sprintf("cix %s and cix server %s are available.", av.App.Version, av.Runtime.Version)
+		what = fmt.Sprintf("cix app %s and cix server %s are available.", av.App.Version, av.Runtime.Version)
 		effect = "The server will be updated and restarted, then cix will close and reopen."
 	}
 

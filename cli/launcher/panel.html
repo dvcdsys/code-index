@@ -401,7 +401,12 @@ function renderTable(s) {
                  s.engineReady ? '' : 'warn']);
     }
     if (s.model) { rows.push(['model', s.model, '']); }
-    if (s.serverVersion) { rows.push(['version', s.serverVersion, '']); }
+    // Two components, two versions, two update streams — so both are named
+    // rather than one row called "version". The app's own is what the footer's
+    // Updates… offers to replace, and hiding it is what made self-update look
+    // like a feature that was not there.
+    if (s.serverVersion) { rows.push(['server', s.serverVersion, '']); }
+    if (s.appVersion) { rows.push(['app', s.appVersion, '']); }
   } else {
     // Nothing is answering, so show what is on disk — the question a stopped
     // panel gets asked is "what would start".
