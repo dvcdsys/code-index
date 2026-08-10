@@ -179,8 +179,18 @@ means:
 
 Once a release has proved the runner can do it, `require` is the right setting.
 
-Three details that cost real debugging time:
+Four details that cost real debugging time:
 
+- **A volume named `cix` already mounted makes the whole step a no-op — and a
+  silent one.** hdiutil then mounts the build's image at `/Volumes/cix 1`, the
+  AppleScript addresses the disk *by name*, and Finder styles the other one.
+  `osascript` still exits 0, so the build prints "layout applied" and ships an
+  image with no `.DS_Store`: no background, no icon positions. Leaving the last
+  DMG open in Finder is enough to trigger it, which makes it a near-certainty on
+  a development machine and rare on CI. The script now detaches a leftover
+  *disk image* of that name before creating (a real volume so named stops the
+  build instead), and refuses to continue if the mount point still comes back
+  suffixed.
 - **The volume icon must be installed after the Finder pass**, not staged up
   front. Staging it looks like it works — `hdiutil` copies the file, `SetFile`
   sets the flag — and then Finder removes both while laying out the window, and
