@@ -198,6 +198,39 @@ func TestSelfUpdateRejectsATamperedImage(t *testing.T) {
 	}
 }
 
+// The up-to-date dialog is the only place most people ever read the app's own
+// version, so what it says on a released build — as opposed to one built from
+// source — is worth pinning.
+func TestUpToDateMessage(t *testing.T) {
+	restore := version
+	t.Cleanup(func() { version = restore })
+
+	t.Run("released build", func(t *testing.T) {
+		version = "0.1.0"
+		msg := upToDateMessage()
+		if !strings.Contains(msg, "cix app\nv0.1.0") {
+			t.Errorf("message does not report the app version:\n%s", msg)
+		}
+		// The caveat belongs only to builds that cannot update themselves;
+		// on a release it would be a lie.
+		if strings.Contains(msg, "built from source") {
+			t.Errorf("a released build claims it cannot update itself:\n%s", msg)
+		}
+	})
+
+	t.Run("development build", func(t *testing.T) {
+		version = "dev"
+		msg := upToDateMessage()
+		if !strings.Contains(msg, "development build") {
+			t.Errorf("message does not say it is a development build:\n%s", msg)
+		}
+		// Why nothing is ever offered — without it the check looks broken.
+		if !strings.Contains(msg, "built from source") {
+			t.Errorf("message does not explain why it never updates:\n%s", msg)
+		}
+	})
+}
+
 // swap.sh is the one part that runs after the app is gone, so its failure modes
 // are the ones nobody is around to see.
 func TestSwapScript(t *testing.T) {

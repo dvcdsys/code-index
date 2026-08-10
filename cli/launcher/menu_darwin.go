@@ -298,6 +298,23 @@ func (m *menu) toggleAutostart() {
 	m.poll.refresh()
 }
 
+// upToDateMessage reports what is installed when there is nothing to offer.
+//
+// Both halves, named and versioned. The wording this replaced folded them into
+// one sentence and never said "app" at all, which read as a server-only check
+// and made the launcher's own self-update look like a feature nobody had
+// written — it is written, it just has nothing to compare against on a build
+// that came from source.
+func upToDateMessage() string {
+	msg := fmt.Sprintf("cix app\n%s\n\ncix server\n%s",
+		displayVersion(), strings.TrimPrefix(runtimeSummary(), "Server "))
+	if isDevBuild() {
+		msg += "\n\nThis app was built from source, so it does not replace " +
+			"itself — only released builds update the app. The server updates either way."
+	}
+	return msg
+}
+
 // checkForUpdates looks for a newer release and, if the user agrees, installs
 // it. `explicit` distinguishes the footer link from the background check: a
 // background check that finds nothing says nothing.
@@ -312,17 +329,7 @@ func (m *menu) checkForUpdates(explicit bool) {
 	av := m.updater.check(explicit)
 	if !av.any() {
 		if explicit {
-			// Both halves, named and versioned. The old wording folded them
-			// into one sentence and never said "app" at all, which read as if
-			// the check only covered the server — and made the launcher's own
-			// self-update look like a feature nobody had written.
-			msg := fmt.Sprintf("cix app\n%s\n\ncix server\n%s",
-				displayVersion(), strings.TrimPrefix(runtimeSummary(), "Server "))
-			if isDevBuild() {
-				msg += "\n\nThis app was built from source, so it does not replace " +
-					"itself — only released builds update the app. The server updates either way."
-			}
-			_ = alert("cix is up to date", msg)
+			_ = alert("cix is up to date", upToDateMessage())
 		}
 		return
 	}
