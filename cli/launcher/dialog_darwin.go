@@ -34,12 +34,32 @@ func quoteAS(s string) string {
 	return strings.Join(parts, " & return & ")
 }
 
-// alert shows a modal informational alert and blocks until it is dismissed.
+// dialogIcon is the POSIX path to the icon dialogs are drawn with. Set once at
+// startup from the bundle; empty when the launcher runs outside a .app.
+var dialogIcon string
+
+// alert shows a modal informational dialog and blocks until it is dismissed.
+//
+// `display dialog` rather than the more obvious `display alert`, for one
+// reason: an alert is drawn with the icon of the process that ran the script,
+// which here is osascript — so the app's own dialogs came up wearing a generic
+// folder icon. `display dialog` takes an explicit icon. The cost is that the
+// title is a window title instead of bold body text; the icon is worth more.
+// It is also the primitive Phase 2 needs anyway, since only `display dialog`
+// supports `default answer` for text input.
 func alert(title, message string) error {
-	script := fmt.Sprintf(
-		`display alert %s message %s as informational buttons {"OK"} default button "OK"`,
-		quoteAS(title), quoteAS(message),
-	)
+	var script string
+	if dialogIcon != "" {
+		script = fmt.Sprintf(
+			`display dialog %s with title %s with icon POSIX file %s buttons {"OK"} default button "OK"`,
+			quoteAS(message), quoteAS(title), quoteAS(dialogIcon),
+		)
+	} else {
+		script = fmt.Sprintf(
+			`display alert %s message %s as informational buttons {"OK"} default button "OK"`,
+			quoteAS(title), quoteAS(message),
+		)
+	}
 	return runOsascript(2*time.Minute, script)
 }
 

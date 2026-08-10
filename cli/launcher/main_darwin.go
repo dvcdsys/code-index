@@ -4,8 +4,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 // cix-launcher — the executable behind cix.app.
 //
@@ -31,6 +37,10 @@ func main() {
 		// on the terminal that is definitely attached and stop.
 		fmt.Fprintf(os.Stderr, "cix-launcher %s: %v\n", version, err)
 		os.Exit(1)
+	}
+
+	if icon := filepath.Join(b.Resources, "cix.icns"); fileExists(icon) {
+		dialogIcon = icon
 	}
 
 	if isTranslocated(b) {
