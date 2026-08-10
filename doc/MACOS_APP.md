@@ -43,23 +43,30 @@ Verify the download first if you like:
 shasum -a 256 -c checksums.txt
 ```
 
-### The first launch is blocked, and that is expected
+### macOS will block it twice, and that is expected
 
-macOS will refuse to open the app the first time, reporting that it "cannot be
-verified" or "is damaged". Neither is true. cix is open source and is signed
-**ad-hoc** rather than with a paid Apple Developer certificate, so it has no
-Gatekeeper trust.
+cix is open source and is signed **ad-hoc** rather than with a paid Apple
+Developer certificate, so it is not notarized and has no Gatekeeper trust.
+Anything downloaded carries a quarantine flag, and macOS refuses both the disk
+image and the app inside it, reporting that Apple "could not verify" them. It
+is not damaged and there is nothing wrong with the download.
 
-To allow it:
+Each block is cleared the same way:
 
 1. **System Settings → Privacy & Security**
-2. Scroll down to **Security**. There is a message about cix being blocked.
+2. Scroll down to **Security**. There is a message naming what was blocked.
 3. Click **Open Anyway** and confirm.
 
-This is once per installed version.
+You will do this twice: once for `cix-<version>-arm64.dmg` when you open it,
+and once for **cix.app** the first time you launch it. The app inherits the
+quarantine flag from the image it was dragged out of, so clearing the first
+does not clear the second. After that the app opens normally, until the next
+version.
 
-On macOS 15 and later, right-clicking the app and choosing **Open** no longer
-works as a shortcut for this — the System Settings route is the only one.
+Choose **Done**, never **Move to Bin**, when the dialog appears.
+
+On macOS 15 and later, right-clicking and choosing **Open** no longer works as
+a shortcut for either — the System Settings route is the only one.
 
 ### Why not Homebrew?
 

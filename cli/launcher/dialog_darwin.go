@@ -65,6 +65,56 @@ func alert(title, message string) error {
 	return runOsascript(2*time.Minute, script)
 }
 
+// alertWithCopy is alert() plus a button that puts secret on the clipboard.
+//
+// AppleScript cannot make a run of text clickable — `display dialog` draws one
+// static string — so the click target has to be a button. That is the whole
+// reason this is not simply "click the password".
+//
+// It re-shows the dialog after copying rather than dismissing. A password
+// displayed once is exactly the thing someone reaches for a second time, and a
+// window that disappears on the first attempt is how people end up reading
+// credentials off a screenshot. The loop always terminates: every turn of it
+// waits for a click.
+func alertWithCopy(title, message, secret, copyLabel string) error {
+	body := message
+	for {
+		script := fmt.Sprintf(
+			`display dialog %s with title %s %s buttons {%s, "Done"} default button "Done"`,
+			quoteAS(body), quoteAS(title), iconClause(), quoteAS(copyLabel),
+		)
+		out, err := outputOsascript(5*time.Minute, script)
+		if err != nil {
+			// Dismissing the window is a perfectly good way to say "I have it".
+			if errors.Is(err, errCancelled) {
+				return nil
+			}
+			return err
+		}
+		if !strings.Contains(out, copyLabel) {
+			return nil
+		}
+
+		if err := copyToClipboard(secret); err != nil {
+			logf("could not copy to the clipboard: %v", err)
+			body = message + "\n\nCould not copy to the clipboard."
+			continue
+		}
+		body = message + "\n\nCopied to the clipboard."
+	}
+}
+
+// copyToClipboard pipes a value to pbcopy.
+//
+// Not AppleScript's `set the clipboard to`: that would put the secret into a
+// script string, where it is one quoting mistake away from being interpreted.
+// A pipe carries bytes and nothing else.
+func copyToClipboard(s string) error {
+	cmd := exec.Command("pbcopy")
+	cmd.Stdin = strings.NewReader(s)
+	return cmd.Run()
+}
+
 // errCancelled is returned when the user dismissed a dialog instead of
 // answering it. osascript reports this as exit status 1 — the same status as a
 // real failure — so it has to be told apart from the error text.
