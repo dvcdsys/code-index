@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -289,6 +291,122 @@ func TestIsLocalOnly(t *testing.T) {
 	for _, tc := range tests {
 		if got := isLocalOnly(tc.vars); got != tc.want {
 			t.Errorf("isLocalOnly(%v) = %v, want %v", tc.vars, got, tc.want)
+		}
+	}
+}
+
+func TestParseTemporaryPassword(t *testing.T) {
+	// The real success output. The password line is conditional — it is only
+	// printed when the password was generated rather than piped in — and the
+	// DISABLED warning is conditional too, so matching the prefix rather than a
+	// line index is what keeps this working when the surrounding lines change.
+	out := "Password reset for admin@example.com (admin).\n" +
+		"Temporary password: mKq7RtVbn3XpZs4Ldy8W\n" +
+		"All sessions for this account were revoked; the next login forces a password change.\n"
+	pw, ok := parseTemporaryPassword(out)
+	if !ok || pw != "mKq7RtVbn3XpZs4Ldy8W" {
+		t.Errorf("parseTemporaryPassword() = %q, %v; want the generated password", pw, ok)
+	}
+
+	// With a DISABLED account the command appends a warning after the password.
+	withWarning := out + "WARNING: this account is DISABLED — it still cannot log in.\n"
+	if pw, ok := parseTemporaryPassword(withWarning); !ok || pw != "mKq7RtVbn3XpZs4Ldy8W" {
+		t.Errorf("parseTemporaryPassword() with trailing warning = %q, %v", pw, ok)
+	}
+
+	// A piped-in password produces no line at all. Reporting some other line as
+	// the password would be worse than reporting nothing.
+	piped := "Password reset for admin@example.com (admin).\n" +
+		"All sessions for this account were revoked; the next login forces a password change.\n"
+	if pw, ok := parseTemporaryPassword(piped); ok {
+		t.Errorf("parseTemporaryPassword() = %q, true; want no match when none was generated", pw)
+	}
+	if _, ok := parseTemporaryPassword(""); ok {
+		t.Error("parseTemporaryPassword(\"\") reported a match")
+	}
+}
+
+func TestPrefsRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Nothing recorded yet: the question has not been asked.
+	if got := loadPrefs(); got.Takeover != "" {
+		t.Errorf("loadPrefs() on a fresh home = %+v, want zero", got)
+	}
+	if err := savePrefs(prefs{Takeover: takeoverKeep}); err != nil {
+		t.Fatalf("savePrefs: %v", err)
+	}
+	if got := loadPrefs(); got.Takeover != takeoverKeep {
+		t.Errorf("loadPrefs() = %+v, want Takeover=%q", got, takeoverKeep)
+	}
+
+	// A corrupt file must not stop the app starting; the worst case is being
+	// asked the question again.
+	path, err := prefsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadPrefs(); got.Takeover != "" {
+		t.Errorf("loadPrefs() on corrupt file = %+v, want zero", got)
+	}
+}
+
+func TestReadEnvFileDialects(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	// install-server.sh writes a file this parser also has to read during a
+	// takeover, and it does not use our quoting.
+	body := "# comment\n\nCIX_PORT=21847\nCIX_API_KEY=\"cix_quoted\"\nexport CIX_DATA_DIR='/tmp/data'\nBAD_LINE\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readEnvFile(path)
+	if err != nil {
+		t.Fatalf("readEnvFile: %v", err)
+	}
+	want := map[string]string{
+		"CIX_PORT":     "21847",
+		"CIX_API_KEY":  "cix_quoted",
+		"CIX_DATA_DIR": "/tmp/data",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("readEnvFile()[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+	if _, ok := got["BAD_LINE"]; ok {
+		t.Error("a line without = should be skipped, not stored")
+	}
+}
+
+func TestIsUserCancelled(t *testing.T) {
+	// The message is localised and the spelling differs between locales — this
+	// project's own development Mac runs en-GB and emits "cancelled", while the
+	// American spelling has one L. Matching either sentence is wrong somewhere,
+	// and was: every dialog dismissal in the app was being reported as a
+	// failure. The OSStatus is the same number in every language.
+	cancelled := []string{
+		`0:778: execution error: User cancelled. (-128)`,
+		`0:112: execution error: User canceled. (-128)`,
+		`0:50: execution error: User canceled the operation. (-128)`,
+	}
+	for _, s := range cancelled {
+		if !isUserCancelled(s) {
+			t.Errorf("isUserCancelled(%q) = false, want true", s)
+		}
+	}
+
+	notCancelled := []string{
+		"",
+		`0:10: syntax error: Expected end of line but found identifier. (-2741)`,
+		`execution error: Finder got an error: Can't get disk "cix". (-1728)`,
+	}
+	for _, s := range notCancelled {
+		if isUserCancelled(s) {
+			t.Errorf("isUserCancelled(%q) = true, want false", s)
 		}
 	}
 }

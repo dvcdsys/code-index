@@ -66,9 +66,20 @@ func alert(title, message string) error {
 }
 
 // errCancelled is returned when the user dismissed a dialog instead of
-// answering it. osascript reports this as exit status 1 with "User canceled" on
-// stderr, which is indistinguishable from a real failure unless matched.
+// answering it. osascript reports this as exit status 1 — the same status as a
+// real failure — so it has to be told apart from the error text.
 var errCancelled = errors.New("cancelled by user")
+
+// isUserCancelled recognises AppleScript's user-cancelled error.
+//
+// Match the OSStatus, not the sentence. The message is localised: on this
+// project's own development Mac, running a British locale, osascript says "User
+// cancelled" with two Ls, while the American spelling has one — so a string
+// match on either is wrong somewhere, and was. -128 (userCanceledErr) is a
+// number and says the same thing in every language.
+func isUserCancelled(stderr string) bool {
+	return strings.Contains(stderr, "(-128)")
+}
 
 // prompt asks for one line of text. Returns errCancelled if the user cancels.
 func prompt(title, message, defaultAnswer string) (string, error) {
@@ -92,9 +103,22 @@ func prompt(title, message, defaultAnswer string) (string, error) {
 
 // confirm shows a two-button question. Returns false when the user declines.
 func confirm(title, message, okLabel string) (bool, error) {
+	return ask(title, message, okLabel, "Cancel")
+}
+
+// ask shows a two-button question with both labels spelled out.
+//
+// Separate from confirm because not every choice has a "cancel" side. "Take
+// Over" versus "Leave It Alone" are two real options, and labelling the second
+// one Cancel would imply it does nothing — when in fact it decides how the app
+// behaves from then on.
+//
+// yesLabel is the default button. Dismissing the dialog counts as no.
+func ask(title, message, yesLabel, noLabel string) (bool, error) {
 	script := fmt.Sprintf(
-		`display dialog %s with title %s %s buttons {"Cancel", %s} default button %s cancel button "Cancel"`,
-		quoteAS(message), quoteAS(title), iconClause(), quoteAS(okLabel), quoteAS(okLabel),
+		`display dialog %s with title %s %s buttons {%s, %s} default button %s cancel button %s`,
+		quoteAS(message), quoteAS(title), iconClause(),
+		quoteAS(noLabel), quoteAS(yesLabel), quoteAS(yesLabel), quoteAS(noLabel),
 	)
 	if _, err := outputOsascript(5*time.Minute, script); err != nil {
 		if errors.Is(err, errCancelled) {
@@ -125,7 +149,7 @@ func outputOsascript(timeout time.Duration, script string) (string, error) {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("osascript timed out after %s", timeout)
 		}
-		if strings.Contains(stderr.String(), "User canceled") {
+		if isUserCancelled(stderr.String()) {
 			return "", errCancelled
 		}
 		return "", fmt.Errorf("osascript: %w: %s", err, strings.TrimSpace(stderr.String()))

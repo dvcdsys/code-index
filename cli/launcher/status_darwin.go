@@ -59,6 +59,11 @@ type snapshot struct {
 	// LocalOnly reflects CIX_BIND_ADDR: true when the server is bound to
 	// loopback and therefore unreachable from other machines.
 	LocalOnly bool
+
+	// Autostart reflects RunAtLoad in the installed plist — read back from the
+	// file rather than remembered, so the menu cannot drift from what launchd
+	// will actually do at the next login.
+	Autostart bool
 }
 
 // providerLabel turns the wire provider kind into something a person can act
@@ -360,6 +365,7 @@ func (p *poller) pollHealth() {
 	p.snap.Port = port
 	p.snap.Managed = managed
 	p.snap.LocalOnly = isLocalOnly(vars)
+	p.snap.Autostart = autostartEnabled()
 	if state != stateRunning {
 		// Provider information from a server that is no longer answering is
 		// stale by definition.

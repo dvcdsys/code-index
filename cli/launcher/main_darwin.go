@@ -58,7 +58,18 @@ func main() {
 
 	stripQuarantine(b)
 
-	if needsFirstRun() {
+	// Order matters here. A machine that already runs cix from a checkout has a
+	// launchd agent under our label and a server holding our port, so the
+	// first-run wizard must never get a look at it — it would set up a second
+	// server that cannot bind, against a second, empty database.
+	switch {
+	case foreignAgent():
+		// Asks once, remembers the answer, and defaults to leaving it alone.
+		// When the user declines, the app stays in observe-only mode: status
+		// and the dashboard work, Start/Stop do not.
+		handleForeignAgent(b)
+
+	case needsFirstRun():
 		if err := runFirstRun(b); err != nil {
 			if errors.Is(err, errCancelled) {
 				// Setup is resumable: the app stays in the menu bar with Start
@@ -67,15 +78,18 @@ func main() {
 					"cix has not been set up yet, so the server cannot start.\n\n"+
 						"Quit and reopen cix when you want to finish setting it up.")
 			} else {
+				logf("first-run setup failed: %v", err)
 				_ = alert("Setup failed", fmt.Sprintf("cix could not complete first-time setup.\n\n%v", err))
 			}
 		}
-	} else if !foreignAgent() {
-		// Re-point the launchd agent at this bundle. An app that was moved, or
-		// replaced by an update, would otherwise keep a job aimed at a path
-		// that no longer holds the binary.
+
+	default:
+		// Re-point the launchd agent at this bundle, preserving the user's
+		// autostart choice. An app that was moved, or replaced by an update,
+		// would otherwise keep a job aimed at a path that no longer holds the
+		// binary.
 		if err := writeLaunchdFiles(b, autostartEnabled()); err != nil {
-			fmt.Fprintf(os.Stderr, "cix-launcher: could not refresh launchd files: %v\n", err)
+			logf("could not refresh launchd files: %v", err)
 		}
 	}
 

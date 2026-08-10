@@ -276,6 +276,23 @@ func autostartEnabled() bool {
 	return strings.HasPrefix(strings.TrimSpace(rest), "<true/>")
 }
 
+// setAutostart flips RunAtLoad and reloads the agent.
+//
+// The reload is not optional and cannot be skipped by kickstarting instead:
+// launchd reads a plist exactly once, when the job is bootstrapped into the
+// domain. A rewritten plist with the job still loaded changes nothing at all
+// until the next login — which is precisely the setting being changed, so the
+// user would find out months later.
+//
+// Rebootstrapping restarts a running server. That is why the caller restores
+// the process afterwards rather than this function pretending the cost is zero.
+func setAutostart(b bundle, enabled bool) error {
+	if err := writeLaunchdFiles(b, enabled); err != nil {
+		return err
+	}
+	return launchdBootstrap()
+}
+
 // foreignAgent reports whether a launchd agent under our label exists but was
 // set up by something else — in practice install-server.sh, which uses the same
 // label (:44) but points it at a repo checkout (:351).

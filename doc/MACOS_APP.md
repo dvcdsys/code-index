@@ -7,9 +7,8 @@ The app sits in the menu bar and shows whether the server is running and what
 its embedding provider is doing, with start/stop and a link to the dashboard.
 There is no Dock icon and no window.
 
-> **Not in this release yet:** the autostart toggle, password reset from the
-> menu, and self-update. Autostart can be set up with `install-server.sh`, and
-> password reset is a command, described below.
+> **Not in this release yet:** self-update. Everything else — start/stop,
+> autostart, password recovery, network exposure — is in the menu.
 
 ## Requirements
 
@@ -115,6 +114,8 @@ What it writes:
 | `~/.cix/launchd/run-cix-server.sh` | launchd entry point; sources `server.env` |
 | `~/Library/LaunchAgents/com.cix.server.plist` | the launchd agent |
 | `~/.cix/config.yaml` | a `local` server entry, so the `cix` CLI works |
+| `~/.cix/launcher.json` | remembered answers, currently only the takeover choice |
+| `~/.cix/logs/launcher.log` | the app's own log (mode 0600) |
 
 `server.env` is the single source of truth for the server process — the plist
 carries no configuration. To change a setting, edit that file and use
@@ -137,7 +138,9 @@ macOS announces any newly registered background agent.
 Stop Server                            Server 0.12.4
 Open Dashboard
 ─────────────
+Start at Login                ✓
 Allow Network Access          ✓
+Reset Password…
 ─────────────
 Quit (server keeps running)
 ```
@@ -157,6 +160,31 @@ placement for free.
 **Starting…** is its own state, distinct from Running and Stopped. A cold start
 loads the embedding model and can take anywhere from 30 seconds to several
 minutes, in silence — a server showing "Starting…" is working, not stuck.
+
+### Start at Login
+
+Whether launchd starts the server when you log in. Off after installation.
+
+Toggling it reloads the launchd agent, which stops the server for a moment —
+launchd reads a job's configuration only when the job is loaded, so there is no
+way to change this in place. The app restarts the server if it was running, so
+the interruption is a few seconds and nothing else.
+
+This is `RunAtLoad` in the plist, and the menu reads it back from the file
+rather than remembering it, so the checkbox cannot drift from what launchd will
+actually do.
+
+### Reset Password…
+
+Generates a new temporary password for an account and signs out its other
+sessions; the next sign-in forces a change. The server does not need to be
+stopped — this opens the database directly, so holding the database file is the
+authorisation.
+
+The underlying command prints every account in the database when it does not
+recognise an address, which is reasonable at a terminal and not something to put
+on screen. The dialog says only "No account with that email address."; the full
+output goes to `~/.cix/logs/launcher.log` (mode 0600).
 
 ### Allow Network Access
 
@@ -185,11 +213,29 @@ configured server — that one may legitimately point at a remote cix.
 
 ### If you already use install-server.sh
 
-Both use the same launchd label, `com.cix.server`. When the app finds an agent
-it did not create, it does not touch it: status, the provider row and the
-dashboard link keep working over HTTP, and Start/Stop are disabled and labelled
-*managed externally*. The app is then useful alongside a development checkout
-instead of fighting it.
+Both use the same launchd label, `com.cix.server`, and `install-server.sh`
+points it at a repo checkout. So on a machine that already runs cix from a
+clone, the app finds an agent it did not create, pointing at a server it does
+not own, holding the port it would use.
+
+It asks once what to do, shows you the paths it found, and remembers the answer
+in `~/.cix/launcher.json`:
+
+- **Leave It Alone** — observe-only. Status, the provider row, the dashboard
+  link and password reset keep working over HTTP; Start/Stop, autostart and the
+  network toggle are disabled. The app is then useful alongside a development
+  checkout instead of fighting it.
+- **Take Over** — the app copies the port, API key and database paths out of
+  the `.env` the old wrapper sourced, backs the old plist and wrapper up under
+  `~/.cix/backup/`, and installs its own. Re-running `install-server.sh` will
+  claim the agent back.
+
+Only those four settings are migrated. The rest of an `install-server.sh` `.env`
+— model tuning, GPU layers, tunnel credentials — belongs to that installation,
+and importing it wholesale would apply settings you never chose for this app.
+
+The first-run wizard never runs while a foreign agent is present: it would set
+up a second server that cannot bind the port, against a second, empty database.
 
 ## Using the CLI
 
@@ -200,9 +246,9 @@ bundle after an update:
 ln -sf /Applications/cix.app/Contents/MacOS/cix /usr/local/bin/cix
 ```
 
-### Forgotten password
+### Forgotten password, from a terminal
 
-`cix-server` can reset a password offline, without the server being stopped:
+The menu's **Reset Password…** does this for you. The same thing by hand:
 
 ```bash
 /Applications/cix.app/Contents/MacOS/cix-server -reset-password you@example.com

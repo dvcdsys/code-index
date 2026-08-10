@@ -32,7 +32,9 @@ type menu struct {
 	modelItem      *systray.MenuItem
 	startStopItem  *systray.MenuItem
 	dashboardItem  *systray.MenuItem
+	autostartItem  *systray.MenuItem
 	networkItem    *systray.MenuItem
+	resetPWItem    *systray.MenuItem
 
 	// detail holds the submenu rows under the server row. They are created
 	// once and retitled on every render: systray has no way to remove an item,
@@ -91,7 +93,9 @@ func (m *menu) onReady() {
 	m.dashboardItem = systray.AddMenuItem("Open Dashboard", "")
 
 	systray.AddSeparator()
+	m.autostartItem = systray.AddMenuItemCheckbox("Start at Login", "", false)
 	m.networkItem = systray.AddMenuItemCheckbox("Allow Network Access", "", false)
+	m.resetPWItem = systray.AddMenuItem("Reset Password…", "")
 
 	systray.AddSeparator()
 	// Spelled out rather than left to a tooltip. Quit here closes the menu bar
@@ -109,8 +113,12 @@ func (m *menu) onReady() {
 				go m.toggleServer()
 			case <-m.dashboardItem.ClickedCh:
 				go m.openDashboard()
+			case <-m.autostartItem.ClickedCh:
+				go m.toggleAutostart()
 			case <-m.networkItem.ClickedCh:
 				go m.toggleNetworkAccess()
+			case <-m.resetPWItem.ClickedCh:
+				go m.resetPasswordFlow()
 			case <-quitItem.ClickedCh:
 				systray.Quit()
 				return
@@ -183,12 +191,53 @@ func (m *menu) render(s snapshot) {
 	} else {
 		m.networkItem.Check()
 	}
+	if s.Autostart {
+		m.autostartItem.Check()
+	} else {
+		m.autostartItem.Uncheck()
+	}
+
 	if s.Managed {
 		m.networkItem.Enable()
+		m.autostartItem.Enable()
+		m.resetPWItem.Enable()
 	} else {
-		// The setting lives in a config file this app does not own.
+		// These live in files this app does not own — except the password
+		// reset, which only needs the database and is therefore still useful
+		// against an install-server.sh deployment.
 		m.networkItem.Disable()
+		m.autostartItem.Disable()
+		m.resetPWItem.Enable()
 	}
+}
+
+// toggleAutostart flips RunAtLoad on the launchd agent.
+//
+// launchd reads a plist only when the job is bootstrapped, so the change needs
+// a full unload/load cycle — which stops a running server. Rather than leave it
+// down, or pretend the cost is zero, this restores whatever state the server
+// was in.
+func (m *menu) toggleAutostart() {
+	s := m.poll.snapshotNow()
+	if !s.Managed {
+		return
+	}
+	enable := !s.Autostart
+
+	if err := setAutostart(m.bundle, enable); err != nil {
+		_ = alert("cix", fmt.Sprintf("Could not change the start-at-login setting.\n\n%v", err))
+		m.render(m.poll.snapshotNow())
+		return
+	}
+
+	// bootstrap does not start the job unless RunAtLoad fired, so a server that
+	// was running before the reload has to be put back.
+	if s.State == stateRunning {
+		if err := startServer(); err != nil {
+			_ = alert("cix", fmt.Sprintf("The setting was changed, but the server could not be restarted.\n\n%v", err))
+		}
+	}
+	m.poll.refresh()
 }
 
 // renderDetail fills the submenu under the server row. Slots with nothing to

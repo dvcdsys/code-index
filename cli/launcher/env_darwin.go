@@ -52,6 +52,13 @@ func readServerEnv() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return readEnvFile(path)
+}
+
+// readEnvFile parses any KEY=value file in the same dialect. Used for our own
+// server.env and, during a takeover, for the .env an install-server.sh wrapper
+// sources — which is written by a different tool and may quote differently.
+func readEnvFile(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
