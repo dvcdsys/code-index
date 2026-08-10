@@ -43,10 +43,14 @@ func needsFirstRun() bool {
 // Returns errCancelled if the user backs out, which is not an error condition —
 // the app stays running with Start disabled until they complete setup.
 func runFirstRun(u *updater) error {
-	intro := "cix needs an administrator account before it can start.\n\n" +
-		"Enter the email address to sign in with. A password will be generated for you, " +
-		"and you will be asked to change it the first time you log in.\n\n" +
-		"Setup then downloads the cix server itself — around 40 MB — which takes a moment."
+	// Short, and leading with the thing to type. The first version of this
+	// opened with why an account is needed and buried the instruction in the
+	// second paragraph — which reads like a sign-up form, and the one question
+	// it left unanswered was the one everybody asks: where is my address going.
+	// Nowhere. Saying so is worth more than the explanation it replaced.
+	intro := "Enter an email address for the administrator account.\n\n" +
+		"It is the login for the cix dashboard on this Mac — nothing is sent anywhere. " +
+		"A password is generated for you, and setup then downloads the server (about 40 MB)."
 
 	email, err := prompt("Set up cix", intro, "")
 	if err != nil {
@@ -138,10 +142,11 @@ func runFirstRun(u *updater) error {
 			"model, which can take a few minutes; the menu bar will show it as running when it is ready."
 	}
 
-	return alert("cix is set up", fmt.Sprintf(
+	return alertWithCopy("cix is set up", fmt.Sprintf(
 		"Sign in at %s\n\nEmail:\n%s\n\nTemporary password:\n%s\n\n"+
 			"You will be asked to change this password on first login.%s%s",
-		dashboardURL(vars), email, password, waitNote, cliNote))
+		dashboardURL(vars), email, password, waitNote, cliNote),
+		password, "Copy Password")
 }
 
 // registerWithCLI adds (or updates) the local server in ~/.cix/config.yaml.
