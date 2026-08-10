@@ -92,7 +92,8 @@ func providerLabel(kind string) string {
 // (`ollama:awhiteside/CodeRankEmbed-Q8_0-GGUF`, 41 characters) stretched the
 // whole menu to fit one line nobody needs to read in full. Capping every row at
 // the same width makes the menu a predictable size instead of a function of
-// whichever model happens to be configured; the full value goes in the tooltip.
+// whichever model happens to be configured; the full value goes in the details
+// submenu.
 const maxRowRunes = 34
 
 // ellipsize shortens s to at most maxRunes, cutting from the middle.
@@ -163,7 +164,7 @@ func (s snapshot) ServerLine() string {
 	default:
 		if !s.Managed {
 			// "(managed externally)" spelled out is 40 characters and would set
-			// the width of the whole menu on its own. The tooltip explains.
+			// the width of the whole menu on its own. The details submenu explains.
 			return "cix-server: Stopped (external)"
 		}
 		return "cix-server: Stopped"

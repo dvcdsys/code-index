@@ -59,7 +59,16 @@ func (m *menu) onReady() {
 	} else {
 		systray.SetTitle("cix")
 	}
-	systray.SetTooltip("cix — semantic code search")
+	// No tooltips anywhere, including on the status item itself. AppKit's are
+	// not usable here: once any one of them has appeared, every subsequent one
+	// shows with no delay at all, and they are positioned against the element
+	// rather than the pointer. Neither has an API — changing either means
+	// giving every row a custom NSView with its own tracking area, i.e. writing
+	// the menu in Objective-C instead of using systray. Everything a tooltip
+	// would have said is in the details submenu, where the timing and placement
+	// are the system's own and correct.
+	//
+	// The empty second argument to AddMenuItem is that tooltip. Leave it empty.
 
 	// The server row is the one enabled row in the status group, because it
 	// carries the details submenu — a parent has to be enabled for macOS to
@@ -79,13 +88,16 @@ func (m *menu) onReady() {
 
 	systray.AddSeparator()
 	m.startStopItem = systray.AddMenuItem("Start Server", "")
-	m.dashboardItem = systray.AddMenuItem("Open Dashboard", "Open the cix dashboard in your browser")
+	m.dashboardItem = systray.AddMenuItem("Open Dashboard", "")
 
 	systray.AddSeparator()
 	m.networkItem = systray.AddMenuItemCheckbox("Allow Network Access", "", false)
 
 	systray.AddSeparator()
-	quitItem := systray.AddMenuItem("Quit cix", "Quit the menu bar app; the server keeps running")
+	// Spelled out rather than left to a tooltip. Quit here closes the menu bar
+	// app and leaves the launchd agent running, which is the opposite of what
+	// Quit means in most menu bar apps — a surprise worth 22 characters.
+	quitItem := systray.AddMenuItem("Quit (server keeps running)", "")
 
 	go m.poll.run(m.stop)
 	go m.watch()

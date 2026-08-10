@@ -52,7 +52,7 @@ func TestSnapshotLines(t *testing.T) {
 		t.Errorf("ModelLine() = %q, want %q", got, want)
 	}
 	if got, want := running.ModelName(), "awhiteside/CodeRankEmbed-Q8_0-GGUF"; got != want {
-		t.Errorf("ModelName() = %q, want %q (the tooltip keeps the full id)", got, want)
+		t.Errorf("ModelName() = %q, want %q (the details submenu keeps the full id)", got, want)
 	}
 }
 
@@ -76,7 +76,7 @@ func TestSnapshotLines_NotRunning(t *testing.T) {
 	// An agent installed by install-server.sh owns the same launchd label. The
 	// app observes it but must not offer to drive it. Abbreviated in the row
 	// because spelled out it is 40 characters and would set the menu's width on
-	// its own; the tooltip carries the explanation.
+	// its own; the details submenu carries the explanation.
 	external := snapshot{State: stateStopped, Managed: false}
 	if got, want := external.ServerLine(), "cix-server: Stopped (external)"; got != want {
 		t.Errorf("ServerLine() = %q, want %q", got, want)
@@ -240,7 +240,7 @@ func TestRowsFitTheWidthCap(t *testing.T) {
 			t.Errorf("%s = %q is %d runes, over the %d cap", name, line, n, maxRowRunes)
 		}
 	}
-	// The untruncated value is still available for the tooltip.
+	// The untruncated value is still available for the details submenu.
 	if got, want := s.ModelName(), "some-extremely-long-organisation/an-even-longer-model-name-v2"; got != want {
 		t.Errorf("ModelName() = %q, want %q", got, want)
 	}

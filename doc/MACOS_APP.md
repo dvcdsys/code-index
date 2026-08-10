@@ -130,23 +130,29 @@ macOS announces any newly registered background agent.
 ## The menu
 
 ```
-● cix-server: Running (:21847)
-● Embeddings: llama.cpp (bundled)
-  Model: awhiteside/Co…bed-Q8_0-GGUF
-─────────────
-Stop Server
+● cix-server: Running (:21847)      ▸  Process: 78903
+● Embeddings: llama.cpp (bundled)      Port: 21847
+  Model: awhiteside/Co…bed-Q8_0-GGUF   Network: this Mac only
+─────────────                          Model: awhiteside/CodeRankEmbed-Q8_0-GGUF
+Stop Server                            Server 0.12.4
 Open Dashboard
 ─────────────
 Allow Network Access          ✓
 ─────────────
-Quit cix
+Quit (server keeps running)
 ```
 
 The dot carries the state: green running, amber starting, red stopped, grey
 unknown. Rows are truncated so the menu stays a predictable width instead of
-being as wide as whichever model happens to be configured — hover a row for the
-full value and for details that do not fit, such as the pid and whether the
-server is reachable from your network.
+being as wide as whichever model happens to be configured; the submenu on the
+server row holds the full values and the things that do not fit — the process
+id, the port, the network exposure and the untruncated model name.
+
+There are no tooltips anywhere in this app, deliberately. AppKit's have two
+behaviours that cannot be changed through any API: once one of them has
+appeared, every subsequent one shows with no delay at all, and they are placed
+against the element rather than the pointer. A submenu gets native timing and
+placement for free.
 
 **Starting…** is its own state, distinct from Running and Stopped. A cold start
 loads the embedding model and can take anywhere from 30 seconds to several
