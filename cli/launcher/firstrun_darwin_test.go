@@ -91,6 +91,36 @@ func TestNeedsFirstRun(t *testing.T) {
 	})
 }
 
+// The two refusals bootstrapAuth emits on a user-less database must route to
+// setup, and other startup failures must not — a port clash is not a reason to
+// offer wiping anyone's configuration. The strings are copied from
+// server/cmd/cix-server/bootstrap.go; if the server rewords them, this test is
+// the tripwire.
+func TestIsBootstrapRefusal(t *testing.T) {
+	refusals := []string{
+		"cix-server: bootstrap auth: incomplete bootstrap configuration: " +
+			"CIX_BOOTSTRAP_ADMIN_EMAIL is set but CIX_BOOTSTRAP_ADMIN_PASSWORD is empty.",
+		"cix-server: bootstrap auth: no users in database and the bootstrap admin " +
+			"env vars are not set: refuse to start.",
+	}
+	for _, tail := range refusals {
+		if !isBootstrapRefusal(tail) {
+			t.Errorf("isBootstrapRefusal(%q) = false, want true", tail)
+		}
+	}
+
+	others := []string{
+		"listen tcp 127.0.0.1:21847: bind: address already in use",
+		"open database: unable to open database file",
+		"", // no log at all
+	}
+	for _, tail := range others {
+		if isBootstrapRefusal(tail) {
+			t.Errorf("isBootstrapRefusal(%q) = true, want false", tail)
+		}
+	}
+}
+
 func TestRetireBootstrapPassword(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -40,11 +40,13 @@ const bootstrapServerName = "local"
 // configuration this app should quietly repair; it is an installation that
 // needs setting up again, and saying so is the whole point.
 //
-// Not covered: a database file that exists but holds no users — a truncated or
-// hand-emptied one. Answering that needs to open SQLite, which would drag the
-// driver into the launcher for a case far rarer than "I deleted my data
-// directory". The server refuses to start in that state and says why in
-// ~/.cix/logs/cix-server.err.
+// Not covered here: a database file that exists but holds no users. That case
+// is not rare at all — it is what a deleted data directory turns into on the
+// very next start, because the server creates the file and runs migrations
+// BEFORE it checks for an admin account, then refuses. Answering it from here
+// would need the SQLite driver in the launcher; instead the refusal itself is
+// recognised after the fact — see isBootstrapRefusal, and the Start handler
+// that routes it back to setup.
 func needsFirstRun() bool {
 	path, err := serverEnvPath()
 	if err != nil {
@@ -71,6 +73,23 @@ func needsFirstRun() bool {
 		return true
 	}
 	return false
+}
+
+// isBootstrapRefusal recognises the server's no-admin-account refusal in a log
+// tail.
+//
+// This closes the gap needsFirstRun leaves open. Delete ~/.cix/data and the
+// first start attempt — a login-time autostart as easily as a click — recreates
+// an empty cix.db before bootstrapAuth refuses, so from then on the file exists
+// and needsFirstRun answers false. The one thing that still knows the database
+// has no accounts is the server itself, and it says so in words this matches:
+// "incomplete bootstrap configuration" (an email left in server.env after the
+// password was retired) and "no users in database" (neither var set). Both mean
+// exactly one thing — there is no admin account and the server will not invent
+// one — and for both, running setup again is the fix.
+func isBootstrapRefusal(logTail string) bool {
+	return strings.Contains(logTail, "incomplete bootstrap configuration") ||
+		strings.Contains(logTail, "no users in database")
 }
 
 // retireBootstrapPassword drops CIX_BOOTSTRAP_ADMIN_PASSWORD from server.env
@@ -118,7 +137,14 @@ func runFirstRun(u *updater) error {
 		"It is the login for the cix dashboard on this Mac — nothing is sent anywhere. " +
 		"A password is generated for you, and setup then downloads the server (about 40 MB)."
 
-	email, err := prompt("Set up cix", intro, "")
+	// On a re-run the previous admin's address is still in server.env, and the
+	// most likely answer is the same one — so offer it, editable.
+	priorEmail := ""
+	if prior, err := readServerEnv(); err == nil {
+		priorEmail = strings.TrimSpace(prior["CIX_BOOTSTRAP_ADMIN_EMAIL"])
+	}
+
+	email, err := prompt("Set up cix", intro, priorEmail)
 	if err != nil {
 		return err
 	}
