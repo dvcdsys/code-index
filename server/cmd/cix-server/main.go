@@ -248,6 +248,22 @@ func run() error {
 		hasProv = true
 	}
 
+	// Two fields of a persisted ollama config describe where this process is
+	// and what pid it has, not what the user chose, and both were frozen at
+	// first boot. Re-derive them — see RefreshOllamaSidecarPaths for what goes
+	// wrong otherwise, which is an installation that keeps launching a
+	// llama-server from a directory that no longer exists.
+	if hasProv && persistedProv.Kind == provider.KindOllama {
+		refreshed, rerr := embeddings.RefreshOllamaSidecarPaths(cfg, persistedProv.Config)
+		if rerr != nil {
+			// Malformed JSON, which the Build below will report properly. Not
+			// worth failing here over.
+			logger.Warn("could not refresh the embedding sidecar paths; using the stored config unchanged", "err", rerr)
+		} else {
+			persistedProv.Config = refreshed
+		}
+	}
+
 	var embedSvc *embeddings.Service
 	if !cfg.EmbeddingsEnabled || !hasProv {
 		// Legacy / disabled path — fall back to env-only ollama wiring.
