@@ -3,7 +3,7 @@ import { CixAscii } from '../shared/ascii.jsx';
 import { Foot } from '../shared/foot.jsx';
 import { TeamDiagram } from '../shared/team-diagram.jsx';
 import {
-  SERVER_VERSION, CLI_VERSION, PLUGIN_VERSION, COWORK_PLUGIN_VERSION, GITHUB_URL,
+  SERVER_VERSION, CLI_VERSION, PLUGIN_VERSION, COWORK_PLUGIN_VERSION, MAC_APP_VERSION, GITHUB_URL,
 } from '../shared/versions.js';
 
 const TOC = [
@@ -102,6 +102,15 @@ export function DocsApp() {
 git clone https://github.com/dvcdsys/code-index && cd code-index
 ./install-server.sh`}</CodeBlock>
             <p>At the end it prints the dashboard URL and your admin login (the password is temporary — you change it on first login), and offers to install the <code>cix</code> CLI and connect it to the new server — so <code>cix init</code> works immediately. Re-running after a <code>git pull</code> upgrades in place; <code>--uninstall</code> removes the server but keeps your data. Forgot the admin password later? <code>./server/scripts/reset-password.sh &lt;email&gt;</code> resets it offline. Details: <a href="https://github.com/dvcdsys/code-index/blob/main/doc/SETUP_MACOS_NATIVE.md">SETUP_MACOS_NATIVE.md</a>.</p>
+
+            <h3>macOS — the menu bar app</h3>
+            <p>On an Apple Silicon Mac there is a second way in: <b>cix.app</b>, a menu bar app that runs the server for you. It sets up an admin account on first launch, downloads the server itself (about 40&nbsp;MB, the same build the Docker images are cut from), and gives you start/stop, network access, launch-at-login and a password reset without a terminal. The server keeps running when you quit the app, and both halves update themselves. <a href={`${GITHUB_URL}/releases/tag/mac/v${MAC_APP_VERSION}`}>Download cix.app {MAC_APP_VERSION}</a> — macOS 13 or later, Apple Silicon only (upstream llama.cpp publishes no macOS x86_64 build).</p>
+
+            <p><b>macOS will block the download</b>, twice: once for the disk image, once for the app inside it. cix is open source and not signed with a paid Apple Developer certificate, so macOS cannot verify it — nothing is wrong with your download. The fastest way through is one command <i>before</i> you open the image, because the app inherits the download mark from the image at the moment you copy it out:</p>
+            <CodeBlock>{`xattr -d com.apple.quarantine ~/Downloads/cix-*-arm64.dmg`}</CodeBlock>
+            <p>Then open the image and drag <b>cix.app</b> onto <b>Applications</b> as usual — no dialogs. Already dragged it across and hit the block? Clear it in place instead: <code>xattr -dr com.apple.quarantine /Applications/cix.app</code>. (<code>No such xattr</code> in either case just means it was already clear.)</p>
+
+            <p>To click through it instead: open the <code>.dmg</code>, and when macOS says it "could not verify" the file choose <b>Done</b> — never <i>Move to Bin</i>, which deletes the download. Then go to <b>System Settings → Privacy &amp; Security</b>, scroll to <b>Security</b>, and click <b>Open Anyway</b> next to the blocked file. That button appears only <i>after</i> the failed attempt, so going there first shows nothing. Drag the app across, open it, and repeat for the app itself. On macOS 15 and later the old right-click → Open shortcut works for neither block. You do this once per version.</p>
 
             <h3>Manual setup (what the installer automates)</h3>
             <p><b>Docker (CPU):</b></p>
