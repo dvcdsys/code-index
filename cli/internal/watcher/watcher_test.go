@@ -124,10 +124,32 @@ func newIndexServer(t *testing.T, dir string) (*httptest.Server, *serverCalls) {
 // waitForCalls polls the mock server counters until BeginIndex has been called
 // at least target times, or the deadline is reached.
 func waitForCalls(calls *serverCalls, target int) {
-	deadline := time.Now().Add(2 * time.Second)
+	waitForCounter(calls, target, func(c *serverCalls) int { return c.Begin })
+}
+
+// waitForFinish waits for FinishIndex, which is what a test asserting on
+// calls.Finish actually needs.
+//
+// Waiting on BeginIndex and then asserting on Finish is a race, and it is the
+// one this package kept losing on CI: they are two sequential HTTP calls from
+// the indexer goroutine, so the window between them is small but real. It shows
+// up as "expected FinishIndex to be called" on a test that took 0.02s — not a
+// timeout, an assertion made too early.
+func waitForFinish(calls *serverCalls, target int) {
+	waitForCounter(calls, target, func(c *serverCalls) int { return c.Finish })
+}
+
+// waitForCounter polls until a counter reaches target, or gives up.
+//
+// The deadline is generous on purpose. It exits the instant the condition holds,
+// so a long limit costs nothing when things work and is the difference between a
+// green run and a red one on a cold CI runner — which is where this package has
+// failed, never locally.
+func waitForCounter(calls *serverCalls, target int, get func(*serverCalls) int) {
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		calls.mu.Lock()
-		count := calls.Begin
+		count := get(calls)
 		calls.mu.Unlock()
 		if count >= target {
 			return
@@ -382,17 +404,10 @@ func TestFlushChanges_TriggersIncrementalReindex(t *testing.T) {
 	w.pendingChanges[filepath.Join(dir, "main.go")] = true
 	w.flushChanges()
 
-	// Wait for indexing to complete (it runs in a goroutine now)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		calls.mu.Lock()
-		count := calls.Begin
-		calls.mu.Unlock()
-		if count >= 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Indexing runs in a goroutine, and it ends with FinishIndex — so that is
+	// what to wait for. Waiting for BeginIndex and then asserting on Finish is
+	// the race this test used to lose on CI.
+	waitForFinish(calls, 1)
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
@@ -470,7 +485,7 @@ func TestFlushChanges_RecoveryAfterServerDown(t *testing.T) {
 	w2.pendingChanges[filePath] = true
 	w2.flushChanges()
 
-	waitForCalls(calls, 1)
+	waitForFinish(calls, 1)
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
@@ -492,7 +507,7 @@ func TestTriggerFullReindex_CallsAPI(t *testing.T) {
 
 	w.triggerFullReindex()
 
-	waitForCalls(calls, 1)
+	waitForFinish(calls, 1)
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
@@ -664,17 +679,12 @@ func TestDebounce_MultipleEventsOnce(t *testing.T) {
 		w.trackChange(filepath.Join(dir, "b.go"))
 	}
 
-	// Poll until the debounce timer fires, with a generous deadline.
-	deadline := time.Now().Add(time.Duration(w.debounceMS*10) * time.Millisecond)
-	for time.Now().Before(deadline) {
-		calls.mu.Lock()
-		n := calls.Begin
-		calls.mu.Unlock()
-		if n >= 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Wait for the debounce timer to fire. Ten times the debounce interval reads
+	// like a generous margin and is 800ms — which a cold CI runner loses. The
+	// property under test is that five events collapse into one flush, not how
+	// fast the flush arrives, so the wait is bounded by patience rather than by
+	// the interval.
+	waitForCalls(calls, 1)
 
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
