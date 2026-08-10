@@ -9,6 +9,7 @@
 #   LLAMA_ARCH      — "arm64"  (Phase 3 only supports arm64)
 #   DEST_DIR        — target directory for the slimmed binary set
 #   CHECKSUMS_FILE  — path to scripts/llama-checksums.txt
+#   LLAMA_STRICT    — "1" to require a pre-recorded checksum (default "0")
 #
 # First-run bootstrap flow
 # ------------------------
@@ -16,11 +17,20 @@
 # for the asset is unknown. Rather than fail, we compute the SHA256 after the
 # download and APPEND it to CHECKSUMS_FILE, printing a very visible message.
 # The expectation is that the contributor then commits that checksum file
-# update in the same PR that bumps LLAMA_VERSION — downstream CI fails hard
-# if the asset's SHA256 does not match an existing line.
+# update in the same PR that bumps LLAMA_VERSION.
 #
 # Every subsequent run on the same LLAMA_VERSION uses the recorded checksum
 # as the authoritative verifier; mismatches fail.
+#
+# Strict mode (LLAMA_STRICT=1)
+# ----------------------------
+# Record-on-first-run is the right behaviour for a developer bootstrapping a
+# bump, and the wrong behaviour for a build that ships. In a release build a
+# missing checksum row means "trust whatever the network just handed us" —
+# the recorded value is derived from the download itself, so it verifies
+# nothing. Release workflows set LLAMA_STRICT=1 so an unpinned LLAMA_VERSION
+# fails the build instead, and the fix is to run `make fetch-llama` locally
+# and commit the resulting llama-checksums.txt line.
 
 set -euo pipefail
 
@@ -30,6 +40,7 @@ set -euo pipefail
 : "${LLAMA_ARCH:?LLAMA_ARCH is required}"
 : "${DEST_DIR:?DEST_DIR is required}"
 : "${CHECKSUMS_FILE:?CHECKSUMS_FILE is required}"
+: "${LLAMA_STRICT:=0}"
 
 if [[ "$LLAMA_OS" != "darwin" || "$LLAMA_ARCH" != "arm64" ]]; then
     echo "fetch-llama.sh: only darwin-arm64 is supported in Phase 3 (got $LLAMA_OS-$LLAMA_ARCH)" >&2
@@ -41,6 +52,30 @@ fi
 ASSET="llama-${LLAMA_VERSION}-bin-macos-arm64.tar.gz"
 URL="https://github.com/${LLAMA_REPO}/releases/download/${LLAMA_VERSION}/${ASSET}"
 
+# Look the pin up BEFORE downloading, so strict mode fails in a second rather
+# than after pulling ~50 MB it is going to reject anyway.
+EXPECTED_SHA=""
+if [[ -f "$CHECKSUMS_FILE" ]]; then
+    EXPECTED_SHA=$(awk -v a="$ASSET" '$2 == a { print $1 }' "$CHECKSUMS_FILE" || true)
+fi
+
+if [[ "$LLAMA_STRICT" == "1" && -z "$EXPECTED_SHA" ]]; then
+    cat >&2 <<EOF
+fetch-llama: LLAMA_STRICT=1 and no checksum is recorded for $ASSET.
+
+  A release build will not record a checksum for itself: the value would be
+  computed from the very download it is meant to verify. Pin it first.
+
+  Locally, from the repo root:
+      cd server && make fetch-llama LLAMA_VERSION=$LLAMA_VERSION
+      git add scripts/llama-checksums.txt
+      git commit -m "chore(server): pin llama.cpp $LLAMA_VERSION checksum"
+
+  Checksum file: $CHECKSUMS_FILE
+EOF
+    exit 1
+fi
+
 TMP_DIR="$(mktemp -d -t cix-fetch-llama-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 ARCHIVE="$TMP_DIR/$ASSET"
@@ -48,12 +83,9 @@ ARCHIVE="$TMP_DIR/$ASSET"
 echo "fetch-llama: downloading $URL"
 curl --fail --location --show-error --silent --output "$ARCHIVE" "$URL"
 
-# SHA256 verify or record-on-first-run.
+# SHA256 verify, or record-on-first-run (non-strict only — strict mode already
+# bailed above when EXPECTED_SHA was empty).
 OBSERVED_SHA=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
-EXPECTED_SHA=""
-if [[ -f "$CHECKSUMS_FILE" ]]; then
-    EXPECTED_SHA=$(awk -v a="$ASSET" '$2 == a { print $1 }' "$CHECKSUMS_FILE" || true)
-fi
 
 if [[ -z "$EXPECTED_SHA" ]]; then
     echo "fetch-llama: first-run — recording checksum for $ASSET → $OBSERVED_SHA"

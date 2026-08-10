@@ -189,6 +189,43 @@ func BuildOllamaConfigFromEnv(cfg *config.Config) ([]byte, error) {
 	return json.Marshal(c)
 }
 
+// RefreshOllamaSidecarPaths re-derives the two ollama config fields that
+// describe THIS process rather than the user's choices, and returns the updated
+// blob.
+//
+// The persisted blob is authoritative for everything a person can choose — the
+// model, the context size, the GPU layers — and that must not change. It cannot
+// be authoritative for these two:
+//
+//   - bin_dir comes from filepath.Dir(os.Executable())/llama, so it names the
+//     directory the server was installed in when the row was first written.
+//     Move or upgrade the installation and every later boot keeps launching the
+//     old llama-server — until that directory is deleted, at which point
+//     embeddings stop working with no configuration having changed. The macOS
+//     app, which installs each release into its own versioned directory, hits
+//     this on the first update.
+//   - socket_path is <TMPDIR>/cix-llama-<pid>.sock, and the pid is the one from
+//     first boot. Persisting it defeats the uniqueness it exists for: every
+//     later boot reuses that one name, so a server can find an orphaned
+//     llama-server already bound to it and talk to that instead of spawning its
+//     own.
+//
+// Both are already documented as deployment-level and are deliberately absent
+// from the dashboard's edit schema (see the ollama factory's SchemaJSON) — this
+// is what makes that true on the second boot as well as the first.
+//
+// The result is not written back to the database. The stored row stays the
+// record of what was chosen; this is only what the running process uses.
+func RefreshOllamaSidecarPaths(cfg *config.Config, blob []byte) ([]byte, error) {
+	var c ollama.Config
+	if err := json.Unmarshal(blob, &c); err != nil {
+		return nil, err
+	}
+	c.BinDir = cfg.LlamaBinDir
+	c.SocketPath = cfg.LlamaSocketPath
+	return json.Marshal(c)
+}
+
 // EnvSecrets returns the production SecretLookup: os.LookupEnv. main.go
 // and the admin handlers pass it to provider.Build / Service.SwitchProvider.
 func EnvSecrets() provider.SecretLookup { return envSecrets }

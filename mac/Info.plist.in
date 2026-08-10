@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for cix.app/Contents/Info.plist. The at-sign delimited placeholders
+  below are substituted by mac/scripts/build-app.sh, which then fails the build
+  if any survive, and validates the result with `plutil -lint`.
+
+  Notes on the non-obvious keys:
+
+  * CFBundleIdentifier must NOT be com.cix.server. That string is the launchd
+    job label used by install-server.sh and (from Phase 3) by the launcher
+    itself. Colliding the bundle id with a launchd label invites launchctl and
+    LaunchServices to disagree about what "com.cix.server" refers to.
+
+  * LSUIElement makes this a menu-bar-only app: no Dock icon, no application
+    menu, no window on launch. Without it the app bounces in the Dock and
+    macOS expects a main window that will never exist.
+
+  * LSMinimumSystemVersion 13.0 is the floor for the APIs the menu-bar layer
+    will use; it is not a claim that older releases were tested.
+
+  * The bundle is Apple Silicon only. Upstream llama.cpp publishes a single
+    macos-arm64 asset and server/scripts/fetch-llama.sh refuses anything else,
+    so there is no x86_64 slice to advertise.
+
+  Deliberately absent: NSPrincipalClass (no AppKit main class of our own),
+  LSBackgroundOnly (that would hide the menu bar item too), and any login-item
+  keys — autostart is launchd's job, configured at runtime, not baked into the
+  bundle.
+
+  Also deliberately absent, and once present: CIXServerVersion, CIXCLIVersion
+  and CIXLlamaVersion. Those three now live outside the app, in
+  ~/.cix/runtime/current/runtime.json, and update without this bundle changing.
+  A version recorded here would be a claim about somebody else's files, wrong
+  the first time either half is updated on its own.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>cix</string>
+	<key>CFBundleDisplayName</key>
+	<string>cix</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.cix.launcher</string>
+	<key>CFBundleExecutable</key>
+	<string>cix-launcher</string>
+	<!-- No extension, by convention: the file is Resources/cix.icns, built from
+	     mac/Resources/cix.iconset/ by build-app.sh. -->
+	<key>CFBundleIconFile</key>
+	<string>cix</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@SHORT_VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUNDLE_VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT licensed. https://github.com/dvcdsys/code-index</string>
+</dict>
+</plist>

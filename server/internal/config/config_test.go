@@ -284,3 +284,67 @@ func unsetAll(t *testing.T) {
 		osUnsetenv(k)
 	}
 }
+
+func TestListenAddr(t *testing.T) {
+	tests := []struct {
+		name string
+		bind string
+		port int
+		want string
+	}{
+		// The empty default must keep producing ":port". Every existing
+		// deployment — every container in particular — depends on binding all
+		// interfaces, so narrowing this is opt-in and never implicit.
+		{"default is all interfaces", "", 21847, ":21847"},
+		{"loopback", "127.0.0.1", 21847, "127.0.0.1:21847"},
+		{"explicit all interfaces", "0.0.0.0", 8080, "0.0.0.0:8080"},
+		{"hostname", "localhost", 21847, "localhost:21847"},
+		// JoinHostPort brackets IPv6; a naive host+":"+port would produce
+		// "::1:21847", which net.Listen reads as a different address entirely.
+		{"ipv6 loopback is bracketed", "::1", 21847, "[::1]:21847"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{BindAddr: tc.bind, Port: tc.port}
+			if got := c.ListenAddr(); got != tc.want {
+				t.Errorf("ListenAddr() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLocalOnly(t *testing.T) {
+	tests := map[string]bool{
+		"":            false, // all interfaces
+		"0.0.0.0":     false,
+		"192.168.1.5": false,
+		"127.0.0.1":   true,
+		"127.0.0.2":   true, // the whole 127/8 block is loopback
+		"::1":         true,
+		"localhost":   true,
+		"LOCALHOST":   true,
+	}
+	for bind, want := range tests {
+		if got := (&Config{BindAddr: bind}).LocalOnly(); got != want {
+			t.Errorf("LocalOnly() for %q = %v, want %v", bind, got, want)
+		}
+	}
+}
+
+func TestValidateBindAddr(t *testing.T) {
+	valid := []string{"", "127.0.0.1", "0.0.0.0", "localhost", "::1", "192.168.1.5"}
+	for _, addr := range valid {
+		if err := validateBindAddr(addr); err != nil {
+			t.Errorf("validateBindAddr(%q) = %v, want nil", addr, err)
+		}
+	}
+	// The two mistakes worth catching: both bind as a hostname on some systems
+	// and then fail to resolve, giving a server that is silently unreachable
+	// instead of one that refused to start.
+	invalid := []string{"http://127.0.0.1", "https://cix.local", "127.0.0.1:21847", "localhost:8080"}
+	for _, addr := range invalid {
+		if err := validateBindAddr(addr); err == nil {
+			t.Errorf("validateBindAddr(%q) = nil, want an error", addr)
+		}
+	}
+}

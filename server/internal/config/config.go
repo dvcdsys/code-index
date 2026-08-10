@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,8 +26,16 @@ type Config struct {
 	// CIX_AUTH_DISABLED=true (and also requires CIX_API_KEY to be empty).
 	// Replaces the older "empty API key = no auth" implicit bypass; the new
 	// behaviour fails loud when CIX_API_KEY is missing without the flag.
-	AuthDisabled            bool
-	Port                    int
+	AuthDisabled bool
+	Port         int
+	// BindAddr is the interface the HTTP server listens on. Empty (the
+	// default) means every interface, which is what a container needs and what
+	// every existing deployment already gets — so the default must not change.
+	//
+	// Set it to 127.0.0.1 to make the server reachable only from the machine it
+	// runs on. That is the useful setting for a desktop install, where "the
+	// whole LAN can reach my code index" is rarely what was intended.
+	BindAddr                string
 	EmbeddingModel          string
 	ChromaPersistDir        string
 	SQLitePath              string
@@ -254,6 +263,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.Port = port
+	c.BindAddr = strings.TrimSpace(getenv("CIX_BIND_ADDR", ""))
 
 	maxFileSize, err := getenvInt("CIX_MAX_FILE_SIZE", 524288)
 	if err != nil {
@@ -490,7 +500,55 @@ func (c *Config) Validate() error {
 	if c.LlamaStartupSec <= 0 {
 		return fmt.Errorf("CIX_LLAMA_STARTUP_TIMEOUT=%d, must be positive", c.LlamaStartupSec)
 	}
+	if err := validateBindAddr(c.BindAddr); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateBindAddr rejects the two shapes people actually get wrong: a URL, and
+// a host:port pair. Both bind successfully as a *hostname* on some systems and
+// then fail to resolve, producing a server that is silently unreachable rather
+// than one that refused to start.
+//
+// Hostnames are otherwise allowed through — "localhost" is a legitimate and
+// probably the most common value.
+func validateBindAddr(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	if strings.Contains(addr, "://") {
+		return fmt.Errorf("CIX_BIND_ADDR=%q is a URL; use a bare address such as 127.0.0.1 or 0.0.0.0", addr)
+	}
+	// A colon is legal in an IPv6 literal and nowhere else here.
+	if strings.Contains(addr, ":") && net.ParseIP(addr) == nil {
+		return fmt.Errorf("CIX_BIND_ADDR=%q includes a port or is not a valid IPv6 address; set the port with CIX_PORT", addr)
+	}
+	return nil
+}
+
+// ListenAddr is the address the HTTP server binds to.
+//
+// An empty BindAddr yields ":port" — every interface. That is the historical
+// behaviour and what a container requires, so it stays the default; narrowing
+// it is opt-in.
+func (c *Config) ListenAddr() string {
+	if c.BindAddr == "" {
+		return ":" + strconv.Itoa(c.Port)
+	}
+	return net.JoinHostPort(c.BindAddr, strconv.Itoa(c.Port))
+}
+
+// LocalOnly reports whether the configured bind address is loopback — i.e. the
+// server is reachable only from this machine.
+func (c *Config) LocalOnly() bool {
+	if c.BindAddr == "" {
+		return false
+	}
+	if ip := net.ParseIP(c.BindAddr); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(c.BindAddr, "localhost")
 }
 
 // defaultDataDir returns the platform-specific root for runtime data
