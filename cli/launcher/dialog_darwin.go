@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -61,6 +63,74 @@ func alert(title, message string) error {
 		)
 	}
 	return runOsascript(2*time.Minute, script)
+}
+
+// errCancelled is returned when the user dismissed a dialog instead of
+// answering it. osascript reports this as exit status 1 with "User canceled" on
+// stderr, which is indistinguishable from a real failure unless matched.
+var errCancelled = errors.New("cancelled by user")
+
+// prompt asks for one line of text. Returns errCancelled if the user cancels.
+func prompt(title, message, defaultAnswer string) (string, error) {
+	script := fmt.Sprintf(
+		`display dialog %s with title %s default answer %s %s buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel"`,
+		quoteAS(message), quoteAS(title), quoteAS(defaultAnswer), iconClause(),
+	)
+	out, err := outputOsascript(5*time.Minute, script)
+	if err != nil {
+		return "", err
+	}
+	// osascript prints `button returned:OK, text returned:<value>`. The text is
+	// last, and a value containing ", text returned:" is not reachable because
+	// the field is single-line — so cutting on the marker is safe.
+	_, answer, ok := strings.Cut(out, "text returned:")
+	if !ok {
+		return "", fmt.Errorf("unexpected osascript output: %q", out)
+	}
+	return strings.TrimSpace(answer), nil
+}
+
+// confirm shows a two-button question. Returns false when the user declines.
+func confirm(title, message, okLabel string) (bool, error) {
+	script := fmt.Sprintf(
+		`display dialog %s with title %s %s buttons {"Cancel", %s} default button %s cancel button "Cancel"`,
+		quoteAS(message), quoteAS(title), iconClause(), quoteAS(okLabel), quoteAS(okLabel),
+	)
+	if _, err := outputOsascript(5*time.Minute, script); err != nil {
+		if errors.Is(err, errCancelled) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func iconClause() string {
+	if dialogIcon == "" {
+		return ""
+	}
+	return "with icon POSIX file " + quoteAS(dialogIcon)
+}
+
+func outputOsascript(timeout time.Duration, script string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("osascript timed out after %s", timeout)
+		}
+		if strings.Contains(stderr.String(), "User canceled") {
+			return "", errCancelled
+		}
+		return "", fmt.Errorf("osascript: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
 }
 
 func runOsascript(timeout time.Duration, script string) error {

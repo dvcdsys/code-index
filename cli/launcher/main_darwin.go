@@ -1,28 +1,23 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // cix-launcher — the executable behind cix.app.
 //
-// Scope of this build: the .app packaging pipeline (mac/v* tag → DMG). The
-// menu-bar interface, launchd control and self-updater land in later releases.
-// What ships today is a correctly signed bundle carrying cix-server, the cix
-// CLI and a Metal-enabled llama-server, plus enough of a front end to tell the
-// user what they have and prove the bundle is intact.
+// A menu bar item showing whether the local cix server is running and what its
+// embedding provider is doing, with start/stop and a dashboard link. It is an
+// LSUIElement app: no Dock icon, no windows, no application menu.
 func main() {
 	showVersion := flag.Bool("v", false, "print version and exit")
-	report := flag.Bool("report", false, "print the bundle report to stdout instead of showing a dialog")
+	report := flag.Bool("report", false, "print a bundle report to stdout and exit, instead of showing the menu")
 	flag.Parse()
 
 	if *showVersion {
@@ -33,8 +28,8 @@ func main() {
 	b, err := locateBundle()
 	if err != nil {
 		// Running outside a .app is a developer scenario (`go run ./launcher`),
-		// not a user-facing error — there is no bundle to report on, so say so
-		// on the terminal that is definitely attached and stop.
+		// not a user-facing error — there is no bundle to manage, so say so on
+		// the terminal that is definitely attached and stop.
 		fmt.Fprintf(os.Stderr, "cix-launcher %s: %v\n", version, err)
 		os.Exit(1)
 	}
@@ -43,31 +38,64 @@ func main() {
 		dialogIcon = icon
 	}
 
-	if isTranslocated(b) {
-		msg := "macOS is running cix from a temporary read-only copy, so it cannot manage a server.\n\n" +
-			"Move cix.app to your Applications folder and open it from there."
-		if *report {
-			fmt.Fprintln(os.Stderr, msg)
-			os.Exit(1)
-		}
-		_ = alert("Move cix.app to Applications", msg)
-		os.Exit(1)
-	}
-
-	body := bundleReport(b)
-
-	// A .app has no terminal attached: writing to stdout on a double-click is
-	// indistinguishable from crashing. -report exists so the same information
-	// is scriptable for CI and for the DMG verification steps.
+	// -report is the scriptable path: CI verifies a freshly built bundle with
+	// it, and it never opens a window.
 	if *report {
-		fmt.Println(body)
+		fmt.Println(bundleReport(b))
 		return
 	}
 
-	if err := alert("cix "+displayVersion(), body); err != nil {
-		fmt.Fprintf(os.Stderr, "cix-launcher: %v\n", err)
+	if isTranslocated(b) {
+		// Gatekeeper is running the app from a randomised read-only copy, which
+		// it does to any quarantined app opened from outside /Applications.
+		// Everything appears to work until the copy is reaped, taking the
+		// launchd job's target with it — so refuse rather than half-work.
+		_ = alert("Move cix to Applications",
+			"macOS is running cix from a temporary copy, so it cannot manage a server.\n\n"+
+				"Move cix.app to your Applications folder and open it from there.")
 		os.Exit(1)
 	}
+
+	stripQuarantine(b)
+
+	if needsFirstRun() {
+		if err := runFirstRun(b); err != nil {
+			if errors.Is(err, errCancelled) {
+				// Setup is resumable: the app stays in the menu bar with Start
+				// disabled, and the next launch offers the wizard again.
+				_ = alert("Setup cancelled",
+					"cix has not been set up yet, so the server cannot start.\n\n"+
+						"Quit and reopen cix when you want to finish setting it up.")
+			} else {
+				_ = alert("Setup failed", fmt.Sprintf("cix could not complete first-time setup.\n\n%v", err))
+			}
+		}
+	} else if !foreignAgent() {
+		// Re-point the launchd agent at this bundle. An app that was moved, or
+		// replaced by an update, would otherwise keep a job aimed at a path
+		// that no longer holds the binary.
+		if err := writeLaunchdFiles(b, autostartEnabled()); err != nil {
+			fmt.Fprintf(os.Stderr, "cix-launcher: could not refresh launchd files: %v\n", err)
+		}
+	}
+
+	runMenu(b)
+}
+
+// stripQuarantine clears com.apple.quarantine from the whole bundle, once.
+//
+// Not cosmetic: the nested llama-server inherits the quarantine flag from the
+// disk image, and macOS then SIGKILLs it on exec with EMPTY STDERR. From the
+// supervisor's side that is indistinguishable from a crash, which is precisely
+// the failure server/Makefile documents for stale signatures. Best-effort — on
+// a read-only volume there is nothing to do and nothing to report.
+func stripQuarantine(b bundle) {
+	_ = exec.Command("xattr", "-dr", "com.apple.quarantine", b.Root).Run()
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // bundleReport asks each bundled binary for its own version rather than
@@ -82,15 +110,10 @@ func bundleReport(b bundle) string {
 	fmt.Fprintf(&sb, "CLI:        %s\n", binaryVersion(b.CLI, "--version"))
 
 	if _, err := os.Stat(b.LlamaDir); err == nil {
-		fmt.Fprintf(&sb, "Embeddings: bundled llama-server (Metal)\n")
+		sb.WriteString("Embeddings: bundled llama-server (Metal)\n")
 	} else {
 		fmt.Fprintf(&sb, "Embeddings: MISSING — %s not found\n", b.LlamaDir)
 	}
-
-	sb.WriteString("\nThe menu-bar interface is not part of this release. ")
-	sb.WriteString("To run the server now:\n\n")
-	fmt.Fprintf(&sb, "  %s\n", b.Server)
-	sb.WriteString("\nSee doc/MACOS_APP.md for the required environment variables.")
 
 	return sb.String()
 }

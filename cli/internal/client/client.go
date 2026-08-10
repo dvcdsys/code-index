@@ -254,9 +254,60 @@ func (c *Client) Status() (*StatusResponse, error) {
 	return &status, nil
 }
 
+// StatusResponse mirrors GET /api/v1/status.
+//
+// The first block is always present. The version-check block is present only
+// when the server was started with the version-check service wired
+// (CIX_VERSION_CHECK_ENABLED); when it is absent the four fields stay at their
+// zero values, and `UpdateAvailable == false` is then "unknown", not "current".
+// Branch on `VersionCheck != nil` before trusting it.
+//
+// LatestVersion and ReleaseURL are pointers because the server emits JSON null
+// for them until a check has actually succeeded — an empty string would be
+// indistinguishable from "checked, and there is no newer release".
+//
+// The exact wire shape is pinned by a twin golden fixture: status_test.go here
+// and server/internal/httpapi/status_contract_test.go there. The two modules
+// cannot import each other, so those fixtures are the contract — change one and
+// the other fails, forcing both sides to move in the same PR.
 type StatusResponse struct {
-	Status             string `json:"status"`
-	ModelLoaded        bool   `json:"model_loaded"`
-	Projects           int    `json:"projects"`
-	ActiveIndexingJobs int    `json:"active_indexing_jobs"`
+	Status                          string `json:"status"`
+	Backend                         string `json:"backend"`
+	ServerVersion                   string `json:"server_version"`
+	APIVersion                      string `json:"api_version"`
+	ModelLoaded                     bool   `json:"model_loaded"`
+	EmbeddingModel                  string `json:"embedding_model"`
+	EmbeddingProvider               string `json:"embedding_provider"`
+	EmbeddingProviderManagesProcess bool   `json:"embedding_provider_manages_process"`
+	Projects                        int    `json:"projects"`
+	ActiveIndexingJobs              int    `json:"active_indexing_jobs"`
+
+	UpdateAvailable bool                `json:"update_available"`
+	LatestVersion   *string             `json:"latest_version"`
+	ReleaseURL      *string             `json:"release_url"`
+	VersionCheck    *VersionCheckStatus `json:"version_check"`
+}
+
+// VersionCheckStatus is the nested `version_check` object.
+type VersionCheckStatus struct {
+	Enabled bool    `json:"enabled"`
+	Error   *string `json:"error"`
+	// CheckedAt is RFC3339, or nil when no check has completed yet.
+	CheckedAt *string `json:"checked_at"`
+}
+
+// EmbeddingsHealthy reports whether the embedding provider should be shown as
+// working.
+//
+// ModelLoaded alone is not that answer. The server computes it under a 500 ms
+// deadline, and for HTTP providers (openai, voyage) there is no local process
+// whose liveness it could reflect — EmbeddingProviderManagesProcess is false
+// there, and treating a slow or skipped probe as "down" would show a permanent
+// red dot for a provider that is fine. Only a managed local process
+// (llama-server) can meaningfully be reported as not loaded.
+func (s *StatusResponse) EmbeddingsHealthy() bool {
+	if !s.EmbeddingProviderManagesProcess {
+		return true
+	}
+	return s.ModelLoaded
 }
