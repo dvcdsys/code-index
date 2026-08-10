@@ -42,12 +42,19 @@ var panelHooks struct {
 }
 
 // panelAction is one user gesture inside the panel, as posted by panel.html.
+// OK and Text carry a dialog's answer and are meaningless for other actions.
 type panelAction struct {
 	Action string `json:"action"`
+	OK     bool   `json:"ok"`
+	Text   string `json:"text"`
 }
 
 //export goPanelReady
 func goPanelReady() {
+	// From here on, dialogs render inside the panel instead of via osascript —
+	// the webview may still be loading, but requests pushed before it finishes
+	// are replayed on load (see pendingDialog in panel_darwin.m).
+	panelUIUp.Store(true)
 	if panelHooks.onReady != nil {
 		// Off the main thread: onReady starts pollers and may do I/O.
 		go panelHooks.onReady()

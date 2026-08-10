@@ -56,7 +56,8 @@ static CixPanel *panel;
 static WKWebView *webView;
 static NSString *pendingHTML;
 static NSString *pendingIconPath;
-static NSString *pendingState; // last state JSON, replayed on load
+static NSString *pendingState;  // last state JSON, replayed on load
+static NSString *pendingDialog; // last dialog JSON, replayed on load
 static BOOL webLoaded = NO;
 static id clickMonitor;
 
@@ -155,6 +156,9 @@ static id clickMonitor;
 }
 
 - (void)openPanel {
+    if (panel.visible) {
+        return;
+    }
     NSWindow *bar = statusItem.button.window;
     if (bar == nil) {
         return;
@@ -189,6 +193,9 @@ static id clickMonitor;
     }
     [panel orderOut:nil];
     statusItem.button.highlighted = NO;
+    // Go must hear about this: an in-panel dialog whose panel disappears is a
+    // dialog nobody can answer, and the Go side is blocked waiting on it.
+    goPanelAction("{\"action\":\"panel-closed\"}");
 }
 
 // windowDidResignKey — clicking anything that takes key status away (another
@@ -218,6 +225,25 @@ static id clickMonitor;
     [webView evaluateJavaScript:js completionHandler:nil];
 }
 
+- (void)setDialogJSON:(NSString *)json {
+    [pendingDialog release];
+    pendingDialog = [json retain];
+    if (!webLoaded) {
+        return; // replayed from didFinishNavigation
+    }
+    [self pushDialog];
+}
+
+- (void)pushDialog {
+    if (pendingDialog == nil) {
+        return;
+    }
+    NSString *js =
+        [NSString stringWithFormat:@"window.cixDialog && window.cixDialog(%@)",
+                                   pendingDialog];
+    [webView evaluateJavaScript:js completionHandler:nil];
+}
+
 - (void)setTitle:(NSString *)title {
     statusItem.button.title = title;
 }
@@ -226,6 +252,7 @@ static id clickMonitor;
     didFinishNavigation:(WKNavigation *)nav {
     webLoaded = YES;
     [self pushState];
+    [self pushDialog];
 }
 
 - (void)userContentController:(WKUserContentController *)ucc
@@ -298,6 +325,20 @@ void panel_set_state(const char *json) {
     NSString *s = [NSString stringWithUTF8String:json];
     dispatch_async(dispatch_get_main_queue(), ^{
       [controller setStateJSON:s];
+    });
+}
+
+void panel_set_dialog(const char *json) {
+    NSString *s = [NSString stringWithUTF8String:json];
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [controller setDialogJSON:s];
+    });
+}
+
+// panel_open fronts the panel — dialogs must surface even when it is closed.
+void panel_open(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [controller openPanel];
     });
 }
 

@@ -10,11 +10,14 @@ import (
 	"time"
 )
 
-// osascript is the dialog mechanism for the whole launcher.
+// osascript dialogs — the FALLBACK layer.
 //
-// The menu-bar library (Phase 2) has no dialog API, and pulling in a second GUI
-// toolkit to draw three alerts would double the bundle for no gain. AppleScript
-// alerts are native, need no linkage, and survive the app being LSUIElement.
+// The app's dialogs live inside the panel now (paneldialog_darwin.go and
+// panel.html's #dialog): alert/confirm/ask/prompt/alertWithSecret there route
+// to the webview once the AppKit side is up. What remains here is the same
+// primitives over osascript, used only in the window before the panel exists —
+// a translocated bundle refusing to run, a version query gone wrong — where a
+// native modal is the only surface available.
 //
 // Two rules, both load-bearing:
 //   - Every string that reaches AppleScript goes through quoteAS. Text here is
@@ -36,20 +39,17 @@ func quoteAS(s string) string {
 	return strings.Join(parts, " & return & ")
 }
 
-// dialogIcon is the POSIX path to the icon dialogs are drawn with. Set once at
-// startup from the bundle; empty when the launcher runs outside a .app.
+// dialogIcon is the POSIX path to the icon osascript dialogs are drawn with.
+// Set once at startup from the bundle; empty when running outside a .app.
 var dialogIcon string
 
-// alert shows a modal informational dialog and blocks until it is dismissed.
+// osaAlert shows a modal informational dialog and blocks until dismissed.
 //
 // `display dialog` rather than the more obvious `display alert`, for one
 // reason: an alert is drawn with the icon of the process that ran the script,
 // which here is osascript — so the app's own dialogs came up wearing a generic
-// folder icon. `display dialog` takes an explicit icon. The cost is that the
-// title is a window title instead of bold body text; the icon is worth more.
-// It is also the primitive Phase 2 needs anyway, since only `display dialog`
-// supports `default answer` for text input.
-func alert(title, message string) error {
+// folder icon. `display dialog` takes an explicit icon.
+func osaAlert(title, message string) error {
 	var script string
 	if dialogIcon != "" {
 		script = fmt.Sprintf(
@@ -63,25 +63,6 @@ func alert(title, message string) error {
 		)
 	}
 	return runOsascript(2*time.Minute, script)
-}
-
-// alertWithSecret shows a credential and puts it on the clipboard.
-//
-// The copying happens before the window opens, not on a button, and the message
-// says so. A button was tried and was worse: AppleScript cannot make a run of
-// text clickable — `display dialog` is modal and returns only when it closes —
-// so "copy" meant closing the window and opening it again, which on screen is
-// a flash. Copying up front removes the flash and the click at once, and there
-// is nothing to be coy about: this is a password the app generated seconds ago
-// and is showing on purpose, and reaching for the clipboard is the next thing
-// anyone does with it.
-func alertWithSecret(title, message, secret, secretName string) error {
-	note := fmt.Sprintf("\n\nThe %s is on your clipboard.", secretName)
-	if err := copyToClipboard(secret); err != nil {
-		logf("could not copy the %s to the clipboard: %v", secretName, err)
-		note = fmt.Sprintf("\n\nThe %s could not be copied to your clipboard — select it above.", secretName)
-	}
-	return alert(title, message+note)
 }
 
 // copyToClipboard pipes a value to pbcopy.
@@ -111,8 +92,8 @@ func isUserCancelled(stderr string) bool {
 	return strings.Contains(stderr, "(-128)")
 }
 
-// prompt asks for one line of text. Returns errCancelled if the user cancels.
-func prompt(title, message, defaultAnswer string) (string, error) {
+// osaPrompt asks for one line of text. Returns errCancelled on cancel.
+func osaPrompt(title, message, defaultAnswer string) (string, error) {
 	script := fmt.Sprintf(
 		`display dialog %s with title %s default answer %s %s buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel"`,
 		quoteAS(message), quoteAS(title), quoteAS(defaultAnswer), iconClause(),
@@ -131,20 +112,9 @@ func prompt(title, message, defaultAnswer string) (string, error) {
 	return strings.TrimSpace(answer), nil
 }
 
-// confirm shows a two-button question. Returns false when the user declines.
-func confirm(title, message, okLabel string) (bool, error) {
-	return ask(title, message, okLabel, "Cancel")
-}
-
-// ask shows a two-button question with both labels spelled out.
-//
-// Separate from confirm because not every choice has a "cancel" side. "Take
-// Over" versus "Leave It Alone" are two real options, and labelling the second
-// one Cancel would imply it does nothing — when in fact it decides how the app
-// behaves from then on.
-//
+// osaAsk shows a two-button question with both labels spelled out.
 // yesLabel is the default button. Dismissing the dialog counts as no.
-func ask(title, message, yesLabel, noLabel string) (bool, error) {
+func osaAsk(title, message, yesLabel, noLabel string) (bool, error) {
 	script := fmt.Sprintf(
 		`display dialog %s with title %s %s buttons {%s, %s} default button %s cancel button %s`,
 		quoteAS(message), quoteAS(title), iconClause(),

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -63,77 +62,12 @@ func main() {
 
 	stripQuarantine(b)
 
-	// Order matters here. A machine that already runs cix from a checkout has a
-	// launchd agent under our label and a server holding our port, so the
-	// first-run wizard must never get a look at it — it would set up a second
-	// server that cannot bind, against a second, empty database.
-	switch {
-	case foreignAgent():
-		// Asks once, remembers the answer, and defaults to leaving it alone.
-		// When the user declines, the app stays in observe-only mode: status
-		// and the dashboard work, Start/Stop do not.
-		//
-		// No runtime is installed on this path. Observing somebody else's server
-		// needs no binaries of our own, and downloading 90 MB to watch an
-		// install the user asked us not to touch would be presumptuous. The one
-		// feature that does need it — password reset — offers the download when
-		// it is used.
-		handleForeignAgent(u)
-
-	case needsFirstRun():
-		if err := runFirstRun(u); err != nil {
-			if errors.Is(err, errCancelled) {
-				// Setup is resumable: the app stays in the menu bar with Start
-				// disabled, and the next launch offers the wizard again.
-				_ = alert("Setup cancelled",
-					"cix has not been set up yet, so the server cannot start.\n\n"+
-						"Quit and reopen cix when you want to finish setting it up.")
-			} else {
-				logf("first-run setup failed: %v", err)
-				_ = alert("Setup failed", fmt.Sprintf("cix could not complete first-time setup.\n\n%v", err))
-			}
-		}
-
-	default:
-		// A configured install with no runtime is the first launch after
-		// upgrading from a version that carried its server inside the bundle:
-		// the old app is gone, and with it the binary the launchd wrapper was
-		// pointing at. Say so before spending a minute on a download, because
-		// otherwise this is a menu bar app that appears to do nothing at all.
-		//
-		// Not said when a local tarball is supplied: there is no download to
-		// warn about, and this is the path a developer takes on every build.
-		if !runtimeReady() && os.Getenv("CIX_RUNTIME_TARBALL") == "" {
-			_ = alert("cix needs to finish updating",
-				"cix now keeps its server outside the application, so it updates without restarting.\n\n"+
-					"It will download that part now — around 40 MB, once. The menu bar icon appears when it is done.")
-		}
-		if err := ensureRuntime(u, logProgress); err != nil {
-			logf("could not install the runtime: %v", err)
-			_ = alert("cix could not install its server",
-				fmt.Sprintf("%v\n\nThe menu bar app still works, but the server cannot start until this succeeds.", err))
-			break
-		}
-		// Only after the runtime exists: pointing the launchd wrapper at a
-		// binary that is not there would break a working install rather than
-		// leave it alone.
-		//
-		// Nothing is started here. An app update no longer stops the server —
-		// the bundle holds none of what it runs — so there is no interrupted
-		// state to resume, and starting a server the user had deliberately
-		// stopped would be the app overriding them.
-		if err := writeLaunchdFiles(autostartEnabled()); err != nil {
-			logf("could not refresh launchd files: %v", err)
-		}
-	}
-
+	// Setup — the foreign-agent question, the first-run wizard, the runtime
+	// download — happens AFTER the panel is up, from menu.startupFlow: its
+	// dialogs render inside the panel, and the menu bar icon appears
+	// immediately instead of after a download.
 	runMenu(b, u)
 }
-
-// logProgress is the progress sink for work that happens before the menu bar
-// item exists. There is nowhere to show it, so it goes in the log — which is
-// where anyone investigating a slow first launch will look.
-func logProgress(msg string) { logf("%s", msg) }
 
 // stripQuarantine clears com.apple.quarantine from the whole bundle, once.
 //

@@ -207,6 +207,37 @@
   }
   #ft .spacer { flex: 1; min-width: 8px; }
 
+  /* -- in-panel dialog --------------------------------------------------- */
+  /* Replaces every osascript window: alerts, confirmations, text prompts and
+     the password display all render as an area that takes over the panel,
+     Docker-Desktop-style, instead of opening a separate window. While open,
+     the normal sections are hidden and the panel's height follows the dialog. */
+  #dialog { display: none; }
+  #panel.dlg > :not(#dialog) { display: none; }
+  #panel.dlg #dialog { display: flex; flex-direction: column; gap: 12px; padding: 16px 18px 14px; }
+  #dialog .dtitle { font-size: 15px; font-weight: 700; }
+  #dialog .dmsg { font-size: 13px; line-height: 1.5; color: var(--text2); white-space: pre-wrap; }
+  #dialog .dsecret {
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 14px; padding: 10px 12px;
+    border: 1.5px solid var(--border); background: var(--sunken);
+    -webkit-user-select: text; user-select: text; word-break: break-all;
+  }
+  #dialog .dnote {
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 11px; color: var(--muted);
+  }
+  #dialog input {
+    all: unset; box-sizing: border-box; width: 100%;
+    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-size: 13px; color: var(--text);
+    padding: 9px 12px; border: 1.5px solid var(--border); background: var(--surface);
+    -webkit-user-select: text; user-select: text; cursor: text;
+  }
+  #dialog input:focus { background: var(--sunken); }
+  #dialog .dbtns { display: flex; gap: 8px; margin-top: 2px; }
+  #dialog .dbtns .btn { flex: 1; }
+
   /* state-flip crossfade — the spec's 120 ms */
   #panel.fade { animation: fade 120ms ease-out; }
   @keyframes fade { from { opacity: 0.4; } to { opacity: 1; } }
@@ -219,6 +250,7 @@
   <div id="actions" class="section" hidden></div>
   <div id="toggles" class="section" hidden></div>
   <footer id="ft" class="section"></footer>
+  <div id="dialog"></div>
 </div>
 
 <script>
@@ -467,7 +499,75 @@ document.addEventListener('click', function (e) {
   post({ action: action, dismiss: !staysOpen });
 });
 
+// -- in-panel dialog ------------------------------------------------------
+var dlgOpen = false;
+var dlgAnswer = null; // set while a dialog is open; answers and hides it
+
+// cixDialog(d) shows one dialog; cixDialog(null) hides it. d:
+//   {kind: 'alert'|'confirm'|'prompt'|'secret', title, message,
+//    okLabel, cancelLabel, defaultAnswer, secret, note}
+// The answer goes back as one {action:'dialog-result', ok, text} message.
+window.cixDialog = function (d) {
+  var panel = document.getElementById('panel');
+  var dlg = document.getElementById('dialog');
+  if (!d) {
+    dlgOpen = false;
+    dlgAnswer = null;
+    panel.classList.remove('dlg');
+    dlg.innerHTML = '';
+    reportHeight();
+    return;
+  }
+  dlgOpen = true;
+
+  var html = '<div class="dtitle">' + esc(d.title) + '</div>';
+  if (d.message) { html += '<div class="dmsg">' + esc(d.message) + '</div>'; }
+  if (d.kind === 'secret') {
+    html += '<div class="dsecret">' + esc(d.secret) + '</div>';
+    if (d.note) { html += '<div class="dnote">' + esc(d.note) + '</div>'; }
+  }
+  if (d.kind === 'prompt') {
+    html += '<input id="dinput" type="text" spellcheck="false" ' +
+            'autocapitalize="off" autocorrect="off" value="' + esc(d.defaultAnswer) + '">';
+  }
+  html += '<div class="dbtns">';
+  if (d.kind === 'confirm' || d.kind === 'prompt') {
+    html += '<button class="btn" id="dcancel">' + esc(d.cancelLabel || 'Cancel') + '</button>';
+  }
+  html += '<button class="btn primary" id="dok">' + esc(d.okLabel || 'OK') + '</button></div>';
+
+  dlg.innerHTML = html;
+  panel.classList.remove('fade');
+  void panel.offsetWidth;
+  panel.classList.add('fade', 'dlg');
+
+  var input = document.getElementById('dinput');
+  var answer = function (ok) {
+    post({ action: 'dialog-result', ok: ok, text: input ? input.value : '' });
+    window.cixDialog(null);
+  };
+  dlgAnswer = answer;
+  document.getElementById('dok').addEventListener('click', function () { answer(true); });
+  var cancel = document.getElementById('dcancel');
+  if (cancel) { cancel.addEventListener('click', function () { answer(false); }); }
+  if (input) {
+    input.focus();
+    input.select();
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { answer(true); }
+    });
+  }
+  reportHeight();
+};
+
 document.addEventListener('keydown', function (e) {
+  if (dlgOpen) {
+    // The dialog owns the keyboard: Esc cancels, Enter confirms (the input's
+    // own Enter handler fires first and hides the dialog before this runs).
+    if (e.key === 'Escape' && dlgAnswer) { dlgAnswer(false); }
+    if (e.key === 'Enter' && dlgAnswer) { dlgAnswer(true); }
+    return;
+  }
   if (e.key === 'Escape') { post({ action: 'close' }); }
 });
 

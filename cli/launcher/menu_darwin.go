@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -108,10 +109,93 @@ func (m *menu) onReady() {
 	go m.poll.run(m.stop)
 	go m.watch()
 
-	// A quiet background check. It only speaks up when there is something to
-	// offer, and it is throttled and ETag-cached, so an app left open all day
-	// costs a handful of 304s.
-	go m.checkForUpdates(false)
+	go func() {
+		m.startupFlow()
+		// A quiet background check, strictly after setup — its "update
+		// available" question must not interleave with the wizard's. It only
+		// speaks up when there is something to offer, and it is throttled and
+		// ETag-cached, so an app left open all day costs a handful of 304s.
+		m.checkForUpdates(false)
+	}()
+}
+
+// startupFlow is first-launch setup, run once the panel exists so its dialogs
+// render inside it (Docker-Desktop-style) rather than as separate windows.
+//
+// Order matters here. A machine that already runs cix from a checkout has a
+// launchd agent under our label and a server holding our port, so the
+// first-run wizard must never get a look at it — it would set up a second
+// server that cannot bind, against a second, empty database.
+//
+// The whole flow holds the busy claim: it downloads and starts things, and a
+// Start click landing in the middle of setup is exactly what busy exists to
+// refuse.
+func (m *menu) startupFlow() {
+	if !m.beginBusy("Setting up…") {
+		return // cannot happen at startup; nothing sane to do if it did
+	}
+	defer m.endBusy()
+
+	switch {
+	case foreignAgent():
+		// Asks once, remembers the answer, and defaults to leaving it alone.
+		// When the user declines, the app stays in observe-only mode: status
+		// and the dashboard work, Start/Stop do not.
+		//
+		// No runtime is installed on this path. Observing somebody else's server
+		// needs no binaries of our own, and downloading 90 MB to watch an
+		// install the user asked us not to touch would be presumptuous. The one
+		// feature that does need it — password reset — offers the download when
+		// it is used.
+		handleForeignAgent(m.updater)
+
+	case needsFirstRun():
+		if err := runFirstRun(m.updater); err != nil {
+			if errors.Is(err, errCancelled) {
+				// Setup is resumable: the app stays in the menu bar with Start
+				// disabled, and the next launch offers the wizard again.
+				_ = alert("Setup cancelled",
+					"cix has not been set up yet, so the server cannot start.\n\n"+
+						"Quit and reopen cix when you want to finish setting it up.")
+			} else {
+				logf("first-run setup failed: %v", err)
+				_ = alert("Setup failed", fmt.Sprintf("cix could not complete first-time setup.\n\n%v", err))
+			}
+		}
+
+	default:
+		// A configured install with no runtime is the first launch after
+		// upgrading from a version that carried its server inside the bundle:
+		// the old app is gone, and with it the binary the launchd wrapper was
+		// pointing at. Say so before spending a minute on a download, because
+		// otherwise this is a menu bar app that appears to do nothing at all.
+		//
+		// Not said when a local tarball is supplied: there is no download to
+		// warn about, and this is the path a developer takes on every build.
+		if !runtimeReady() && os.Getenv("CIX_RUNTIME_TARBALL") == "" {
+			_ = alert("cix needs to finish updating",
+				"cix now keeps its server outside the application, so it updates without restarting.\n\n"+
+					"It will download that part now — around 40 MB, once.")
+		}
+		if err := ensureRuntime(m.updater, m.setProgress); err != nil {
+			logf("could not install the runtime: %v", err)
+			_ = alert("cix could not install its server",
+				fmt.Sprintf("%v\n\nThe menu bar app still works, but the server cannot start until this succeeds.", err))
+			return
+		}
+		m.setProgress("")
+		// Only after the runtime exists: pointing the launchd wrapper at a
+		// binary that is not there would break a working install rather than
+		// leave it alone.
+		//
+		// Nothing is started here. An app update no longer stops the server —
+		// the bundle holds none of what it runs — so there is no interrupted
+		// state to resume, and starting a server the user had deliberately
+		// stopped would be the app overriding them.
+		if err := writeLaunchdFiles(autostartEnabled()); err != nil {
+			logf("could not refresh launchd files: %v", err)
+		}
+	}
 }
 
 func (m *menu) onExit() {
@@ -130,6 +214,12 @@ func (m *menu) onAction(a panelAction) {
 		// actually came up.
 		logf("panel opened")
 		m.poll.refresh()
+	case "dialog-result":
+		resolvePanelDialog(panelDialogResult{OK: a.OK, Text: a.Text})
+	case "panel-closed":
+		// A dialog whose panel disappeared is a dialog nobody can answer any
+		// more; count it as declined so the waiting goroutine moves on.
+		resolvePanelDialog(panelDialogResult{OK: false})
 	case "toggle-server":
 		m.toggleServer()
 	case "dashboard":
