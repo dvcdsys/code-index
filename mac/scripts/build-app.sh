@@ -106,8 +106,17 @@ cp "$SERVER_BUNDLE/cix-server" "$APP/Contents/MacOS/cix-server"
 cp -R "$SERVER_BUNDLE/llama" "$APP/Contents/MacOS/llama"
 cp "$OUT_DIR/stage/cix" "$APP/Contents/MacOS/cix"
 cp "$OUT_DIR/stage/cix-launcher" "$APP/Contents/MacOS/cix-launcher"
-cp mac/Resources/AppIcon.icns mac/Resources/menubar.png mac/Resources/menubar@2x.png \
-    "$APP/Contents/Resources/"
+
+# The app icon is built from the iconset rather than committed as a binary, so
+# the PNGs stay the single source of truth. CFBundleIconFile in Info.plist.in
+# names this file without its extension, as macOS expects.
+iconutil -c icns mac/Resources/cix.iconset -o "$APP/Contents/Resources/cix.icns"
+
+# Menu-bar glyphs: 1x and 2x of the 18 px status item. These must stay template
+# images — pure black plus alpha — because macOS recolours them for dark mode
+# and for the pressed state and ignores everything but the alpha channel.
+cp mac/Resources/menubar/cixTemplate-18.png "$APP/Contents/Resources/cixTemplate.png"
+cp mac/Resources/menubar/cixTemplate-36.png "$APP/Contents/Resources/cixTemplate@2x.png"
 
 sed \
     -e "s|@SHORT_VERSION@|${MAC_VERSION}|g" \

@@ -76,7 +76,8 @@ cix.app/Contents/
     cix              command-line client
     llama/           Metal-accelerated llama-server + its libraries
   Resources/
-    AppIcon.icns  menubar.png  menubar@2x.png
+    cix.icns         app icon
+    cixTemplate.png  menu-bar glyph (and @2x)
 ```
 
 Everything executable lives in `Contents/MacOS/`, including `llama/`. That is

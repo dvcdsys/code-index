@@ -6,13 +6,12 @@ User-facing installation and usage documentation lives in
 
 ```
 mac/
-  Info.plist.in                    bundle metadata template (@PLACEHOLDER@ tokens)
-  Resources/                       icons — placeholders, safe to replace
-  scripts/build-app.sh             assemble + sign mac/dist/cix.app
-  scripts/sign-app.sh              ad-hoc codesign, innermost code first
-  scripts/make-dmg.sh              wrap the app in a drag-to-Applications DMG
-  scripts/make-placeholder-icons.py regenerate the placeholder artwork
-  dist/                            build output (gitignored)
+  Info.plist.in          bundle metadata template (placeholder tokens)
+  Resources/             icon set + DMG artwork — see Resources/README.md
+  scripts/build-app.sh   assemble + sign mac/dist/cix.app
+  scripts/sign-app.sh    ad-hoc codesign, innermost code first
+  scripts/make-dmg.sh    wrap the app in a drag-to-Applications DMG
+  dist/                  build output (gitignored)
 ```
 
 ## Build
@@ -33,6 +32,8 @@ set explicitly by CI:
 | `OUT_DIR` | build directory (default `mac/dist`) |
 | `SKIP_SERVER_BUILD` | `1` reuses an existing `server/dist` bundle — much faster when iterating on the launcher |
 | `SKIP_SIGN` | `1` skips codesign; the result **will not run** |
+
+`make-dmg.sh` additionally takes `DMG_LAYOUT` — see "Disk image" below.
 
 Release builds pass the versions in rather than deriving them, because
 `git describe` is not reliable on this repo: the three tag streams interleave,
@@ -75,13 +76,51 @@ things about it are not stylistic:
 `--options runtime` is deliberately not used: the hardened runtime only pays off
 alongside notarization, and it risks breaking `llama-server`.
 
-## DMG
+## Disk image
 
-A plain UDZO image containing `cix.app`, an `/Applications` symlink and a
-`READ ME FIRST.txt` with the Gatekeeper instructions. No custom window layout:
-positioning icons requires a read-write image driven through Finder over
-AppleScript in a real GUI session, which is flaky-to-impossible on a CI runner.
-A pre-baked `.DS_Store` can be added later without changing the script.
+The image carries exactly two visible items — `cix.app` and an `/Applications`
+symlink — over the designed background, with the red installer icon as the
+volume icon.
+
+A third item, a `READ ME FIRST.txt` carrying the Gatekeeper instructions, was
+tried and removed. The block happens *after* the user has dragged the app to
+Applications and ejected the image, so the file is on screen exactly when it is
+not needed and gone when it is. Those instructions belong in the release body,
+next to the download button, and in `doc/MACOS_APP.md`.
+
+Getting the window laid out means creating a read-write image, mounting it, and
+driving Finder over AppleScript — Finder stores the layout in the volume's
+`.DS_Store`, which cannot be written into a compressed read-only image
+afterwards. That needs a GUI session, which a CI runner may not have, and an
+automation-consent prompt would *hang* the build rather than fail it. So the
+step runs under a 90-second watchdog and `DMG_LAYOUT` decides what its failure
+means:
+
+| value | behaviour |
+|---|---|
+| `auto` (default) | try; on failure warn (a `::warning::` under Actions) and ship a valid but unstyled image |
+| `require` | try; on failure abort the release |
+| `off` | skip the Finder pass entirely |
+
+Once a release has proved the runner can do it, `require` is the right setting.
+
+Three details that cost real debugging time:
+
+- **The volume icon must be installed after the Finder pass**, not staged up
+  front. Staging it looks like it works — `hdiutil` copies the file, `SetFile`
+  sets the flag — and then Finder removes both while laying out the window, and
+  the image ships with a generic disk icon.
+- **Finder's item `position` is the top-left of the cell**, not its centre, and
+  a cell is the icon size plus its label (~124 px at icon size 104).
+- **Positions below y≈68 are not clamped, they translate everything.** Asking
+  for y=22 moved *every* item down by 46 px, sliding the app and the
+  Applications symlink off the arrow they are aligned with. Both of these only
+  matter if someone adds an item — worth knowing before trying.
+
+The volume name is a constant `cix` with no version in it: the layout is stored
+per volume and the AppleScript addresses the disk by name, so a version-stamped
+volume would make both version-specific for nothing. The version is in the
+filename.
 
 The app is copied with `ditto`, not `cp -R`. `cp -R` drops extended attributes
 and signature-relevant metadata, which turns a verified bundle into one that
@@ -89,24 +128,23 @@ fails `codesign --verify --strict` after the round trip through the image.
 
 ## Icons
 
-`mac/Resources/` holds three committed files:
+Real artwork, not placeholders — see [`Resources/README.md`](Resources/README.md)
+for the full set, the brand palette and the rules of use. In short:
 
-| File | Size | Notes |
-|---|---|---|
-| `menubar.png` | 18×18 | template image — black + alpha only |
-| `menubar@2x.png` | 36×36 | template image |
-| `AppIcon.icns` | — | full icns |
+- `Resources/cix.iconset/` → `iconutil` → `Contents/Resources/cix.icns` (app)
+- `Resources/cix-installer.iconset/` → `iconutil` → the DMG volume icon
+- `Resources/menubar/cixTemplate-{18,36}.png` → `Contents/Resources/cixTemplate{,@2x}.png`
+- `Resources/dmg/dmg-background{,@2x}.png` → the disk image window background
 
-They are placeholders. Replacing them means dropping in new files with the same
-names and sizes; no code changes anywhere.
+The `.icns` files are built rather than committed, so the PNG iconsets stay the
+single source of truth. Replacing the artwork means dropping in files with the
+same names — no code changes.
 
-The menu-bar images **must** be template images. macOS recolours template images
-to match the menu bar (dark mode, tinting, inactive state) and reads only their
-alpha channel — a coloured PNG renders as a solid smudge.
-
-`scripts/make-placeholder-icons.py` regenerates the current placeholders. It is
-stdlib-only and is never run by a build; it exists so the placeholders are
-reproducible rather than mystery binaries.
+Cream is the app, red is the installer; that inversion is the only thing telling
+the two apart in a Downloads folder. The menu-bar glyphs must stay template
+images (pure black plus alpha): macOS recolours them for dark mode and for the
+pressed state and reads nothing but the alpha channel, so a coloured PNG renders
+as a smudge.
 
 ## Apple Silicon only
 

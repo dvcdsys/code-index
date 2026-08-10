@@ -38,8 +38,10 @@
 	<string>com.cix.launcher</string>
 	<key>CFBundleExecutable</key>
 	<string>cix-launcher</string>
+	<!-- No extension, by convention: the file is Resources/cix.icns, built from
+	     mac/Resources/cix.iconset/ by build-app.sh. -->
 	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
+	<string>cix</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleSignature</key>
