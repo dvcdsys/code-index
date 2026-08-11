@@ -63,6 +63,7 @@ func newAdminFixture(t *testing.T) *adminFixture {
 		Sessions:       sessSvc,
 		APIKeys:        akSvc,
 		RuntimeCfg:     runtimecfg.New(database, envCfg),
+		Cfg:            envCfg,
 	}
 	return &adminFixture{
 		authTestFixture: &authTestFixture{

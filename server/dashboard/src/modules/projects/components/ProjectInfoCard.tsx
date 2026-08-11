@@ -1,18 +1,7 @@
 import type { Project } from '@/api/types';
 import { Card, CardBody, CardHead } from '@/ui/card';
+import { formatBytes } from '@/lib/formatBytes';
 import { formatDateTime, formatRelative } from '@/lib/formatDate';
-
-function formatBytes(bytes?: number | null): string {
-  if (!bytes || bytes <= 0) return '—';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let v = bytes;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
-}
 
 // Metadata that would otherwise need an SSH session: which embedding model
 // produced the vectors, where this project's SQLite and chromem-go state

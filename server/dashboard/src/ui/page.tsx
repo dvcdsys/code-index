@@ -1,12 +1,21 @@
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/cn';
 
-// Every page is: a fixed header (title + one sentence + exactly ONE primary
+// Every page is: a fixed header (title + one sentence + at most ONE primary
 // action) over a scrolling content area. Sub-navigation — tabs, segmented
 // controls, filters — belongs in the content, never in the header.
 //
-// The header does not scroll away: on the Server page it carries "Save &
-// restart", and an action you can lose by scrolling is an action you forget.
+// The header does not scroll away, which is why an action lives there: one you
+// can lose by scrolling is one you forget. But that only holds while the action
+// applies to the whole page. Once a page grows tabs, a header action either
+// follows the active tab — appearing and vanishing under the title, which reads
+// as a glitch — or hovers over tabs it has nothing to do with. The Server page
+// hit exactly that and moved "Save & restart" into its Runtime settings tab,
+// as a plain bar closing the form it acts on. Tabbed pages should follow suit.
+//
+// That bar was sticky at first, to keep the "cannot scroll it away" property.
+// It was worse: cards sliding under a pinned strip read as a rendering fault.
+// A form short enough to reach the end of does not need its action pinned.
 export function Page({
   title,
   subtitle,

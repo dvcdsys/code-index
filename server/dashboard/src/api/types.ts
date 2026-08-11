@@ -88,3 +88,17 @@ export type TestEmbeddingProviderResponse = components['schemas']['TestEmbedding
 
 // Provider kind union — the dashboard uses this in form-state discriminants.
 export type EmbeddingProviderKind = 'ollama' | 'openai' | 'voyage';
+
+// Admin resource accounting: what the server is using, what of that is
+// reclaimable, and the result of reclaiming it.
+export type ResourceUsage = components['schemas']['ResourceUsage'];
+export type MemoryUsage = components['schemas']['MemoryUsage'];
+export type DiskUsage = components['schemas']['DiskUsage'];
+export type VectorStoreUsage = components['schemas']['VectorStoreUsage'];
+export type ReclaimAnalysis = components['schemas']['ReclaimAnalysis'];
+export type ReclaimCategory = components['schemas']['ReclaimCategory'];
+export type ReclaimCategoryId = components['schemas']['ReclaimCategoryId'];
+export type ReclaimItem = components['schemas']['ReclaimItem'];
+export type CleanRequest = components['schemas']['CleanRequest'];
+export type CleanResult = components['schemas']['CleanResult'];
+export type CleanCategoryResult = components['schemas']['CleanCategoryResult'];

@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import type { ModelEntry, RuntimeConfig } from '@/api/types';
+import { formatBytes as formatSize } from '@/lib/formatBytes';
 import { Callout } from '@/ui/alert';
 import { Card, CardBody, CardHead } from '@/ui/card';
 import { Chip } from '@/ui/code';
@@ -22,18 +23,6 @@ function isAbsPath(v: string): boolean {
   // POSIX-only is enough — the server runs on Linux/macOS. Windows would need
   // an extra drive-letter test.
   return v.startsWith('/');
-}
-
-function formatSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '—';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let i = 0;
-  let v = bytes;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
 }
 
 // Exactly one model source, chosen with two radio panels:

@@ -176,7 +176,7 @@ func (s *Server) AddGitRepo(w http.ResponseWriter, r *http.Request) {
 		//       would cascade away the winner's git_repo row.
 		if projectCreatedHere {
 			if _, gerr := s.Deps.GitRepos.GetByPath(r.Context(), projectPath); errors.Is(gerr, gitrepos.ErrNotFound) {
-				if derr := projects.Delete(r.Context(), s.Deps.DB, projectPath); derr != nil && s.Deps.Logger != nil {
+				if derr := projects.Delete(r.Context(), s.Deps.DB, projectPath, s.projectArtifacts()); derr != nil && s.Deps.Logger != nil {
 					s.Deps.Logger.Warn(
 						"AddGitRepo: compensating projects.Delete after gitrepos.Create failure failed; an orphan 'pending' project may need manual cleanup",
 						"project_path", projectPath,

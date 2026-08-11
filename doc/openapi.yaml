@@ -602,6 +602,113 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /api/v1/admin/resources:
+    get:
+      operationId: getResourceUsage
+      tags: [admin]
+      summary: Report memory and disk usage (admin only)
+      description: |
+        What the server is using right now: Go heap figures, resident set size
+        where the platform exposes it cheaply, the four storage locations with
+        their sizes and free space, and the resident vector-store totals.
+
+        The vector store is an in-memory database — every document of every
+        collection is decoded into the heap at startup and never evicted — so
+        `memory.heap_alloc_bytes` tracks the size of the loaded index almost
+        one-for-one, and `vector_store.documents` is the number that explains
+        it. Document counts are read from memory and free; the directory sizes
+        are real filesystem walks and can take several seconds on a large
+        index, so render this behind a loading state rather than polling it.
+      responses:
+        "200":
+          description: Current usage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceUsage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/resources/analyze:
+    post:
+      operationId: analyzeReclaimable
+      tags: [admin]
+      summary: Find reclaimable garbage (admin only)
+      description: |
+        Reconciles what is on disk and in memory against what the database
+        still knows about, and returns the reclaimable garbage grouped into
+        categories the admin can select individually.
+
+        Synchronous and expensive — it walks the vector store and the clone
+        directory. Concurrent calls collapse into a single scan.
+
+        The returned `analysis_id` is passed back to
+        `POST /api/v1/admin/resources/clean`. It is an identity for "the
+        picture the admin was shown", not a safety mechanism: every item is
+        re-validated against live state immediately before it is deleted, so a
+        project that comes back between analyze and clean is skipped rather
+        than wiped.
+      responses:
+        "200":
+          description: Analysis complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReclaimAnalysis"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/resources/clean:
+    post:
+      operationId: cleanResources
+      tags: [admin]
+      summary: Delete the selected reclaimable categories (admin only)
+      description: |
+        Deletes the selected categories from a previous analysis.
+
+        Returns `200` even when individual items failed or were skipped — the
+        per-category counts carry that detail, and failing the whole call would
+        hide the items that were successfully reclaimed. `409` means the
+        analysis expired or was already spent; re-run analyze.
+
+        Deleting orphaned collections releases heap immediately — the server
+        forces a GC afterwards, so `heap_alloc_bytes` drops right away. How far
+        `rss_bytes` follows is platform-dependent: on Linux the pages go back to
+        the OS and resident memory drops with the heap; on macOS they are marked
+        reclaimable and stay resident until something else needs them.
+        Everything else is disk only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CleanRequest"
+      responses:
+        "200":
+          description: Clean finished (possibly with per-item failures)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CleanResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
   /api/v1/admin/embedding-providers:
     get:
       operationId: listEmbeddingProviders
@@ -3159,6 +3266,14 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    ResourcesUnavailable:
+      description: |
+        Resource accounting is not wired on this server (no config in the
+        handler dependencies — happens in partial-test contexts).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     WorkspacesDisabled:
       description: |
         Required service is not configured on this server (commonly an
@@ -3600,6 +3715,230 @@ components:
         cache_dir:
           type: string
           description: The CIX_GGUF_CACHE_DIR that was scanned. Empty list with non-empty cache_dir = no .gguf files found.
+
+    MemoryUsage:
+      type: object
+      required:
+        [
+          heap_alloc_bytes,
+          heap_inuse_bytes,
+          heap_idle_bytes,
+          heap_released_bytes,
+          sys_bytes,
+          num_gc,
+          num_goroutine,
+        ]
+      description: |
+        Go runtime memory. heap_alloc_bytes is the meaningful figure for this
+        server: the vector store lives entirely in the heap, so it tracks the
+        size of the loaded index. sys_bytes and rss_bytes run higher because
+        the runtime holds freed spans before returning them to the OS.
+      properties:
+        heap_alloc_bytes: { type: integer, format: int64, minimum: 0 }
+        heap_inuse_bytes: { type: integer, format: int64, minimum: 0 }
+        heap_idle_bytes: { type: integer, format: int64, minimum: 0 }
+        heap_released_bytes: { type: integer, format: int64, minimum: 0 }
+        sys_bytes: { type: integer, format: int64, minimum: 0 }
+        num_gc: { type: integer, format: int64, minimum: 0 }
+        num_goroutine: { type: integer, minimum: 0 }
+        rss_bytes:
+          type: integer
+          format: int64
+          description: |
+            Current resident set size. Absent where it cannot be read without
+            cgo (macOS keeps it behind mach's task_info) — render "n/a", never
+            treat a missing field as zero.
+        peak_rss_bytes:
+          type: integer
+          format: int64
+          description: |
+            High-water resident set size from getrusage. Available on Linux and
+            macOS. It only ever rises, so it must be labelled as a peak and
+            never substituted for rss_bytes.
+
+    DiskUsage:
+      type: object
+      required: [id, label, path, exists]
+      properties:
+        id:
+          type: string
+          enum: [sqlite, chroma, repos, gguf]
+        label: { type: string }
+        path: { type: string }
+        exists: { type: boolean }
+        used_bytes:
+          type: integer
+          format: int64
+          description: |
+            Size of the tree. Absent when it could not be walked, which keeps
+            "unreadable" distinguishable from "empty". The SQLite entry
+            includes the -wal and -shm sidecars.
+        fs_total_bytes: { type: integer, format: int64 }
+        fs_free_bytes: { type: integer, format: int64 }
+
+    VectorStoreUsage:
+      type: object
+      required: [collections, documents, active_namespace_path]
+      description: Resident vector-store totals, read from memory — no I/O.
+      properties:
+        collections: { type: integer, minimum: 0 }
+        documents: { type: integer, format: int64, minimum: 0 }
+        active_namespace_path: { type: string }
+
+    ResourceUsage:
+      type: object
+      required: [generated_at, memory, disks, vector_store]
+      properties:
+        generated_at: { type: string, format: date-time }
+        memory: { $ref: "#/components/schemas/MemoryUsage" }
+        disks:
+          type: array
+          items: { $ref: "#/components/schemas/DiskUsage" }
+        vector_store: { $ref: "#/components/schemas/VectorStoreUsage" }
+
+    ReclaimCategoryId:
+      type: string
+      enum:
+        [
+          orphan_collections,
+          orphan_repos,
+          stale_namespaces,
+          stale_jobs,
+          unused_models,
+        ]
+
+    ReclaimItem:
+      type: object
+      required: [key, label, size_bytes]
+      properties:
+        key:
+          type: string
+          description: Server-side identity — collection name, path_hash, directory or model file.
+        label: { type: string }
+        detail: { type: string }
+        size_bytes: { type: integer, format: int64, minimum: 0 }
+
+    ReclaimCategory:
+      type: object
+      required:
+        [
+          id,
+          label,
+          description,
+          item_count,
+          size_bytes,
+          default_selected,
+          destructive,
+          items,
+          items_truncated,
+        ]
+      properties:
+        id: { $ref: "#/components/schemas/ReclaimCategoryId" }
+        label: { type: string }
+        description:
+          type: string
+          description: |
+            Server-authored explanation, including why a category is disabled
+            when it is. Render it as-is; the reasoning lives on the server so
+            the rules are decided in one place.
+        item_count:
+          type: integer
+          minimum: 0
+          description: Total items found — may exceed the length of `items`.
+        size_bytes: { type: integer, format: int64, minimum: 0 }
+        estimated_ram_bytes:
+          type: integer
+          format: int64
+          description: |
+            Heap attributable to these items, apportioned by document count.
+            Only set for orphan_collections, and an estimate rather than a
+            measurement — chromem exposes no per-collection allocation figure.
+        default_selected:
+          type: boolean
+          description: Whether the dashboard should pre-tick this category.
+        destructive:
+          type: boolean
+          description: Expensive or impossible to regenerate; the confirm dialog warns extra.
+        items:
+          type: array
+          description: A sample for display, capped server-side. Cleaning always acts on the full set.
+          items: { $ref: "#/components/schemas/ReclaimItem" }
+        items_truncated: { type: boolean }
+
+    ReclaimAnalysis:
+      type: object
+      required:
+        [
+          analysis_id,
+          generated_at,
+          expires_at,
+          duration_ms,
+          total_reclaimable_bytes,
+          categories,
+        ]
+      properties:
+        analysis_id: { type: string }
+        generated_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        duration_ms: { type: integer, minimum: 0 }
+        total_reclaimable_bytes: { type: integer, format: int64, minimum: 0 }
+        categories:
+          type: array
+          items: { $ref: "#/components/schemas/ReclaimCategory" }
+        warnings:
+          type: array
+          description: Non-fatal problems, e.g. a directory that could not be read.
+          items: { type: string }
+
+    CleanRequest:
+      type: object
+      required: [analysis_id, categories]
+      properties:
+        analysis_id: { type: string }
+        categories:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ReclaimCategoryId" }
+
+    CleanOutcome:
+      type: object
+      required: [key, reason]
+      properties:
+        key: { type: string }
+        reason: { type: string }
+
+    CleanCategoryResult:
+      type: object
+      required:
+        [id, deleted_count, skipped_count, failed_count, reclaimed_bytes]
+      properties:
+        id: { $ref: "#/components/schemas/ReclaimCategoryId" }
+        deleted_count: { type: integer, minimum: 0 }
+        skipped_count:
+          type: integer
+          minimum: 0
+          description: Re-validation at delete time said it was no longer safe.
+        failed_count: { type: integer, minimum: 0 }
+        reclaimed_bytes: { type: integer, format: int64, minimum: 0 }
+        skipped:
+          type: array
+          items: { $ref: "#/components/schemas/CleanOutcome" }
+        failures:
+          type: array
+          items: { $ref: "#/components/schemas/CleanOutcome" }
+
+    CleanResult:
+      type: object
+      required:
+        [started_at, finished_at, duration_ms, reclaimed_bytes, categories]
+      properties:
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        duration_ms: { type: integer, minimum: 0 }
+        reclaimed_bytes: { type: integer, format: int64, minimum: 0 }
+        categories:
+          type: array
+          items: { $ref: "#/components/schemas/CleanCategoryResult" }
 
     EmbeddingProviderList:
       type: object

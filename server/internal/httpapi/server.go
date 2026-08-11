@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,7 +16,9 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/langdetect"
+	"github.com/dvcdsys/code-index/server/internal/maintenance"
 	"github.com/dvcdsys/code-index/server/internal/projects"
+	"github.com/dvcdsys/code-index/server/internal/repocloner"
 	"github.com/dvcdsys/code-index/server/internal/symbolindex"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
@@ -37,6 +38,11 @@ type Server struct {
 	// so each test fixture (and each running server) gets its own
 	// in-memory state.
 	loginLimiter *loginLimiter
+
+	// maintenance backs the admin resource endpoints. Built once by
+	// NewRouter because it owns the analysis cache — the id returned by
+	// analyze has to still resolve when clean comes back holding it.
+	maintenance *maintenance.Service
 }
 
 // Compile-time assertion that Server implements the generated interface.
@@ -238,67 +244,54 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request, path openapi
 		return
 	}
 	out := projectToOpenAPI(p)
-	s.enrichProjectStorage(&out, p)
+	s.enrichProjectStorage(r.Context(), &out, p)
 	writeJSON(w, http.StatusOK, out)
 }
 
-// enrichProjectStorage fills the storage-related Project fields. Skipped
-// when embeddings are disabled / unavailable — callers see those as nil and
-// the dashboard hides the section. Per-call os.Stat is cheap enough for the
-// single-project endpoint; we deliberately do NOT enrich the list endpoint
-// (would multiply stat calls × N projects on every page load).
-func (s *Server) enrichProjectStorage(out *openapi.Project, p *projects.Project) {
-	es, ok := s.Deps.EmbeddingSvc.(*embeddings.Service)
-	if !ok || es == nil {
-		return
+// enrichProjectStorage fills the storage-related Project fields. Per-call
+// os.Stat is cheap enough for the single-project endpoint; we deliberately do
+// NOT enrich the list endpoint (would multiply stat calls × N projects on
+// every page load).
+//
+// Prefers Deps.Cfg and falls back to the embedding service's copy, so the
+// fields still populate when embeddings are disabled.
+func (s *Server) enrichProjectStorage(ctx context.Context, out *openapi.Project, p *projects.Project) {
+	cfg := s.Deps.Cfg
+	if cfg == nil {
+		if es, ok := s.Deps.EmbeddingSvc.(*embeddings.Service); ok && es != nil {
+			cfg = es.Config()
+		}
 	}
-	cfg := es.Config()
 	if cfg == nil {
 		return
 	}
-	sqlitePath := cfg.SQLitePath
-	if sqlitePath != "" {
+	// The write-ahead log routinely runs to tens of megabytes on a busy
+	// index, so the main file alone understates the footprint.
+	if sqlitePath := cfg.SQLitePath; sqlitePath != "" {
 		out.SqlitePath = ptrString(sqlitePath)
 		if info, err := os.Stat(sqlitePath); err == nil {
 			sz := info.Size()
+			for _, sidecar := range []string{"-wal", "-shm"} {
+				if si, err := os.Stat(sqlitePath + sidecar); err == nil {
+					sz += si.Size()
+				}
+			}
 			out.SqliteSizeBytes = &sz
 		}
 	}
-	// Chroma dir is namespaced by the ACTIVE provider's identity path, so
-	// the displayed path tracks whatever provider is live now.
-	if comps := es.StoragePath(); cfg.ChromaPersistDir != "" && len(comps) > 0 {
-		col := vectorstore.CollectionName(p.HostPath)
-		dir := filepath.Join(cfg.ChromaDirFor(comps), col)
-		out.ChromaPath = ptrString(dir)
-		if sz, ok := dirSizeBytes(dir); ok {
-			out.ChromaSizeBytes = &sz
+	// Ask the store where the collection actually lives. Deriving the path by
+	// hand here is what broke this before: the code joined the logical
+	// collection name (project_<md5>) onto the namespace directory, but
+	// chromem stores collections under a hash of that name, so the path never
+	// existed and the size was silently omitted on every single project.
+	if m, ok := s.Deps.VectorStore.(vectorstore.Maintainer); ok && m != nil {
+		if dir := m.CollectionDir(p.HostPath); dir != "" {
+			out.ChromaPath = ptrString(dir)
+			if sz, ok := maintenance.DirSizeBytes(ctx, dir); ok {
+				out.ChromaSizeBytes = &sz
+			}
 		}
 	}
-}
-
-// dirSizeBytes walks dir and sums regular-file sizes. Returns (0,false) on
-// any error (missing dir, permission, etc.) so callers can decide to omit
-// the field rather than report a misleading 0.
-func dirSizeBytes(dir string) (int64, bool) {
-	var total int64
-	walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		total += info.Size()
-		return nil
-	})
-	if walkErr != nil {
-		return 0, false
-	}
-	return total, true
 }
 
 // UpdateProject — PATCH /api/v1/projects/{path}. Admin-only: settings
@@ -338,11 +331,71 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path open
 	if p == nil {
 		return
 	}
-	if err := projects.Delete(r.Context(), s.Deps.DB, p.HostPath); err != nil {
+	// Stop the pipeline before removing anything, the same two steps
+	// ForceStopIndex takes. Dequeuing alone is not enough: deleting a
+	// `running` row does not stop the goroutine behind it (see the note on
+	// jobs.DeleteByDedupeKeys), so an index already in flight would keep
+	// writing chunks and vectors and re-create the collection and checkout
+	// moments after the artifact cleanup removed them.
+	if s.Deps.Jobs != nil {
+		hash := projects.HashPath(p.HostPath)
+		if _, err := s.Deps.Jobs.DeleteByDedupeKeys(r.Context(), "clone:"+hash, "index:"+hash); err != nil {
+			s.Deps.Logger.Warn("delete project: clear queued jobs", "project", p.HostPath, "err", err)
+		}
+	}
+	if s.Deps.Indexer != nil {
+		if _, err := s.Deps.Indexer.CancelIndexing(r.Context(), p.HostPath); err != nil {
+			// Best effort: a live session that refuses to cancel leaves an
+			// orphan the Resources screen can reclaim, which is a better
+			// outcome than refusing to delete the project.
+			s.Deps.Logger.Warn("delete project: cancel active index session", "project", p.HostPath, "err", err)
+		}
+	}
+	if err := projects.Delete(r.Context(), s.Deps.DB, p.HostPath, s.projectArtifacts()); err != nil {
+		// A cleanup failure means the project itself is gone and only residue
+		// is left, which the Resources screen can reclaim. Reporting a 500
+		// there would tell the operator the delete failed when it did not.
+		if errors.Is(err, projects.ErrArtifactCleanup) {
+			s.Deps.Logger.Warn("delete project: cleanup left residue", "project", p.HostPath, "err", err)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// projectArtifacts wires the off-database cleanup for a project delete: the
+// vector collection (resident in RAM until dropped) and the cloned checkout.
+// Returns nil when neither is available, which keeps router-only tests working.
+func (s *Server) projectArtifacts() *projects.Artifacts {
+	art := &projects.Artifacts{}
+	if m, ok := s.Deps.VectorStore.(vectorstore.Maintainer); ok && m != nil {
+		art.DropCollection = func(hostPath string) error {
+			return m.DeleteCollectionByName(vectorstore.CollectionName(hostPath))
+		}
+	}
+	if s.Deps.DataDir != "" {
+		art.RemoveCloneDir = func(hostPath string) error {
+			hash := projects.HashPath(hostPath)
+			dir := repocloner.LocalDirFor(s.Deps.DataDir, hash)
+			if s.Deps.RepoLocks == nil {
+				return os.RemoveAll(dir)
+			}
+			// Same write lock the clone worker takes to rewrite a worktree,
+			// and the counterpart of the read lock the file/tree handlers
+			// take. Removing the tree out from under either is exactly what
+			// the registry exists to prevent.
+			return s.Deps.RepoLocks.WithWrite(hash, func() error {
+				return os.RemoveAll(dir)
+			})
+		}
+	}
+	if art.DropCollection == nil && art.RemoveCloneDir == nil {
+		return nil
+	}
+	return art
 }
 
 // ---------------------------------------------------------------------------
