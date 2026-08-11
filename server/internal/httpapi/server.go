@@ -61,6 +61,24 @@ var _ openapi.ServerInterface = (*Server)(nil)
 
 // GetHealth — GET /health (public).
 func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
+	// While the database is frozen for compaction, report healthy without
+	// touching it.
+	//
+	// This is not cosmetic. The probe below needs a connection from a pool of
+	// eight, and during a freeze it may not get one within its one-second
+	// budget — so the container healthcheck (30 s interval, 3 retries) would
+	// mark the server unhealthy and any restart policy would kill it in the
+	// middle of the compaction. The server is deliberately read-only here,
+	// not unwell, and the reason is carried in the payload so a caller that
+	// cares can tell the difference.
+	if s.Deps.DBMaint.Gate.Frozen() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "ok",
+			"maintenance": true,
+			"reason":      "the database is being compacted; reads are served, changes are refused",
+		})
+		return
+	}
 	if s.Deps.DB != nil {
 		pingCtx, cancel := context.WithTimeout(r.Context(), time.Second)
 		defer cancel()

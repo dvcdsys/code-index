@@ -181,7 +181,9 @@ func TestIndexStatus_GroupMemberHasReadAccess(t *testing.T) {
 
 	// Group + share + membership.
 	_, gbody := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups", map[string]string{"name": "Eng"})
-	var g struct{ ID string `json:"id"` }
+	var g struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(gbody, &g)
 	doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups/"+g.ID+"/members", map[string]string{"user_id": aliceID})
 	if rr, b := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/projects/"+extHash+"/shares", map[string]string{"group_id": g.ID}); rr.Code != http.StatusNoContent {

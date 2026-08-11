@@ -8,7 +8,7 @@ import "sort"
 // the best score across the merged set, and records inner hits as
 // NestedHits so the renderer can show them as breadcrumbs.
 //
-// Why this matters
+// # Why this matters
 //
 // Tree-sitter emits nested chunks by design: a class chunk wraps its method
 // chunks; a markdown H1 section wraps its H2 sub-sections; a Python class

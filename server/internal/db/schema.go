@@ -473,6 +473,29 @@ CREATE TABLE IF NOT EXISTS tunnel_config (
     updated_at      TEXT    NOT NULL,
     updated_by      TEXT
 );
+
+-- maintenance_settings holds the single row configuring automatic database
+-- reclaim (migration 19). Config only: the *outcome* of a run lives in the
+-- journal file beside the database, because a compaction replaces the
+-- database and nothing written during one survives into the new file.
+--
+-- No row is inserted here, by either the schema or the migration. Its absence
+-- means "never configured", and the defaults are then derived from the
+-- database's own auto-vacuum mode — so a server upgraded into this feature
+-- comes up with automation off and cannot surprise anybody, while a database
+-- created by a recent build comes up already sensible.
+CREATE TABLE IF NOT EXISTS maintenance_settings (
+    id                INTEGER PRIMARY KEY CHECK(id=1),
+    enabled           INTEGER,
+    mode              TEXT,
+    interval_hours    INTEGER,
+    min_free_percent  INTEGER,
+    min_free_bytes    INTEGER,
+    window_start_hour INTEGER,
+    window_end_hour   INTEGER,
+    updated_at        TEXT NOT NULL,
+    updated_by        TEXT
+);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -500,5 +523,6 @@ var ExpectedTables = []string{
 	"chunks_meta",
 	"chunks_fts",
 	"tunnel_config",
+	"maintenance_settings",
 	"schema_migrations",
 }

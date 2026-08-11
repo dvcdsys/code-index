@@ -44,6 +44,7 @@ func TestMerge_NestedSections(t *testing.T) {
 // TestMerge_SameSymbolAdjacent: splitChunk emitted run() as
 //   - lines 61-195, function:run
 //   - lines 196-198, block, no symbol
+//
 // Merge the second into the first.
 func TestMerge_SameSymbolAdjacent(t *testing.T) {
 	items := []searchResultItem{

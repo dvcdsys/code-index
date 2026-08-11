@@ -779,17 +779,27 @@ paths:
         re-executes itself rather than exiting, so a container keeps its PID 1
         and no restart policy or supervisor is involved.
 
-        Read-only is enforced at the driver level rather than by auditing
-        write paths: the pool is reopened with `query_only`, so a missed
-        handler cannot slip a write through. This matters because the rebuild
-        copies a *snapshot* — anything committed after the copy begins would
-        not be in the new file, and swapping it in would silently discard
-        those writes.
+        The read-only window matters because the rebuild copies a *snapshot*:
+        anything committed after the copy begins is absent from the new file,
+        and swapping it in would silently discard those writes. It is enforced
+        in three layers rather than one, because the obvious single mechanism
+        is wrong in both available forms.
+
+        A route gate refuses the endpoints that write, and is what keeps
+        latency sane — it is classified per route, never by HTTP method, since
+        search is a POST and is one of the things that must keep working.
+        Background work is stopped and drained before the copy starts. Finally
+        the compactor holds a write transaction on a connection of its own, so
+        anything that slips past the first two layers is refused by SQLite
+        itself rather than landing outside the snapshot.
 
         Set `enable_incremental` to also switch the file to incremental
-        auto-vacuum. That switch is not a separate cheap operation: SQLite can
-        only change the mode of a populated database by rebuilding it, so it
-        costs exactly one compaction and is folded into this one.
+        auto-vacuum. SQLite can only change the mode of a populated database
+        by rebuilding it, so the switch costs exactly one compaction and is
+        folded into this one — but it is not free afterwards: incremental mode
+        maintains pointer-map pages, so every page allocated or freed carries
+        an extra write. On a server whose hot path is bulk-inserting chunk and
+        symbol rows, that cost lands on indexing.
 
         Crash safety: progress is journalled to a state file beside the
         database, written atomically, and every combination of that state and
@@ -840,9 +850,15 @@ paths:
       summary: Return free pages to the filesystem in bounded chunks (admin only)
       description: |
         Runs `PRAGMA incremental_vacuum`, which moves free pages to the end of
-        the file and truncates it. Synchronous, bounded and cheap: it holds an
-        ordinary write lock for the pages it moves, not an exclusive lock on
-        the whole database, so it does not need a maintenance window.
+        the file, followed by a WAL checkpoint. Synchronous, bounded and
+        cheap: it holds an ordinary write lock for the pages it moves, not an
+        exclusive lock on the whole database, so it does not need a
+        maintenance window.
+
+        The checkpoint is part of the operation, not an extra. In WAL mode the
+        page moves and the truncation both land in the log, so the database
+        file does not shrink until the log is folded back in — without it a
+        small reclaim reports bytes freed while the file on disk is unchanged.
 
         Requires the file to be in incremental auto-vacuum mode; `409`
         otherwise, with compaction as the remedy.
@@ -974,11 +990,17 @@ paths:
       summary: Progress of a running maintenance operation (public)
       description: |
         Public and deliberately so. It reads a state file next to the database
-        and touches neither the database nor the session table, because it has
-        to keep answering while the server is restarting into the new file —
-        exactly the moment an admin is most likely to be staring at the
-        screen. Anything authenticated would return `401` there, and anything
-        DB-backed would hang.
+        and touches neither the database nor the session table, so it answers
+        throughout the read-only window and again the moment the restarted
+        server is listening. Anything authenticated would `401` while sessions
+        are unwritable, and anything DB-backed would block behind the freeze.
+
+        It cannot answer *during* the restart itself: the router is built
+        after the database is opened and the listener binds at the end of
+        startup, so a client sees a connection failure until the server is
+        back. A poller is expected to render that as "reconnecting" rather
+        than as an error — the journal it reads is durable, so the first
+        successful poll after the gap reports what happened.
 
         This is also how the result of a compaction reaches the dashboard at
         all: the outcome is only known after the snapshot the new database was

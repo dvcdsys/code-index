@@ -121,6 +121,11 @@ type Deps struct {
 	// project-detail card ended up reporting no vector-store size at all.
 	// Nil in router-only tests; the resource handlers then 503.
 	Cfg *config.Config
+	// DBMaint carries the hooks database compaction needs to reach the rest
+	// of the process. Zero value disables compaction while leaving the
+	// reporting and reclaim endpoints working, which is what router-only
+	// tests get.
+	DBMaint DBMaintHooks
 	// RepoLocks serialises file reads against the clone worker's worktree
 	// rewrite. Shared (same instance) with repojobs.Deps.RepoLocks. Nil-safe:
 	// NewRouter allocates a private registry when unset (tests).
@@ -188,6 +193,11 @@ func NewRouter(d Deps) http.Handler {
 		maintenance:  newMaintenanceService(d),
 		dbmaint:      newDBMaintService(d),
 	}
+
+	// Write freeze — installed before auth on purpose: the GitHub webhook
+	// route is a write that isPublicPath exempts from authentication, and a
+	// gate inside requireAuth would never see it.
+	r.Use(maintenanceGate(d.DBMaint.Gate))
 
 	// Auth — the middleware is installed unless AuthDisabled is true. Every
 	// authenticated route accepts EITHER an active session cookie OR a

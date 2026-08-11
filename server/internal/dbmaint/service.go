@@ -17,14 +17,35 @@ type Deps struct {
 	// DBPath is the database file. Everything this package writes — the
 	// journal, the event log, the candidate copy — lives beside it.
 	DBPath string
+	// Env is the CIX_DB_MAINTENANCE_* layer, for deployments configured by a
+	// compose file rather than by anyone opening the dashboard.
+	Env    ScheduleEnv
 	Logger *slog.Logger
+
+	// The hooks below are how compaction reaches the rest of the server
+	// without this package importing the job queue, the scheduler or the
+	// router. All are optional: a Service wired without them reports and
+	// reclaims but refuses to compact.
+
+	// Quiesce stops every background writer and waits for in-flight work to
+	// drain. An error means it could not, and the compaction is abandoned.
+	Quiesce func(ctx context.Context) error
+	// Freeze and Thaw drive the HTTP write gate.
+	Freeze func()
+	Thaw   func()
+	// RequestRestart asks the process to shut down cleanly and re-execute
+	// itself, which is how a compacted copy is adopted.
+	RequestRestart func()
+	// ActiveJobs counts in-flight clone and index jobs.
+	ActiveJobs func(ctx context.Context) (int, error)
 }
 
 // Service is the admin-facing surface over database maintenance.
 type Service struct {
 	d Deps
 
-	mu sync.Mutex
+	mu      sync.Mutex
+	running bool
 	// throughput is the copy rate measured by the last compaction on this
 	// machine, used to estimate the next one. Zero until a compaction has run,
 	// at which point the estimate stops being a guess.
@@ -60,6 +81,28 @@ func (s *Service) Checkpoint(ctx context.Context) (CheckpointResult, error) {
 // Reclaim returns free pages to the filesystem, up to maxPages (0 = all).
 func (s *Service) Reclaim(ctx context.Context, maxPages int64) (ReclaimResult, error) {
 	return Reclaim(ctx, s.d.DB, s.d.DBPath, maxPages)
+}
+
+// currentMode reads the database file's own auto-vacuum mode. It is read
+// live, never stored, so it is right on any server regardless of how it got
+// here — including one upgraded into this feature.
+func (s *Service) currentMode(ctx context.Context) AutoVacuum {
+	var v int64
+	if err := s.d.DB.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&v); err != nil {
+		s.d.Logger.Warn("could not read the database auto-vacuum mode", "err", err)
+		return AutoVacuumNone
+	}
+	return autoVacuumFromPragma(v)
+}
+
+// Schedule resolves the effective automatic-reclaim schedule.
+func (s *Service) Schedule(ctx context.Context) (Schedule, error) {
+	return ScheduleFor(ctx, s.d.DB, s.d.Env, s.currentMode(ctx), s.Status())
+}
+
+// SaveSchedule applies a patch and returns the schedule as it now resolves.
+func (s *Service) SaveSchedule(ctx context.Context, patch SchedulePatch, updatedBy string) (Schedule, error) {
+	return SaveSchedule(ctx, s.d.DB, s.d.Env, s.currentMode(ctx), s.Status(), patch, updatedBy)
 }
 
 // Status is the public progress report. It reads the journal and the event

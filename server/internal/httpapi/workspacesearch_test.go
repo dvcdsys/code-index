@@ -628,9 +628,9 @@ func TestWorkspaceSearch_RRFFusesBothSides(t *testing.T) {
 			{Content: "the beta filler", FilePath: "f.go", StartLine: 21, EndLine: 29, ChunkType: "function", Language: "go"},
 		},
 		[][]float32{
-			l2([]float32{1.0, 0.0, 0.0, 0.0}),  // cosine 1.0 with query
-			l2([]float32{0.0, 1.0, 0.0, 0.0}),  // cosine 0
-			l2([]float32{0.6, 0.8, 0.0, 0.0}),  // cosine 0.6
+			l2([]float32{1.0, 0.0, 0.0, 0.0}), // cosine 1.0 with query
+			l2([]float32{0.0, 1.0, 0.0, 0.0}), // cosine 0
+			l2([]float32{0.6, 0.8, 0.0, 0.0}), // cosine 0.6
 		},
 	)
 

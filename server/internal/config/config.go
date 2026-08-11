@@ -195,6 +195,19 @@ type Config struct {
 	// PollSchedulerTick is how often the shared poll scheduler scans for
 	// due repos. Source: CIX_POLL_SCHEDULER_TICK (default 30s).
 	PollSchedulerTick time.Duration
+
+	// Automatic database reclaim, CIX_DB_MAINTENANCE_*. All nil unless the
+	// variable is set: absent means "fall through to the dashboard setting,
+	// then to a default derived from the database's own auto-vacuum mode".
+	// These exist for deployments driven by a compose file, where nobody is
+	// going to open the dashboard to switch anything on.
+	DBMaintenanceEnabled         *bool
+	DBMaintenanceMode            *string
+	DBMaintenanceIntervalHours   *int
+	DBMaintenanceMinFreePercent  *int
+	DBMaintenanceMinFreeBytes    *int64
+	DBMaintenanceWindowStartHour *int
+	DBMaintenanceWindowEndHour   *int
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -466,6 +479,45 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.PollSchedulerTick = pollTick
+
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_ENABLED"); ok {
+		b, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_ENABLED: %w", err)
+		}
+		c.DBMaintenanceEnabled = &b
+	}
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_MODE"); ok {
+		m := strings.TrimSpace(v)
+		if m != "incremental" && m != "full" {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MODE must be \"incremental\" or \"full\", got %q", m)
+		}
+		c.DBMaintenanceMode = &m
+	}
+	for _, spec := range []struct {
+		key  string
+		into **int
+	}{
+		{"CIX_DB_MAINTENANCE_INTERVAL_HOURS", &c.DBMaintenanceIntervalHours},
+		{"CIX_DB_MAINTENANCE_MIN_FREE_PERCENT", &c.DBMaintenanceMinFreePercent},
+		{"CIX_DB_MAINTENANCE_WINDOW_START_HOUR", &c.DBMaintenanceWindowStartHour},
+		{"CIX_DB_MAINTENANCE_WINDOW_END_HOUR", &c.DBMaintenanceWindowEndHour},
+	} {
+		if v, ok := os.LookupEnv(spec.key); ok {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", spec.key, err)
+			}
+			*spec.into = &n
+		}
+	}
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_MIN_FREE_BYTES"); ok {
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_BYTES: %w", err)
+		}
+		c.DBMaintenanceMinFreeBytes = &n
+	}
 
 	return c, nil
 }

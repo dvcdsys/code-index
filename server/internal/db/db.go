@@ -69,8 +69,11 @@ var registeredMigrations = []migration{
 	{14, "user_local_project_disabled", func(db *sql.DB, _ OpenOptions) error { return migrateUserLocalProjectDisabled(db) }},
 	{15, "index_embed_batch_chunks", func(db *sql.DB, _ OpenOptions) error { return migrateIndexEmbedBatchChunks(db) }},
 	{16, "chunk_max_concurrent", func(db *sql.DB, _ OpenOptions) error { return migrateChunkMaxConcurrent(db) }},
-	{17, "llama_cache_ram_mib", func(db *sql.DB, _ OpenOptions) error { return migrateAddRuntimeSettingsColumn(db, "llama_cache_ram_mib") }},
+	{17, "llama_cache_ram_mib", func(db *sql.DB, _ OpenOptions) error {
+		return migrateAddRuntimeSettingsColumn(db, "llama_cache_ram_mib")
+	}},
 	{18, "projects_full_sync_required", func(db *sql.DB, _ OpenOptions) error { return migrateProjectsFullSyncRequired(db) }},
+	{19, "maintenance_settings", func(db *sql.DB, _ OpenOptions) error { return migrateMaintenanceSettings(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -262,6 +265,30 @@ CREATE TABLE IF NOT EXISTS tunnel_config (
 )`)
 	if err != nil {
 		return fmt.Errorf("create tunnel_config: %w", err)
+	}
+	return nil
+}
+
+// migrateMaintenanceSettings creates the single-row table configuring
+// automatic database reclaim. It deliberately inserts no row: the absence of
+// one means "never configured", which is how an upgraded server comes up with
+// automation off instead of inheriting a decision nobody made.
+func migrateMaintenanceSettings(db *sql.DB) error {
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS maintenance_settings (
+    id                INTEGER PRIMARY KEY CHECK(id=1),
+    enabled           INTEGER,
+    mode              TEXT,
+    interval_hours    INTEGER,
+    min_free_percent  INTEGER,
+    min_free_bytes    INTEGER,
+    window_start_hour INTEGER,
+    window_end_hour   INTEGER,
+    updated_at        TEXT NOT NULL,
+    updated_by        TEXT
+)`)
+	if err != nil {
+		return fmt.Errorf("create maintenance_settings: %w", err)
 	}
 	return nil
 }
