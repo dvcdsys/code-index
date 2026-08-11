@@ -46,6 +46,11 @@ type Service struct {
 
 	mu      sync.Mutex
 	running bool
+
+	// schedStopped is closed when RunScheduler returns, so StopScheduler can
+	// wait for it rather than merely cancel it.
+	schedStopped chan struct{}
+	schedDone    sync.Once
 	// throughput is the copy rate measured by the last compaction on this
 	// machine, used to estimate the next one. Zero until a compaction has run,
 	// at which point the estimate stops being a guess.
@@ -57,13 +62,17 @@ func New(d Deps) *Service {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
-	s := &Service{d: d}
+	s := &Service{d: d, schedStopped: make(chan struct{})}
 	// A previous run's measured rate outlives the process that measured it.
 	if st, ok, err := Load(d.DBPath); err == nil && ok {
 		s.throughput = st.ThroughputBytesPerSec
 	}
 	return s
 }
+
+// ActiveJobsFunc exposes the in-flight job counter the service was wired
+// with, so a caller can build one service and reuse its wiring.
+func (s *Service) ActiveJobsFunc() func(context.Context) (int, error) { return s.d.ActiveJobs }
 
 // Stats reports the size, waste and advice for the database file.
 func (s *Service) Stats(ctx context.Context) (Stats, error) {

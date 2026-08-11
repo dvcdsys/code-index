@@ -661,24 +661,60 @@ func run() (restart bool, err error) {
 	restartCh := make(chan struct{})
 	var restartOnce sync.Once
 
+	// Quiesce drains every background writer, in dependency order: the
+	// producers first (they enqueue work), then the queue itself. Cancelling
+	// is not enough for any of them — the compactor needs to know they have
+	// *finished*, because a tick still in flight would write into a database
+	// that is about to be replaced.
+	var dbMaintSvc *dbmaint.Service
+	quiesce := func(ctx context.Context) error {
+		bgCancel()
+		if err := pollSvc.Stop(ctx); err != nil {
+			return fmt.Errorf("poll scheduler did not stop: %w", err)
+		}
+		if err := dbMaintSvc.StopScheduler(ctx); err != nil {
+			return fmt.Errorf("maintenance scheduler did not stop: %w", err)
+		}
+		jobsCancel()
+		if err := jobsSvc.Stop(ctx); err != nil {
+			return fmt.Errorf("job queue did not drain: %w", err)
+		}
+		return nil
+	}
+
+	dbMaintSvc = dbmaint.New(dbmaint.Deps{
+		DB:             database,
+		DBPath:         cfg.SQLitePath,
+		Logger:         logger,
+		Quiesce:        quiesce,
+		Freeze:         dbGate.Freeze,
+		Thaw:           dbGate.Thaw,
+		RequestRestart: func() { restartOnce.Do(func() { close(restartCh) }) },
+		ActiveJobs: func(ctx context.Context) (int, error) {
+			var n int
+			err := database.QueryRowContext(ctx, `
+				SELECT COUNT(*) FROM jobs
+				WHERE status IN ('pending','running') AND type IN ('clone_repo','index_repo')`).Scan(&n)
+			return n, err
+		},
+		Env: dbmaint.ScheduleEnv{
+			Enabled:         cfg.DBMaintenanceEnabled,
+			Mode:            cfg.DBMaintenanceMode,
+			IntervalHours:   cfg.DBMaintenanceIntervalHours,
+			MinFreePercent:  cfg.DBMaintenanceMinFreePercent,
+			MinFreeBytes:    cfg.DBMaintenanceMinFreeBytes,
+			WindowStartHour: cfg.DBMaintenanceWindowStartHour,
+			WindowEndHour:   cfg.DBMaintenanceWindowEndHour,
+		},
+	})
+	go dbMaintSvc.RunScheduler(bgCtx)
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		DBMaint: httpapi.DBMaintHooks{
+			Service:        dbMaintSvc,
 			Gate:           dbGate,
 			RequestRestart: func() { restartOnce.Do(func() { close(restartCh) }) },
-			// Quiesce drains every background writer. Order matters: the poll
-			// scheduler enqueues jobs, so it goes first, or it could hand the
-			// queue new work while the queue is being drained.
-			Quiesce: func(ctx context.Context) error {
-				if err := pollSvc.Stop(ctx); err != nil {
-					return fmt.Errorf("poll scheduler did not stop: %w", err)
-				}
-				bgCancel()
-				jobsCancel()
-				if err := jobsSvc.Stop(ctx); err != nil {
-					return fmt.Errorf("job queue did not drain: %w", err)
-				}
-				return nil
-			},
+			Quiesce:        quiesce,
 		},
 		DB:                database,
 		ServerVersion:     version,

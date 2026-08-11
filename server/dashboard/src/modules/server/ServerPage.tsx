@@ -21,6 +21,7 @@ import { RuntimeParamsSection } from './sections/RuntimeParamsSection';
 import { SidecarRail } from './sections/SidecarRail';
 import { AdvancedSection } from './sections/AdvancedSection';
 import { EmbeddingProviderSection } from './sections/EmbeddingProviderSection';
+import { DatabaseSection } from './sections/DatabaseSection';
 import { ResourcesSection } from './sections/ResourcesSection';
 import { SaveAndRestartDialog } from './components/SaveAndRestartDialog';
 
@@ -267,6 +268,7 @@ export default function ServerPage() {
             page is failing to load. */}
         <TabsContent value="resources">
           <ResourcesSection />
+            <DatabaseSection />
         </TabsContent>
       </Tabs>
 

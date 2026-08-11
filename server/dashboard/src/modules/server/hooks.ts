@@ -2,6 +2,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import type {
   ActiveEmbeddingProvider,
+  CheckpointResult,
+  CompactRequest,
+  DatabaseState,
+  MaintenanceOperation,
+  MaintenanceSchedule,
+  MaintenanceScheduleUpdate,
+  ReclaimRequest,
+  ReclaimResult,
   CleanRequest,
   CleanResult,
   EmbeddingProviderList,
@@ -23,6 +31,8 @@ export const serverKeys = {
   embeddingProviders: ['server', 'embedding-providers'] as const,
   activeProvider: ['server', 'embedding-provider', 'active'] as const,
   resources: ['server', 'resources'] as const,
+  database: ['server', 'database'] as const,
+  maintenanceSchedule: ['server', 'database', 'schedule'] as const,
 };
 
 export function useRuntimeConfig() {
@@ -173,5 +183,73 @@ export function useSwitchProvider() {
       qc.invalidateQueries({ queryKey: serverKeys.sidecarStatus });
       qc.invalidateQueries({ queryKey: ['runtime-model'] });
     },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Database compaction
+// ---------------------------------------------------------------------------
+
+export function useDatabaseState() {
+  return useQuery({
+    queryKey: serverKeys.database,
+    queryFn: ({ signal }) => api.get<DatabaseState>('/admin/database', { signal }),
+    // Poll quickly while an operation is in flight so the numbers and the
+    // button state track it; otherwise leave it alone — page geometry only
+    // changes when something is done to it.
+    refetchInterval: (q) => {
+      const data = q.state.data as DatabaseState | undefined;
+      const phase = data?.operation?.phase;
+      if (phase && phase !== 'idle' && phase !== 'done' && phase !== 'failed' && phase !== 'interrupted') {
+        return 2_000;
+      }
+      return false;
+    },
+    refetchIntervalInBackground: false,
+  });
+}
+
+export function useMaintenanceSchedule() {
+  return useQuery({
+    queryKey: serverKeys.maintenanceSchedule,
+    queryFn: ({ signal }) => api.get<MaintenanceSchedule>('/admin/database/schedule', { signal }),
+  });
+}
+
+export function useUpdateMaintenanceSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: MaintenanceScheduleUpdate) =>
+      api.put<MaintenanceSchedule>('/admin/database/schedule', patch),
+    onSuccess: (data) => qc.setQueryData(serverKeys.maintenanceSchedule, data),
+  });
+}
+
+export function useCheckpointWal() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post<CheckpointResult>('/admin/database/checkpoint'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: serverKeys.database }),
+  });
+}
+
+export function useReclaimFreePages() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ReclaimRequest) => api.post<ReclaimResult>('/admin/database/reclaim', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: serverKeys.database }),
+  });
+}
+
+// Compaction is a mutation rather than a query for the same reason analyze is:
+// it has a side effect that must never fire on a mount or a refetch. It
+// answers 202 and the server then restarts itself, so the banner — not this
+// hook — is what reports the outcome.
+export function useCompactDatabase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CompactRequest) =>
+      api.post<MaintenanceOperation>('/admin/database/compact', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: serverKeys.database }),
   });
 }

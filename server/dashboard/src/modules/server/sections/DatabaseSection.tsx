@@ -1,0 +1,230 @@
+import { useState } from 'react';
+import { ApiError } from '@/api/client';
+import { formatBytes } from '@/lib/formatBytes';
+import { toast } from 'sonner';
+import { Callout } from '@/ui/alert';
+import { Button, Dots } from '@/ui/button';
+import { Card, CardBody, CardFoot, CardHead, KV, StatStrip } from '@/ui/card';
+import { Skeleton } from '@/ui/skeleton';
+import { SwitchRow } from '@/ui/switch';
+import { ConfirmCompactDialog } from '../components/ConfirmCompactDialog';
+import { MaintenanceScheduleForm } from '../components/MaintenanceScheduleForm';
+import {
+  useCheckpointWal,
+  useCompactDatabase,
+  useDatabaseState,
+  useReclaimFreePages,
+} from '../hooks';
+
+const VERDICT_VARIANT = {
+  ok: 'default',
+  recommended: 'warn',
+  urgent: 'danger',
+} as const;
+
+export function DatabaseSection() {
+  const state = useDatabaseState();
+  const compact = useCompactDatabase();
+  const reclaim = useReclaimFreePages();
+  const checkpoint = useCheckpointWal();
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [viaToggle, setViaToggle] = useState(false);
+
+  const db = state.data;
+  const op = db?.operation ?? null;
+  const running =
+    !!op && !['idle', 'done', 'failed', 'interrupted'].includes(op.phase ?? 'idle');
+  const busy = running || compact.isPending || reclaim.isPending || checkpoint.isPending;
+
+  const describe = (err: unknown) => (err instanceof ApiError ? err.detail : String(err));
+
+  const onConfirmCompact = () => {
+    compact.mutate(
+      { enable_incremental: viaToggle },
+      {
+        onSuccess: () => {
+          setConfirmOpen(false);
+          toast.success('Compaction started', {
+            description: 'The server is read-only until it finishes, then it restarts itself.',
+          });
+        },
+        onError: (err) => {
+          setConfirmOpen(false);
+          toast.error('Could not start the compaction', { description: describe(err) });
+        },
+      },
+    );
+  };
+
+  const onReclaim = () => {
+    reclaim.mutate(
+      {},
+      {
+        onSuccess: (res) => {
+          if (res.bytes_freed > 0) {
+            toast.success(`Reclaimed ${formatBytes(res.bytes_freed)}`);
+          } else {
+            toast.info('Nothing to reclaim', {
+              description: 'The database has no free pages to return right now.',
+            });
+          }
+        },
+        onError: (err) => toast.error('Reclaim failed', { description: describe(err) }),
+      },
+    );
+  };
+
+  const onCheckpoint = () => {
+    checkpoint.mutate(undefined, {
+      onSuccess: (res) => {
+        const freed = res.wal_bytes_before - res.wal_bytes_after;
+        if (res.blocked) {
+          toast.warning('Checkpoint partially blocked', {
+            description: 'A reader held the log open; the rest goes on the next attempt.',
+          });
+        } else if (freed > 0) {
+          toast.success(`Folded ${formatBytes(freed)} of write-ahead log back in`);
+        } else {
+          toast.info('The write-ahead log was already empty');
+        }
+      },
+      onError: (err) => toast.error('Checkpoint failed', { description: describe(err) }),
+    });
+  };
+
+  return (
+    <Card>
+      <CardHead
+        title="Database"
+        aside={
+          db && db.wal_bytes > 0 ? (
+            <Button size="sm" variant="ghost" onClick={onCheckpoint} disabled={busy}>
+              {checkpoint.isPending ? <Dots /> : null}
+              Checkpoint log
+            </Button>
+          ) : null
+        }
+      />
+      <CardBody className="flex flex-col gap-5">
+        {state.isLoading ? (
+          <Skeleton className="h-32" />
+        ) : state.isError ? (
+          <Callout variant="warn">Could not read the database state: {describe(state.error)}</Callout>
+        ) : db ? (
+          <>
+            <StatStrip
+              items={[
+                { label: 'File size', value: formatBytes(db.file_bytes, { zero: '0 B' }) },
+                {
+                  label: 'Wasted',
+                  value: `${formatBytes(db.reclaimable_bytes, { zero: '0 B' })} (${Math.round(db.reclaimable_percent)}%)`,
+                  title: `${db.freelist_pages} free pages of ${db.page_count}`,
+                },
+                { label: 'Write-ahead log', value: formatBytes(db.wal_bytes, { zero: '0 B' }) },
+                {
+                  label: 'Reclaim mode',
+                  value: db.auto_vacuum === 'incremental' ? 'incremental' : db.auto_vacuum,
+                },
+              ]}
+            />
+
+            <Callout variant={VERDICT_VARIANT[db.verdict] ?? 'default'}>{db.verdict_reason}</Callout>
+
+            {running ? (
+              <Callout variant="default">
+                {op?.message ?? 'A maintenance operation is running.'}
+                {op?.bytes_total ? (
+                  <>
+                    {' '}
+                    {formatBytes(op.bytes_done ?? 0)} of {formatBytes(op.bytes_total)}.
+                  </>
+                ) : null}
+              </Callout>
+            ) : null}
+
+            <KV
+              rows={[
+                { label: 'Path', value: <span className="font-mono text-[12px]">{db.path}</span> },
+                { label: 'Page size', value: `${db.page_size} B` },
+                { label: 'Free disk', value: formatBytes(db.free_disk_bytes, { zero: 'unknown' }) },
+                {
+                  label: 'A compaction needs',
+                  value: formatBytes(db.required_disk_bytes, { zero: '0 B' }),
+                  title: 'The rebuilt copy exists alongside the original until the swap.',
+                },
+              ]}
+            />
+
+            <SwitchRow
+              id="db-incremental"
+              checked={db.auto_vacuum === 'incremental'}
+              disabled={busy || db.auto_vacuum === 'incremental'}
+              onCheckedChange={(next) => {
+                if (!next) return; // turning it off would also mean a rebuild; not offered
+                setViaToggle(true);
+                setConfirmOpen(true);
+              }}
+              label="Incremental reclaim"
+              hint={
+                db.auto_vacuum === 'incremental'
+                  ? 'Free pages can be returned to the filesystem without a rebuild.'
+                  : 'Off. Turning it on rebuilds the database once, and costs a little on every index run afterwards.'
+              }
+            />
+
+            <MaintenanceScheduleForm disabled={busy} mode={db.auto_vacuum} />
+          </>
+        ) : null}
+      </CardBody>
+
+      {db ? (
+        <CardFoot>
+          <span className="cix-hint">
+            {db.blocked_reason ??
+              (db.auto_vacuum === 'incremental'
+                ? 'Reclaim is cheap and needs no window. Compacting also defragments.'
+                : 'Compacting rebuilds the file and restarts the server.')}
+          </span>
+          <div className="ml-auto flex items-center gap-2.5">
+            {db.auto_vacuum === 'incremental' ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={onReclaim}
+                disabled={busy || db.reclaimable_bytes === 0}
+              >
+                {reclaim.isPending ? <Dots /> : null}
+                Reclaim now
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={() => {
+                setViaToggle(false);
+                setConfirmOpen(true);
+              }}
+              disabled={busy || !!db.blocked_reason}
+              title={db.blocked_reason ?? 'Rebuild the database and reclaim its empty space'}
+            >
+              {compact.isPending ? <Dots /> : null}
+              Compact now
+            </Button>
+          </div>
+        </CardFoot>
+      ) : null}
+
+      {db ? (
+        <ConfirmCompactDialog
+          open={confirmOpen}
+          onOpenChange={(next) => (!compact.isPending ? setConfirmOpen(next) : null)}
+          onConfirm={onConfirmCompact}
+          isPending={compact.isPending}
+          state={db}
+          viaToggle={viaToggle}
+        />
+      ) : null}
+    </Card>
+  );
+}

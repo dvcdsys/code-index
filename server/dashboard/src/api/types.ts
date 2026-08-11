@@ -102,3 +102,15 @@ export type ReclaimItem = components['schemas']['ReclaimItem'];
 export type CleanRequest = components['schemas']['CleanRequest'];
 export type CleanResult = components['schemas']['CleanResult'];
 export type CleanCategoryResult = components['schemas']['CleanCategoryResult'];
+
+// Database compaction: how much of the SQLite file is wasted, what an
+// operation on it is doing, and when one runs automatically.
+export type DatabaseState = components['schemas']['DatabaseState'];
+export type CompactRequest = components['schemas']['CompactRequest'];
+export type MaintenanceOperation = components['schemas']['MaintenanceOperation'];
+export type MaintenanceEvent = components['schemas']['MaintenanceEvent'];
+export type ReclaimRequest = components['schemas']['ReclaimRequest'];
+export type ReclaimResult = components['schemas']['ReclaimResult'];
+export type CheckpointResult = components['schemas']['CheckpointResult'];
+export type MaintenanceSchedule = components['schemas']['MaintenanceSchedule'];
+export type MaintenanceScheduleUpdate = components['schemas']['MaintenanceScheduleUpdate'];

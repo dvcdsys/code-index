@@ -18,6 +18,11 @@ import (
 // dependencies and so the whole mechanism can be exercised in a test without a
 // job queue or a real process to restart.
 type DBMaintHooks struct {
+	// Service, when set, is used instead of building one. main supplies it so
+	// the scheduler ticks on the *same* instance the handlers use — two
+	// services would not share the "already running" flag, and a scheduled
+	// compaction could start on top of a manual one.
+	Service *dbmaint.Service
 	// Gate is the write freeze consulted by the middleware, by the two Touch
 	// call sites and by the health probe. Nil means never frozen.
 	Gate *dbmaint.Gate
@@ -32,6 +37,9 @@ type DBMaintHooks struct {
 // tests). Constructed once so the throughput measured by a compaction survives
 // into the next estimate.
 func newDBMaintService(d Deps) *dbmaint.Service {
+	if d.DBMaint.Service != nil {
+		return d.DBMaint.Service
+	}
 	if d.Cfg == nil || d.DB == nil {
 		return nil
 	}
