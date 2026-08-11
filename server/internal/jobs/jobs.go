@@ -515,6 +515,28 @@ func (s *Service) DeleteByDedupeKeys(ctx context.Context, keys ...string) (int64
 	return n, nil
 }
 
+// DeleteFinishedBefore removes completed and failed rows that finished before
+// cutoff, returning how many went. This is the queue's only retention
+// mechanism: nothing else ever deletes terminal rows, so on a long-lived
+// server the table grows without bound.
+//
+// Mirrors DeleteByDedupeKeys in reverse — that one only touches active rows,
+// this one only touches terminal ones, so neither can ever cancel live work.
+// Rows with a NULL completed_at (a terminal status written by an older build)
+// fall back to created_at rather than being kept forever.
+func (s *Service) DeleteFinishedBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM jobs
+		  WHERE status IN ('completed', 'failed')
+		    AND COALESCE(completed_at, created_at) < ?`,
+		cutoff.UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, fmt.Errorf("delete finished jobs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // --- helpers ---
 
 func scanRow(r interface{ Scan(dest ...any) error }) (Job, error) {

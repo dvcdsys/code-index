@@ -12,6 +12,7 @@ import (
 	"net/http"
 
 	"github.com/dvcdsys/code-index/server/internal/apikeys"
+	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
@@ -112,6 +113,14 @@ type Deps struct {
 	// file/tree read handlers read from this on-disk checkout. Empty in
 	// router-only tests; those handlers then 409 (no checkout on disk).
 	DataDir string
+	// Cfg is the process-wide env-derived config, for handlers that need to
+	// resolve on-disk locations (SQLitePath, ChromaPersistDir, GGUFCacheDir,
+	// ChromaDirFor). The alternative — type-asserting EmbeddingSvc to
+	// *embeddings.Service and calling Config() — silently yields nothing when
+	// embeddings are disabled or a fake is installed, which is how the
+	// project-detail card ended up reporting no vector-store size at all.
+	// Nil in router-only tests; the resource handlers then 503.
+	Cfg *config.Config
 	// RepoLocks serialises file reads against the clone worker's worktree
 	// rewrite. Shared (same instance) with repojobs.Deps.RepoLocks. Nil-safe:
 	// NewRouter allocates a private registry when unset (tests).
@@ -173,7 +182,7 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(structuredLogger(d.Logger))
 	r.Use(limitBodySize())
 
-	srv := &Server{Deps: d, loginLimiter: newLoginLimiter()}
+	srv := &Server{Deps: d, loginLimiter: newLoginLimiter(), maintenance: newMaintenanceService(d)}
 
 	// Auth — the middleware is installed unless AuthDisabled is true. Every
 	// authenticated route accepts EITHER an active session cookie OR a

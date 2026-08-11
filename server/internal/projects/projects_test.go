@@ -299,7 +299,7 @@ func TestDelete(t *testing.T) {
 
 	_, _ = Create(ctx, d, CreateRequest{HostPath: "/proj"})
 
-	if err := Delete(ctx, d, "/proj"); err != nil {
+	if err := Delete(ctx, d, "/proj", nil); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
@@ -309,11 +309,50 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+// The artifacts hook is the fix for the leak that motivated the Resources
+// screen: FK CASCADE reaches rows only, so without it a deleted project left
+// its vector collection resident in RAM forever.
+func TestDelete_RunsArtifactHooks(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	_, _ = Create(ctx, d, CreateRequest{HostPath: "/proj"})
+
+	var droppedFor, removedFor string
+	err := Delete(ctx, d, "/proj", &Artifacts{
+		DropCollection: func(hostPath string) error { droppedFor = hostPath; return nil },
+		RemoveCloneDir: func(hostPath string) error { removedFor = hostPath; return nil },
+	})
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if droppedFor != "/proj" || removedFor != "/proj" {
+		t.Errorf("hooks called with (%q, %q), want both /proj", droppedFor, removedFor)
+	}
+}
+
+// A hook failure must not resurrect the project or look like a failed delete:
+// the row is gone, and what is left is reclaimable garbage.
+func TestDelete_ArtifactFailureStillDeletesTheProject(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	_, _ = Create(ctx, d, CreateRequest{HostPath: "/proj"})
+
+	err := Delete(ctx, d, "/proj", &Artifacts{
+		DropCollection: func(string) error { return errors.New("disk on fire") },
+	})
+	if !errors.Is(err, ErrArtifactCleanup) {
+		t.Fatalf("Delete error = %v, want it to wrap ErrArtifactCleanup", err)
+	}
+	if _, err := Get(ctx, d, "/proj"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("project still present after a cleanup failure: %v", err)
+	}
+}
+
 func TestDelete_NotFound(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 
-	err := Delete(ctx, d, "/nonexistent")
+	err := Delete(ctx, d, "/nonexistent", nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Delete nonexistent: %v, want ErrNotFound", err)
 	}

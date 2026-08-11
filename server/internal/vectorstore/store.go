@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strconv"
 
 	chromem "github.com/philippgille/chromem-go"
@@ -45,6 +46,10 @@ type SearchResult struct {
 // Store wraps a persistent chromem-go DB.
 type Store struct {
 	db *chromem.DB
+	// baseDir is the persist directory this Store was opened at. chromem-go
+	// keeps its own copy in an unexported field, so we remember it to be able
+	// to resolve a collection's on-disk directory (see maintenance.go).
+	baseDir string
 }
 
 // Open returns a Store backed by a persistent chromem-go DB at path.
@@ -54,7 +59,15 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vectorstore open %q: %w", path, err)
 	}
-	return &Store{db: db}, nil
+	// Mirror chromem-go's own normalisation (NewPersistentDB): empty means
+	// "./chromem-go", everything else is Cleaned. Keeping these in lockstep is
+	// what makes CollectionDir resolve to a path that actually exists.
+	if path == "" {
+		path = "./chromem-go"
+	} else {
+		path = filepath.Clean(path)
+	}
+	return &Store{db: db, baseDir: path}, nil
 }
 
 // collectionName mirrors Python: f"project_{md5hex(project_path)}"

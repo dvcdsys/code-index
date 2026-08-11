@@ -626,6 +626,7 @@ func run() error {
 		WorkspaceProjects: wpSvc,
 		Jobs:              jobsSvc,
 		DataDir:           cfg.WorkspacesDataDir,
+		Cfg:               cfg,
 		RepoLocks:         repoLocks,
 		PublicBaseURL:     cfg.PublicBaseURL,
 		Tunnel:            tunnelMgr,
