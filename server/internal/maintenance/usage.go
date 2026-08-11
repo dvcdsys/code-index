@@ -65,8 +65,9 @@ func (s *Service) Usage(ctx context.Context) Usage {
 			if u, ok := s.usage.get(s.now()); ok {
 				return u
 			}
-			// Leader produced nothing usable; compute it ourselves rather than
-			// recursing, so a persistently failing leader cannot spin.
+			// Leader produced nothing usable; fall through and compute it
+			// ourselves rather than re-entering Usage. Same reasoning as
+			// Analyze: recursing would add a stack frame per failed round.
 		case <-ctx.Done():
 			return Usage{GeneratedAt: s.now(), Memory: readMemory()}
 		}

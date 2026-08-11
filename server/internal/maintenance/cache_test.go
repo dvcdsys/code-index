@@ -2,6 +2,8 @@ package maintenance
 
 import (
 	"context"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -94,6 +96,100 @@ func TestAnalysisCache_ExpiryAndInvalidate(t *testing.T) {
 	if _, ok := c.take("ghi"); ok {
 		t.Error("an invalidated analysis must not be redeemable")
 	}
+}
+
+// Liveness under a persistently failing scan: every caller gets its own error
+// promptly, nobody deadlocks waiting on a leader that will never deliver.
+// This says nothing about HOW the retry is done — see the next test for that.
+func TestAnalyze_FailingScanStaysLive(t *testing.T) {
+	f := newFixture(t)
+	// Closing the database makes readScanState fail on every attempt.
+	if err := f.db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = f.svc.Analyze(context.Background())
+		}()
+	}
+
+	waited := make(chan struct{})
+	go func() { wg.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Analyze did not return under a persistently failing scan — callers are spinning or deadlocked")
+	}
+
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("caller %d succeeded against a closed database", i)
+		}
+	}
+}
+
+// The liveness check above passes even with a recursive retry — verified by
+// restoring the recursion, which reached 7 frames while that test stayed
+// green. This one measures the property directly: no goroutine may ever be
+// inside Analyze twice.
+func TestAnalyze_NeverReEntersItself(t *testing.T) {
+	f := newFixture(t)
+	if err := f.db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	var mu sync.Mutex
+	deepest := 0
+	// Now() is called once per scan attempt, from inside Analyze — so the
+	// call stack at that moment tells us how many Analyze frames are live.
+	f.svc.d.Now = func() time.Time {
+		depth := countFrames("maintenance.(*Service).Analyze")
+		mu.Lock()
+		if depth > deepest {
+			deepest = depth
+		}
+		mu.Unlock()
+		return f.now
+	}
+
+	const callers = 8
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = f.svc.Analyze(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	if deepest > 1 {
+		t.Errorf("Analyze was %d frames deep — the follower path is recursing", deepest)
+	}
+}
+
+// countFrames reports how many frames of the current stack belong to fn.
+func countFrames(fn string) int {
+	pcs := make([]uintptr, 64)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	count := 0
+	for {
+		fr, more := frames.Next()
+		if strings.Contains(fr.Function, fn) {
+			count++
+		}
+		if !more {
+			break
+		}
+	}
+	return count
 }
 
 // A follower that arrives while a scan is running must never be handed a

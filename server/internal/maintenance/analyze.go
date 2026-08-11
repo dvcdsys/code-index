@@ -58,13 +58,21 @@ func (s *Service) Analyze(ctx context.Context) (*Analysis, error) {
 			if a := s.cache.latest(); a != nil && a.ID != before && s.cache.fresh(a) {
 				return a, nil
 			}
-			// No usable result from the leader; scan ourselves.
-			return s.Analyze(ctx)
+			// The leader produced nothing usable, so fall through and scan
+			// ourselves — without re-entering Analyze. Recursing here would
+			// add a stack frame per failed round, and a scan that keeps
+			// failing under a steady stream of requests turns that into
+			// unbounded growth. Falling through also means each caller gets
+			// its own error instead of queueing behind a broken leader, which
+			// is what you want precisely when things are failing.
+			//
+			// Same shape as Usage; the two are deliberately identical.
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	} else {
+		defer done()
 	}
-	defer done()
 
 	ctx, cancel := context.WithTimeout(ctx, analysisBudget)
 	defer cancel()
