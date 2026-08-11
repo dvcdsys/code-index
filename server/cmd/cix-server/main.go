@@ -24,6 +24,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/chunker/tswasm"
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/db"
+	"github.com/dvcdsys/code-index/server/internal/dbmaint"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
@@ -167,6 +168,16 @@ func run() error {
 		return fmt.Errorf("adopt legacy system db: %w", err)
 	}
 	dbPath := cfg.SQLitePath
+
+	// Adopt a compacted copy left by a previous run, or undo a swap that was
+	// interrupted. This has to happen here — after the legacy adoption above,
+	// before anything opens the file — because it renames the database, and a
+	// rename under an open handle is exactly the corruption this feature
+	// exists to avoid.
+	if err := dbmaint.Reconcile(context.Background(), dbPath, logger); err != nil {
+		return fmt.Errorf("reconcile database maintenance state: %w", err)
+	}
+
 	logger.Info("opening database", "path", dbPath)
 	database, err := db.OpenWith(db.OpenOptions{
 		Path:    dbPath,

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/access"
+	"github.com/dvcdsys/code-index/server/internal/dbmaint"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
@@ -43,6 +44,12 @@ type Server struct {
 	// NewRouter because it owns the analysis cache — the id returned by
 	// analyze has to still resolve when clean comes back holding it.
 	maintenance *maintenance.Service
+
+	// dbmaint backs the database compaction endpoints. Built once by
+	// NewRouter because it caches the copy throughput measured by the last
+	// compaction, which is what turns the duration estimate from a guess
+	// into a measurement.
+	dbmaint *dbmaint.Service
 }
 
 // Compile-time assertion that Server implements the generated interface.

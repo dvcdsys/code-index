@@ -709,6 +709,293 @@ paths:
         "503":
           $ref: "#/components/responses/ResourcesUnavailable"
 
+  /api/v1/admin/database:
+    get:
+      operationId: getDatabaseState
+      tags: [admin]
+      summary: Report SQLite size, wasted space and compaction advice (admin only)
+      description: |
+        Deleting rows does not shrink a SQLite file. The pages go on the
+        freelist and are reused by later writes, so a database that has lost
+        more data than it has since gained stays large and mostly empty. This
+        endpoint reports how much of the file is waste and whether it is worth
+        doing anything about it.
+
+        Cheap: `page_count` and `freelist_pages` are header reads, not scans,
+        so this is safe to poll.
+
+        `auto_vacuum` is a property of the database file itself, not a stored
+        setting — it is read live, so it always reflects reality even on a
+        server that was upgraded into this feature. `none` means the file can
+        only be shrunk by a full rebuild; `incremental` means free pages can
+        additionally be returned to the filesystem in small bounded chunks
+        (see `POST /api/v1/admin/database/reclaim`).
+
+        `blocked_reason` is non-null when compaction cannot start right now —
+        an indexing or clone job is in flight, or the filesystem does not have
+        room for the copy. Render it instead of enabling the button.
+      responses:
+        "200":
+          description: Current database state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatabaseState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/database/compact:
+    post:
+      operationId: compactDatabase
+      tags: [admin]
+      summary: Rebuild the database to reclaim free pages (admin only)
+      description: |
+        Starts a background rebuild and returns immediately with `202`. Poll
+        `GET /maintenance/status` for progress.
+
+        What the admin is agreeing to, and what the confirmation dialog must
+        say before this is called:
+
+        * For the long part the server is **read-only**, not down. Search,
+          browsing and every read keep working. New logins and every write are
+          rejected with `503` and a `Retry-After`; indexing and scheduled
+          polling pause. Existing sessions and API keys keep working — their
+          last-seen timestamps simply stop being refreshed for the duration,
+          which is invisible against a 14-day session lifetime.
+        * Then the server **restarts itself** to adopt the new file, and is
+          fully unavailable while it comes back up.
+        * Expect roughly a minute per 8 GB on a warm SSD for the copy, plus
+          the usual startup time; `estimated_seconds` on `DatabaseState`
+          carries the current estimate.
+
+        The restart is not a fallback, it is the mechanism. Swapping the file
+        under a live server would leave every service holding an open handle
+        to the old one, so the swap is performed at boot, before anything
+        opens the database — no pool, no services, no concurrency. The process
+        re-executes itself rather than exiting, so a container keeps its PID 1
+        and no restart policy or supervisor is involved.
+
+        Read-only is enforced at the driver level rather than by auditing
+        write paths: the pool is reopened with `query_only`, so a missed
+        handler cannot slip a write through. This matters because the rebuild
+        copies a *snapshot* — anything committed after the copy begins would
+        not be in the new file, and swapping it in would silently discard
+        those writes.
+
+        Set `enable_incremental` to also switch the file to incremental
+        auto-vacuum. That switch is not a separate cheap operation: SQLite can
+        only change the mode of a populated database by rebuilding it, so it
+        costs exactly one compaction and is folded into this one.
+
+        Crash safety: progress is journalled to a state file beside the
+        database, written atomically, and every combination of that state and
+        the files actually present on disk maps to exactly one recovery
+        action. An interrupted copy is discarded; an interrupted swap is
+        carried forward or rolled back. The original is deleted last, so no
+        interruption leaves the server without a database. Nothing is resumed
+        — the operation is all-or-nothing and is simply re-run.
+
+        The state lives in a file rather than a table precisely because the
+        database is the thing being replaced: a row describing the operation
+        could not survive the swap, could not be written during the read-only
+        window, and could not be read back during the restart.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompactRequest"
+      responses:
+        "202":
+          description: Compaction started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            Already running, or held back because clone/index jobs are in
+            flight. `DatabaseState.blocked_reason` carries the same detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/database/reclaim:
+    post:
+      operationId: reclaimFreePages
+      tags: [admin]
+      summary: Return free pages to the filesystem in bounded chunks (admin only)
+      description: |
+        Runs `PRAGMA incremental_vacuum`, which moves free pages to the end of
+        the file and truncates it. Synchronous, bounded and cheap: it holds an
+        ordinary write lock for the pages it moves, not an exclusive lock on
+        the whole database, so it does not need a maintenance window.
+
+        Requires the file to be in incremental auto-vacuum mode; `409`
+        otherwise, with compaction as the remedy.
+
+        This reclaims space but does not defragment — a full compaction still
+        rebuilds the file and improves read locality. The point of incremental
+        reclaim is to make that rare rather than routine.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReclaimRequest"
+      responses:
+        "200":
+          description: Reclaim finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReclaimResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The database is not in incremental auto-vacuum mode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/database/checkpoint:
+    post:
+      operationId: checkpointWal
+      tags: [admin]
+      summary: Fold the write-ahead log back into the database (admin only)
+      description: |
+        Runs `PRAGMA wal_checkpoint(TRUNCATE)`. Seconds at most, no maintenance
+        window, and it only moves data that is already durable — the cheap
+        first thing to try when the `-wal` file has grown large.
+
+        A checkpoint can be blocked by long-running readers, in which case it
+        returns what it managed to move rather than failing.
+      responses:
+        "200":
+          description: Checkpoint finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckpointResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/database/schedule:
+    get:
+      operationId: getMaintenanceSchedule
+      tags: [admin]
+      summary: Read the automatic reclaim schedule (admin only)
+      description: |
+        A server that has never been configured has no stored schedule; the
+        defaults are then derived from the database itself. A file created by
+        a recent server is already in incremental mode and gets daily
+        incremental reclaim; a database carried over from an older install is
+        in `none` mode and gets nothing until an admin opts in. That is
+        deliberate — an upgrade must never start blocking anybody's server on
+        its own.
+
+        `source` reports where each effective value came from, the same way
+        the runtime settings do.
+      responses:
+        "200":
+          description: Effective schedule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceSchedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+    put:
+      operationId: updateMaintenanceSchedule
+      tags: [admin]
+      summary: Change the automatic reclaim schedule (admin only)
+      description: |
+        A scheduled run fires only when every condition holds at once: enabled,
+        the interval has elapsed, the waste is over both thresholds, the clock
+        is inside the window if one is set, no clone or index job is in flight,
+        and — for `full` — there is room for the copy. Anything else and the
+        tick is skipped silently until the next hour.
+
+        `full` is allowed but is not the default, because it takes the server
+        read-only for minutes. Setting it without a window is accepted; the UI
+        is expected to say what that means.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaintenanceScheduleUpdate"
+      responses:
+        "200":
+          description: Updated schedule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceSchedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /maintenance/status:
+    get:
+      operationId: getMaintenanceStatus
+      tags: [system]
+      summary: Progress of a running maintenance operation (public)
+      description: |
+        Public and deliberately so. It reads a state file next to the database
+        and touches neither the database nor the session table, because it has
+        to keep answering while the server is restarting into the new file —
+        exactly the moment an admin is most likely to be staring at the
+        screen. Anything authenticated would return `401` there, and anything
+        DB-backed would hang.
+
+        This is also how the result of a compaction reaches the dashboard at
+        all: the outcome is only known after the snapshot the new database was
+        built from, so it exists in the state file and nowhere else.
+
+        `phase` is `idle` when nothing is happening. `interrupted` means a
+        previous run did not finish and the next boot brought the database
+        back to a consistent state; it is informational, not an error to
+        clear.
+      responses:
+        "200":
+          description: Current maintenance state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceOperation"
+
   /api/v1/admin/embedding-providers:
     get:
       operationId: listEmbeddingProviders
@@ -3266,6 +3553,15 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    InsufficientStorage:
+      description: |
+        Not enough free space to hold the compacted copy alongside the
+        original. `DatabaseState.required_disk_bytes` and `free_disk_bytes`
+        carry the numbers.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     ResourcesUnavailable:
       description: |
         Resource accounting is not wired on this server (no config in the
@@ -3939,6 +4235,283 @@ components:
         categories:
           type: array
           items: { $ref: "#/components/schemas/CleanCategoryResult" }
+
+    DatabaseState:
+      type: object
+      required:
+        [
+          path,
+          file_bytes,
+          wal_bytes,
+          page_size,
+          page_count,
+          freelist_pages,
+          reclaimable_bytes,
+          reclaimable_percent,
+          auto_vacuum,
+          verdict,
+          verdict_reason,
+          free_disk_bytes,
+          required_disk_bytes,
+          estimated_seconds,
+        ]
+      properties:
+        path: { type: string }
+        file_bytes: { type: integer, format: int64, minimum: 0 }
+        wal_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Size of the `-wal` sidecar. Large on its own is not a problem —
+            it is checkpointed automatically — but it is the cheapest thing
+            to reclaim when it is not.
+        page_size: { type: integer, minimum: 0 }
+        page_count: { type: integer, format: int64, minimum: 0 }
+        freelist_pages:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Pages that are allocated but hold no data.
+        reclaimable_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "`freelist_pages` × `page_size` — waste, not a projection of the final size."
+        reclaimable_percent: { type: number, minimum: 0, maximum: 100 }
+        auto_vacuum:
+          type: string
+          enum: [none, incremental, full]
+          description: |
+            Read live from the database file, never from stored settings, so
+            it is correct on any server regardless of how it got here.
+        verdict:
+          type: string
+          enum: [ok, recommended, urgent]
+        verdict_reason:
+          type: string
+          description: One sentence explaining the verdict, safe to render as-is.
+        free_disk_bytes: { type: integer, format: int64, minimum: 0 }
+        required_disk_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Room a compaction needs: the copy is written alongside the
+            original, so both exist at once.
+        estimated_seconds:
+          type: integer
+          minimum: 0
+          description: |
+            Estimated copy time, excluding the restart. Derived from the
+            database size and a measured throughput figure, so it is an
+            order-of-magnitude guide rather than a promise.
+        blocked_reason:
+          type: string
+          nullable: true
+          description: |
+            Why compaction cannot start right now — an in-flight clone or
+            index job, insufficient disk, or an operation already running.
+            Null when it can start.
+        operation:
+          allOf: [{ $ref: "#/components/schemas/MaintenanceOperation" }]
+          nullable: true
+          description: The running or most recent operation, if any.
+
+    CompactRequest:
+      type: object
+      properties:
+        enable_incremental:
+          type: boolean
+          default: false
+          description: |
+            Also switch the file to incremental auto-vacuum. Free, in the
+            sense that a populated database can only change mode by being
+            rebuilt — which is what this operation already does.
+
+    MaintenanceOperation:
+      type: object
+      required: [run_id, kind, phase, started_at]
+      properties:
+        run_id:
+          type: string
+          description: |
+            Identifies one attempt. It changes on every run, so a client can
+            tell a fresh operation from a stale state file left by a process
+            that did not survive.
+        kind:
+          type: string
+          enum: [compact, reclaim, checkpoint]
+        phase:
+          type: string
+          enum:
+            [
+              idle,
+              preparing,
+              copying,
+              ready_to_swap,
+              swapping,
+              restarting,
+              done,
+              failed,
+              interrupted,
+            ]
+          description: |
+            `preparing` is draining background work; `copying` is the
+            read-only window; `ready_to_swap` onwards happens around and
+            during the restart. `interrupted` is a previous run that did not
+            finish — the database was brought back to a consistent state and
+            the operation can simply be re-run.
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        bytes_total:
+          type: integer
+          format: int64
+          nullable: true
+          description: Expected size of the copy, for a progress bar.
+        bytes_done: { type: integer, format: int64, nullable: true }
+        percent: { type: number, minimum: 0, maximum: 100, nullable: true }
+        freed_bytes: { type: integer, format: int64, nullable: true }
+        enable_incremental: { type: boolean, nullable: true }
+        message:
+          type: string
+          nullable: true
+          description: Human-readable description of the current step.
+        error: { type: string, nullable: true }
+        events:
+          type: array
+          description: |
+            Ordered trail of what happened, most recent last. Appended to a
+            file beside the database, so it spans the restart that the
+            operation performs — the server log alone is split across two
+            process lifetimes, and the interesting half is usually the one
+            that did not come back. Truncated to the most recent entries;
+            the full trail stays on disk.
+          items:
+            $ref: "#/components/schemas/MaintenanceEvent"
+
+    MaintenanceEvent:
+      type: object
+      required: [at, level, phase, message]
+      properties:
+        at: { type: string, format: date-time }
+        level: { type: string, enum: [info, warn, error] }
+        phase: { type: string }
+        message: { type: string }
+
+    ReclaimRequest:
+      type: object
+      properties:
+        max_pages:
+          type: integer
+          minimum: 1
+          description: |
+            Upper bound on pages returned to the filesystem in this call.
+            Omit to drain the whole freelist. Bounding it keeps the write
+            lock short on a database with a very large freelist.
+
+    ReclaimResult:
+      type: object
+      required: [pages_freed, bytes_freed, file_bytes, freelist_pages]
+      properties:
+        pages_freed: { type: integer, format: int64, minimum: 0 }
+        bytes_freed: { type: integer, format: int64, minimum: 0 }
+        file_bytes: { type: integer, format: int64, minimum: 0 }
+        freelist_pages:
+          type: integer
+          format: int64
+          minimum: 0
+          description: What is left on the freelist after this call.
+
+    CheckpointResult:
+      type: object
+      required: [pages_checkpointed, wal_bytes_before, wal_bytes_after, blocked]
+      properties:
+        pages_checkpointed: { type: integer, format: int64, minimum: 0 }
+        wal_bytes_before: { type: integer, format: int64, minimum: 0 }
+        wal_bytes_after: { type: integer, format: int64, minimum: 0 }
+        blocked:
+          type: boolean
+          description: |
+            True when a reader prevented the log from being fully folded in.
+            Not an error — the checkpoint moved what it could.
+
+    MaintenanceSchedule:
+      type: object
+      required:
+        [
+          enabled,
+          mode,
+          interval_hours,
+          min_free_percent,
+          min_free_bytes,
+          configured,
+          source,
+        ]
+      properties:
+        enabled: { type: boolean }
+        mode:
+          type: string
+          enum: [incremental, full]
+          description: |
+            `incremental` returns free pages to the filesystem in bounded
+            chunks and needs no window. `full` rebuilds the database and
+            takes the server read-only, then restarts it.
+        interval_hours: { type: integer, minimum: 1 }
+        min_free_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: |
+            Both thresholds must be met. A percentage alone nags on small
+            databases; an absolute figure alone nags on large ones.
+        min_free_bytes: { type: integer, format: int64, minimum: 0 }
+        window_start_hour:
+          type: integer
+          minimum: 0
+          maximum: 23
+          nullable: true
+          description: |
+            Local-time window the run must start inside. Null means any
+            hour. Mainly of interest for `full`.
+        window_end_hour: { type: integer, minimum: 0, maximum: 23, nullable: true }
+        configured:
+          type: boolean
+          description: |
+            False when no admin has ever saved a schedule and the values are
+            derived from the database's own auto-vacuum mode. Upgraded
+            servers come up unconfigured and therefore disabled.
+        last_run_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null when it has never run — render that, not an epoch date.
+        last_status:
+          type: string
+          enum: [ok, failed, skipped]
+          nullable: true
+        last_freed_bytes: { type: integer, format: int64, nullable: true }
+        last_error: { type: string, nullable: true }
+        source:
+          type: object
+          additionalProperties: { type: string, enum: [db, env, recommended] }
+          description: |
+            Where each effective value came from, so a compose-configured
+            server can explain a schedule nobody enabled in the dashboard.
+
+    MaintenanceScheduleUpdate:
+      type: object
+      description: |
+        Absent fields are left unchanged. Explicit `null` on the window
+        fields clears the window.
+      properties:
+        enabled: { type: boolean }
+        mode: { type: string, enum: [incremental, full] }
+        interval_hours: { type: integer, minimum: 1 }
+        min_free_percent: { type: integer, minimum: 0, maximum: 100 }
+        min_free_bytes: { type: integer, format: int64, minimum: 0 }
+        window_start_hour: { type: integer, minimum: 0, maximum: 23, nullable: true }
+        window_end_hour: { type: integer, minimum: 0, maximum: 23, nullable: true }
 
     EmbeddingProviderList:
       type: object
