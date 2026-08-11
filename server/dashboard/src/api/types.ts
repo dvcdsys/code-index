@@ -106,7 +106,7 @@ export type CleanCategoryResult = components['schemas']['CleanCategoryResult'];
 // Database compaction: how much of the SQLite file is wasted, what an
 // operation on it is doing, and when one runs automatically.
 export type DatabaseState = components['schemas']['DatabaseState'];
-export type CompactRequest = components['schemas']['CompactRequest'];
+export type AutoVacuumRequest = components['schemas']['AutoVacuumRequest'];
 export type MaintenanceOperation = components['schemas']['MaintenanceOperation'];
 export type MaintenanceEvent = components['schemas']['MaintenanceEvent'];
 export type ReclaimRequest = components['schemas']['ReclaimRequest'];

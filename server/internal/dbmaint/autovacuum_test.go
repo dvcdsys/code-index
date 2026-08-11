@@ -104,21 +104,21 @@ func TestCompact_CopyKeepsTheSourceModeUnlessAsked(t *testing.T) {
 	svc := New(Deps{DB: shared, DBPath: path, Logger: slog.New(slog.DiscardHandler)})
 
 	out := filepath.Join(dir, "copy.db")
-	if err := svc.copyInto(context.Background(), out, TargetKeep); err != nil {
+	if err := svc.copyInto(context.Background(), out, svc.currentMode(context.Background())); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 	if got := modeOf(t, out); got != AutoVacuumNone {
-		t.Errorf("a copy made with auto_vacuum=keep is in %q mode; it must match the source (%q)",
+		t.Errorf("a copy that preserves the source mode is in %q mode; it must match the source (%q)",
 			got, AutoVacuumNone)
 	}
 
 	// Asking for incremental switches the copy...
 	out2 := filepath.Join(dir, "copy2.db")
-	if err := svc.copyInto(context.Background(), out2, TargetIncremental); err != nil {
+	if err := svc.copyInto(context.Background(), out2, AutoVacuumIncremental); err != nil {
 		t.Fatalf("copy with enable_incremental: %v", err)
 	}
 	if got := modeOf(t, out2); got != AutoVacuumIncremental {
-		t.Errorf("a copy made with auto_vacuum=incremental is in %q mode, want %q", got, AutoVacuumIncremental)
+		t.Errorf("a copy asked for incremental is in %q mode, want %q", got, AutoVacuumIncremental)
 	}
 	_ = os.Remove(out)
 }
@@ -139,7 +139,7 @@ func TestCompact_CopyPreservesIncrementalWithoutBeingAsked(t *testing.T) {
 	svc := New(Deps{DB: sdb, DBPath: path, Logger: slog.New(slog.DiscardHandler)})
 
 	out := filepath.Join(dir, "copy.db")
-	if err := svc.copyInto(context.Background(), out, TargetKeep); err != nil {
+	if err := svc.copyInto(context.Background(), out, svc.currentMode(context.Background())); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 	if got := modeOf(t, out); got != AutoVacuumIncremental {
@@ -191,7 +191,7 @@ func TestCompact_CopyCanTurnIncrementalOff(t *testing.T) {
 	svc := New(Deps{DB: sdb, DBPath: path, Logger: slog.New(slog.DiscardHandler)})
 
 	out := filepath.Join(dir, "copy.db")
-	if err := svc.copyInto(context.Background(), out, TargetNone); err != nil {
+	if err := svc.copyInto(context.Background(), out, AutoVacuumNone); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 	if got := modeOf(t, out); got != AutoVacuumNone {
@@ -199,7 +199,7 @@ func TestCompact_CopyCanTurnIncrementalOff(t *testing.T) {
 	}
 }
 
-func TestCompact_RejectsAnUnknownTarget(t *testing.T) {
+func TestSetAutoVacuum_RejectsAnUnknownMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.db")
 	sdb, err := db.Open(path)
 	if err != nil {
@@ -211,7 +211,46 @@ func TestCompact_RejectsAnUnknownTarget(t *testing.T) {
 		Quiesce:        func(context.Context) error { return nil },
 		RequestRestart: func() {},
 	})
-	if _, err := svc.Compact(context.Background(), TargetMode("sideways")); err == nil {
-		t.Fatal("an unknown auto_vacuum target was accepted")
+	if _, _, err := svc.SetAutoVacuum(context.Background(), AutoVacuum("sideways")); err == nil {
+		t.Fatal("an unknown reclaim mode was accepted")
+	}
+}
+
+// Asking for the mode the database is already in must do nothing at all — no
+// rebuild, no restart, no interruption. This is the case the whole endpoint
+// hangs on: the toggle is a setting, and setting it to what it already is is
+// not an operation.
+func TestSetAutoVacuum_SameModeIsANoOp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.db")
+	sdb, err := db.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer sdb.Close()
+
+	quiesced := false
+	restarted := false
+	svc := New(Deps{
+		DB: sdb, DBPath: path, Logger: slog.New(slog.DiscardHandler),
+		Quiesce:        func(context.Context) error { quiesced = true; return nil },
+		RequestRestart: func() { restarted = true },
+	})
+
+	// A fresh database is incremental; ask for incremental.
+	st, changed, err := svc.SetAutoVacuum(context.Background(), AutoVacuumIncremental)
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if changed {
+		t.Error("changed = true when the database was already in the requested mode")
+	}
+	if st.Phase != PhaseIdle {
+		t.Errorf("phase = %q, want %q", st.Phase, PhaseIdle)
+	}
+	if quiesced || restarted {
+		t.Error("a no-op stopped background work or asked for a restart")
+	}
+	if exists(JournalPath(path)) {
+		t.Error("a no-op wrote a journal entry")
 	}
 }

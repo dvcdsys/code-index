@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/dvcdsys/code-index/server/internal/dbmaint"
 )
@@ -193,17 +192,7 @@ func (s *Server) CompactDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body struct {
-		AutoVacuum string `json:"auto_vacuum"`
-	}
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
-		return
-	}
-
-	st, err := svc.Compact(r.Context(), dbmaint.TargetMode(body.AutoVacuum))
+	st, err := svc.Compact(r.Context())
 	if err != nil {
 		switch {
 		case errors.Is(err, dbmaint.ErrCompactionRunning):
@@ -213,12 +202,59 @@ func (s *Server) CompactDatabase(w http.ResponseWriter, r *http.Request) {
 				"an indexing or clone job is in flight — compaction takes the server read-only and would fail it mid-run")
 		case errors.Is(err, dbmaint.ErrInsufficientDisk):
 			writeError(w, http.StatusInsufficientStorage, err.Error())
-		case strings.HasPrefix(err.Error(), "unknown auto_vacuum target"):
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
 		default:
 			s.Deps.Logger.Error("start database compaction", "err", err)
 			writeError(w, http.StatusInternalServerError, "compact: "+err.Error())
 		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, st)
+}
+
+// SetAutoVacuumMode — PUT /api/v1/admin/database/auto-vacuum.
+//
+// The reclaim mode is a setting, not an operation. Asking for the mode the
+// database is already in does nothing and answers 200; only a real change
+// costs the rebuild, and then this behaves exactly like compaction because it
+// *is* compaction underneath.
+func (s *Server) SetAutoVacuumMode(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.mustBeAdmin(w, r); !ok {
+		return
+	}
+	svc := s.databaseService(w)
+	if svc == nil {
+		return
+	}
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
+		return
+	}
+
+	st, changed, err := svc.SetAutoVacuum(r.Context(), dbmaint.AutoVacuum(body.Mode))
+	if err != nil {
+		switch {
+		case errors.Is(err, dbmaint.ErrInvalidSchedule):
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+		case errors.Is(err, dbmaint.ErrCompactionRunning):
+			writeError(w, http.StatusConflict, "a database compaction is already running")
+		case errors.Is(err, dbmaint.ErrJobsInFlight):
+			writeError(w, http.StatusConflict,
+				"an indexing or clone job is in flight — changing the reclaim mode rebuilds the database and would fail it mid-run")
+		case errors.Is(err, dbmaint.ErrInsufficientDisk):
+			writeError(w, http.StatusInsufficientStorage, err.Error())
+		default:
+			s.Deps.Logger.Error("set auto-vacuum mode", "err", err)
+			writeError(w, http.StatusInternalServerError, "set reclaim mode: "+err.Error())
+		}
+		return
+	}
+	if !changed {
+		writeJSON(w, http.StatusOK, st)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, st)

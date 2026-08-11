@@ -16,12 +16,14 @@ Server → Resources → Database reports that and offers three ways to act on i
 | **Reclaim now** | Returns free pages to the filesystem in bounded chunks | Milliseconds per chunk, no window, no restart |
 | **Compact now** | Rebuilds the database into a fresh file and replaces it | A read-only window, then a restart |
 
-Reclaim needs the database to be in **incremental** auto-vacuum mode. Databases
-created by recent builds already are; older ones are not. The mode is a
-two-way switch in the Database block, and moving it in **either** direction
-costs exactly one compaction, because rebuilding the file is the only way
-SQLite can change the mode of a populated database. The dialog states the
-price; the decision is the admin's.
+Reclaim needs the database to be in **incremental** auto-vacuum mode. That is a
+**setting**, not an action, and it lives on its own two-way switch. Compaction
+never changes it: asking for space back and asking to change a setting are
+different requests, and one must not quietly do the other.
+
+Moving the switch does cost a rebuild, in either direction, because rebuilding
+the file is the only way SQLite can change the mode of a populated database.
+Moving it to the position it is already in costs nothing and does nothing.
 
 Reclaim returns space but does not defragment. Compaction rebuilds the file and
 improves read locality, so it stays useful — just rarely, rather than as the

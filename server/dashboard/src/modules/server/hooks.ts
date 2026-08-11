@@ -3,7 +3,7 @@ import { api } from '@/api/client';
 import type {
   ActiveEmbeddingProvider,
   CheckpointResult,
-  CompactRequest,
+  AutoVacuumRequest,
   DatabaseState,
   MaintenanceOperation,
   MaintenanceSchedule,
@@ -248,8 +248,19 @@ export function useReclaimFreePages() {
 export function useCompactDatabase() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: CompactRequest) =>
-      api.post<MaintenanceOperation>('/admin/database/compact', body),
+    mutationFn: () => api.post<MaintenanceOperation>('/admin/database/compact'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: serverKeys.database }),
+  });
+}
+
+// The reclaim mode is a setting, not an operation. Changing it happens to cost
+// a rebuild, which is why this looks like compaction — but asking for the mode
+// the database is already in does nothing at all.
+export function useSetAutoVacuum() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AutoVacuumRequest) =>
+      api.put<MaintenanceOperation>('/admin/database/auto-vacuum', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: serverKeys.database }),
   });
 }

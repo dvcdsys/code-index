@@ -793,18 +793,10 @@ paths:
         anything that slips past the first two layers is refused by SQLite
         itself rather than landing outside the snapshot.
 
-        `auto_vacuum` changes the file's reclaim mode on the way through.
-        SQLite can only change the mode of a populated database by rebuilding
-        it, so either direction costs exactly one compaction and is folded into
-        this one. `keep` leaves it as it is.
-
-        Incremental mode is what makes
-        `POST /api/v1/admin/database/reclaim` possible, and it is not free:
-        it maintains pointer-map pages, so every page allocated or freed
-        carries an extra write. Measured on an indexing-shaped workload that
-        is +1.5% on insert. Switching back to `none` is offered for the same
-        reason it is offered at all — it is the admin's call, and the cost is
-        stated rather than decided for them.
+        Compaction does not change the database's reclaim mode. It reclaims
+        space and leaves the mode exactly as it found it — that is a separate
+        setting, changed through
+        `PUT /api/v1/admin/database/auto-vacuum`.
 
         Crash safety: progress is journalled to a state file beside the
         database, written atomically, and every combination of that state and
@@ -818,12 +810,6 @@ paths:
         database is the thing being replaced: a row describing the operation
         could not survive the swap, could not be written during the read-only
         window, and could not be read back during the restart.
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CompactRequest"
       responses:
         "202":
           description: Compaction started
@@ -920,6 +906,67 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/database/auto-vacuum:
+    put:
+      operationId: setAutoVacuumMode
+      tags: [admin]
+      summary: Change the database's reclaim mode (admin only)
+      description: |
+        Incremental mode lets free pages be returned to the filesystem without
+        a rebuild — it is what makes
+        `POST /api/v1/admin/database/reclaim` possible. It is not free: it
+        maintains pointer-map pages, so every page allocated or freed carries
+        an extra write, measured at +1.5% on an indexing-shaped workload.
+
+        **Asking for the mode the database is already in does nothing** and
+        answers `200`. Only an actual change costs anything.
+
+        A change costs a full rebuild, in either direction, because that is
+        the only way SQLite can change the mode of a populated database. So a
+        `202` here means the same interruption as
+        `POST /api/v1/admin/database/compact`: a read-only window, then a
+        restart. The space that rebuild happens to reclaim is a side effect,
+        not the point.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutoVacuumRequest"
+      responses:
+        "200":
+          description: |
+            The database is already in the requested mode. Nothing was done and
+            the returned operation is `idle`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceOperation"
+        "202":
+          description: A rebuild has started to apply the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            Already running, or held back because clone/index jobs are in
+            flight.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
         "503":
           $ref: "#/components/responses/ResourcesUnavailable"
 
@@ -4345,17 +4392,13 @@ components:
           nullable: true
           description: The running or most recent operation, if any.
 
-    CompactRequest:
+    AutoVacuumRequest:
       type: object
+      required: [mode]
       properties:
-        auto_vacuum:
+        mode:
           type: string
-          enum: [keep, none, incremental]
-          default: keep
-          description: |
-            The reclaim mode the rebuilt file should have. `keep` preserves
-            whatever the database is in today. Both other values cost the same
-            rebuild that is already happening, in either direction.
+          enum: [none, incremental]
 
     MaintenanceOperation:
       type: object
@@ -4408,9 +4451,9 @@ components:
         freed_bytes: { type: integer, format: int64, nullable: true }
         auto_vacuum:
           type: string
-          enum: [keep, none, incremental]
+          enum: [none, incremental]
           nullable: true
-          description: The reclaim mode this run was asked to produce.
+          description: The reclaim mode this run leaves the database in.
         message:
           type: string
           nullable: true

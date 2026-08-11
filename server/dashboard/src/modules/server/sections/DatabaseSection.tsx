@@ -14,6 +14,7 @@ import {
   useCompactDatabase,
   useDatabaseState,
   useReclaimFreePages,
+  useSetAutoVacuum,
 } from '../hooks';
 
 const VERDICT_VARIANT = {
@@ -27,6 +28,7 @@ export function DatabaseSection() {
   const compact = useCompactDatabase();
   const reclaim = useReclaimFreePages();
   const checkpoint = useCheckpointWal();
+  const setMode = useSetAutoVacuum();
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [toggleTo, setToggleTo] = useState<'incremental' | 'none' | null>(null);
@@ -35,26 +37,33 @@ export function DatabaseSection() {
   const op = db?.operation ?? null;
   const running =
     !!op && !['idle', 'done', 'failed', 'interrupted'].includes(op.phase ?? 'idle');
-  const busy = running || compact.isPending || reclaim.isPending || checkpoint.isPending;
+  const busy =
+    running || compact.isPending || reclaim.isPending || checkpoint.isPending || setMode.isPending;
 
   const describe = (err: unknown) => (err instanceof ApiError ? err.detail : String(err));
 
-  const onConfirmCompact = () => {
-    compact.mutate(
-      { auto_vacuum: toggleTo ?? 'keep' },
-      {
-        onSuccess: () => {
-          setConfirmOpen(false);
-          toast.success('Compaction started', {
-            description: 'The server is read-only until it finishes, then it restarts itself.',
-          });
-        },
-        onError: (err) => {
-          setConfirmOpen(false);
-          toast.error('Could not start the compaction', { description: describe(err) });
-        },
-      },
-    );
+  const started = {
+    onSuccess: () => {
+      setConfirmOpen(false);
+      toast.success('Rebuild started', {
+        description: 'The server is read-only until it finishes, then it restarts itself.',
+      });
+    },
+    onError: (err: unknown) => {
+      setConfirmOpen(false);
+      toast.error('Could not start the rebuild', { description: describe(err) });
+    },
+  };
+
+  // Two different intents, one interruption. Compacting reclaims space and
+  // leaves the mode alone; the toggle changes the mode and reclaims space as a
+  // side effect. They are separate calls because they are separate decisions.
+  const onConfirm = () => {
+    if (toggleTo) {
+      setMode.mutate({ mode: toggleTo }, started);
+    } else {
+      compact.mutate(undefined, started);
+    }
   };
 
   const onReclaim = () => {
@@ -219,9 +228,9 @@ export function DatabaseSection() {
       {db ? (
         <ConfirmCompactDialog
           open={confirmOpen}
-          onOpenChange={(next) => (!compact.isPending ? setConfirmOpen(next) : null)}
-          onConfirm={onConfirmCompact}
-          isPending={compact.isPending}
+          onOpenChange={(next) => (!compact.isPending && !setMode.isPending ? setConfirmOpen(next) : null)}
+          onConfirm={onConfirm}
+          isPending={compact.isPending || setMode.isPending}
           state={db}
           toggleTo={toggleTo}
         />

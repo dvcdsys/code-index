@@ -36,34 +36,46 @@ const progressInterval = 2 * time.Second
 // failure that costs a restart.
 const quiesceBudget = 2 * time.Minute
 
-// TargetMode is the reclaim mode a compaction should leave the file in.
-type TargetMode string
-
-const (
-	// TargetKeep preserves whatever the database is in today.
-	TargetKeep TargetMode = "keep"
-	// TargetNone rebuilds without incremental reclaim.
-	TargetNone TargetMode = "none"
-	// TargetIncremental rebuilds with it.
-	TargetIncremental TargetMode = "incremental"
-)
-
-// Compact starts a background rebuild and returns the initial state.
+// Compact reclaims space and leaves the reclaim mode exactly as it found it.
 //
-// Everything that can refuse happens synchronously, before anything is
-// stopped: a caller that gets an error here is on a server that never left
-// normal service. Past that point the operation owns the process — it will
-// finish and restart, or fail and restart.
-func (s *Service) Compact(ctx context.Context, target TargetMode) (State, error) {
+// Compaction and the reclaim mode are separate concerns that happen to share
+// an implementation: changing the mode of a populated database requires a
+// rebuild, and this is the rebuild. That is a reason for SetAutoVacuum to call
+// into here, not a reason for "reclaim my space" to carry an opinion about
+// settings.
+func (s *Service) Compact(ctx context.Context) (State, error) {
+	return s.startRebuild(ctx, s.currentMode(ctx))
+}
+
+// SetAutoVacuum changes the database's reclaim mode.
+//
+// Asking for the mode it is already in does nothing and reports changed=false.
+// Anything else costs a full rebuild, because that is the only way SQLite can
+// change the mode of a populated database — so the caller is agreeing to the
+// same interruption Compact describes.
+func (s *Service) SetAutoVacuum(ctx context.Context, mode AutoVacuum) (State, bool, error) {
+	switch mode {
+	case AutoVacuumNone, AutoVacuumIncremental:
+	default:
+		return State{}, false, fmt.Errorf("%w: unknown reclaim mode %q", ErrInvalidSchedule, mode)
+	}
+	if s.currentMode(ctx) == mode {
+		return State{
+			Phase:   PhaseIdle,
+			Message: fmt.Sprintf("the database is already in %s reclaim mode; nothing to do", mode),
+		}, false, nil
+	}
+	st, err := s.startRebuild(ctx, mode)
+	return st, err == nil, err
+}
+
+// startRebuild is the shared machinery. Everything that can refuse happens
+// synchronously, before anything is stopped: a caller that gets an error here
+// is on a server that never left normal service. Past that point the operation
+// owns the process — it will finish and restart, or fail and restart.
+func (s *Service) startRebuild(ctx context.Context, mode AutoVacuum) (State, error) {
 	if s.d.RequestRestart == nil || s.d.Quiesce == nil {
 		return State{}, errors.New("database compaction is not wired on this server")
-	}
-	switch target {
-	case "", TargetKeep:
-		target = TargetKeep
-	case TargetNone, TargetIncremental:
-	default:
-		return State{}, fmt.Errorf("unknown auto_vacuum target %q", target)
 	}
 
 	s.mu.Lock()
@@ -109,7 +121,7 @@ func (s *Service) Compact(ctx context.Context, target TargetMode) (State, error)
 		StartedAt:  &startedAt,
 		PID:        os.Getpid(),
 		BytesTotal: (stats.PageCount - stats.FreelistPages) * stats.PageSize,
-		AutoVacuum: string(target),
+		AutoVacuum: string(mode),
 		Message:    "stopping background work before the copy begins",
 	}
 	s.record(&st, LevelInfo, st.Message)
@@ -215,7 +227,7 @@ func (s *Service) runCompaction(st State) {
 
 	stopProgress := s.trackProgress(&st, p.Copy)
 	started := time.Now()
-	err = s.copyInto(ctx, p.Copy, TargetMode(st.AutoVacuum))
+	err = s.copyInto(ctx, p.Copy, AutoVacuum(st.AutoVacuum))
 	elapsed := time.Since(started)
 	stopProgress()
 	if err != nil {
@@ -300,7 +312,7 @@ func (s *Service) runCompaction(st State) {
 // alone is sufficient; both are cheap, and TestCompact_CopyKeepsTheSourceMode-
 // UnlessAsked fails only when both are removed, which is the honest statement
 // of what is protecting what.
-func (s *Service) copyInto(ctx context.Context, target string, want TargetMode) error {
+func (s *Service) copyInto(ctx context.Context, target string, want AutoVacuum) error {
 	pool, err := openDedicated(s.d.DBPath, 1)
 	if err != nil {
 		return err
@@ -312,23 +324,12 @@ func (s *Service) copyInto(ctx context.Context, target string, want TargetMode) 
 	}
 	defer conn.Close()
 
-	mode := "NONE"
-	switch want {
-	case TargetIncremental:
-		mode = "INCREMENTAL"
-	case TargetNone:
-		mode = "NONE"
-	default: // TargetKeep
-		var v int64
-		if err := conn.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&v); err != nil {
-			return fmt.Errorf("read the source auto_vacuum mode: %w", err)
-		}
-		if autoVacuumFromPragma(v) == AutoVacuumIncremental {
-			mode = "INCREMENTAL"
-		}
+	pragma := "NONE"
+	if want == AutoVacuumIncremental {
+		pragma = "INCREMENTAL"
 	}
-	if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum=`+mode); err != nil {
-		return fmt.Errorf("set auto_vacuum=%s: %w", mode, err)
+	if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum=`+pragma); err != nil {
+		return fmt.Errorf("set auto_vacuum=%s: %w", pragma, err)
 	}
 	// Bound, not interpolated: a data directory can contain a quote.
 	if _, err := conn.ExecContext(ctx, `VACUUM INTO ?`, target); err != nil {

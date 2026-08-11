@@ -81,7 +81,7 @@ func (s *Service) scheduleTickOnce(ctx context.Context) {
 	case ModeIncremental:
 		s.runScheduledReclaim(ctx)
 	case ModeFull:
-		if _, err := s.Compact(ctx, TargetKeep); err != nil {
+		if _, err := s.Compact(ctx); err != nil {
 			s.d.Logger.Warn("scheduled database compaction did not start", "err", err)
 		}
 	}
