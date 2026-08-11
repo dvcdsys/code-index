@@ -10,12 +10,30 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/db"
 )
 
-// quickCheckBudget bounds PRAGMA quick_check. On a multi-gigabyte file the
-// check reads every page, so it is given a deadline rather than allowed to
-// hold up a boot indefinitely. A timeout is not treated as corruption — the
-// cheap structural checks still have to pass, and they are the ones that
-// catch the failure this guards against (a truncated or half-written copy).
-const quickCheckBudget = 30 * time.Second
+// quickCheckMaxBytes is the size above which PRAGMA quick_check is skipped.
+//
+// The check reads every page, and the server is not serving while it runs —
+// this happens at boot, before the listener binds. Measured on a real 4.5 GB
+// compacted copy it did not finish within a 30-second budget, so the deadline
+// fired and the result was discarded: thirty seconds of extra downtime buying
+// nothing. Below the threshold it costs a second or two and is worth having.
+//
+// Skipping it is safe because it was never the check doing the work. What
+// actually catches a bad copy is the fingerprint — row counts taken from the
+// source under the write freeze, which a copy of the wrong database or an
+// earlier state cannot match — and the header's own claim about the file's
+// length, which catches truncation. quick_check adds page-level structural
+// validation on top of that, and SQLite having written a complete file that
+// then fails its own structural check is not a failure mode this feature can
+// cause.
+//
+// A variable rather than a constant so a test can lower it and prove that the
+// fingerprint, not quick_check, is what rejects a bad copy.
+var quickCheckMaxBytes int64 = 512 << 20
+
+// quickCheckBudget bounds the check on files that do get it, so an unexpectedly
+// slow filesystem cannot hold a boot open.
+const quickCheckBudget = 15 * time.Second
 
 // openForRead opens a SQLite file read-only on a single connection. Used for
 // inspecting a file nothing else has open — a candidate copy at boot, or the
@@ -117,6 +135,13 @@ func VerifyCopy(ctx context.Context, copyPath string, want Fingerprint) error {
 	if want := got.PageCount * got.PageSize; want != info.Size() {
 		return fmt.Errorf("copy is %d bytes but its header describes %d (page_count %d x page_size %d)",
 			info.Size(), want, got.PageCount, got.PageSize)
+	}
+
+	if info.Size() > quickCheckMaxBytes {
+		// Deliberately skipped. See quickCheckMaxBytes: on a large file this
+		// is minutes of downtime for a check the fingerprint has already
+		// covered.
+		return nil
 	}
 
 	qcCtx, cancel := context.WithTimeout(ctx, quickCheckBudget)

@@ -146,3 +146,27 @@ func TestCompact_CopyPreservesIncrementalWithoutBeingAsked(t *testing.T) {
 		t.Errorf("copy mode = %q; an incremental database must stay incremental", got)
 	}
 }
+
+// Above the size threshold quick_check is skipped, and the copy is still
+// rejected when it is not this database. This is the claim the skip rests on:
+// the fingerprint does the work, quick_check is insurance on small files.
+func TestVerifyCopy_RejectsAWrongCopyWithoutQuickCheck(t *testing.T) {
+	orig := quickCheckMaxBytes
+	quickCheckMaxBytes = 1 // every file is now "too large to check"
+	t.Cleanup(func() { quickCheckMaxBytes = orig })
+
+	dir := t.TempDir()
+	mine := filepath.Join(dir, "mine.db")
+	theirs := filepath.Join(dir, "theirs.db")
+	makeDB(t, mine, 5)
+	makeDB(t, theirs, 2)
+
+	want := fingerprintOf(t, mine)
+	if err := VerifyCopy(context.Background(), theirs, want); err == nil {
+		t.Fatal("a copy of a different database passed verification with quick_check skipped")
+	}
+	// And the right one still passes.
+	if err := VerifyCopy(context.Background(), mine, want); err != nil {
+		t.Fatalf("the matching database failed verification: %v", err)
+	}
+}

@@ -82,8 +82,31 @@ last, so no interruption can leave the server without a database.
 
 A compacted copy is only adopted after it has been proved to be this database:
 row counts taken from the source under the freeze are re-checked against the
-copy, together with its page geometry and an integrity check. A copy that fails
-any of that is discarded and the original is kept.
+copy, together with the header's own claim about the file's length. A copy that
+fails either is discarded and the original is kept.
+
+Databases under 512 MB additionally get a `PRAGMA quick_check`. Larger ones do
+not, and that is a measured decision rather than an omission: on a real 4.5 GB
+copy the check did not finish inside a 30-second budget, and since it runs at
+boot before the listener binds, it was buying thirty seconds of extra downtime
+and then discarding its own result.
+
+## What a real run looked like
+
+Against a copy of a production database, 8.25 GB with 47% waste:
+
+```
+00:00  compaction requested                 202, server goes read-only
+00:00  reads 200 · writes 503 · health 200  throughout
+01:35  copy complete, 4.4 GB, verified
+01:35  server re-executes itself
+02:07  listening again
+       8.25 GB → 4.18 GB, 4.07 GB returned to the filesystem
+       48 projects, 297 563 chunks, 2 users — unchanged
+```
+
+The read-only window was 95 seconds; full unavailability was the ~30 seconds
+of restart after it.
 
 The state lives in a file rather than a table because the database is the thing
 being replaced: a row describing the operation could not be written during the
