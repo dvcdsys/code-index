@@ -1,22 +1,24 @@
+import { Page } from '@/ui/page';
 import { EditorSection } from './sections/EditorSection';
 import { ProfileSection } from './sections/ProfileSection';
 import { SessionsSection } from './sections/SessionsSection';
 import { ThemeSection } from './sections/ThemeSection';
 
+// Personal, not administrative: everything here affects only the signed-in
+// user (and, for theme and editor, only this browser).
 export default function SettingsPage() {
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-sm text-muted-foreground">
-          Account, sessions, and personal UI preferences.
-        </p>
-      </header>
-
-      <ProfileSection />
-      <SessionsSection />
-      <EditorSection />
-      <ThemeSection />
-    </div>
+    <Page title="Settings" subtitle="Your account, your sessions, and this browser's preferences.">
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="flex min-w-0 flex-col gap-5">
+          <ProfileSection />
+          <SessionsSection />
+        </div>
+        <div className="flex flex-col gap-5">
+          <ThemeSection />
+          <EditorSection />
+        </div>
+      </div>
+    </Page>
   );
 }

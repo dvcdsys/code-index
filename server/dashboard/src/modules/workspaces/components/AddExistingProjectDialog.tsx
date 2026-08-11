@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link2, Loader2 } from 'lucide-react';
 import { api, ApiError } from '@/api/client';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Badge } from '@/ui/badge';
-import { Button } from '@/ui/button';
+import { Callout } from '@/ui/alert';
+import { Badge, StatusDot } from '@/ui/badge';
+import { Button, Dots } from '@/ui/button';
+import { Checkbox } from '@/ui/checkbox';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -13,8 +14,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/ui/dialog';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
+import { Field, Input } from '@/ui/input';
 import type { Project, ProjectListResponse } from '@/api/types';
 
 // Per-row disabled reason. null means the row is selectable. Local
@@ -184,30 +184,27 @@ export function AddExistingProjectDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="outline">
-          <Link2 className="mr-1 size-4" /> Add Existing Project
-        </Button>
+        <Button>Link project</Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>Link existing projects</DialogTitle>
-          <DialogDescription>
-            Select one or more indexed projects to link into this workspace.
-            Linked projects show up in workspace search without re-cloning or
-            re-indexing.
-          </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3">
+        <DialogBody>
+          <DialogDescription>
+            Pick one or more indexed projects. They join workspace search without being cloned or
+            indexed again.
+          </DialogDescription>
+
           {loadErr && (
-            <Alert variant="destructive">
-              <AlertTitle>Could not load projects</AlertTitle>
-              <AlertDescription>{loadErr}</AlertDescription>
-            </Alert>
+            <Callout variant="danger">
+              <b>Could not load projects</b>
+              <p>{loadErr}</p>
+            </Callout>
           )}
 
-          <div className="space-y-1.5">
-            <Label htmlFor="proj-filter">Filter</Label>
+          <Field label="Filter" htmlFor="proj-filter">
             <Input
               id="proj-filter"
               placeholder="github.com/owner/repo or /local/path"
@@ -215,88 +212,82 @@ export function AddExistingProjectDialog({
               onChange={(e) => setQuery(e.target.value)}
               disabled={projects === null}
             />
-          </div>
+          </Field>
 
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <div className="flex items-center justify-between gap-3 font-mono text-[11.5px] text-muted">
             <span>
               {projects === null
-                ? 'Loading…'
-                : `${selected.size} selected · ${selectableInView.length} selectable in view · ${annotated.length} total`}
+                ? 'loading…'
+                : `${selected.size} selected · ${selectableInView.length} selectable here · ${annotated.length} total`}
             </span>
             {selectableInView.length > 0 && (
               <button
                 type="button"
                 onClick={toggleAllInView}
-                className="font-medium text-primary hover:underline"
+                className="text-accent hover:underline"
                 disabled={submitting}
               >
-                {allInViewSelected ? 'Clear visible' : 'Select all visible'}
+                {allInViewSelected ? 'clear visible' : 'select all visible'}
               </button>
             )}
           </div>
 
-          <div className="max-h-80 overflow-y-auto rounded border">
+          <div className="max-h-80 overflow-y-auto border">
             {projects === null ? (
-              <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" /> Loading projects…
+              <div className="flex items-center justify-center gap-2 py-6 font-mono text-[12px] text-muted">
+                <Dots /> loading projects…
               </div>
             ) : filtered.length === 0 ? (
-              <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+              <div className="px-3 py-6 text-center text-sm text-dim">
                 {annotated.length === 0
                   ? 'No projects on this server yet.'
-                  : 'No projects match the filter.'}
+                  : 'Nothing matches the filter.'}
               </div>
             ) : (
-              <ul className="divide-y">
+              <ul>
                 {filtered.map(({ p, reason }) => {
                   const isChecked = selected.has(p.path_hash);
                   const disabled = reason !== null || submitting;
                   const rowErr = errs[p.path_hash];
                   return (
-                    <li key={p.path_hash}>
+                    <li key={p.path_hash} className="border-b border-line-soft last:border-b-0">
                       <label
-                        className={`flex cursor-pointer items-start gap-3 px-3 py-2 text-sm hover:bg-muted ${
-                          disabled ? 'cursor-not-allowed opacity-60 hover:bg-transparent' : ''
-                        } ${isChecked ? 'bg-muted/50' : ''}`}
+                        className={`flex items-start gap-3 px-3 py-2.5 text-sm ${
+                          disabled
+                            ? 'cursor-not-allowed text-faint'
+                            : 'cursor-pointer hover:bg-surface-hover'
+                        } ${isChecked ? 'bg-surface-hover' : ''}`}
                       >
-                        <input
-                          type="checkbox"
-                          className="mt-0.5 size-4 shrink-0 cursor-pointer accent-primary disabled:cursor-not-allowed"
+                        <Checkbox
+                          className="mt-0.5"
                           checked={isChecked}
                           disabled={disabled}
                           onChange={() => toggle(p.path_hash)}
                         />
-                        <div className="min-w-0 flex-1 space-y-0.5">
-                          <div
-                            className="truncate font-mono text-xs"
-                            title={p.host_path}
-                          >
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate font-mono text-[13px]" title={p.host_path}>
                             {p.host_path}
                           </div>
-                          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
-                            <Badge
-                              variant={
-                                p.status === 'indexed'
-                                  ? 'default'
-                                  : p.status === 'error'
-                                  ? 'destructive'
-                                  : 'secondary'
-                              }
-                              className="text-[10px]"
-                            >
+                          <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted">
+                            <span className="inline-flex items-center gap-1.5">
+                              <StatusDot
+                                tone={
+                                  p.status === 'indexed'
+                                    ? 'ok'
+                                    : p.status === 'error'
+                                      ? 'busy'
+                                      : 'warn'
+                                }
+                              />
                               {p.status}
-                            </Badge>
+                            </span>
                             {p.languages.slice(0, 3).map((l) => (
                               <span key={l}>{l}</span>
                             ))}
-                            {reason && (
-                              <span className="font-medium text-amber-700 dark:text-amber-400">
-                                · {disabledLabel(reason)}
-                              </span>
-                            )}
+                            {reason && <Badge variant="warn">{disabledLabel(reason)}</Badge>}
                           </div>
                           {rowErr && (
-                            <div className="mt-1 text-[11px] text-destructive">
+                            <div className="mt-1 font-mono text-[11px] text-accent">
                               link failed: {rowErr}
                             </div>
                           )}
@@ -308,17 +299,19 @@ export function AddExistingProjectDialog({
               </ul>
             )}
           </div>
-        </div>
+        </DialogBody>
 
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={submitting}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={selected.size === 0 || submitting}>
-            {submitting ? <Loader2 className="mr-1 size-4 animate-spin" /> : null}
-            {selected.size === 0
-              ? 'Link selected'
-              : `Link ${selected.size} selected`}
+          <Button
+            variant="primary"
+            onClick={handleSubmit}
+            disabled={selected.size === 0 || submitting}
+          >
+            {submitting ? <Dots /> : null}
+            {selected.size === 0 ? 'Link selected' : `Link ${selected.size} selected`}
           </Button>
         </DialogFooter>
       </DialogContent>

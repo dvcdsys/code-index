@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Github, KeyRound, Plus, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { ApiError, api } from '@/api/client';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Button } from '@/ui/button';
+import { Callout } from '@/ui/alert';
+import { Button, Dots } from '@/ui/button';
+import { Card, Empty } from '@/ui/card';
+import { Chip } from '@/ui/code';
 import { Skeleton } from '@/ui/skeleton';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -13,8 +16,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/ui/dialog';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
+import { Field, Input } from '@/ui/input';
+import { formatDateTime, formatRelative } from '@/lib/formatDate';
 
 type GithubToken = {
   id: string;
@@ -29,9 +32,9 @@ type GithubTokenListResponse = {
   total: number;
 };
 
-// TokensTab manages encrypted-at-rest GitHub PATs used for cloning private
-// repos and registering webhooks. The plaintext value is sent on POST and
-// never returned — subsequent operations identify tokens by id.
+// Encrypted-at-rest GitHub PATs for cloning private repos and registering
+// webhooks. The plaintext value is sent on POST and never returned; every
+// later operation identifies a token by id.
 export default function TokensTab() {
   const [list, setList] = useState<GithubToken[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -59,114 +62,127 @@ export default function TokensTab() {
 
   if (featureOff) {
     return (
-      <Alert>
-        <AlertCircle className="size-4" />
-        <AlertTitle>GitHub tokens service is not configured</AlertTitle>
-        <AlertDescription>
-          The server returned 503 — the encryption layer for github_tokens
-          failed to wire. Check the server logs (most common cause:{' '}
-          <code>CIX_SECRET_KEY</code> / <code>CIX_SECRET_KEYFILE</code>{' '}
-          resolution) and restart.
-        </AlertDescription>
-      </Alert>
+      <Callout variant="warn">
+        <b>The GitHub tokens service is not configured</b>
+        <p>
+          The server answered 503 — the encryption layer for github_tokens failed to wire. The
+          usual cause is <Chip>CIX_SECRET_KEY</Chip> / <Chip>CIX_SECRET_KEYFILE</Chip> not
+          resolving. Check the logs and restart.
+        </p>
+      </Callout>
     );
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">
-          Personal Access Tokens for cloning private repositories and
-          registering webhooks. Stored encrypted; the plaintext value is never
-          returned after creation.
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="m-0 max-w-2xl text-[13.5px] text-dim">
+          Personal Access Tokens for cloning private repositories and registering webhooks. Stored
+          encrypted; the plaintext is never returned after creation.
         </p>
         <CreateTokenDialog onCreated={reload} />
       </div>
+
       {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="size-4" />
-          <AlertTitle>Could not load tokens</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
+        <Callout variant="danger">
+          <b>Could not load tokens</b>
+          <p>{error}</p>
+        </Callout>
       )}
+
       {list === null ? (
-        <div className="space-y-2">
-          <Skeleton className="h-12 w-full" />
-          <Skeleton className="h-12 w-full" />
+        <div className="flex flex-col gap-2.5">
+          <Skeleton className="h-12" />
+          <Skeleton className="h-12" />
         </div>
       ) : list.length === 0 ? (
-        <EmptyState />
+        <Empty title="No GitHub tokens yet">
+          A token is required to add private repositories, and to let the server register their
+          webhooks for you.
+        </Empty>
       ) : (
-        <ul className="divide-y rounded-md border">
+        <Card>
           {list.map((t) => (
             <TokenRow key={t.id} token={t} onChanged={reload} />
           ))}
-        </ul>
+        </Card>
       )}
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="rounded-md border bg-muted/30 p-8 text-center">
-      <Github className="mx-auto mb-3 size-8 text-muted-foreground" />
-      <p className="text-sm font-medium">No GitHub tokens yet</p>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Tokens are required when adding private repositories to a workspace.
-      </p>
     </div>
   );
 }
 
 function TokenRow({ token, onChanged }: { token: GithubToken; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(false);
 
   async function handleDelete() {
-    if (!confirm(`Delete token "${token.name}"? This cannot be undone.`)) return;
     setBusy(true);
     try {
       await api.delete<void>(`/github-tokens/${token.id}`);
+      setConfirm(false);
+      toast.success('Token deleted', { description: token.name });
       onChanged();
     } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
+      toast.error('Could not delete the token', {
+        description: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <li className="flex items-center justify-between gap-3 px-4 py-3">
-      <div className="min-w-0">
-        <div className="truncate font-medium">{token.name}</div>
-        <div className="truncate text-xs text-muted-foreground">
-          scopes:{' '}
-          {token.scopes.length ? token.scopes.join(', ') : '(fine-grained or none)'}
-          {token.last_used_at && (
-            <> · last used {new Date(token.last_used_at).toLocaleString()}</>
+    <div className="cix-row">
+      <div className="min-w-0 flex-1">
+        <div className="cix-row__title truncate">{token.name}</div>
+        <div className="cix-row__meta truncate">
+          {token.scopes.length ? token.scopes.join(', ') : 'fine-grained or no scopes'}
+          {token.last_used_at ? (
+            <span title={formatDateTime(token.last_used_at)}>
+              {' '}
+              · used {formatRelative(token.last_used_at)}
+            </span>
+          ) : (
+            <span className="text-faint"> · never used</span>
           )}
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-1">
-        <RotateTokenDialog token={token} onRotated={onChanged} disabled={busy} />
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={busy}
-          onClick={handleDelete}
-          aria-label={`Delete token ${token.name}`}
-        >
-          <Trash2 className="size-4" />
-        </Button>
-      </div>
-    </li>
+      <RotateTokenDialog token={token} onRotated={onChanged} disabled={busy} />
+      <Button variant="quietDanger" size="sm" disabled={busy} onClick={() => setConfirm(true)}>
+        Delete
+      </Button>
+
+      <Dialog open={confirm} onOpenChange={(next) => (!busy ? setConfirm(next) : null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <span className="cix-dot is-busy" aria-hidden />
+            <DialogTitle>Delete this token?</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <DialogDescription>
+              Projects bound to <span className="font-mono text-ink">{token.name}</span> stop
+              cloning and their webhooks stop being managed until another token is attached.
+            </DialogDescription>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirm(false)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={handleDelete} disabled={busy}>
+              {busy ? <Dots /> : null}
+              Delete token
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
 
-// RotateTokenDialog updates the secret value of an existing token in place
-// (PUT /github-tokens/{id}). The id and name are unchanged, so every external
-// project bound to this token keeps working — no re-binding. The new value is
-// re-validated against GitHub and the displayed scopes refresh on success.
+// Replaces the secret value in place (PUT /github-tokens/{id}). The id and
+// name are unchanged, so every project bound to this token keeps working — no
+// re-binding. The new value is re-validated against GitHub and the scopes
+// refresh on success.
 function RotateTokenDialog({
   token,
   onRotated,
@@ -188,6 +204,7 @@ function RotateTokenDialog({
       await api.put(`/github-tokens/${token.id}`, { token: value });
       setValue('');
       setOpen(false);
+      toast.success('Token rotated', { description: token.name });
       onRotated();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -208,50 +225,44 @@ function RotateTokenDialog({
       }}
     >
       <DialogTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={disabled}
-          aria-label={`Update token ${token.name}`}
-        >
-          <KeyRound className="size-4" />
+        <Button size="sm" disabled={disabled}>
+          Rotate
         </Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Update “{token.name}”</DialogTitle>
-          <DialogDescription>
-            Replace the secret value of this token. The id and name stay the
-            same, so projects already using it keep working — no need to
-            re-attach them. The new value is validated against GitHub and the
-            scopes are refreshed on save.
-          </DialogDescription>
+          <DialogTitle>Rotate “{token.name}”</DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <Label htmlFor="rotate-value">New token value</Label>
+        <DialogBody>
+          <DialogDescription>
+            Replaces the secret only. The id and name stay put, so projects already using this
+            token keep working. The new value is validated against GitHub and its scopes refresh
+            on save.
+          </DialogDescription>
+          <Field label="New token value" htmlFor="rotate-value">
             <Input
               id="rotate-value"
               autoFocus
               type="password"
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              placeholder="ghp_... or github_pat_..."
-              className="font-mono"
+              placeholder="ghp_… or github_pat_…"
+              invalid={!!err}
             />
-          </div>
-          {err && (
-            <Alert variant="destructive">
-              <AlertDescription>{err}</AlertDescription>
-            </Alert>
-          )}
-        </div>
+          </Field>
+          {err ? (
+            <Callout variant="danger">
+              <p>{err}</p>
+            </Callout>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={busy || value.trim() === ''}>
-            Update
+          <Button variant="primary" onClick={submit} disabled={busy || value.trim() === ''}>
+            {busy ? <Dots /> : null}
+            Rotate
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -266,9 +277,9 @@ function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Scopes are intentionally not asked for — the server validates the token
-  // against GET /user and reads the real X-OAuth-Scopes header, which is the
-  // only thing GitHub will actually enforce.
+  // Scopes are deliberately not asked for — the server validates against
+  // GET /user and reads the real X-OAuth-Scopes header, which is the only
+  // thing GitHub actually enforces.
   async function submit() {
     setBusy(true);
     setErr(null);
@@ -277,6 +288,7 @@ function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
       setName('');
       setToken('');
       setOpen(false);
+      toast.success('Token added', { description: name });
       onCreated();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -288,25 +300,19 @@ function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button>
-          <Plus className="mr-1 size-4" />
-          Add token
-        </Button>
+        <Button variant="primary">Add token</Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Add GitHub token</DialogTitle>
-          <DialogDescription>
-            Stored encrypted-at-rest with AES-256-GCM. The plaintext value
-            never leaves this request — there is no way to retrieve it after
-            saving. Scopes are read from GitHub on save (no need to enter them
-            here). For auto webhook registration the token needs the{' '}
-            <code>admin:repo_hook</code> scope.
-          </DialogDescription>
+          <DialogTitle>Add a GitHub token</DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <Label htmlFor="tok-name">Name</Label>
+        <DialogBody>
+          <DialogDescription>
+            Stored encrypted at rest with AES-256-GCM. The plaintext never leaves this request and
+            cannot be retrieved afterwards. Scopes are read from GitHub on save; automatic webhook
+            registration needs <Chip>admin:repo_hook</Chip>.
+          </DialogDescription>
+          <Field label="Name" htmlFor="tok-name">
             <Input
               id="tok-name"
               autoFocus
@@ -314,32 +320,33 @@ function CreateTokenDialog({ onCreated }: { onCreated: () => void }) {
               onChange={(e) => setName(e.target.value)}
               placeholder="personal"
             />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="tok-value">Token value</Label>
+          </Field>
+          <Field label="Token value" htmlFor="tok-value">
             <Input
               id="tok-value"
               type="password"
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder="ghp_... or github_pat_..."
-              className="font-mono"
+              placeholder="ghp_… or github_pat_…"
+              invalid={!!err}
             />
-          </div>
-          {err && (
-            <Alert variant="destructive">
-              <AlertDescription>{err}</AlertDescription>
-            </Alert>
-          )}
-        </div>
+          </Field>
+          {err ? (
+            <Callout variant="danger">
+              <p>{err}</p>
+            </Callout>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
             Cancel
           </Button>
           <Button
+            variant="primary"
             onClick={submit}
             disabled={busy || name.trim() === '' || token.trim() === ''}
           >
+            {busy ? <Dots /> : null}
             Save
           </Button>
         </DialogFooter>

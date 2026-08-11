@@ -1,19 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Boxes, ChevronRight, Loader2 } from 'lucide-react';
 import { api } from '@/api/client';
-import { Badge } from '@/ui/badge';
-import { Card, CardContent } from '@/ui/card';
-import type {
-  Workspace,
-  WorkspaceProject,
-  WorkspaceProjectListResponse,
-} from '../types';
+import { Badge, Status } from '@/ui/badge';
+import { Card } from '@/ui/card';
+import type { Workspace, WorkspaceProject, WorkspaceProjectListResponse } from '../types';
 import { isInFlight } from '../types';
 import { formatRelative } from '@/lib/formatDate';
 
-// WorkspaceCard mirrors the projects ProjectCard so the dashboard reads
-// with one visual language. Project memberships load lazily.
+// Mirrors ProjectCard so the two grids read as one system. Memberships load
+// lazily — the list endpoint doesn't carry them.
 export function WorkspaceCard({ workspace }: { workspace: Workspace }) {
   const [projects, setProjects] = useState<WorkspaceProject[] | null>(null);
 
@@ -33,63 +28,57 @@ export function WorkspaceCard({ workspace }: { workspace: Workspace }) {
   }, [workspace.id]);
 
   const summary = computeSummary(projects);
+  const total = projects?.length ?? 0;
 
   return (
-    <Link to={`/workspaces/${workspace.id}`} className="group">
-      <Card className="h-full transition-colors hover:border-foreground/30">
-        <CardContent className="space-y-3 p-5">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 truncate text-base font-medium leading-tight">
-                <Boxes className="size-4 shrink-0 text-muted-foreground" />
-                <span className="truncate">{workspace.name}</span>
+    <Link to={`/workspaces/${workspace.id}`} className="min-w-0">
+      <Card clickable className={`h-full ${summary.failed > 0 ? 'border-accent' : ''}`}>
+        <div className="flex h-full flex-col gap-3 p-[18px]">
+          <div className="min-w-0">
+            <div className="truncate text-[15px] font-bold leading-tight">{workspace.name}</div>
+            {workspace.description ? (
+              <div className="cix-row__meta mt-1 truncate" title={workspace.description}>
+                {workspace.description}
               </div>
-              {workspace.description && (
-                <div
-                  className="mt-0.5 truncate text-xs text-muted-foreground"
-                  title={workspace.description}
-                >
-                  {workspace.description}
-                </div>
-              )}
-            </div>
-            <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            {summary.busy ? (
-              <Badge variant="secondary" className="gap-1">
-                <Loader2 className="size-3 animate-spin" />
-                {summary.busy === 1 ? '1 in progress' : `${summary.busy} in progress`}
-              </Badge>
+            {summary.busy > 0 ? (
+              <Status tone="warn" className="font-mono text-[11.5px]">
+                {summary.busy} indexing
+              </Status>
             ) : projects === null ? (
-              <Badge variant="outline" className="font-normal">
-                Loading…
-              </Badge>
-            ) : projects.length === 0 ? (
-              <Badge variant="outline" className="font-normal">
-                No projects yet
-              </Badge>
+              <span className="cix-hint">loading…</span>
+            ) : total === 0 ? (
+              <Status tone="idle" className="font-mono text-[11.5px]">
+                empty
+              </Status>
             ) : summary.failed > 0 ? (
-              <Badge variant="destructive">{summary.failed} failed</Badge>
+              <Status tone="busy" className="font-mono text-[11.5px]">
+                {summary.failed} failed
+              </Status>
             ) : (
-              <Badge>Ready</Badge>
+              <Status tone="ok" className="font-mono text-[11.5px]">
+                ready
+              </Status>
             )}
-            {projects !== null && projects.length > 0 && (
-              <Badge variant="outline" className="font-normal text-xs">
-                {summary.indexed}/{projects.length} indexed
+            {total > 0 ? (
+              <Badge variant="quiet">
+                {summary.indexed}/{total} indexed
               </Badge>
-            )}
+            ) : null}
           </div>
 
-          <div className="flex items-center gap-4 text-xs text-muted-foreground">
-            <span className="ml-auto">
-              {projects !== null && projects.length > 0
-                ? `Updated ${formatRelative(latestUpdate(projects))}`
-                : `Created ${formatRelative(workspace.created_at)}`}
-            </span>
-          </div>
-        </CardContent>
+          <dl className="cix-kv mt-auto">
+            <dt>projects</dt>
+            <dd className="tabular-nums">{projects === null ? '—' : total}</dd>
+            <dt>{total > 0 ? 'updated' : 'created'}</dt>
+            <dd>
+              {formatRelative(total > 0 ? latestUpdate(projects!) : workspace.created_at)}
+            </dd>
+          </dl>
+        </div>
       </Card>
     </Link>
   );
@@ -115,8 +104,6 @@ function computeSummary(projects: WorkspaceProject[] | null): {
 
 function latestUpdate(projects: WorkspaceProject[]): string {
   let best = projects[0]?.added_at ?? '';
-  for (const p of projects) {
-    if (p.added_at > best) best = p.added_at;
-  }
+  for (const p of projects) if (p.added_at > best) best = p.added_at;
   return best;
 }

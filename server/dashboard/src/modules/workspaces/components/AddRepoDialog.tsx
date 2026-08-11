@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Copy, Loader2, Lock, Plus, Unlock } from 'lucide-react';
 import { api, ApiError } from '@/api/client';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Button } from '@/ui/button';
+import { Callout } from '@/ui/alert';
+import { Button, Dots } from '@/ui/button';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -12,9 +12,10 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/ui/dialog';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
-import { RadioGroup, RadioGroupItem } from '@/ui/radio-group';
+import { Chip } from '@/ui/code';
+import { Field, Input } from '@/ui/input';
+import { RadioCard, RadioGroup } from '@/ui/radio-group';
+import { useCopy } from '@/lib/useCopy';
 import {
   Select,
   SelectContent,
@@ -266,21 +267,22 @@ export function AddRepoDialog({
         }}
       >
         <DialogTrigger asChild>
-          <Button>
-            <Plus className="mr-1 size-4" /> Add repo
-          </Button>
+          <Button variant="primary">Add repo</Button>
         </DialogTrigger>
         <DialogContent className="max-w-lg [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle>Repository attached</DialogTitle>
-            <DialogDescription>
-              Clone + indexing is queued. The card will progress through
-              cloning → indexing → indexed as the worker picks it up.
-            </DialogDescription>
           </DialogHeader>
-          <CreatedResult created={created} mode={webhookMode} />
+          <DialogBody>
+            <DialogDescription>
+              Clone and indexing are queued. The project moves through cloning → indexing →
+              indexed as the worker picks it up.
+            </DialogDescription>
+            <CreatedResult created={created} mode={webhookMode} />
+          </DialogBody>
           <DialogFooter>
             <Button
+              variant="primary"
               onClick={() => {
                 setOpen(false);
                 reset();
@@ -303,9 +305,7 @@ export function AddRepoDialog({
       }}
     >
       <DialogTrigger asChild>
-        <Button>
-          <Plus className="mr-1 size-4" /> Add repo
-        </Button>
+        <Button variant="primary">Add repo</Button>
       </DialogTrigger>
       {/* `min-w-0` on every direct grid child is the trick: DialogContent
           is `display: grid`, and grid items default to `min-width: auto`
@@ -316,45 +316,38 @@ export function AddRepoDialog({
       <DialogContent className="max-w-lg [&>*]:min-w-0">
         <DialogHeader>
           <DialogTitle>Add repository</DialogTitle>
-          <DialogDescription>
-            Pick a token, then an account and a repository. Branch
-            defaults to <code>main</code> — change it if the repo
-            uses a different one (the picker shows each repo's default
-            in the column on the right).
-          </DialogDescription>
         </DialogHeader>
 
-        <div className="min-w-0 space-y-4">
+        <DialogBody className="min-w-0">
+          <DialogDescription>
+            Pick a token, then an account and a repository. The branch defaults to{' '}
+            <Chip>main</Chip> — each row shows its repo&rsquo;s own default on the right.
+          </DialogDescription>
           {/* Step 1: token */}
-          <div className="space-y-1.5">
-            <Label htmlFor="tok">GitHub token</Label>
+          <Field
+            label="GitHub token"
+            htmlFor="tok"
+            hint={
+              tokens?.length === 0
+                ? 'No tokens stored yet — add one under GitHub Integration.'
+                : undefined
+            }
+          >
             <Select value={tokenID} onValueChange={setTokenID}>
               <SelectTrigger id="tok">
                 <SelectValue placeholder="Choose a token…" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={NO_TOKEN}>
-                  (public repo · no token)
-                </SelectItem>
+                <SelectItem value={NO_TOKEN}>public repo · no token</SelectItem>
                 {tokens?.map((t) => (
                   <SelectItem key={t.id} value={t.id}>
                     {t.name}
-                    {t.scopes.length > 0 && (
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        {t.scopes.join(', ')}
-                      </span>
-                    )}
+                    {t.scopes.length > 0 ? ` · ${t.scopes.join(', ')}` : ''}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            {tokens?.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                No tokens stored yet. Add one under <strong>GitHub Tokens</strong>{' '}
-                in the sidebar.
-              </p>
-            )}
-          </div>
+          </Field>
 
           {/* Accounts fetch is paginated server-side (/user + up to 5
               pages of /user/repos) and can take a few seconds against
@@ -362,47 +355,38 @@ export function AddRepoDialog({
               doesn't look frozen between picking the token and the
               account selector appearing. */}
           {tokenID && tokenID !== NO_TOKEN && accountsLoading && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="size-3.5 animate-spin" />
-              Loading accounts visible to this token…
-            </div>
+            <span className="flex items-center gap-2 font-mono text-[12px] text-muted">
+              <Dots /> loading accounts visible to this token…
+            </span>
           )}
 
           {/* Step 2: account — the PAT owner plus every org they
               belong to. The operator must pick one specifically so we
               always know which slice of GitHub to ask. */}
           {tokenID && tokenID !== NO_TOKEN && accounts !== null && (
-            <div className="space-y-1.5">
-              <Label htmlFor="acc">Account</Label>
+            <Field
+              label="Account"
+              htmlFor="acc"
+              error={accountsErr ?? undefined}
+              hint={
+                accounts.length === 0
+                  ? 'GitHub returned no accounts — the PAT needs at least read:user and read:org.'
+                  : undefined
+              }
+            >
               <Select value={accountKey} onValueChange={setAccountKey}>
                 <SelectTrigger id="acc">
                   <SelectValue placeholder="Choose an account…" />
                 </SelectTrigger>
                 <SelectContent>
                   {accounts.map((a) => (
-                    <SelectItem
-                      key={`${a.type}:${a.login}`}
-                      value={`${a.type}:${a.login}`}
-                    >
-                      {a.login}
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        {a.type}
-                      </span>
+                    <SelectItem key={`${a.type}:${a.login}`} value={`${a.type}:${a.login}`}>
+                      {a.login} · {a.type}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              {accounts.length === 0 && (
-                <p className="text-xs text-muted-foreground">
-                  GitHub returned no accounts for this token. Check the
-                  PAT has at least the <code>read:user</code> +{' '}
-                  <code>read:org</code> scopes.
-                </p>
-              )}
-              {accountsErr && (
-                <p className="text-xs text-destructive">{accountsErr}</p>
-              )}
-            </div>
+            </Field>
           )}
 
           {/* Step 3: repository — only shown once accounts are loaded
@@ -410,17 +394,15 @@ export function AddRepoDialog({
               Repository label before that just renders an empty box
               that adds to the "form is frozen" feeling. */}
           {tokenID && tokenID !== NO_TOKEN && accounts !== null && (
-            <div className="space-y-1.5">
-              <Label htmlFor="repo-search">Repository</Label>
+            <Field label="Repository" htmlFor="repo-search">
               {reposLoading ? (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="size-3.5 animate-spin" />
-                  Loading repos accessible to this token…
-                </div>
+                <span className="flex items-center gap-2 font-mono text-[12px] text-muted">
+                  <Dots /> loading repositories…
+                </span>
               ) : reposErr ? (
-                <Alert variant="destructive">
-                  <AlertDescription>{reposErr}</AlertDescription>
-                </Alert>
+                <Callout variant="danger">
+                  <p>{reposErr}</p>
+                </Callout>
               ) : repos === null ? null : (
                 <>
                   <Input
@@ -432,11 +414,10 @@ export function AddRepoDialog({
                       setSelectedRepo(null);
                     }}
                   />
-                  <div className="max-h-56 min-w-0 overflow-y-auto overflow-x-hidden rounded-md border">
+                  <div className="mt-2 max-h-56 min-w-0 overflow-y-auto overflow-x-hidden border">
                     {filteredRepos.length === 0 ? (
-                      <div className="px-3 py-2 text-xs text-muted-foreground">
-                        No matching repositories. {repos.length} total visible
-                        to this token.
+                      <div className="px-3 py-2 font-mono text-[11.5px] text-muted">
+                        no match · {repos.length} visible to this token
                       </div>
                     ) : (
                       <ul>
@@ -458,19 +439,21 @@ export function AddRepoDialog({
                                   // branch input if the repo needs a
                                   // different one (e.g. legacy master).
                                 }}
-                                className={`flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted ${
-                                  active ? 'bg-muted' : ''
+                                className={`flex w-full min-w-0 items-center gap-2.5 px-3 py-2 text-left text-sm ${
+                                  active ? 'bg-ink text-surface' : 'hover:bg-surface-hover'
                                 }`}
                               >
-                                {r.private ? (
-                                  <Lock className="size-3.5 shrink-0 text-muted-foreground" />
-                                ) : (
-                                  <Unlock className="size-3.5 shrink-0 text-muted-foreground" />
-                                )}
-                                <span className="min-w-0 flex-1 truncate font-medium">
+                                <span
+                                  aria-hidden
+                                  className={`h-2 w-2 flex-none ${
+                                    r.private ? 'bg-accent' : 'bg-ok'
+                                  }`}
+                                  title={r.private ? 'private' : 'public'}
+                                />
+                                <span className="min-w-0 flex-1 truncate font-mono text-[13px]">
                                   {r.full_name}
                                 </span>
-                                <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                                <span className="shrink-0 font-mono text-[11px] opacity-70">
                                   {r.default_branch}
                                 </span>
                               </button>
@@ -482,74 +465,71 @@ export function AddRepoDialog({
                   </div>
                 </>
               )}
-            </div>
+            </Field>
           )}
 
           {/* Step 2 (no-token variant): manual URL input */}
           {tokenID === NO_TOKEN && (
-            <div className="space-y-1.5">
-              <Label htmlFor="manual-url">GitHub URL</Label>
+            <Field
+              label="GitHub URL"
+              htmlFor="manual-url"
+              hint="Only public repositories can be cloned without a token."
+            >
               <Input
                 id="manual-url"
                 placeholder="https://github.com/owner/repo"
                 value={manualUrl}
                 onChange={(e) => setManualUrl(e.target.value)}
               />
-              <p className="text-xs text-muted-foreground">
-                Only public repositories can be cloned without a token.
-              </p>
-            </div>
+            </Field>
           )}
 
           {/* Step 3: branch — needs a URL to be meaningful */}
           {validUrl && (
-            <div className="space-y-1.5">
-              <Label htmlFor="branch">Branch</Label>
-              <Input
-                id="branch"
-                value={branch}
-                onChange={(e) => setBranch(e.target.value)}
-              />
-            </div>
+            <Field label="Branch" htmlFor="branch">
+              <Input id="branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
+            </Field>
           )}
 
           {/* Step 4: webhook mode — needs everything above */}
           {validUrl && (
-            <div className="space-y-1.5">
-              <Label>Webhook</Label>
+            <Field label="Webhook">
               <RadioGroup
                 value={webhookMode}
                 onValueChange={(v) => setWebhookMode(v as WebhookMode)}
               >
-                <WebhookModeOption
+                <RadioCard
+                  id="wh-manual"
                   value="manual"
-                  title="Manual"
-                  hint="You paste the URL + secret into the repo's webhook settings."
                   selected={webhookMode === 'manual'}
+                  title="Manual"
+                  hint="You paste the URL and secret into the repo's webhook settings."
                 />
-                <WebhookModeOption
+                <RadioCard
+                  id="wh-auto"
                   value="auto"
-                  title="Automatic"
-                  hint="Server registers the webhook via GitHub API (requires admin:repo_hook on the PAT)."
                   selected={webhookMode === 'auto'}
                   disabled={tokenID === NO_TOKEN}
+                  title="Automatic"
+                  hint="The server registers it via the GitHub API — needs admin:repo_hook on the PAT."
                 />
-                <WebhookModeOption
+                <RadioCard
+                  id="wh-disabled"
                   value="disabled"
-                  title="Disabled"
-                  hint="No auto-sync; reindex via the Reindex button only."
                   selected={webhookMode === 'disabled'}
+                  title="Disabled"
+                  hint="No auto-sync — Reindex only."
                 />
               </RadioGroup>
-            </div>
+            </Field>
           )}
 
           {submitErr && (
-            <Alert variant="destructive">
-              <AlertDescription>{submitErr}</AlertDescription>
-            </Alert>
+            <Callout variant="danger">
+              <p>{submitErr}</p>
+            </Callout>
           )}
-        </div>
+        </DialogBody>
 
         <DialogFooter>
           <Button
@@ -562,8 +542,8 @@ export function AddRepoDialog({
           >
             Cancel
           </Button>
-          <Button onClick={submit} disabled={!canSubmit}>
-            {submitting ? <Loader2 className="mr-1 size-4 animate-spin" /> : null}
+          <Button variant="primary" onClick={submit} disabled={!canSubmit}>
+            {submitting ? <Dots /> : null}
             Attach repository
           </Button>
         </DialogFooter>
@@ -572,121 +552,63 @@ export function AddRepoDialog({
   );
 }
 
-function WebhookModeOption({
-  value,
-  title,
-  hint,
-  selected,
-  disabled,
-}: {
-  value: WebhookMode;
-  title: string;
-  hint: string;
-  selected: boolean;
-  disabled?: boolean;
-}) {
+function CreatedResult({ created, mode }: { created: GitRepoCreated; mode: WebhookMode }) {
   return (
-    <label
-      className={`flex cursor-pointer items-start gap-3 rounded-md border p-2 text-sm ${
-        selected ? 'border-foreground/40 bg-muted/40' : 'hover:bg-muted/20'
-      } ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
-    >
-      <RadioGroupItem value={value} disabled={disabled} className="mt-0.5" />
-      <div>
-        <div className="font-medium">{title}</div>
-        <div className="text-xs text-muted-foreground">{hint}</div>
-      </div>
-    </label>
-  );
-}
+    <div className="flex flex-col gap-3">
+      <dl className="cix-kv">
+        <dt>project</dt>
+        <dd>{created.git_repo.project_path}</dd>
+      </dl>
 
-function CreatedResult({
-  created,
-  mode,
-}: {
-  created: GitRepoCreated;
-  mode: WebhookMode;
-}) {
-  return (
-    <div className="space-y-3 text-sm">
-      <div>
-        <span className="text-muted-foreground">Project:</span>{' '}
-        <span className="font-mono">{created.git_repo.project_path}</span>
-      </div>
-
-      {mode === 'auto' && (
-        <Alert>
-          <AlertTitle>
+      {mode === 'auto' ? (
+        <Callout variant={created.auto_registered ? 'ok' : 'warn'}>
+          <b>
             {created.auto_registered
               ? 'Webhook registered with GitHub'
-              : 'Auto-register failed'}
-          </AlertTitle>
-          {!created.auto_registered && created.auto_register_note && (
-            <AlertDescription>{created.auto_register_note}</AlertDescription>
-          )}
-        </Alert>
-      )}
+              : 'Auto-registration failed'}
+          </b>
+          {!created.auto_registered && created.auto_register_note ? (
+            <p>{created.auto_register_note}</p>
+          ) : null}
+        </Callout>
+      ) : null}
 
-      {mode === 'manual' && (
+      {mode === 'manual' ? (
         <>
-          <Alert>
-            <AlertTitle>Configure the webhook in GitHub</AlertTitle>
-            <AlertDescription>
-              Add a webhook in <code>Settings → Webhooks → Add webhook</code>{' '}
-              for the repo with the URL and secret below. Content-type:{' '}
-              <code>application/json</code>. Events: <code>push</code>.
-            </AlertDescription>
-          </Alert>
+          <Callout>
+            <b>Configure the webhook in GitHub</b>
+            <p>
+              Settings → Webhooks → Add webhook, with the URL and secret below. Content type{' '}
+              <Chip>application/json</Chip>, event <Chip>push</Chip>.
+            </p>
+          </Callout>
           <CopyableField label="Webhook URL" value={created.webhook_url} />
-          <CopyableField label="Secret" value={created.webhook_secret} mono />
-          <p className="text-xs text-muted-foreground">
-            The secret is shown once here. Store it in a password manager —
-            you can also re-fetch it via the API's webhook-info endpoint.
+          <CopyableField label="Secret" value={created.webhook_secret} />
+          <p className="cix-hint m-0">
+            the secret is shown once here — it can also be re-fetched from the webhook-info
+            endpoint
           </p>
         </>
-      )}
+      ) : null}
 
-      {mode === 'disabled' && (
-        <Alert>
-          <AlertTitle>Webhook disabled</AlertTitle>
-          <AlertDescription>
-            This repo will only be reindexed when you click <strong>Reindex</strong>{' '}
-            on its card.
-          </AlertDescription>
-        </Alert>
-      )}
+      {mode === 'disabled' ? (
+        <Callout variant="warn">
+          <b>Webhook disabled</b>
+          <p>This repository is only reindexed when you press Reindex.</p>
+        </Callout>
+      ) : null}
     </div>
   );
 }
 
-function CopyableField({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-}) {
-  const [copied, setCopied] = useState(false);
+function CopyableField({ label, value }: { label: string; value: string }) {
+  const { copied, copy } = useCopy();
   return (
-    <div className="space-y-1">
-      <Label className="text-xs">{label}</Label>
-      <div className="flex gap-1">
-        <Input readOnly value={value} className={mono ? 'font-mono text-xs' : ''} />
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            void navigator.clipboard.writeText(value);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          }}
-        >
-          <Copy className="size-3.5" />
-          <span className="ml-1 text-xs">{copied ? 'Copied' : 'Copy'}</span>
-        </Button>
+    <Field label={label}>
+      <div className="flex gap-2">
+        <Input readOnly value={value} onFocus={(e) => e.currentTarget.select()} />
+        <Button onClick={() => void copy(value)}>{copied ? 'Copied' : 'Copy'}</Button>
       </div>
-    </div>
+    </Field>
   );
 }

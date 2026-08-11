@@ -4,10 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#EDE0C6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#171412" media="(prefers-color-scheme: dark)" />
     <title>cix dashboard</title>
     <script>
       // Anti-flash: applies the persisted theme synchronously before React
-      // mounts. Without this, a saved 'dark' choice would briefly flash light.
+      // mounts. Without this, a saved 'dark' choice would briefly flash cream.
       // Storage key + values must match src/lib/theme.ts.
       (function () {
         try {
@@ -16,13 +18,24 @@
             t === 'dark' ||
             (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
           if (dark) document.documentElement.classList.add('dark');
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light';
         } catch (_e) {
           /* localStorage may be unavailable in some browsers — no-op */
         }
       })();
     </script>
+    <style>
+      /* Paint the canvas before the stylesheet lands so the first frame is
+         cream, not white. Values mirror --c-canvas in src/index.css. */
+      html {
+        background: #ede0c6;
+      }
+      html.dark {
+        background: #171412;
+      }
+    </style>
   </head>
-  <body class="bg-background text-foreground antialiased">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

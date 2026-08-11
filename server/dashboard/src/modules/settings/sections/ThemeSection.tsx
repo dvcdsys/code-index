@@ -1,17 +1,12 @@
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
-import { Label } from '@/ui/label';
-import { RadioGroup, RadioGroupItem } from '@/ui/radio-group';
+import { Card, CardBody, CardHead } from '@/ui/card';
+import { RadioCard, RadioGroup } from '@/ui/radio-group';
 import { useTheme } from '@/app/ThemeProvider';
 import type { ThemeMode } from '@/lib/theme';
 
 const OPTIONS: ReadonlyArray<{ value: ThemeMode; label: string; hint: string }> = [
-  { value: 'light', label: 'Light', hint: 'Always use the light theme.' },
-  { value: 'dark', label: 'Dark', hint: 'Always use the dark theme.' },
-  {
-    value: 'system',
-    label: 'System',
-    hint: 'Follow the OS-level prefers-color-scheme setting.',
-  },
+  { value: 'light', label: 'Cream', hint: 'always the light theme' },
+  { value: 'dark', label: 'Ink', hint: 'always the dark theme' },
+  { value: 'system', label: 'System', hint: 'follow prefers-color-scheme' },
 ];
 
 export function ThemeSection() {
@@ -19,32 +14,27 @@ export function ThemeSection() {
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>Theme</CardTitle>
-        <CardDescription>
-          Currently rendering in <span className="font-medium capitalize">{resolved}</span>{' '}
-          mode. Stored locally — applies to this browser only.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <RadioGroup
-          value={mode}
-          onValueChange={(v) => setMode(v as ThemeMode)}
-          className="space-y-3"
-        >
+      <CardHead
+        title="Theme"
+        aside={<span className="font-mono text-[11px] font-normal text-muted">{resolved}</span>}
+      />
+      <CardBody>
+        <p className="mb-3.5 mt-0 text-[13.5px] text-dim">
+          Stored locally — it applies to this browser only.
+        </p>
+        <RadioGroup value={mode} onValueChange={(v) => setMode(v as ThemeMode)}>
           {OPTIONS.map((o) => (
-            <div key={o.value} className="flex items-start gap-3">
-              <RadioGroupItem id={`theme-${o.value}`} value={o.value} className="mt-0.5" />
-              <div className="space-y-0.5">
-                <Label htmlFor={`theme-${o.value}`} className="font-medium">
-                  {o.label}
-                </Label>
-                <p className="text-xs text-muted-foreground">{o.hint}</p>
-              </div>
-            </div>
+            <RadioCard
+              key={o.value}
+              id={`theme-${o.value}`}
+              value={o.value}
+              selected={mode === o.value}
+              title={o.label}
+              hint={o.hint}
+            />
           ))}
         </RadioGroup>
-      </CardContent>
+      </CardBody>
     </Card>
   );
 }

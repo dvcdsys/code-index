@@ -1,29 +1,26 @@
 import { useMemo, useState } from 'react';
-import { AlertCircle, ChevronDown, FolderPlus, LayoutGrid, List, Search } from 'lucide-react';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
+import { ApiError } from '@/api/client';
+import { useAuth } from '@/auth/useAuth';
+import { useStatusFact } from '@/app/StatusBar';
+import { useRuntimeModel } from '@/lib/useServerStatus';
+import { AddRepoDialog } from '@/modules/workspaces/components/AddRepoDialog';
+import { Callout } from '@/ui/alert';
 import { Button } from '@/ui/button';
+import { Empty } from '@/ui/card';
+import { CheckboxRow } from '@/ui/checkbox';
+import { Chip } from '@/ui/code';
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/ui/dropdown-menu';
 import { Input } from '@/ui/input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/ui/select';
+import { Page } from '@/ui/page';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/ui/select';
 import { Skeleton } from '@/ui/skeleton';
-import { ApiError } from '@/api/client';
-import { useAuth } from '@/auth/useAuth';
-import { useRuntimeModel } from '@/lib/useServerStatus';
-import { AddRepoDialog } from '@/modules/workspaces/components/AddRepoDialog';
+import { Segmented } from '@/ui/tabs';
 import { ProjectCard } from './components/ProjectCard';
 import { ProjectsTable } from './components/ProjectsTable';
 import { useProjects } from './hooks';
@@ -47,11 +44,11 @@ export function ProjectsListPage() {
   const [type, setType] = useState<TypeFilter>('all');
   const [statuses, setStatuses] = useState<string[]>([]);
   const [language, setLanguage] = useState('all');
-  // Sorting is a table-only affordance, defaulting to most-recently-indexed.
+  // Sorting is a table-only affordance; most-recently-indexed first.
   const [sort, setSort] = useState<ProjectSort>({ key: 'last_indexed', dir: 'desc' });
 
-  // Sidecar embedding model — resolves the "Stale model" status the same way
-  // the badges do, so the status filter options/predicate match the column.
+  // The sidecar's model resolves "Stale model" the same way the badges do, so
+  // the filter options and the predicate always match the Status column.
   const currentModel = useRuntimeModel();
 
   function changeView(v: ProjectView) {
@@ -64,70 +61,51 @@ export function ProjectsListPage() {
   }
 
   const projects = data?.projects;
-  // Filter options come from the full list so they don't vanish as the user
-  // narrows the view with the other filters.
+  // Options come from the full list so they don't vanish as the view narrows.
   const languages = useMemo(() => (projects ? collectLanguages(projects) : []), [projects]);
   const statusOptions = useMemo(
     () => (projects ? collectStatuses(projects, currentModel) : []),
-    [projects, currentModel],
+    [projects, currentModel]
   );
   const filtered = useMemo(
     () =>
-      projects
-        ? filterProjects(projects, { search, type, statuses, currentModel, language })
-        : [],
-    [projects, search, type, statuses, currentModel, language],
+      projects ? filterProjects(projects, { search, type, statuses, currentModel, language }) : [],
+    [projects, search, type, statuses, currentModel, language]
   );
   const rows = useMemo(
     () => (view === 'table' ? sortProjects(filtered, sort) : filtered),
-    [filtered, sort, view],
+    [filtered, sort, view]
   );
 
   const filterActive =
     search.trim() !== '' || type !== 'all' || statuses.length > 0 || language !== 'all';
 
+  useStatusFact(
+    data ? `${rows.length}${filterActive ? ` of ${data.total}` : ''} projects` : null
+  );
+
   return (
-    <div className="space-y-6">
-      <header className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
-          <p className="text-sm text-muted-foreground">
-            {data
-              ? filterActive
-                ? `Showing ${rows.length} of ${data.total} ${
-                    data.total === 1 ? 'project' : 'projects'
-                  }`
-                : `${data.total} indexed ${data.total === 1 ? 'project' : 'projects'}`
-              : ' '}
-          </p>
-        </div>
-        {/* Add repo here clones + indexes a GitHub repository as a
-            standalone project. The new project lives in /projects with
-            no workspace attachment — link it into specific workspaces
-            from the workspace detail page if you want.
-
-            External (GitHub-cloned) projects are admin-administered — only
-            admins can create them. Hide the trigger from regular users so
-            the UI doesn't dangle a button that would 403 on submit. */}
-        {isAdmin && <AddRepoDialog onAdded={() => void refetch()} />}
-      </header>
-
-      {/* Toolbar: name search + type/status/language filters + view toggle.
-          All filters apply to both views; column sorting is handled inside
-          the table. */}
+    <Page
+      title="Projects"
+      subtitle="Indexed repositories on this server — local ones registered by the CLI, external ones cloned from GitHub."
+      action={
+        // External (GitHub-cloned) projects are admin-administered, so a
+        // non-admin would only get a 403 on submit — no dangling button.
+        isAdmin ? <AddRepoDialog onAdded={() => void refetch()} /> : null
+      }
+    >
       {data && data.projects.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative min-w-[14rem] flex-1">
-            <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Filter by name…"
-              className="pl-8"
-            />
-          </div>
+        <div className="mb-5 flex flex-wrap items-center gap-2.5">
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filter by path…"
+            aria-label="Filter projects by path"
+            className="min-w-[14rem] flex-1"
+          />
+
           <Select value={type} onValueChange={(v) => setType(v as TypeFilter)}>
-            <SelectTrigger className="w-[9.5rem]">
+            <SelectTrigger className="w-[150px]" aria-label="Project type">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -136,14 +114,14 @@ export function ProjectsListPage() {
               <SelectItem value="local">Local</SelectItem>
             </SelectContent>
           </Select>
+
           {statusOptions.length > 0 ? (
-            // Inclusive multi-select: pick any of the status badges that appear
-            // in the data; a project is kept only if it carries ALL the ticked
-            // ones. Options are derived from the current projects, not the raw
-            // server enum, so they mirror what the Status column shows.
+            // Inclusive multi-select over the badges that actually appear in
+            // the data: a project is kept only if it carries ALL the ticked
+            // ones, so {Indexed, Out of sync} narrows rather than widens.
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" className="w-[11rem] justify-between font-normal">
+                <Button className="w-[176px] justify-between font-normal">
                   <span className="truncate">
                     {statuses.length === 0
                       ? 'All statuses'
@@ -151,39 +129,35 @@ export function ProjectsListPage() {
                         ? statuses[0]
                         : `${statuses.length} statuses`}
                   </span>
-                  <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  <span aria-hidden className="font-mono text-[10px]">
+                    ▼
+                  </span>
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-[11rem]">
-                <DropdownMenuLabel>Status</DropdownMenuLabel>
+              <DropdownMenuContent align="start" className="w-[220px]">
                 {statusOptions.map((s) => (
-                  <DropdownMenuCheckboxItem
-                    key={s}
-                    checked={statuses.includes(s)}
-                    // Keep the menu open so several can be ticked in one go.
-                    onSelect={(e) => e.preventDefault()}
-                    onCheckedChange={() => toggleStatus(s)}
-                  >
-                    {s}
-                  </DropdownMenuCheckboxItem>
+                  <div key={s} className="px-3 py-2">
+                    <CheckboxRow
+                      id={`status-${s}`}
+                      checked={statuses.includes(s)}
+                      onCheckedChange={() => toggleStatus(s)}
+                      label={s}
+                    />
+                  </div>
                 ))}
                 {statuses.length > 0 ? (
                   <>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      onSelect={() => setStatuses([])}
-                      className="justify-center text-muted-foreground"
-                    >
-                      Clear
-                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => setStatuses([])}>Clear</DropdownMenuItem>
                   </>
                 ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
           ) : null}
+
           {languages.length > 0 ? (
             <Select value={language} onValueChange={setLanguage}>
-              <SelectTrigger className="w-[10rem]">
+              <SelectTrigger className="w-[160px]" aria-label="Language">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -196,88 +170,46 @@ export function ProjectsListPage() {
               </SelectContent>
             </Select>
           ) : null}
-          <div className="flex items-center rounded-md border p-0.5">
-            <Button
-              type="button"
-              variant={view === 'grid' ? 'default' : 'ghost'}
-              size="icon"
-              className="h-8 w-8"
-              aria-label="Tiles view"
-              aria-pressed={view === 'grid'}
-              onClick={() => changeView('grid')}
-            >
-              <LayoutGrid className="h-4 w-4" />
-            </Button>
-            <Button
-              type="button"
-              variant={view === 'table' ? 'default' : 'ghost'}
-              size="icon"
-              className="h-8 w-8"
-              aria-label="Table view"
-              aria-pressed={view === 'table'}
-              onClick={() => changeView('table')}
-            >
-              <List className="h-4 w-4" />
-            </Button>
-          </div>
+
+          <Segmented
+            aria-label="View"
+            value={view}
+            onChange={changeView}
+            options={[
+              { value: 'table', label: 'Table' },
+              { value: 'grid', label: 'Tiles' },
+            ]}
+          />
         </div>
       ) : null}
 
       {isLoading ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-44 w-full" />
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }, (_, i) => (
+            <Skeleton key={i} className="h-44" />
           ))}
         </div>
       ) : error ? (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Failed to load projects</AlertTitle>
-          <AlertDescription>
-            {error instanceof ApiError ? error.detail : String(error)}
-          </AlertDescription>
-        </Alert>
+        <Callout variant="danger">
+          <b>Could not load projects</b>
+          <p>{error instanceof ApiError ? error.detail : String(error)}</p>
+        </Callout>
       ) : !data || data.projects.length === 0 ? (
-        <EmptyState />
+        <Empty title="No projects yet">
+          Use <b>Add repo</b> above to clone and index a GitHub repository, or register a local one
+          from the CLI with <Chip>cix init &lt;path&gt;</Chip>.
+        </Empty>
       ) : rows.length === 0 ? (
-        <NoMatches />
+        <Empty title="No matches">Nothing here fits the current filters.</Empty>
       ) : view === 'table' ? (
         <ProjectsTable projects={rows} sort={sort} onSortChange={setSort} />
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {rows.map((p) => (
             <ProjectCard key={p.path_hash} project={p} />
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function NoMatches() {
-  return (
-    <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed py-12 text-center">
-      <Search className="h-8 w-8 text-muted-foreground" />
-      <p className="text-sm text-muted-foreground">No projects match your filters.</p>
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-16 text-center">
-      <FolderPlus className="h-10 w-10 text-muted-foreground" />
-      <div className="space-y-1">
-        <p className="text-base font-medium">No projects yet</p>
-        <p className="max-w-sm text-sm text-muted-foreground">
-          Use <strong>Add repo</strong> above to clone + index a GitHub
-          repository, or register a local project from the CLI with{' '}
-          <code className="rounded bg-muted px-1 py-0.5 text-xs">
-            cix init &lt;path&gt;
-          </code>
-          .
-        </p>
-      </div>
-    </div>
+    </Page>
   );
 }

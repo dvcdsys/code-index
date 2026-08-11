@@ -1,58 +1,45 @@
-import { AlertCircle, ShieldCheck } from 'lucide-react';
 import { ApiError } from '@/api/client';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Skeleton } from '@/ui/skeleton';
+import { useStatusFact } from '@/app/StatusBar';
+import { Callout } from '@/ui/alert';
+import { Empty } from '@/ui/card';
+import { Page } from '@/ui/page';
+import { SkeletonRows } from '@/ui/skeleton';
+import { TableNote } from '@/ui/table';
 import { LoginLocksTable } from './components/LoginLocksTable';
 import { useLoginLocks } from './hooks';
 
 export default function LoginLocksPage() {
   const { data, error, isLoading } = useLoginLocks();
+  const count = data?.locks.length ?? 0;
+
+  useStatusFact(data ? `${count} active lock${count === 1 ? '' : 's'}` : null);
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Login security</h1>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            Accounts and source IPs currently blocked by the login rate limiter
-            after too many failed attempts. Locks clear themselves as their
-            window expires — reset one to let a user back in immediately.
-          </p>
-        </div>
-      </header>
-
+    <Page
+      title="Login security"
+      subtitle="Accounts and source IPs the login rate limiter is currently blocking after too many failed attempts. Locks expire on their own — reset one to let someone back in immediately."
+    >
       {isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton key={i} className="h-10 w-full" />
-          ))}
-        </div>
+        <SkeletonRows rows={3} />
       ) : error ? (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Failed to load login locks</AlertTitle>
-          <AlertDescription>
-            {error instanceof ApiError ? error.detail : String(error)}
-          </AlertDescription>
-        </Alert>
+        <Callout variant="danger">
+          <b>Could not load login locks</b>
+          <p>{error instanceof ApiError ? error.detail : String(error)}</p>
+        </Callout>
       ) : !data || data.locks.length === 0 ? (
-        <EmptyState />
+        <Empty title="No active locks">
+          Nobody is rate-limited right now. Locks appear here the moment an account or an IP
+          crosses the failed-login threshold.
+        </Empty>
       ) : (
-        <LoginLocksTable locks={data.locks} />
+        <>
+          <LoginLocksTable locks={data.locks} />
+          <TableNote
+            left={`${count} lock${count === 1 ? '' : 's'}`}
+            right="locks clear themselves when their window expires"
+          />
+        </>
       )}
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-16 text-center">
-      <ShieldCheck className="h-10 w-10 text-muted-foreground" />
-      <p className="text-base font-medium">No active login locks</p>
-      <p className="max-w-sm text-sm text-muted-foreground">
-        Nobody is currently rate-limited. Locks appear here automatically when
-        an account or IP exceeds the failed-login threshold.
-      </p>
-    </div>
+    </Page>
   );
 }

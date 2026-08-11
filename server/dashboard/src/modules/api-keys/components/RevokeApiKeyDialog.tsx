@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Loader2, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Button } from '@/ui/button';
+import { Button, Dots } from '@/ui/button';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -32,38 +32,37 @@ export function RevokeApiKeyDialog({
       toast.success('API key revoked', { description: name });
       setOpen(false);
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : String(err);
-      toast.error('Failed to revoke key', { description: detail });
+      toast.error('Could not revoke the key', {
+        description: err instanceof ApiError ? err.detail : String(err),
+      });
     }
   }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="text-destructive hover:text-destructive"
-        >
-          <Trash2 className="mr-1 h-4 w-4" />
+        <Button variant="ghost" size="sm" className="text-accent hover:bg-danger-bg">
           Revoke
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-w-md">
         <DialogHeader>
+          <span className="cix-dot is-busy" aria-hidden />
           <DialogTitle>Revoke this API key?</DialogTitle>
-          <DialogDescription>
-            Any client using <span className="font-mono text-foreground">{prefix}…</span> ({name})
-            will start receiving 401 immediately. The audit row stays in the
-            database but the key cannot authenticate again.
-          </DialogDescription>
         </DialogHeader>
+        <DialogBody>
+          <DialogDescription>
+            Every client presenting <span className="font-mono text-ink">{prefix}…</span> ({name})
+            starts getting 401 immediately. The audit row stays in the database, but the key can
+            never authenticate again.
+          </DialogDescription>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={revoke.isPending}>
             Cancel
           </Button>
-          <Button variant="destructive" onClick={onConfirm} disabled={revoke.isPending}>
-            {revoke.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+          <Button variant="danger" onClick={onConfirm} disabled={revoke.isPending}>
+            {revoke.isPending ? <Dots /> : null}
             Revoke key
           </Button>
         </DialogFooter>

@@ -1,63 +1,740 @@
+@import './fonts/fonts.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* shadcn/ui design tokens — neutral baseColor, Notion-like palette.
- * Light is the default; .dark variants live alongside for the toggle that
- * lands in PR-D. Keep both in sync when adjusting. */
+/* ============================================================================
+ * cix design system — cream & ink.
+ *
+ * Five rules the whole dashboard obeys (see dashboard/README.md §Design):
+ *   1. Cream, not grey. Every "grey" is a warm brown.
+ *   2. Ink outlines (1.5px), never blur shadows.
+ *   3. Cards are rounded (12px); controls are square (0).
+ *   4. Depth is a hard offset shadow, one per screen region.
+ *   5. Mono for machine values, UI sans for prose. Numbers align right.
+ *
+ * Colours live as space-separated RGB channels so Tailwind can apply opacity
+ * modifiers (`bg-ink/40`) and the dark theme can swap the whole palette by
+ * overriding the channel vars. The `--cix-*` aliases are the resolved colours
+ * for the hand-written component layer below.
+ * ==========================================================================*/
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 9%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96%;
-    --muted-foreground: 0 0% 45%;
-    --accent: 0 0% 96%;
-    --accent-foreground: 0 0% 9%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 90%;
-    --input: 0 0% 90%;
-    --ring: 0 0% 9%;
-    --radius: 0.5rem;
+    /* surfaces */
+    /* Surfaces are a tonal ladder, not a set of moods. Each role sits a fixed
+     * L* step from its neighbour — the same device Material 3 uses for its
+     * surface-container roles (~4 L* per step) and Carbon uses for layers.
+     * Measured, not eyeballed; the numbers in the comments are CIE L*.
+     *
+     *   field   97.4   the writable rectangle — Carbon's $field, one step
+     *                  ABOVE the card it sits in, so a form reads as a row of
+     *                  filled slots rather than a grid of identical outlines
+     *   surface 94.4   card body
+     *   canvas  89.6   page
+     *   head    84.7   card header / table header / card footer
+     *
+     * head used to be 87.5 — only 2.0 below the canvas while the body was 4.8
+     * above it, so a card's header strip blended into the page while its body
+     * popped. It is now the canvas's mirror image: −4.9 against the body's
+     * +4.8. */
+    --c-canvas: 237 224 198; /* #EDE0C6 page background */
+    --c-surface: 247 238 220; /* #F7EEDC cards, tables */
+    --c-field: 255 247 229; /* #FFF7E5 inputs, selects — the typed-into tone */
+    --c-surface-alt: 241 230 207; /* #F1E6CF sidebar, status bar */
+    --c-surface-head: 225 210 181; /* #E1D2B5 table + card headers */
+    --c-surface-hover: 242 230 207; /* #F2E6CF row hover */
+    --c-track: 219 204 174; /* #DBCCAE toggle off, disabled fill */
+    --c-warm: 239 226 200; /* #EFE2C8 secondary button hover */
+    --c-warm-deep: 229 214 184; /* #E5D6B8 nav + ghost hover */
+
+    /* ink + text */
+    /* Three content tones, all of which clear WCAG AA (4.5:1) on every surface
+     * they are allowed to appear on, plus one non-content tone that does not.
+     * `muted` was #8B7358 and measured 3.88:1 on a card and 3.43:1 on the
+     * canvas — under the floor, which is why mono labels and hints were hard
+     * to read rather than merely quiet. It is now 5.14:1 on a card, 4.53:1 on
+     * the canvas. `faint` stays below AA on purpose and is therefore limited
+     * to non-content: placeholders, disabled text, "never". */
+    --c-ink: 31 20 15; /* #1F140F borders, primary fill, primary text */
+    --c-ink-soft: 58 37 25; /* #3A2519 primary button hover */
+    --c-dim: 107 83 64; /* #6B5340 secondary text — 6.20:1 on a card */
+    --c-muted: 119 96 70; /* #776046 mono labels, hints — 5.14:1 on a card */
+    --c-faint: 164 144 111; /* #A4906F placeholders, "never" — NOT for content */
+    --c-line-soft: 224 208 176; /* #E0D0B0 row dividers inside cards */
+    --c-line-quiet: 198 179 148; /* #C6B394 disabled borders */
+
+    /* semantic */
+    --c-accent: 215 62 44; /* #D73E2C destructive, active marker, focus */
+    --c-accent-press: 194 51 31; /* #C2331F */
+    --c-accent-deep: 122 42 30; /* #7A2A1E */
+    --c-ok: 47 122 85; /* #2F7A55 */
+    --c-warn: 184 134 11; /* #B8860B */
+    --c-warn-ink: 122 91 8; /* #7A5B08 */
+    --c-danger-bg: 251 233 228; /* #FBE9E4 */
+    --c-warn-bg: 251 242 224; /* #FBF2E0 */
+    --c-danger-ink: 163 46 28; /* #A32E1C */
+
+    /* fixed: the code well is dark in both themes */
+    --c-well: 23 18 15;
+    --c-well-text: 241 230 207;
+
+    /* resolved aliases for the component layer */
+    --cix-canvas: rgb(var(--c-canvas));
+    --cix-surface: rgb(var(--c-surface));
+    --cix-field: rgb(var(--c-field));
+    --cix-surface-alt: rgb(var(--c-surface-alt));
+    --cix-surface-head: rgb(var(--c-surface-head));
+    --cix-surface-hover: rgb(var(--c-surface-hover));
+    --cix-track: rgb(var(--c-track));
+    --cix-warm: rgb(var(--c-warm));
+    --cix-warm-deep: rgb(var(--c-warm-deep));
+    --cix-ink: rgb(var(--c-ink));
+    --cix-ink-soft: rgb(var(--c-ink-soft));
+    --cix-dim: rgb(var(--c-dim));
+    --cix-muted: rgb(var(--c-muted));
+    --cix-faint: rgb(var(--c-faint));
+    --cix-line-soft: rgb(var(--c-line-soft));
+    --cix-line-quiet: rgb(var(--c-line-quiet));
+    --cix-accent: rgb(var(--c-accent));
+    --cix-accent-press: rgb(var(--c-accent-press));
+    --cix-accent-deep: rgb(var(--c-accent-deep));
+    --cix-ok: rgb(var(--c-ok));
+    --cix-warn: rgb(var(--c-warn));
+
+    /* geometry */
+    --cix-border-w: 1.5px;
+    --cix-radius-card: 12px;
+    --cix-shadow-color: rgb(var(--c-ink));
+
+    /* type */
+    --cix-font-ui: 'Helvetica Neue', Helvetica, Inter, system-ui, sans-serif;
+    --cix-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+    /* sizing */
+    --cix-h-sm: 30px;
+    --cix-h-md: 38px;
+    --cix-h-lg: 46px;
+    --cix-h-row: 33px;
+    --cix-h-searchbar: 48px;
+    --cix-h-statusbar: 36px;
+    --cix-sidebar-w: 236px;
+    --cix-pad-x: 18px;
+    --cix-pad-page: 32px;
+
+    color-scheme: light;
   }
 
   .dark {
-    --background: 0 0% 7%;
-    --foreground: 0 0% 95%;
-    --card: 0 0% 9%;
-    --card-foreground: 0 0% 95%;
-    --popover: 0 0% 9%;
-    --popover-foreground: 0 0% 95%;
-    --primary: 0 0% 95%;
-    --primary-foreground: 0 0% 9%;
-    --secondary: 0 0% 14%;
-    --secondary-foreground: 0 0% 95%;
-    --muted: 0 0% 14%;
-    --muted-foreground: 0 0% 60%;
-    --accent: 0 0% 14%;
-    --accent-foreground: 0 0% 95%;
-    --destructive: 0 62% 45%;
-    --destructive-foreground: 0 0% 95%;
-    --border: 0 0% 18%;
-    --input: 0 0% 18%;
-    --ring: 0 0% 80%;
+    /* Same ladder, inverted: layers get lighter as they stack (Carbon's dark
+     * layering model), except the field, which recesses. L*:
+     * canvas 6.6 → surface 9.3 → head 13.9, with field at 5.2 — a well the
+     * card sits above rather than a slab on top of it. */
+    --c-canvas: 23 20 18; /* #171412 */
+    --c-surface: 30 25 23; /* #1E1917 */
+    --c-field: 22 16 13; /* #16100D */
+    --c-surface-alt: 18 16 14; /* #12100E */
+    --c-surface-head: 41 34 30; /* #29221E */
+    --c-surface-hover: 36 30 26; /* #241E1A */
+    --c-track: 51 41 31; /* #33291F */
+    --c-warm: 34 28 23; /* #221C17 */
+    --c-warm-deep: 42 34 28;
+
+    --c-ink: 241 230 207; /* #F1E6CF — ink inverts to cream */
+    --c-ink-soft: 224 208 176;
+    --c-dim: 164 144 111; /* #A4906F */
+    --c-muted: 150 130 102;
+    --c-faint: 122 106 84;
+    --c-line-soft: 51 41 31; /* #33291F */
+    --c-line-quiet: 74 59 44; /* #4A3B2C */
+
+    --c-ok: 79 176 126; /* #4FB07E */
+    --c-warn: 214 163 42;
+    --c-warn-ink: 226 187 90;
+    --c-danger-bg: 51 26 22;
+    --c-warn-bg: 46 37 20;
+    --c-danger-ink: 240 138 118;
+
+    /* Ink is cream in dark mode, so the hard shadow switches to the quiet
+     * line colour — a cream drop shadow would read as a glow. */
+    --cix-shadow-color: rgb(var(--c-line-quiet));
+
+    color-scheme: dark;
+  }
+
+  * {
+    border-color: var(--cix-ink);
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    background: var(--cix-canvas);
+    color: var(--cix-ink);
+    font-family: var(--cix-font-ui, 'Helvetica Neue', Helvetica, system-ui, sans-serif);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: var(--cix-accent);
+    color: rgb(var(--c-surface));
+  }
+
+  /* Focus is always visible — the hard shadow is not a focus indicator. */
+  :focus-visible {
+    outline: 2px solid var(--cix-accent);
+    outline-offset: 2px;
+  }
+
+  /* Square, ink-toned scrollbars — no rounded grey pills. */
+  * {
+    scrollbar-color: rgb(var(--c-line-quiet)) transparent;
+    scrollbar-width: thin;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--c-line-quiet));
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--c-muted));
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
-@layer base {
-  * {
-    @apply border-border;
+/* ============================================================================
+ * Component layer. These classes are the design system's vocabulary; pages
+ * compose them and use Tailwind only for layout (flex / grid / gap / spacing).
+ * ==========================================================================*/
+
+@layer components {
+  /* ---------- app shell ---------- */
+  .cix-app {
+    @apply flex h-dvh w-full flex-col;
   }
-  body {
-    @apply bg-background text-foreground;
-    font-feature-settings: 'rlig' 1, 'calt' 1;
+  .cix-body {
+    @apply flex min-h-0 flex-1;
+  }
+  .cix-sidebar {
+    width: var(--cix-sidebar-w);
+    @apply flex flex-none flex-col border-r bg-surface-alt;
+  }
+  .cix-main {
+    @apply flex min-w-0 flex-1 flex-col overflow-hidden;
+  }
+  .cix-content {
+    padding: 22px var(--cix-pad-page);
+    @apply flex-1 overflow-y-auto;
+  }
+
+  .cix-statusbar {
+    height: var(--cix-h-statusbar);
+    @apply flex flex-none items-center gap-4 border-t bg-surface-alt px-[18px]
+           font-mono text-[11.5px] text-muted;
+  }
+
+  /* ---------- sidebar nav ---------- */
+  .cix-nav-item {
+    height: var(--cix-h-row);
+    @apply flex items-center gap-[10px] px-[10px] text-[13.5px] text-dim
+           transition-colors;
+  }
+  .cix-nav-item::before {
+    content: '';
+    @apply block h-[7px] w-[7px] flex-none bg-line-quiet;
+  }
+  .cix-nav-item:hover {
+    @apply bg-warm-deep text-ink;
+  }
+  .cix-nav-item.is-active {
+    @apply bg-ink font-semibold text-surface;
+  }
+  .cix-nav-item.is-active::before {
+    @apply bg-accent;
+  }
+  .cix-nav-group {
+    @apply px-[10px] pb-1 pt-[6px] font-mono text-[10px] tracking-[0.18em] text-faint;
+  }
+
+  /* ---------- page header ---------- */
+  .cix-pagehead {
+    padding: 24px var(--cix-pad-page) 18px;
+    @apply flex flex-none items-start gap-5 border-b;
+  }
+  .cix-pagehead h1 {
+    @apply m-0 text-[30px] font-bold leading-tight tracking-[-0.02em];
+  }
+  .cix-pagehead p {
+    @apply mt-1.5 max-w-3xl text-[14.5px] text-dim;
+  }
+
+  /* ---------- buttons ---------- */
+  .cix-btn {
+    height: var(--cix-h-md);
+    @apply inline-flex flex-none cursor-pointer items-center justify-center gap-2
+           whitespace-nowrap border bg-surface px-[18px] text-sm font-semibold
+           text-ink transition-[transform,box-shadow,background-color] duration-75;
+  }
+  .cix-btn:hover:not(:disabled) {
+    @apply bg-warm;
+  }
+  .cix-btn.is-primary {
+    @apply bg-ink text-surface shadow-hard;
+  }
+  .cix-btn.is-primary:hover:not(:disabled) {
+    @apply translate-x-[2px] translate-y-[2px] bg-ink-soft shadow-hard-sm;
+  }
+  .cix-btn.is-danger {
+    @apply border-accent bg-accent text-white shadow-hard;
+  }
+  .cix-btn.is-danger:hover:not(:disabled) {
+    @apply translate-x-[2px] translate-y-[2px] bg-accent-press shadow-hard-sm;
+  }
+  .cix-btn.is-quiet-danger {
+    @apply border-accent bg-transparent text-accent;
+  }
+  .cix-btn.is-quiet-danger:hover:not(:disabled) {
+    @apply bg-accent text-white;
+  }
+  .cix-btn.is-ghost {
+    @apply border-transparent bg-transparent px-3.5 text-dim;
+  }
+  .cix-btn.is-ghost:hover:not(:disabled) {
+    @apply bg-warm-deep text-ink;
+  }
+  .cix-btn.is-sm {
+    height: var(--cix-h-sm);
+    @apply px-3 text-[12.5px];
+  }
+  .cix-btn.is-lg {
+    height: var(--cix-h-lg);
+    @apply px-6 text-[15px];
+  }
+  .cix-btn.is-icon {
+    width: var(--cix-h-md);
+    @apply px-0 font-mono;
+  }
+  .cix-btn.is-icon.is-sm {
+    width: var(--cix-h-sm);
+  }
+  .cix-btn:disabled {
+    @apply cursor-default border-line-quiet bg-track text-faint shadow-none;
+    transform: none;
+  }
+  .cix-link-btn {
+    @apply cursor-pointer border-0 border-b-[1.5px] border-accent bg-transparent p-0
+           text-sm font-semibold text-accent;
+  }
+  .cix-link-btn:hover {
+    @apply border-accent-deep text-accent-deep;
+  }
+  .cix-link-btn:disabled {
+    @apply cursor-default border-line-quiet text-faint;
+  }
+
+  /* loading: 3 squares, first ink */
+  .cix-dots {
+    @apply inline-flex items-center gap-[3px];
+  }
+  .cix-dots i {
+    @apply block h-[5px] w-[5px] bg-muted;
+    animation: cix-dot 900ms steps(1, end) infinite;
+  }
+  .cix-dots i:nth-child(1) {
+    animation-delay: 0ms;
+  }
+  .cix-dots i:nth-child(2) {
+    animation-delay: 300ms;
+  }
+  .cix-dots i:nth-child(3) {
+    animation-delay: 600ms;
+  }
+
+  /* ---------- fields ---------- */
+  .cix-field {
+    @apply flex flex-col gap-1.5;
+  }
+  .cix-label {
+    @apply font-mono text-[11px] uppercase tracking-[0.16em] text-muted;
+  }
+  .cix-hint {
+    @apply font-mono text-[11px] text-muted;
+  }
+  .cix-input {
+    height: var(--cix-h-md);
+    @apply w-full border bg-field px-3 font-mono text-[13px] text-ink;
+  }
+  .cix-input::placeholder {
+    @apply text-faint;
+  }
+  .cix-input:disabled {
+    @apply border-line-quiet bg-track text-faint;
+  }
+  .cix-input.is-error {
+    @apply border-accent bg-danger-bg;
+  }
+  textarea.cix-input {
+    height: auto;
+    @apply resize-y py-2.5 leading-relaxed;
+  }
+  .cix-error {
+    @apply font-mono text-[11px] text-accent;
+  }
+
+  /* ---------- search bar (the hero on /search) ---------- */
+  .cix-search {
+    height: var(--cix-h-searchbar);
+    @apply flex items-center gap-3 border bg-field px-3.5 shadow-hard;
+  }
+  .cix-search input {
+    @apply min-w-0 flex-1 border-0 bg-transparent font-mono text-sm text-ink outline-none;
+  }
+  .cix-search input::placeholder {
+    @apply text-faint;
+  }
+  .cix-kbd {
+    @apply border px-[7px] py-[3px] font-mono text-[11px] leading-none;
+    box-shadow: 2px 2px 0 rgb(var(--c-line-quiet));
+  }
+
+  /* ---------- navigation controls ---------- */
+  .cix-segmented {
+    @apply inline-flex border bg-track;
+  }
+  .cix-segmented > button {
+    @apply cursor-pointer px-[15px] py-[7px] text-[13.5px] font-semibold text-dim;
+  }
+  .cix-segmented > button + button {
+    @apply border-l;
+  }
+  .cix-segmented > button:hover {
+    @apply bg-warm text-ink;
+  }
+  .cix-segmented > button[data-state='active'],
+  .cix-segmented > button.is-active {
+    @apply bg-ink text-surface;
+  }
+
+  .cix-tabs {
+    @apply flex gap-[22px] border-b border-line-quiet;
+  }
+  .cix-tabs > button {
+    @apply -mb-[1.5px] cursor-pointer border-b-[3px] border-transparent pb-2 text-sm text-dim;
+  }
+  .cix-tabs > button:hover {
+    @apply text-ink;
+  }
+  .cix-tabs > button[data-state='active'],
+  .cix-tabs > button.is-active {
+    @apply border-accent font-semibold text-ink;
+  }
+
+  .cix-pager {
+    @apply flex gap-1.5;
+  }
+  .cix-pager button {
+    @apply flex h-[30px] w-[30px] cursor-pointer items-center justify-center border
+           bg-surface font-mono text-xs;
+  }
+  .cix-pager button:hover:not(:disabled) {
+    @apply bg-warm;
+  }
+  .cix-pager button.is-active {
+    @apply bg-ink text-surface;
+  }
+  .cix-pager button:disabled {
+    @apply cursor-default border-line-quiet text-faint;
+  }
+
+  /* ---------- containers ---------- */
+  .cix-card {
+    @apply overflow-hidden rounded-card border bg-surface;
+  }
+  .cix-card__head {
+    padding: 13px var(--cix-pad-x);
+    @apply flex items-center gap-2.5 border-b bg-surface-head text-base font-bold;
+  }
+  .cix-card__body {
+    padding: 16px var(--cix-pad-x);
+  }
+  .cix-card__foot {
+    padding: 13px var(--cix-pad-x);
+    @apply flex items-center gap-2.5 border-t bg-surface-head;
+  }
+  .cix-card.is-clickable {
+    @apply cursor-pointer transition-[transform,box-shadow] duration-75;
+  }
+  .cix-card.is-clickable:hover {
+    @apply -translate-x-[2px] -translate-y-[2px] shadow-hard;
+  }
+
+  /* stat strip — 1.5px dividers, no gaps */
+  .cix-stats {
+    @apply grid border bg-surface;
+  }
+  .cix-stats > * {
+    @apply flex flex-col gap-[5px] px-[18px] py-[13px];
+  }
+  .cix-stats > * + * {
+    @apply border-l;
+  }
+  .cix-stats b {
+    @apply truncate font-mono text-[19px] font-bold;
+  }
+
+  /* ---------- data ---------- */
+  .cix-table {
+    @apply w-full border-collapse;
+  }
+  .cix-table thead th {
+    padding: 11px var(--cix-pad-x);
+    @apply border-b bg-surface-head text-left font-mono text-[11px] font-normal
+           uppercase tracking-[0.14em] text-dim;
+  }
+  .cix-table tbody td {
+    padding: 14px var(--cix-pad-x);
+    @apply border-b border-line-soft text-sm align-middle;
+  }
+  .cix-table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+  .cix-table tbody tr:hover {
+    @apply bg-surface-hover;
+  }
+  .cix-table .cix-num,
+  .cix-table .cix-actions {
+    @apply text-right;
+  }
+  .cix-mono {
+    @apply font-mono text-[13px] text-dim;
+  }
+
+  .cix-row {
+    padding: 14px var(--cix-pad-x);
+    @apply flex items-center gap-3.5 border-b border-line-soft;
+  }
+  .cix-row:last-child {
+    @apply border-b-0;
+  }
+  .cix-row:hover {
+    @apply bg-surface-hover;
+  }
+  .cix-row__title {
+    @apply text-[14.5px] font-semibold;
+  }
+  .cix-row__meta {
+    @apply font-mono text-[11.5px] text-muted;
+  }
+
+  .cix-kv {
+    @apply grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 font-mono text-[12.5px];
+  }
+  .cix-kv dt {
+    @apply text-muted;
+  }
+  .cix-kv dd {
+    @apply m-0 min-w-0 truncate text-right;
+  }
+
+  .cix-empty {
+    @apply flex flex-col items-center gap-2.5 rounded-card border border-dashed
+           border-line-quiet px-[18px] py-7 text-center;
+  }
+  .cix-skel {
+    @apply block h-3 bg-track;
+  }
+
+  /* ---------- status & feedback ---------- */
+  .cix-dot {
+    @apply inline-block h-[9px] w-[9px] flex-none bg-faint;
+  }
+  .cix-dot.is-ok {
+    @apply bg-ok;
+  }
+  .cix-dot.is-busy {
+    @apply bg-accent;
+  }
+  .cix-dot.is-warn {
+    @apply bg-warn;
+  }
+
+  .cix-badge {
+    @apply inline-flex flex-none items-center gap-1.5 whitespace-nowrap border
+           border-line-quiet bg-track px-2 py-[3px] font-mono text-[11px]
+           leading-none text-dim;
+  }
+  .cix-badge.is-outline {
+    @apply border-ink bg-transparent text-ink;
+  }
+  .cix-badge.is-quiet {
+    @apply border-line-quiet bg-transparent text-muted;
+  }
+  .cix-badge.is-ok {
+    @apply border-ok bg-ok text-white;
+  }
+  .cix-badge.is-busy {
+    @apply border-accent bg-accent text-white;
+  }
+  .cix-badge.is-warn {
+    @apply border-warn bg-warn text-white;
+  }
+  .cix-badge.is-ink {
+    @apply border-ink bg-ink text-surface;
+  }
+
+  .cix-callout {
+    @apply flex flex-col gap-1.5 border border-l-[6px] bg-surface px-4 py-3.5;
+  }
+  .cix-callout > b {
+    @apply text-sm;
+  }
+  .cix-callout > p {
+    @apply m-0 text-[13.5px] text-dim;
+  }
+  .cix-callout.is-warn {
+    @apply border-warn bg-warn-bg;
+  }
+  .cix-callout.is-warn > b {
+    @apply text-warn-ink;
+  }
+  .cix-callout.is-danger {
+    @apply border-accent bg-danger-bg;
+  }
+  .cix-callout.is-danger > b {
+    @apply text-danger-ink;
+  }
+  .cix-callout.is-ok {
+    @apply border-ok;
+  }
+  .cix-callout.is-ok > b {
+    @apply text-ok;
+  }
+
+  .cix-progress {
+    @apply flex gap-[3px];
+  }
+  .cix-progress i {
+    @apply block h-2.5 flex-1 border bg-track;
+  }
+  .cix-progress i.is-on {
+    @apply bg-accent;
+  }
+
+  /* ---------- overlays ---------- */
+  .cix-modal {
+    @apply overflow-hidden rounded-card border bg-surface shadow-hard-lg;
+  }
+  .cix-modal__head {
+    @apply flex items-center gap-3 border-b px-5 py-4 text-[17px] font-bold;
+  }
+  .cix-modal__body {
+    @apply flex flex-col gap-3 px-5 py-[18px];
+  }
+  .cix-modal__foot {
+    @apply flex justify-end gap-2.5 border-t px-5 py-3.5;
+  }
+
+  .cix-menu {
+    @apply border bg-surface p-1.5 shadow-hard;
+  }
+  .cix-menu__item {
+    @apply cursor-pointer px-3 py-2.5 text-sm leading-none outline-none;
+  }
+  .cix-menu__item[data-highlighted],
+  .cix-menu__item:hover {
+    @apply bg-ink text-surface;
+  }
+  .cix-menu__item.is-danger {
+    @apply text-accent;
+  }
+  .cix-menu__item.is-danger[data-highlighted],
+  .cix-menu__item.is-danger:hover {
+    @apply bg-accent text-white;
+  }
+
+  .cix-tooltip {
+    @apply bg-ink px-[9px] py-1.5 font-mono text-[11.5px] text-surface;
+  }
+
+  /* ---------- code & steps ---------- */
+  .cix-code {
+    @apply flex items-stretch border;
+  }
+  .cix-code pre {
+    @apply m-0 flex-1 overflow-x-auto whitespace-pre px-3 py-2.5 font-mono
+           text-[12.5px] leading-relaxed;
+    background: rgb(var(--c-well));
+    color: rgb(var(--c-well-text));
+  }
+  .cix-code button {
+    @apply cursor-pointer flex-none border-0 border-l bg-surface px-3.5 text-[13px]
+           font-semibold text-ink;
+  }
+  .cix-code button:hover {
+    @apply bg-warm;
+  }
+
+  .cix-well {
+    @apply overflow-x-auto border px-3 py-2.5 font-mono text-[12.5px] leading-relaxed;
+    background: rgb(var(--c-well));
+    color: rgb(var(--c-well-text));
+  }
+
+  .cix-step {
+    @apply flex items-start gap-3.5;
+  }
+  .cix-step__n {
+    @apply flex h-[26px] w-[26px] flex-none items-center justify-center bg-ink
+           font-mono text-[13px] font-bold text-surface;
+  }
+  .cix-step.is-pending .cix-step__n {
+    @apply border border-line-quiet bg-transparent font-normal text-muted;
+  }
+
+  /* inline mono chip for machine values inside prose */
+  .cix-chip {
+    @apply border border-line-quiet bg-track px-1.5 py-0.5 font-mono text-[12px] text-ink;
+  }
+}
+
+@keyframes cix-dot {
+  0%,
+  33% {
+    background: var(--cix-ink);
+  }
+  34%,
+  100% {
+    background: var(--cix-muted);
+  }
+}
+
+/* Radix animation helpers — no blur, just presence. */
+@keyframes cix-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes cix-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
   }
 }

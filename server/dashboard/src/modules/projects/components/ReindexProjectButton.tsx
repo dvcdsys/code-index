@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Hammer, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Button, type ButtonProps } from '@/ui/button';
+import { Button, Dots, type ButtonProps } from '@/ui/button';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -14,20 +14,14 @@ import {
 } from '@/ui/dialog';
 import { useReindexProject } from '../hooks';
 
-// ReindexProjectButton triggers a FULL rebuild — the server clears
-// indexed_sha first, so the next job re-embeds every file (wipes prior
-// chunks/symbols/refs). This is the heavy "rebuild from scratch" path;
-// for the cheap "pull + incremental" path use the Sync button instead.
-// Gated behind a confirmation dialog because it's an expensive operation
-// that's easy to trigger by accident.
-//
-// variant/size/className are forwarded to the trigger Button so callers can
-// render it prominently (project detail header) or compact (projects list
-// row / card), mirroring SyncProjectButton.
+// ReindexProjectButton triggers a FULL rebuild: the server clears indexed_sha
+// first, so the next job re-embeds every file and wipes the prior chunks,
+// symbols and refs. Heavy and easy to fire by accident, hence the confirm.
+// The cheap "pull + incremental" path is the Sync button.
 export function ReindexProjectButton({
   hash,
   hostPath,
-  variant = 'outline',
+  variant,
   size = 'sm',
   className,
 }: {
@@ -50,8 +44,9 @@ export function ReindexProjectButton({
       }
       setOpen(false);
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : String(err);
-      toast.error('Failed to enqueue reindex', { description: detail });
+      toast.error('Could not enqueue the reindex', {
+        description: err instanceof ApiError ? err.detail : String(err),
+      });
     }
   }
 
@@ -62,28 +57,28 @@ export function ReindexProjectButton({
           variant={variant}
           size={size}
           className={className}
-          title="Full reindex — clears the index and re-embeds every file. For a quick pull + incremental update, use Sync."
+          title="Clear the index and re-embed every file. For a quick pull + incremental update, use Sync."
         >
-          <Hammer className="mr-1 h-4 w-4" />
           Reindex
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Run a full reindex?</DialogTitle>
-          <DialogDescription>
-            This clears the index for{' '}
-            <span className="font-mono text-foreground">{hostPath}</span> and re-embeds every
-            file from scratch — a heavy operation that can take a while. For a quick pull +
-            incremental update, use Sync instead.
-          </DialogDescription>
         </DialogHeader>
+        <DialogBody>
+          <DialogDescription>
+            The index for <span className="font-mono text-ink">{hostPath}</span> is cleared and
+            every file is re-embedded from scratch — heavy, and it can take a while. For a quick
+            pull plus incremental update, use Sync instead.
+          </DialogDescription>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={reindex.isPending}>
             Cancel
           </Button>
-          <Button variant="default" onClick={onConfirm} disabled={reindex.isPending}>
-            {reindex.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+          <Button variant="danger" onClick={onConfirm} disabled={reindex.isPending}>
+            {reindex.isPending ? <Dots /> : null}
             Reindex
           </Button>
         </DialogFooter>

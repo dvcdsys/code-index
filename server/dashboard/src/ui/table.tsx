@@ -1,117 +1,81 @@
-import * as React from "react"
+import { forwardRef, type HTMLAttributes, type TdHTMLAttributes, type ThHTMLAttributes } from 'react';
+import { cn } from '@/lib/cn';
 
-import { cn } from "@/lib/cn"
+// Real <table> semantics inside a rounded card. The header strip is filled
+// and mono-capped; body rows are divided by soft 1.5px rules; numeric and
+// action columns align right because the right edge is the reading axis.
+//
+// Wrap in <Card> (or pass `card`) so the 12px radius clips the header strip.
 
-const Table = React.forwardRef<
+export const Table = forwardRef<
   HTMLTableElement,
-  React.HTMLAttributes<HTMLTableElement>
->(({ className, ...props }, ref) => (
-  <div className="relative w-full overflow-auto">
-    <table
-      ref={ref}
-      className={cn("w-full caption-bottom text-sm", className)}
-      {...props}
-    />
-  </div>
-))
-Table.displayName = "Table"
+  HTMLAttributes<HTMLTableElement> & { card?: boolean }
+>(({ className, card, ...props }, ref) => {
+  const table = <table ref={ref} className={cn('cix-table', className)} {...props} />;
+  if (!card) return <div className="w-full overflow-x-auto">{table}</div>;
+  return (
+    <div className="cix-card">
+      <div className="w-full overflow-x-auto">{table}</div>
+    </div>
+  );
+});
+Table.displayName = 'Table';
 
-const TableHeader = React.forwardRef<
-  HTMLTableSectionElement,
-  React.HTMLAttributes<HTMLTableSectionElement>
->(({ className, ...props }, ref) => (
-  <thead ref={ref} className={cn("[&_tr]:border-b", className)} {...props} />
-))
-TableHeader.displayName = "TableHeader"
+export const THead = forwardRef<HTMLTableSectionElement, HTMLAttributes<HTMLTableSectionElement>>(
+  ({ className, ...props }, ref) => <thead ref={ref} className={className} {...props} />
+);
+THead.displayName = 'THead';
 
-const TableBody = React.forwardRef<
-  HTMLTableSectionElement,
-  React.HTMLAttributes<HTMLTableSectionElement>
->(({ className, ...props }, ref) => (
-  <tbody
-    ref={ref}
-    className={cn("[&_tr:last-child]:border-0", className)}
-    {...props}
-  />
-))
-TableBody.displayName = "TableBody"
+export const TBody = forwardRef<HTMLTableSectionElement, HTMLAttributes<HTMLTableSectionElement>>(
+  ({ className, ...props }, ref) => <tbody ref={ref} className={className} {...props} />
+);
+TBody.displayName = 'TBody';
 
-const TableFooter = React.forwardRef<
-  HTMLTableSectionElement,
-  React.HTMLAttributes<HTMLTableSectionElement>
->(({ className, ...props }, ref) => (
-  <tfoot
-    ref={ref}
-    className={cn(
-      "border-t bg-muted/50 font-medium [&>tr]:last:border-b-0",
-      className
-    )}
-    {...props}
-  />
-))
-TableFooter.displayName = "TableFooter"
+export const TR = forwardRef<HTMLTableRowElement, HTMLAttributes<HTMLTableRowElement>>(
+  ({ className, ...props }, ref) => <tr ref={ref} className={className} {...props} />
+);
+TR.displayName = 'TR';
 
-const TableRow = React.forwardRef<
-  HTMLTableRowElement,
-  React.HTMLAttributes<HTMLTableRowElement>
->(({ className, ...props }, ref) => (
-  <tr
-    ref={ref}
-    className={cn(
-      "border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted",
-      className
-    )}
-    {...props}
-  />
-))
-TableRow.displayName = "TableRow"
-
-const TableHead = React.forwardRef<
+export const TH = forwardRef<
   HTMLTableCellElement,
-  React.ThHTMLAttributes<HTMLTableCellElement>
->(({ className, ...props }, ref) => (
-  <th
-    ref={ref}
-    className={cn(
-      "h-12 px-4 text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0",
-      className
-    )}
-    {...props}
-  />
-))
-TableHead.displayName = "TableHead"
+  ThHTMLAttributes<HTMLTableCellElement> & { align?: 'left' | 'right' }
+>(({ className, align, ...props }, ref) => (
+  <th ref={ref} className={cn(align === 'right' && 'text-right', className)} {...props} />
+));
+TH.displayName = 'TH';
 
-const TableCell = React.forwardRef<
+export const TD = forwardRef<
   HTMLTableCellElement,
-  React.TdHTMLAttributes<HTMLTableCellElement>
->(({ className, ...props }, ref) => (
+  TdHTMLAttributes<HTMLTableCellElement> & { mono?: boolean; align?: 'left' | 'right' }
+>(({ className, mono, align, ...props }, ref) => (
   <td
     ref={ref}
-    className={cn("p-4 align-middle [&:has([role=checkbox])]:pr-0", className)}
+    className={cn(mono && 'cix-mono', align === 'right' && 'text-right', className)}
     {...props}
   />
-))
-TableCell.displayName = "TableCell"
+));
+TD.displayName = 'TD';
 
-const TableCaption = React.forwardRef<
-  HTMLTableCaptionElement,
-  React.HTMLAttributes<HTMLTableCaptionElement>
->(({ className, ...props }, ref) => (
-  <caption
-    ref={ref}
-    className={cn("mt-4 text-sm text-muted-foreground", className)}
-    {...props}
-  />
-))
-TableCaption.displayName = "TableCaption"
-
-export {
-  Table,
-  TableHeader,
-  TableBody,
-  TableFooter,
-  TableHead,
-  TableRow,
-  TableCell,
-  TableCaption,
+// A line under a table carrying its count and any one-line caveat. Mono,
+// muted, outside the card — never a modal-only surprise.
+export function TableNote({
+  left,
+  right,
+  className,
+}: {
+  left?: React.ReactNode;
+  right?: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        'flex flex-wrap items-center justify-between gap-3 pt-2.5 font-mono text-[11.5px] text-muted',
+        className
+      )}
+    >
+      <span>{left}</span>
+      <span>{right}</span>
+    </div>
+  );
 }

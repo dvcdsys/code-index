@@ -1,37 +1,38 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, CheckCircle2, Info, Loader2, Save } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Button } from '@/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
-import { Label } from '@/ui/label';
 import type { EmbeddingProviderKind, EmbeddingProviderSecretEnv } from '@/api/types';
+import { Callout } from '@/ui/alert';
+import { Badge, Status } from '@/ui/badge';
+import { Button, Dots } from '@/ui/button';
+import { Card, CardBody, CardHead } from '@/ui/card';
+import { Field } from '@/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/ui/select';
+import { Skeleton } from '@/ui/skeleton';
 import {
   useActiveProvider,
   useEmbeddingProviders,
   useSwitchProvider,
   useTestProvider,
 } from '../hooks';
-import { OpenAIProviderForm, type OpenAIConfig, defaultOpenAIConfig } from './providers/OpenAIProviderForm';
-import { VoyageProviderForm, type VoyageConfig, defaultVoyageConfig } from './providers/VoyageProviderForm';
+import {
+  OpenAIProviderForm,
+  defaultOpenAIConfig,
+  type OpenAIConfig,
+} from './providers/OpenAIProviderForm';
+import {
+  VoyageProviderForm,
+  defaultVoyageConfig,
+  type VoyageConfig,
+} from './providers/VoyageProviderForm';
 
-// EmbeddingProviderSection wraps the provider-kind dropdown + the
-// per-kind form. The ollama-specific sections (EmbeddingModelSection,
-// RuntimeParamsSection, SidecarSection) stay rendered by the parent
-// ServerPage when the active kind is "ollama" — switching to a remote
-// provider hides them in ServerPage by checking activeProvider.kind.
+// The provider-kind picker plus the per-kind form. Ollama's own tuning
+// (model, ctx, GPU layers, sidecar) lives in the sections below, rendered by
+// ServerPage only while ollama is the active kind.
 //
-// Save flow:
-//   1. POST /admin/embedding-providers/{kind}/test with the draft.
-//   2. On success → PUT /admin/embedding-providers/active.
-//   3. Surface toast + invalidate caches so the footer / sidecar
-//      cards update immediately.
-//
-// API keys are never stored on the server: configs only carry the
-// NAME of the env var that holds the key. When the relevant env var
-// is missing the form renders a red banner and the Save button is
-// disabled.
+// Save flow: POST /test with the draft → PUT /active on success → invalidate
+// so the status bar and the sidecar rail update immediately. API keys are
+// never sent here; configs carry only the NAME of the env var holding one.
 export function EmbeddingProviderSection() {
   const providers = useEmbeddingProviders();
   const active = useActiveProvider();
@@ -41,11 +42,9 @@ export function EmbeddingProviderSection() {
   const [openAIDraft, setOpenAIDraft] = useState<OpenAIConfig>(defaultOpenAIConfig);
   const [voyageDraft, setVoyageDraft] = useState<VoyageConfig>(defaultVoyageConfig);
 
-  // When the persisted active provider loads / changes (e.g. after a
-  // successful switch), reset the drafts so the form mirrors what is
-  // live. Selecting a different kind in the dropdown only changes the
-  // form being rendered — it does NOT mutate the underlying drafts
-  // until the admin clicks Save.
+  // Reset the drafts when the persisted provider loads or changes so the form
+  // mirrors what is live. Picking a different kind only swaps which form is
+  // rendered — the drafts stay untouched until Save.
   useEffect(() => {
     const data = active.data;
     if (!data?.kind) return;
@@ -64,8 +63,7 @@ export function EmbeddingProviderSection() {
         model: String(cfg.model ?? defaultVoyageConfig.model),
         api_key_env: String(cfg.api_key_env ?? defaultVoyageConfig.api_key_env),
         output_dimension: Number(cfg.output_dimension ?? defaultVoyageConfig.output_dimension),
-        output_dtype:
-          (cfg.output_dtype as 'float' | 'int8') ?? defaultVoyageConfig.output_dtype,
+        output_dtype: (cfg.output_dtype as 'float' | 'int8') ?? defaultVoyageConfig.output_dtype,
         truncation: cfg.truncation !== false,
         rate_limit_rpm: typeof cfg.rate_limit_rpm === 'number' ? cfg.rate_limit_rpm : undefined,
         rate_limit_tpm: typeof cfg.rate_limit_tpm === 'number' ? cfg.rate_limit_tpm : undefined,
@@ -77,9 +75,8 @@ export function EmbeddingProviderSection() {
     }
   }, [active.data]);
 
-  // Lookup the env-key readiness for the currently selected kind so
-  // the relevant form can render a "set CIX_VOYAGE_API_KEY before
-  // saving" banner without each form duplicating the query.
+  // Env readiness for the selected kind, resolved once here so neither form
+  // has to repeat the query.
   const envsForKind = useMemo<EmbeddingProviderSecretEnv[]>(() => {
     if (!providers.data) return [];
     return providers.data.providers.find((p) => p.kind === draftKind)?.secret_envs ?? [];
@@ -90,33 +87,26 @@ export function EmbeddingProviderSection() {
   if (providers.isLoading || active.isLoading) {
     return (
       <Card>
-        <CardHeader>
-          <CardTitle>Embedding provider</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="text-sm text-muted-foreground">Loading providers…</div>
-        </CardContent>
+        <CardHead title="Embedding provider" />
+        <CardBody>
+          <Skeleton className="h-[38px]" />
+        </CardBody>
       </Card>
     );
   }
+
   if (providers.error || !providers.data || active.error) {
     return (
-      <Alert variant="destructive">
-        <AlertCircle className="h-4 w-4" />
-        <AlertTitle>Could not load embedding providers</AlertTitle>
-        <AlertDescription>
-          {String(providers.error ?? active.error ?? 'unknown error')}
-        </AlertDescription>
-      </Alert>
+      <Callout variant="danger">
+        <b>Could not load embedding providers</b>
+        <p>{String(providers.error ?? active.error ?? 'unknown error')}</p>
+      </Callout>
     );
   }
 
-  // Build the current draft config blob for the selected kind.
-  // For ollama we always send an empty object — the backend's
-  // SwitchEmbeddingProvider handler synthesizes a complete ollama
-  // config from runtime-cfg + env on receipt, because the
-  // ollama-specific tuning fields (GGUF model, ctx, GPU layers,
-  // sidecar paths) are not part of this card's form.
+  // For ollama we always send {} — the backend synthesizes a complete config
+  // from runtime-cfg + env on receipt, because ollama's tuning fields (GGUF
+  // model, ctx, GPU layers, sidecar paths) are not part of this card.
   const draftConfig: Record<string, unknown> = (() => {
     switch (draftKind) {
       case 'openai':
@@ -128,177 +118,106 @@ export function EmbeddingProviderSection() {
     }
   })();
 
-  // Validation: we let the backend's /test endpoint be the source of
-  // truth, but disable the Save button locally when an obviously
+  // The backend's /test is the real authority; this only disables Save when a
   // required field is empty or a referenced env var is missing.
   const allEnvsSet = envsForKind.every((e) => e.set);
   const localValid = (() => {
     if (draftKind === 'openai') {
       return !!openAIDraft.base_url && !!openAIDraft.model && !!openAIDraft.api_key_env;
     }
-    if (draftKind === 'voyage') {
-      return !!voyageDraft.model && !!voyageDraft.api_key_env;
-    }
-    return true; // ollama is edited via the lower sections
+    if (draftKind === 'voyage') return !!voyageDraft.model && !!voyageDraft.api_key_env;
+    return true; // ollama is edited in the sections below
   })();
 
   const canSave = localValid && allEnvsSet && !switchMut.isPending && !test.isPending;
-  // Dirty when the kind has changed; for remote providers also dirty
-  // when the per-kind form differs from what's persisted. Ollama-
-  // is-ollama is never dirty (form has no editable fields here —
-  // those live in the sections below).
   const kindChanged = draftKind !== active.data?.kind;
-  const dirty = kindChanged || (() => {
-    if (draftKind === 'ollama') return false;
-    const a = JSON.stringify(active.data?.config ?? {});
-    const b = JSON.stringify(draftConfig);
-    return a !== b;
-  })();
+  const dirty =
+    kindChanged ||
+    (draftKind !== 'ollama' &&
+      JSON.stringify(active.data?.config ?? {}) !== JSON.stringify(draftConfig));
 
   async function onSave() {
     try {
-      // Skip the /test pre-check when switching to ollama — the
-      // backend builds the full config from runtime-cfg + env on
-      // receipt, so the client's empty {} can't be tested as-is
-      // (would fail factory validation: model is required).
-      // Ollama config correctness will be exercised by Start()
-      // inside SwitchProvider anyway.
-      if (draftKind !== 'ollama') {
-        await test.mutateAsync(draftConfig);
-      }
+      // Skip /test when switching to ollama — the backend builds the full
+      // config from runtime-cfg + env on receipt, so the client's empty {}
+      // can't be validated as-is. Start() inside SwitchProvider exercises it.
+      if (draftKind !== 'ollama') await test.mutateAsync(draftConfig);
       await switchMut.mutateAsync({ kind: draftKind, config: draftConfig });
       toast.success(`Switched to ${draftKind}`, {
-        description: 'Every project will get a Stale-model badge until reindex.',
+        description: 'Every project shows a stale-model badge until it is reindexed.',
       });
     } catch (e) {
-      const detail = e instanceof ApiError ? e.detail : String(e);
-      toast.error('Provider switch failed', { description: detail });
+      toast.error('Provider switch failed', {
+        description: e instanceof ApiError ? e.detail : String(e),
+      });
     }
   }
 
+  const pending = switchMut.isPending || test.isPending;
+
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          Embedding provider
-          {active.data?.kind ? (
-            <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-mono">
-              {active.data.kind}
-            </span>
-          ) : null}
-        </CardTitle>
-        <CardDescription>
-          Choose where embeddings are computed. Switching providers triggers a
-          full reindex per project on the next clone job — every project's
-          stored model fingerprint becomes stale.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-5">
-        <Alert>
-          <Info className="h-4 w-4" />
-          <AlertTitle>Cost & rate limits — read before picking</AlertTitle>
-          <AlertDescription>
-            <ul className="ml-4 mt-1 list-disc space-y-1 text-sm">
-              <li>
-                <strong>Ollama</strong> — free, runs the llama-server sidecar
-                locally on this machine's CPU/GPU. No external API, no rate
-                limits, no API keys.
-              </li>
-              <li>
-                <strong>OpenAI-compatible</strong> — pay-as-you-go on{' '}
-                <a
-                  href="https://platform.openai.com/account/billing"
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  className="underline"
-                >
-                  api.openai.com
-                </a>{' '}
-                (account billing required) or free against your own
-                self-hosted vLLM / TEI / LocalAI instance.
-              </li>
-              <li>
-                <strong>Voyage AI</strong> — paid plan strongly recommended.
-                The{' '}
-                <a
-                  href="https://dashboard.voyageai.com/"
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  className="underline"
-                >
-                  free tier
-                </a>{' '}
-                is capped at 3 RPM / 10K TPM — fine for a smoke test, not
-                usable for indexing a real repo. Add a payment method
-                before pointing the indexer at it.
-              </li>
-            </ul>
-          </AlertDescription>
-        </Alert>
+      <CardHead
+        title="Embedding provider"
+        aside={
+          <span className="font-mono text-[11px] font-normal text-dim">reindex on change</span>
+        }
+      >
+        {active.data?.kind ? <Badge variant="ink">{active.data.kind}</Badge> : null}
+      </CardHead>
+      <CardBody className="flex flex-col gap-5">
+        <Callout>
+          <b>Cost &amp; rate limits</b>
+          <p>
+            <b className="text-ink">Ollama</b> — local llama-server, free, no keys, no limits.{' '}
+            <b className="text-ink">OpenAI-compatible</b> — pay-as-you-go on api.openai.com, or
+            free against your own vLLM / TEI / LocalAI. <b className="text-ink">Voyage AI</b> — the
+            free tier is 3 RPM, enough for a smoke test and nothing else; add a payment method
+            before pointing the indexer at it.
+          </p>
+        </Callout>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="provider-kind">Provider</Label>
-          <select
-            id="provider-kind"
-            value={draftKind}
-            onChange={(e) => setDraftKind(e.target.value as EmbeddingProviderKind)}
-            className="block w-full rounded-md border bg-background px-3 py-2 text-sm sm:max-w-xs"
-          >
-            <option value="ollama">Ollama sidecar (local llama-server, free)</option>
-            <option value="openai">OpenAI-compatible (/v1/embeddings, paid)</option>
-            <option value="voyage">Voyage AI (paid plan recommended)</option>
-          </select>
-        </div>
-
-        {draftKind === 'openai' ? (
-          <OpenAIProviderForm
-            value={openAIDraft}
-            onChange={setOpenAIDraft}
-            secretEnvs={envsForKind}
-          />
-        ) : null}
-        {draftKind === 'voyage' ? (
-          <VoyageProviderForm
-            value={voyageDraft}
-            onChange={setVoyageDraft}
-            secretEnvs={envsForKind}
-          />
-        ) : null}
-        {draftKind === 'ollama' ? (
-          <div className="rounded-md border border-dashed bg-muted/30 p-3 text-xs text-muted-foreground">
-            {kindChanged ? (
-              <>
-                Switching back to Ollama will restart the llama-server
-                sidecar with the current model + tuning from the runtime
-                config (see the sections below). After the switch, every
-                project will need to be reindexed (full reindex on the
-                next clone job).
-              </>
-            ) : (
-              <>
-                Ollama tuning (model picker, ctx, GPU layers, sidecar
-                status) is configured in the sections below.
-              </>
-            )}
-          </div>
-        ) : null}
-
-        <div className="flex items-center gap-2 pt-2">
-          <Button onClick={onSave} disabled={!canSave || !dirty}>
-            {switchMut.isPending || test.isPending ? (
-              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-            ) : (
-              <Save className="mr-1 h-4 w-4" />
-            )}
+        <div className="flex flex-wrap items-end gap-3">
+          <Field label="Provider" className="min-w-[280px] flex-1">
+            <Select
+              value={draftKind}
+              onValueChange={(v) => setDraftKind(v as EmbeddingProviderKind)}
+            >
+              <SelectTrigger aria-label="Embedding provider kind">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ollama">Ollama sidecar (local, free)</SelectItem>
+                <SelectItem value="openai">OpenAI-compatible (/v1/embeddings, paid)</SelectItem>
+                <SelectItem value="voyage">Voyage AI (paid plan recommended)</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Button variant="primary" onClick={onSave} disabled={!canSave || !dirty}>
+            {pending ? <Dots /> : null}
             {kindChanged ? `Save & switch to ${draftKind}` : 'Save & switch'}
           </Button>
           {test.isSuccess && !switchMut.isPending && draftKind !== 'ollama' ? (
-            <span className="flex items-center gap-1 text-xs text-emerald-700">
-              <CheckCircle2 className="h-3 w-3" /> Last test ok
-            </span>
+            <Status tone="ok" className="pb-2.5 font-mono text-[11.5px]">
+              last test ok
+            </Status>
           ) : null}
         </div>
-      </CardContent>
+
+        {draftKind === 'openai' ? (
+          <OpenAIProviderForm value={openAIDraft} onChange={setOpenAIDraft} secretEnvs={envsForKind} />
+        ) : null}
+        {draftKind === 'voyage' ? (
+          <VoyageProviderForm value={voyageDraft} onChange={setVoyageDraft} secretEnvs={envsForKind} />
+        ) : null}
+        {draftKind === 'ollama' ? (
+          <p className="m-0 text-[13.5px] text-dim">
+            {kindChanged
+              ? 'Switching back restarts the llama-server sidecar with the model and tuning from the cards below. Every project needs a full reindex afterwards.'
+              : 'Ollama tuning — model, context, GPU layers, sidecar state — is in the cards below.'}
+          </p>
+        ) : null}
+      </CardBody>
     </Card>
   );
 }

@@ -1,14 +1,13 @@
 import { useState, type FormEvent } from 'react';
 import { ApiError } from '@/api/client';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Button } from '@/ui/button';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
+import { Callout } from '@/ui/alert';
+import { Button, Dots } from '@/ui/button';
+import { Field, Input } from '@/ui/input';
+import { AuthShell } from './AuthShell';
 import { useAuth } from './useAuth';
 
-// Standalone full-page login form. Lives outside the Shell so the sidebar
-// doesn't peek through. Successful login transitions the auth state and
-// the parent App routes the user to /change-password or / accordingly.
+// Standalone login. Lives outside the Shell so no sidebar peeks through; on
+// success the auth state flips and App routes to /change-password or /.
 export default function LoginPage() {
   const { login } = useAuth();
   const [email, setEmail] = useState('');
@@ -23,65 +22,66 @@ export default function LoginPage() {
     try {
       await login({ email, password });
     } catch (err) {
-      const detail =
-        err instanceof ApiError ? err.detail : 'Could not reach server. Try again.';
-      setError(detail);
+      setError(err instanceof ApiError ? err.detail : 'Could not reach the server. Try again.');
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-muted/20 px-4">
-      <div className="w-full max-w-sm">
-        <div className="mb-8 text-center">
-          <div className="text-2xl font-semibold tracking-tight">cix dashboard</div>
-          <div className="mt-1 text-sm text-muted-foreground">Sign in to continue</div>
-        </div>
+    <AuthShell
+      title="Sign in"
+      subtitle="Operator access to this cix server."
+      footer="CLI and CI authenticate with API keys, not with this form."
+    >
+      <form onSubmit={onSubmit} className="flex flex-col gap-4">
+        <Field label="Email" htmlFor="email">
+          <Input
+            id="email"
+            type="email"
+            autoComplete="username"
+            autoFocus
+            required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            disabled={submitting}
+          />
+        </Field>
 
-        <form onSubmit={onSubmit} className="space-y-4 rounded-lg border bg-background p-6 shadow-sm">
-          <div className="space-y-1.5">
-            <Label htmlFor="email">Email</Label>
-            <Input
-              id="email"
-              type="email"
-              autoComplete="username"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              disabled={submitting}
-            />
-          </div>
+        <Field label="Password" htmlFor="password">
+          <Input
+            id="password"
+            type="password"
+            autoComplete="current-password"
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={submitting}
+          />
+        </Field>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="password">Password</Label>
-            <Input
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={submitting}
-            />
-          </div>
+        {error && (
+          <Callout variant="danger">
+            <b>Sign-in failed</b>
+            <p>{error}</p>
+          </Callout>
+        )}
 
-          {error && (
-            <Alert variant="destructive">
-              <AlertTitle>Login failed</AlertTitle>
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
+        <Button
+          type="submit"
+          variant="primary"
+          className="mt-1 w-full"
+          disabled={submitting || !email || !password}
+        >
+          {submitting ? (
+            <>
+              <Dots /> Signing in
+            </>
+          ) : (
+            'Sign in'
           )}
-
-          <Button type="submit" className="w-full" disabled={submitting || !email || !password}>
-            {submitting ? 'Signing in…' : 'Sign in'}
-          </Button>
-        </form>
-
-        <p className="mt-6 text-center text-xs text-muted-foreground">
-          CLI users authenticate with API keys, not this form.
-        </p>
-      </div>
-    </div>
+        </Button>
+      </form>
+    </AuthShell>
   );
 }

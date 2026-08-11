@@ -1,123 +1,100 @@
 import { Link } from 'react-router-dom';
-import { AlertTriangle, ChevronRight, Database, FileText } from 'lucide-react';
 import type { Project } from '@/api/types';
-import { Badge } from '@/ui/badge';
-import { Card, CardContent } from '@/ui/card';
+import { Badge, Status } from '@/ui/badge';
+import { Card } from '@/ui/card';
 import { formatRelative } from '@/lib/formatDate';
 import { useRuntimeModel } from '@/lib/useServerStatus';
-import { basename, isDrifted, isExternal, STATUS_VARIANT } from '../lib/projectList';
+import {
+  isDrifted,
+  isExternal,
+  projectLabel,
+  projectPath,
+  STATUS_TONE,
+  statusLabel,
+} from '../lib/projectList';
 import { ReindexProjectButton } from './ReindexProjectButton';
 import { SyncProjectButton } from './SyncProjectButton';
 
+// Tile view. Lifts 2px into a hard shadow on hover — the one motion the
+// system allows — and turns its outline accent when something is wrong.
+//
+// The <Link> wraps only the informational area. The action footer is a
+// sibling: buttons nested inside an anchor are invalid HTML, and it also
+// means the actions no longer have to fight the card's own navigation.
 export function ProjectCard({ project }: { project: Project }) {
   const currentModel = useRuntimeModel();
   // Drift = indexed under a different model than the sidecar runs now. Shared
-  // predicate so the badge and the Projects status filter never disagree.
+  // predicate so the badge and the status filter can never disagree.
   const drift = isDrifted(project, currentModel);
-  // Format-staleness flag set server-side (e.g. chunker format changed under
-  // the index). Informational — the admin triggers the full resync.
+  // Format-staleness flag set server-side (the chunker format changed under
+  // the index). Informational — the admin triggers the resync.
   const fullSyncRequired = !!project.full_sync_required;
-  // Sync only makes sense for GitHub-cloned projects — the server can pull +
-  // incrementally index those. Local projects are driven by the CLI.
+  // Sync only makes sense for GitHub-cloned projects: the server can pull and
+  // incrementally index those. Local ones are driven from the CLI.
   const external = isExternal(project);
+  const needsAttention = drift || fullSyncRequired;
 
   return (
-    <Link to={`/projects/${project.path_hash}`} className="group">
-      <Card
-        className={`h-full transition-colors ${
-          drift || fullSyncRequired
-            ? 'border-destructive/60 hover:border-destructive'
-            : 'hover:border-foreground/30'
-        }`}
+    <Card clickable className={`flex h-full flex-col ${needsAttention ? 'border-accent' : ''}`}>
+      <Link
+        to={`/projects/${project.path_hash}`}
+        className="flex min-w-0 flex-1 flex-col gap-3 p-[18px] focus-visible:outline-offset-[-4px]"
       >
-        <CardContent className="space-y-3 p-5">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-base font-medium leading-tight">
-                {basename(project.display_path ?? project.host_path)}
-              </div>
-              <div
-                className="mt-0.5 truncate text-xs text-muted-foreground"
-                title={project.display_path ?? project.host_path}
-              >
-                {project.display_path ?? project.host_path}
-              </div>
-            </div>
-            <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+        <div className="min-w-0">
+          <div className="truncate text-[15px] font-bold leading-tight">
+            {projectLabel(project)}
           </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant={STATUS_VARIANT[project.status]} className="capitalize">
-              {project.status}
+          <div className="cix-row__meta mt-1 truncate" title={projectPath(project)}>
+            {projectPath(project)}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Status tone={STATUS_TONE[project.status]} className="font-mono text-[11.5px]">
+            {statusLabel(project.status).toLowerCase()}
+          </Status>
+          {drift ? <Badge variant="warn">stale model</Badge> : null}
+          {fullSyncRequired ? (
+            <Badge variant="busy" title={project.full_sync_reason ?? undefined}>
+              out of sync
             </Badge>
-            {drift ? (
-              <Badge variant="destructive" className="gap-1">
-                <AlertTriangle className="h-3 w-3" />
-                Stale model
-              </Badge>
-            ) : null}
-            {fullSyncRequired ? (
-              <Badge
-                variant="destructive"
-                className="gap-1"
-                title={project.full_sync_reason ?? undefined}
-              >
-                <AlertTriangle className="h-3 w-3" />
-                Out of sync
-              </Badge>
-            ) : null}
-            {project.languages.slice(0, 4).map((l) => (
-              <Badge key={l} variant="outline" className="font-normal text-xs">
-                {l}
-              </Badge>
-            ))}
-            {project.languages.length > 4 ? (
-              <span className="text-xs text-muted-foreground">+{project.languages.length - 4}</span>
-            ) : null}
-          </div>
-          <div className="flex items-center gap-4 text-xs text-muted-foreground">
-            <span className="inline-flex items-center gap-1">
-              <FileText className="h-3.5 w-3.5" />
-              {project.stats.indexed_files.toLocaleString()} files
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <Database className="h-3.5 w-3.5" />
-              {project.stats.total_symbols.toLocaleString()} symbols
-            </span>
-            <span className="ml-auto">
-              {project.last_indexed_at
-                ? `Indexed ${formatRelative(project.last_indexed_at)}`
-                : 'Never indexed'}
-            </span>
-          </div>
-          {external ? (
-            // Dedicated action area for GitHub-synced projects. The card is a
-            // <Link>, so intercept the click here to run the mutation instead
-            // of navigating to the detail page.
-            <div
-              className="flex justify-end gap-1.5 border-t pt-3"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-              }}
-            >
-              <SyncProjectButton
-                hash={project.path_hash}
-                hostPath={project.display_path ?? project.host_path}
-                variant="outline"
-                size="sm"
-                className="h-7 px-2.5 text-xs"
-              />
-              <ReindexProjectButton
-                hash={project.path_hash}
-                hostPath={project.display_path ?? project.host_path}
-                variant="outline"
-                size="sm"
-                className="h-7 px-2.5 text-xs"
-              />
-            </div>
           ) : null}
-        </CardContent>
-      </Card>
-    </Link>
+          {project.languages.slice(0, 3).map((l) => (
+            <Badge key={l} variant="quiet">
+              {l}
+            </Badge>
+          ))}
+          {project.languages.length > 3 ? (
+            <span className="cix-row__meta">+{project.languages.length - 3}</span>
+          ) : null}
+        </div>
+
+        <dl className="cix-kv mt-auto">
+          <dt>files</dt>
+          <dd className="tabular-nums">{project.stats.indexed_files.toLocaleString()}</dd>
+          <dt>symbols</dt>
+          <dd className="tabular-nums">{project.stats.total_symbols.toLocaleString()}</dd>
+          <dt>indexed</dt>
+          <dd>
+            {project.last_indexed_at ? (
+              formatRelative(project.last_indexed_at)
+            ) : (
+              <span className="text-faint">never</span>
+            )}
+          </dd>
+        </dl>
+      </Link>
+
+      {external ? (
+        <div className="flex flex-none justify-end gap-1.5 border-t bg-surface-head px-[18px] py-2.5">
+          <SyncProjectButton hash={project.path_hash} hostPath={projectPath(project)} size="sm" />
+          <ReindexProjectButton
+            hash={project.path_hash}
+            hostPath={projectPath(project)}
+            size="sm"
+          />
+        </div>
+      ) : null}
+    </Card>
   );
 }

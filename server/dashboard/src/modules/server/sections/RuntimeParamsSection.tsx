@@ -1,50 +1,6 @@
-import { useId } from 'react';
 import type { RuntimeConfig } from '@/api/types';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
-import { SourcePill } from '../components/SourcePill';
-
-interface NumberFieldProps {
-  field: string;
-  label: string;
-  hint: string;
-  value: number;
-  recommended?: number;
-  source?: string;
-  onChange: (next: number) => void;
-  min?: number;
-}
-
-function NumberField({ field, label, hint, value, recommended, source, onChange, min = 0 }: NumberFieldProps) {
-  const id = useId();
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between gap-2">
-        <Label htmlFor={id} className="font-medium">
-          {label}
-          <span className="ml-2 font-normal text-muted-foreground text-xs">({field})</span>
-        </Label>
-        <SourcePill source={source} />
-      </div>
-      <Input
-        id={id}
-        type="number"
-        min={min}
-        value={Number.isFinite(value) ? value : 0}
-        onChange={(e) => {
-          const n = parseInt(e.target.value, 10);
-          onChange(Number.isFinite(n) ? n : 0);
-        }}
-        className="max-w-xs"
-      />
-      <p className="text-xs text-muted-foreground">
-        {hint}
-        {recommended !== undefined ? <> Recommended: <code>{recommended}</code>.</> : null}
-      </p>
-    </div>
-  );
-}
+import { Card, CardBody, CardHead } from '@/ui/card';
+import { NumberField } from '../components/NumberField';
 
 interface Props {
   config?: RuntimeConfig;
@@ -58,9 +14,9 @@ interface Props {
   onDraftCacheRAM: (n: number) => void;
 }
 
-// RuntimeParamsSection: ctx, n_gpu_layers, n_threads form. n_gpu_layers
-// allows -1 (Metal/CUDA all-layers sentinel) so we deliberately do NOT
-// clamp to >= 0 in the input.
+// Flags handed to llama-server on every (re)start. n_gpu_layers accepts -1
+// (the Metal/CUDA "all layers" sentinel), so it is deliberately not clamped
+// at zero like the rest.
 export function RuntimeParamsSection({
   config,
   draftCtx,
@@ -76,18 +32,14 @@ export function RuntimeParamsSection({
   const src = config?.source;
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>Runtime parameters</CardTitle>
-        <CardDescription>
-          Tunables passed to llama-server on every (re)start. Leaving a field
-          at zero falls back to env / recommended on the next save.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-5">
+      <CardHead title="Runtime parameters">
+        <span className="ml-2 font-mono text-[11px] font-normal text-dim">restart on change</span>
+      </CardHead>
+      <CardBody className="grid gap-5 sm:grid-cols-2">
         <NumberField
           field="llama_ctx_size"
           label="Context window"
-          hint="Maximum tokens per chunk. Larger values use more memory."
+          hint="Maximum tokens per chunk. Larger costs memory."
           value={draftCtx}
           recommended={rec?.llama_ctx_size}
           source={src?.llama_ctx_size}
@@ -97,7 +49,7 @@ export function RuntimeParamsSection({
         <NumberField
           field="llama_n_gpu_layers"
           label="GPU layers"
-          hint="-1 = all (Metal/CUDA), 0 = CPU only, >0 = partial offload."
+          hint="-1 offloads everything (Metal/CUDA), 0 is CPU only, >0 is a partial offload."
           value={draftGpuLayers}
           recommended={rec?.llama_n_gpu_layers}
           source={src?.llama_n_gpu_layers}
@@ -115,15 +67,15 @@ export function RuntimeParamsSection({
         />
         <NumberField
           field="llama_cache_ram_mib"
-          label="Host prompt cache (MiB)"
-          hint="llama-server's in-RAM prompt cache (--cache-ram). Embeddings never reuse prompts, so 0 (disabled) is right for cix — llama's own 8192 MiB default only inflates RSS until the container hits its memory limit. -1 = unlimited."
+          label="Host prompt cache"
+          hint="llama-server's in-RAM prompt cache (--cache-ram), in MiB. Embeddings never reuse prompts, so 0 is right for cix — llama's own 8192 default only inflates RSS until the container hits its memory limit. -1 is unlimited."
           value={draftCacheRAM}
           recommended={rec?.llama_cache_ram_mib}
           source={src?.llama_cache_ram_mib}
           onChange={onDraftCacheRAM}
           min={-1}
         />
-      </CardContent>
+      </CardBody>
     </Card>
   );
 }
