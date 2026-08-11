@@ -143,6 +143,22 @@ export default function ServerPage() {
   const isPending = update.isPending || restart.isPending;
   const disabled = status.data?.state === 'disabled';
 
+  // Why the save button is greyed out, in the order the reasons apply. A
+  // disabled control with no explanation reads as a broken one — which is
+  // exactly how the embeddings-disabled case came across, since that state
+  // blocks saving no matter how many fields you have edited.
+  //
+  // Note this covers THIS button only. Switching provider is a separate
+  // control inside the provider card and stays enabled — though with the
+  // service disabled the server refuses that too (embeddings.ErrDisabled),
+  // because there is no service to switch. Both roads lead back to the env
+  // var, so the message says so rather than leaving the reader hunting.
+  const saveBlockedReason = disabled
+    ? 'Embeddings are off, so there is nothing to apply this to — set CIX_EMBEDDINGS_ENABLED=true and restart the server'
+    : isPending
+      ? 'Applying the configuration…'
+      : null;
+
   async function onConfirm() {
     if (!cfg.data || !draft) return;
     const { patch } = diffPatch(cfg.data, draft);
@@ -194,6 +210,36 @@ export default function ServerPage() {
             </p>
           </Callout>
         ) : null}
+
+        {/* The action sits with the form it acts on, and sticks to the top of
+            the tab so it cannot be scrolled away — the reason it used to live
+            in the page header. It stays mounted while disabled rather than
+            disappearing, because "greyed out with a reason" answers "why can't
+            I save?" and an absent button does not. */}
+        <div
+          className="sticky top-0 z-10 mb-5 flex items-center gap-3 border-b py-2.5"
+          // The scroll container has no background of its own, so a sticky
+          // child needs the page canvas explicitly or the cards show through.
+          style={{ background: 'var(--cix-canvas)' }}
+        >
+          <span className="cix-hint">
+            {saveBlockedReason ??
+              (dirty
+                ? `${changes.length} unsaved change${changes.length === 1 ? '' : 's'}`
+                : 'no changes')}
+          </span>
+          <Button
+            variant="primary"
+            className="ml-auto"
+            onClick={() => setConfirmOpen(true)}
+            disabled={!dirty || isPending || disabled}
+            title={saveBlockedReason ?? 'Write the overrides and restart the sidecar'}
+          >
+            {isPending ? <Dots /> : null}
+            {isOllama ? 'Save & restart' : 'Save'}
+          </Button>
+        </div>
+
         {runtimeGrid(cfg.data, draft)}
       </>
     );
@@ -203,21 +249,8 @@ export default function ServerPage() {
     <Page
       title="Server"
       subtitle="Embedding provider, indexing parameters and sidecar lifecycle, plus what the process is using on disk and in memory."
-      action={
-        // Only on the tab it applies to. Resources has its own actions, and a
-        // "Save & restart" hovering over a storage screen would be noise —
-        // worse, it would look like it might act on what is shown there.
-        tab === 'runtime' ? (
-          <Button
-            variant="primary"
-            onClick={() => setConfirmOpen(true)}
-            disabled={!dirty || isPending || disabled}
-          >
-            {isPending ? <Dots /> : null}
-            {isOllama ? 'Save & restart' : 'Save'}
-          </Button>
-        ) : undefined
-      }
+      // No header action: the only one this page has belongs to the Runtime
+      // settings form and now lives with it, inside that tab.
     >
       <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)}>
         <TabsList>
