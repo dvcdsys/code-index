@@ -10,15 +10,13 @@ export function basename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-// Status → shadcn Badge variant. Shared so card and table badges match.
-export const STATUS_VARIANT: Record<
-  Project['status'],
-  'default' | 'secondary' | 'destructive' | 'outline'
-> = {
-  created: 'outline',
-  indexing: 'secondary',
-  indexed: 'default',
-  error: 'destructive',
+// Lifecycle status → the square's tone. Shared so the card and the table can
+// never disagree about what colour "indexing" is.
+export const STATUS_TONE: Record<Project['status'], 'ok' | 'busy' | 'warn' | 'idle'> = {
+  created: 'idle',
+  indexing: 'warn',
+  indexed: 'ok',
+  error: 'busy',
 };
 
 // Labels of the two flag badges that ride alongside the lifecycle status in

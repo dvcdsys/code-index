@@ -128,10 +128,26 @@ cd server && make bundle
 the Metal-enabled `llama-server` (llama.cpp + `libggml-metal.dylib`).
 The binaries land in `server/dist/cix-darwin-arm64/`.
 
-> The bundled `llama-server` is re-signed at bundle time (commit
-> `8c56fc3`) so macOS amfid doesn't kill it on first launch. If you
-> see "killed: 9" on startup, re-run `make bundle` to refresh the
-> signature.
+Each step is skipped when it would reproduce identical output, so a
+repeat `make bundle` (or `make run`) takes well under a second instead
+of re-downloading ~11 MB from GitHub and re-signing 52 MB of dylibs.
+Force a step when you need to:
+
+| Variable | Forces |
+|---|---|
+| `LLAMA_FORCE=1` | re-fetch llama.cpp, restage `dist/llama/`, and rebuild the bundle |
+| `BUNDLE_FORCE=1` | re-copy + re-sign the bundle's `llama/` only |
+| `DASHBOARD_FORCE=1` | rebuild the React dashboard |
+
+Verified llama.cpp archives are cached in `~/.cache/cix/llama/`
+(override with `LLAMA_CACHE_DIR`), so even a forced re-fetch is
+usually offline.
+
+> The bundled `llama-server` is re-signed whenever it is copied into
+> the bundle (commit `8c56fc3`) so macOS amfid doesn't kill it on
+> first launch. If you see "killed: 9" on startup, run
+> `make bundle BUNDLE_FORCE=1` to refresh the signature — a plain
+> `make bundle` will skip the copy, and the re-sign with it.
 
 ### Configure
 

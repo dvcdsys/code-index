@@ -1,28 +1,29 @@
 import { useState } from 'react';
-import { AlertCircle, CheckCircle2, Download } from 'lucide-react';
 import { api } from '@/api/client';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Button } from '@/ui/button';
+import { Callout } from '@/ui/alert';
+import { Status } from '@/ui/badge';
+import { Button, Dots } from '@/ui/button';
+import { Chip } from '@/ui/code';
 import type { TunnelBinary, TunnelProvider } from './types';
 
-// Per-provider manual install instructions, shown only for local
-// (non-managed) deployments where the binary must be on the system PATH.
+// Manual install instructions per provider, shown only for local
+// (non-managed) deployments where the binary has to be on the system PATH.
 const INSTALL_HINTS: Record<TunnelProvider, { macos: string; linux: string; docs: string }> = {
   cloudflare: {
     macos: 'brew install cloudflared',
-    linux: 'See pkg.cloudflare.com (apt/rpm) or download the cloudflared binary',
+    linux: 'pkg.cloudflare.com (apt/rpm), or download the cloudflared binary',
     docs: 'https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
   },
   ngrok: {
     macos: 'brew install ngrok',
-    linux: 'See ngrok.com/download (apt/snap) or download the ngrok binary',
+    linux: 'ngrok.com/download (apt/snap), or download the ngrok binary',
     docs: 'https://ngrok.com/download',
   },
 };
 
-// BinarySection shows the agent-binary state for the selected provider:
-// a confirmation when present, Install/Update buttons in managed mode
-// (Docker), or manual install instructions for local runs.
+// The agent binary for the selected provider: a confirmation line when it is
+// present, Install/Update in managed mode (Docker), or manual instructions
+// for a local run.
 export function BinarySection({
   provider,
   binary,
@@ -50,75 +51,66 @@ export function BinarySection({
 
   const managed = binary?.managed ?? false;
 
-  // Installed.
   if (binary?.installed) {
     return (
-      <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
-        <div className="flex items-center justify-between gap-3">
-          <span className="flex items-center gap-1.5 text-muted-foreground">
-            <CheckCircle2 className="size-3.5 text-green-600" />
-            Binary installed
-            {binary.version && <span className="font-mono">· {binary.version.split('\n')[0]}</span>}
-          </span>
-          {managed && (
-            <Button variant="outline" size="sm" disabled={busy} onClick={() => run('update')}>
-              <Download className="mr-1 size-3.5" />
-              {busy ? 'Updating…' : 'Update'}
+      <div className="border px-3.5 py-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Status tone="ok" className="font-mono text-[11.5px]">
+            binary installed
+            {binary.version ? ` · ${binary.version.split('\n')[0]}` : ''}
+          </Status>
+          {managed ? (
+            <Button size="sm" disabled={busy} onClick={() => run('update')}>
+              {busy ? <Dots /> : null}
+              Update
             </Button>
-          )}
+          ) : null}
         </div>
-        {err && <p className="mt-1 text-destructive">{err}</p>}
+        {err ? <p className="cix-error mt-1.5">{err}</p> : null}
       </div>
     );
   }
 
-  // Not installed, managed → offer Install.
   if (managed) {
     return (
-      <Alert>
-        <AlertCircle className="size-4" />
-        <AlertTitle>Agent binary not installed</AlertTitle>
-        <AlertDescription className="space-y-2">
-          <p>The {provider} agent isn't downloaded yet. Install it to enable this tunnel.</p>
-          <Button size="sm" disabled={busy} onClick={() => run('install')}>
-            <Download className="mr-1 size-4" />
-            {busy ? 'Installing…' : `Install ${provider}`}
+      <Callout variant="warn">
+        <b>Agent binary not installed</b>
+        <p>The {provider} agent has not been downloaded yet. Install it to enable this tunnel.</p>
+        <div className="mt-1 flex items-center gap-3">
+          <Button variant="primary" size="sm" disabled={busy} onClick={() => run('install')}>
+            {busy ? <Dots /> : null}
+            Install {provider}
           </Button>
-          {err && <p className="text-destructive">{err}</p>}
-        </AlertDescription>
-      </Alert>
+          {err ? <span className="cix-error">{err}</span> : null}
+        </div>
+      </Callout>
     );
   }
 
-  // Not installed, not managed → manual install instructions (local only).
   const hint = INSTALL_HINTS[provider];
   return (
-    <Alert>
-      <AlertCircle className="size-4" />
-      <AlertTitle>Agent binary not found on this server</AlertTitle>
-      <AlertDescription className="space-y-1.5 text-xs">
-        <p>
-          Install the {provider} agent on the host running cix, then it'll be picked up
-          automatically. Only needed for local runs — the Docker images bundle it.
-        </p>
-        <p>
-          <span className="text-muted-foreground">macOS:</span>{' '}
-          <code className="font-mono">{hint.macos}</code>
-        </p>
-        <p>
-          <span className="text-muted-foreground">Linux:</span> {hint.linux}
-        </p>
-        <p>
-          <a
-            href={hint.docs}
-            target="_blank"
-            rel="noreferrer"
-            className="text-primary underline-offset-2 hover:underline"
-          >
-            Download docs ↗
-          </a>
-        </p>
-      </AlertDescription>
-    </Alert>
+    <Callout variant="warn">
+      <b>Agent binary not found on this server</b>
+      <p>
+        Install the {provider} agent on the host running cix and it gets picked up automatically.
+        Only local runs need this — the Docker images bundle it.
+      </p>
+      <dl className="cix-kv mt-1">
+        <dt>macos</dt>
+        <dd className="text-left">
+          <Chip>{hint.macos}</Chip>
+        </dd>
+        <dt>linux</dt>
+        <dd className="text-left">{hint.linux}</dd>
+      </dl>
+      <a
+        href={hint.docs}
+        target="_blank"
+        rel="noreferrer"
+        className="mt-1 self-start font-mono text-[11.5px] text-accent hover:underline"
+      >
+        download docs ↗
+      </a>
+    </Callout>
   );
 }

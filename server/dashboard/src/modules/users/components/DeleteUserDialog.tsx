@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Loader2, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Button } from '@/ui/button';
+import { Button, Dots } from '@/ui/button';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -12,19 +12,13 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/ui/dialog';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
+import { Field, Input } from '@/ui/input';
 import { useDeleteUser } from '../hooks';
 
-// Two-factor confirm: typing the email avoids accidental destructive clicks
-// in a list of similar-looking rows. Server cascade-deletes sessions + keys.
-export function DeleteUserDialog({
-  userId,
-  email,
-}: {
-  userId: string;
-  email: string;
-}) {
+// Typing the email is the second factor: in a list of similar-looking rows a
+// single misplaced click should not delete an account. The server cascades
+// sessions and API keys.
+export function DeleteUserDialog({ userId, email }: { userId: string; email: string }) {
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState('');
   const del = useDeleteUser();
@@ -42,8 +36,9 @@ export function DeleteUserDialog({
       setOpen(false);
       reset();
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : String(err);
-      toast.error('Failed to delete user', { description: detail });
+      toast.error('Could not delete the user', {
+        description: err instanceof ApiError ? err.detail : String(err),
+      });
     }
   }
 
@@ -56,45 +51,40 @@ export function DeleteUserDialog({
       }}
     >
       <DialogTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="text-destructive hover:text-destructive"
-        >
-          <Trash2 className="mr-1 h-4 w-4" />
+        <Button variant="quietDanger" size="sm">
           Delete
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Delete user?</DialogTitle>
-          <DialogDescription>
-            Permanently removes <span className="font-mono text-foreground">{email}</span>{' '}
-            and cascades all their sessions and API keys. This cannot be undone.
-          </DialogDescription>
+          <span className="cix-dot is-busy" aria-hidden />
+          <DialogTitle>Delete this user?</DialogTitle>
         </DialogHeader>
-        <div className="space-y-2">
-          <Label htmlFor="delete-confirm-email">
-            Type the email to confirm
-          </Label>
-          <Input
-            id="delete-confirm-email"
-            value={typed}
-            onChange={(e) => setTyped(e.target.value)}
-            placeholder={email}
-            autoComplete="off"
-          />
-        </div>
+        <DialogBody>
+          <DialogDescription>
+            Permanently removes <span className="font-mono text-ink">{email}</span> along with
+            every session and API key they own. This cannot be undone.
+          </DialogDescription>
+          <Field label="Type the email to confirm" htmlFor="delete-confirm-email">
+            <Input
+              id="delete-confirm-email"
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              placeholder={email}
+              autoComplete="off"
+            />
+          </Field>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={del.isPending}>
             Cancel
           </Button>
           <Button
-            variant="destructive"
+            variant="danger"
             onClick={onConfirm}
             disabled={del.isPending || typed.trim() !== email}
           >
-            {del.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            {del.isPending ? <Dots /> : null}
             Delete user
           </Button>
         </DialogFooter>

@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, RefreshCw } from 'lucide-react';
 import { api } from '@/api/client';
 import { useAuth } from '@/auth/useAuth';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Button } from '@/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
+import { Callout } from '@/ui/alert';
+import { Status } from '@/ui/badge';
+import { Button, Dots } from '@/ui/button';
+import { Card, CardBody, CardHead, KV } from '@/ui/card';
+import { Chip } from '@/ui/code';
 
-// Effective public origin webhook URLs are delivered to, and where it comes
-// from. `tunnel` — a live managed tunnel; `public_url` — CIX_PUBLIC_URL set,
-// i.e. the server is made public by infrastructure (reverse proxy / ingress /
-// static IP) and a tunnel is NOT needed; `none` — no origin configured.
+// The effective public origin webhooks are delivered to, and where it came
+// from. `tunnel` — a live managed tunnel; `public_url` — CIX_PUBLIC_URL is
+// set, i.e. infrastructure (reverse proxy / ingress / static IP) already makes
+// the server public and no tunnel is needed; `none` — nothing configured.
 type WebhookOriginSource = 'tunnel' | 'public_url' | 'none';
 type WebhookOrigin = { origin: string; source: WebhookOriginSource };
 
@@ -30,17 +31,16 @@ type ReconcileResult = {
   outcomes?: ReconcileOutcome[];
 };
 
-const ACTION_COLOR: Record<ReconcileOutcome['action'], string> = {
-  updated: 'text-green-600',
-  created: 'text-green-600',
-  skipped: 'text-muted-foreground',
-  failed: 'text-destructive',
+const ACTION_TONE: Record<ReconcileOutcome['action'], 'ok' | 'busy' | 'idle'> = {
+  updated: 'ok',
+  created: 'ok',
+  skipped: 'idle',
+  failed: 'busy',
 };
 
-// WebhooksTab shows the public origin webhooks are delivered to and lets the
-// operator re-register every webhook_mode=auto repo against it. The tunnel
-// that provides the public URL is managed under Managed Tunnels — this tab
-// only consumes it.
+// Shows the origin and lets an admin re-register every webhook_mode=auto repo
+// against it. The tunnel that supplies that origin lives under Managed
+// Tunnels — this tab only consumes it.
 export default function WebhooksTab() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
@@ -61,8 +61,7 @@ export default function WebhooksTab() {
     setErr(null);
     setResult(null);
     try {
-      const res = await api.post<ReconcileResult>('/github/webhooks/reconcile');
-      setResult(res);
+      setResult(await api.post<ReconcileResult>('/github/webhooks/reconcile'));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -70,115 +69,108 @@ export default function WebhooksTab() {
     }
   }
 
+  const configured = origin && origin.source !== 'none';
+
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-5">
       <Card>
-        <CardHeader>
-          <CardTitle>Webhook delivery origin</CardTitle>
-          <CardDescription>
-            GitHub webhooks for <code>webhook_mode=auto</code> repos are
-            registered against this public origin. A live managed tunnel takes
-            precedence over <code>CIX_PUBLIC_URL</code>.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          {origin?.source === 'tunnel' && (
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-muted-foreground">Active tunnel URL</span>
-              <span className="font-mono">{origin.origin}</span>
-            </div>
-          )}
+        <CardHead
+          title="Delivery origin"
+          aside={
+            isAdmin ? (
+              <Button size="sm" disabled={busy} onClick={reconcile}>
+                {busy ? <Dots /> : null}
+                Re-register webhooks
+              </Button>
+            ) : null
+          }
+        />
+        <CardBody className="flex flex-col gap-3.5">
+          <p className="m-0 text-[13.5px] text-dim">
+            Hooks for <Chip>webhook_mode=auto</Chip> repositories are registered against this
+            public origin. A live managed tunnel takes precedence over{' '}
+            <Chip>CIX_PUBLIC_URL</Chip>. Re-registration runs on boot and whenever the tunnel URL
+            changes{isAdmin ? ' — the button above forces it now.' : '; forcing it needs an admin.'}
+          </p>
 
-          {origin?.source === 'public_url' && (
-            <div className="space-y-1">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">
-                  Delivery origin (<code>CIX_PUBLIC_URL</code>)
-                </span>
-                <span className="font-mono">{origin.origin}</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                The server is made publicly reachable by your infrastructure,
-                so a managed tunnel is optional. Configure one under{' '}
-                <Link to="/tunnels" className="text-primary underline-offset-2 hover:underline">
-                  Managed Tunnels
-                </Link>{' '}
-                only if you need the server to mint its own public URL.
-              </p>
-            </div>
-          )}
+          {configured ? (
+            <KV
+              rows={[
+                {
+                  label: 'source',
+                  value: origin!.source === 'tunnel' ? 'managed tunnel' : 'CIX_PUBLIC_URL',
+                },
+                { label: 'origin', value: origin!.origin, title: origin!.origin },
+              ]}
+            />
+          ) : null}
 
-          {(!origin || origin.source === 'none') && (
-            <Alert>
-              <AlertCircle className="size-4" />
-              <AlertTitle>No public origin configured</AlertTitle>
-              <AlertDescription>
-                Webhook delivery needs a public URL. Set{' '}
-                <code>CIX_PUBLIC_URL</code> if the server is already reachable
-                (reverse proxy, ingress, static IP), or configure a tunnel
-                under{' '}
-                <Link to="/tunnels" className="text-primary underline-offset-2 hover:underline">
+          {origin?.source === 'public_url' ? (
+            <p className="cix-hint m-0">
+              your infrastructure already exposes the server, so a tunnel is optional — configure
+              one under{' '}
+              <Link to="/tunnels" className="text-accent hover:underline">
+                Managed Tunnels
+              </Link>{' '}
+              only if the server should mint its own URL
+            </p>
+          ) : null}
+
+          {!configured ? (
+            <Callout variant="warn">
+              <b>No public origin configured</b>
+              <p>
+                Webhook delivery needs one. Set <Chip>CIX_PUBLIC_URL</Chip> if the server is
+                already reachable, or configure a tunnel under{' '}
+                <Link to="/tunnels" className="text-accent hover:underline">
                   Managed Tunnels
                 </Link>
-                . Repos where you aren't an admin can sync via polling instead.
-              </AlertDescription>
-            </Alert>
-          )}
+                . Repositories where you are not an admin can sync by polling instead.
+              </p>
+            </Callout>
+          ) : null}
 
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-            <p className="text-xs text-muted-foreground">
-              Re-registration runs automatically on boot and when the tunnel URL
-              changes.{' '}
-              {isAdmin ? 'Use this to trigger it manually.' : 'Manual re-registration requires an admin.'}
-            </p>
-            {isAdmin && (
-              <Button variant="outline" size="sm" disabled={busy} onClick={reconcile}>
-                <RefreshCw className="mr-1 size-4" />
-                {busy ? 'Re-registering…' : 'Re-register webhooks'}
-              </Button>
-            )}
-          </div>
-
-          {err && (
-            <Alert variant="destructive">
-              <AlertCircle className="size-4" />
-              <AlertTitle>Reconcile failed</AlertTitle>
-              <AlertDescription>{err}</AlertDescription>
-            </Alert>
-          )}
-        </CardContent>
+          {err ? (
+            <Callout variant="danger">
+              <b>Re-registration failed</b>
+              <p>{err}</p>
+            </Callout>
+          ) : null}
+        </CardBody>
       </Card>
 
-      {result && (
+      {result ? (
         <Card>
-          <CardHeader>
-            <CardTitle>Last reconcile</CardTitle>
-            <CardDescription>
-              {result.total} auto repo(s) · {result.updated} updated ·{' '}
-              {result.created} created · {result.skipped} skipped ·{' '}
-              {result.failed} failed
-            </CardDescription>
-          </CardHeader>
-          {result.outcomes && result.outcomes.length > 0 && (
-            <CardContent>
-              <ul className="divide-y rounded-md border">
-                {result.outcomes.map((o) => (
-                  <li
-                    key={o.project_path}
-                    className="flex items-center justify-between gap-3 px-4 py-2 text-sm"
-                  >
-                    <span className="truncate font-mono text-xs">{o.project_path}</span>
-                    <span className={`shrink-0 capitalize ${ACTION_COLOR[o.action]}`}>
-                      {o.action}
-                      {o.note ? ` — ${o.note}` : ''}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </CardContent>
+          <CardHead
+            title="Last re-registration"
+            aside={
+              <span className="font-mono text-[11.5px] font-normal text-muted">
+                {result.total} auto · {result.created} created · {result.updated} updated ·{' '}
+                {result.skipped} skipped · {result.failed} failed
+              </span>
+            }
+          />
+          {result.outcomes && result.outcomes.length > 0 ? (
+            <>
+              {result.outcomes.map((o) => (
+                <div key={o.project_path} className="cix-row">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[13px]">
+                    {o.project_path}
+                  </span>
+                  <Status tone={ACTION_TONE[o.action]} className="font-mono text-[11.5px]">
+                    {o.action}
+                    {o.note ? ` — ${o.note}` : ''}
+                  </Status>
+                </div>
+              ))}
+            </>
+          ) : (
+            <CardBody>
+              <p className="m-0 text-sm text-dim">Nothing to re-register.</p>
+            </CardBody>
           )}
         </Card>
-      )}
+      ) : null}
     </div>
   );
 }

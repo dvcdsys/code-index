@@ -1,9 +1,8 @@
-import { useId } from 'react';
 import type { RuntimeConfig } from '@/api/types';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
-import { SourcePill } from '../components/SourcePill';
+import { Callout } from '@/ui/alert';
+import { Card, CardBody, CardHead } from '@/ui/card';
+import { Chip } from '@/ui/code';
+import { NumberField } from '../components/NumberField';
 
 interface Props {
   config?: RuntimeConfig;
@@ -15,17 +14,14 @@ interface Props {
   onDraftBatch: (n: number) => void;
   onDraftIndexBatch: (n: number) => void;
   onDraftChunkConc: (n: number) => void;
-  // isOllama controls whether the llama-only batch-size field is
-  // rendered. Concurrency (the Service-level queue depth) applies to
-  // every provider — caps how many parallel /v1/embeddings POSTs go
-  // out, which OpenAI / Voyage both honour natively — and is shown
-  // regardless.
+  // The llama-only batch-size field is gated on this. Queue concurrency is
+  // the Service-level cap on parallel /v1/embeddings POSTs and every provider
+  // honours it, so that one is always shown.
   isOllama: boolean;
 }
 
-// AdvancedSection: throughput-tuning fields most operators won't touch.
-// Wrapped in a native <details> so the form stays light by default — Radix
-// Collapsible isn't installed and the plain HTML element is good enough.
+// Throughput. The long explanation that used to float above the fields is a
+// callout now — prose that matters gets a border, prose that doesn't is gone.
 export function AdvancedSection({
   config,
   draftConcurrency,
@@ -38,155 +34,66 @@ export function AdvancedSection({
   onDraftChunkConc,
   isOllama,
 }: Props) {
-  const concId = useId();
-  const batchId = useId();
-  const idxBatchId = useId();
-  const chunkConcId = useId();
   const rec = config?.recommended;
   const src = config?.source;
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>Throughput</CardTitle>
-        <CardDescription>
-          During repo indexing the embedder packs chunks (across files) into
-          batched <code>/v1/embeddings</code> POSTs and runs several in
-          parallel. Embed batch size sets how many chunks per POST;
-          concurrency caps how many POSTs run at once. Both apply to every
-          backend and together govern indexing speed. Llama batch (below) is
-          sidecar-only.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <details className="group" open>
-          <summary className="cursor-pointer text-sm font-medium text-muted-foreground hover:text-foreground">
-            Show throughput tunables
-          </summary>
-          <div className="mt-4 space-y-5">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <Label htmlFor={concId} className="font-medium">
-                  Embedding queue concurrency
-                  <span className="ml-2 font-normal text-muted-foreground text-xs">(max_embedding_concurrency)</span>
-                </Label>
-                <SourcePill source={src?.max_embedding_concurrency} />
-              </div>
-              <Input
-                id={concId}
-                type="number"
-                min={1}
-                value={Number.isFinite(draftConcurrency) ? draftConcurrency : 0}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  onDraftConcurrency(Number.isFinite(n) ? n : 0);
-                }}
-                className="max-w-xs"
-              />
-              <p className="text-xs text-muted-foreground">
-                Maximum batched <code>/v1/embeddings</code> POSTs in flight
-                across the whole server (each POST already carries one
-                file's chunks as a batch). 1 = strictly sequential. OpenAI
-                and Voyage both accept concurrent requests, but their
-                account-level rate limits still apply — start low (e.g. 2)
-                and raise it if you don't see 429s. Per-request limits
-                (Voyage <code>voyage-code-*</code>: 128 inputs <em>or</em>
-                ~100K tokens; OpenAI: 2048 inputs) are split server-side
-                under one queue slot, so oversized files are safe.
-                Recommended:{' '}
-                <code>{rec?.max_embedding_concurrency ?? 1}</code>.
-              </p>
-            </div>
+      <CardHead title="Throughput" />
+      <CardBody className="flex flex-col gap-5">
+        <Callout>
+          <b>How indexing throughput is shaped</b>
+          <p>
+            The embedder packs chunks from consecutive files into batched{' '}
+            <Chip>/v1/embeddings</Chip> POSTs and runs several in parallel. Batch size sets how
+            many chunks ride in one POST; concurrency caps how many POSTs are in flight. Both
+            apply to every provider.
+          </p>
+        </Callout>
 
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <Label htmlFor={idxBatchId} className="font-medium">
-                  Embed batch size (indexing)
-                  <span className="ml-2 font-normal text-muted-foreground text-xs">(index_embed_batch_chunks)</span>
-                </Label>
-                <SourcePill source={src?.index_embed_batch_chunks} />
-              </div>
-              <Input
-                id={idxBatchId}
-                type="number"
-                min={0}
-                value={Number.isFinite(draftIndexBatch) ? draftIndexBatch : 0}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  onDraftIndexBatch(Number.isFinite(n) ? n : 0);
-                }}
-                className="max-w-xs"
-              />
-              <p className="text-xs text-muted-foreground">
-                Max chunks packed into a single embed POST during repo
-                indexing — chunks from consecutive small files are merged so
-                each POST carries a full payload instead of one tiny file.
-                Combined with concurrency above, this is what makes large
-                repos index fast. 0 = one POST per file. Recommended:{' '}
-                <code>{rec?.index_embed_batch_chunks ?? 64}</code>.
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <Label htmlFor={chunkConcId} className="font-medium">
-                  Chunker concurrency
-                  <span className="ml-2 font-normal text-muted-foreground text-xs">(chunk_max_concurrent)</span>
-                </Label>
-                <SourcePill source={src?.chunk_max_concurrent} />
-              </div>
-              <Input
-                id={chunkConcId}
-                type="number"
-                min={0}
-                value={Number.isFinite(draftChunkConc) ? draftChunkConc : 0}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  onDraftChunkConc(Number.isFinite(n) ? n : 0);
-                }}
-                className="max-w-xs"
-              />
-              <p className="text-xs text-muted-foreground">
-                How many tree-sitter (wasm) parser instances run at once —
-                the chunker's OWN concurrency, decoupled from embedding
-                concurrency above. Each instance holds ~69&nbsp;MiB, so this
-                bounds peak chunker memory regardless of how many files embed
-                in parallel. Raise it on big multi-core boxes; lower it if the
-                indexer is memory-pressured. Applies live (no restart).
-                0 = recommended:{' '}
-                <code>{rec?.chunk_max_concurrent ?? 3}</code>.
-              </p>
-            </div>
-
-            {isOllama ? (
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <Label htmlFor={batchId} className="font-medium">
-                    Llama batch size
-                    <span className="ml-2 font-normal text-muted-foreground text-xs">(llama_batch_size, -b)</span>
-                  </Label>
-                  <SourcePill source={src?.llama_batch_size} />
-                </div>
-                <Input
-                  id={batchId}
-                  type="number"
-                  min={1}
-                  value={Number.isFinite(draftBatch) ? draftBatch : 0}
-                  onChange={(e) => {
-                    const n = parseInt(e.target.value, 10);
-                    onDraftBatch(Number.isFinite(n) ? n : 0);
-                  }}
-                  className="max-w-xs"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Logical batch passed to llama-server (-b). 0 = match context window.
-                  Recommended: <code>{rec?.llama_batch_size ?? 'ctx'}</code>.
-                </p>
-              </div>
-            ) : null}
-          </div>
-        </details>
-      </CardContent>
+        <div className="grid gap-5 sm:grid-cols-2">
+          <NumberField
+            field="max_embedding_concurrency"
+            label="Queue concurrency"
+            hint="Batched POSTs in flight across the whole server. 1 is strictly sequential. OpenAI and Voyage accept concurrency but enforce account rate limits — start at 2 and raise it until you see 429s. Per-request caps are split server-side under one slot, so oversized files are safe."
+            value={draftConcurrency}
+            recommended={rec?.max_embedding_concurrency ?? 1}
+            source={src?.max_embedding_concurrency}
+            onChange={onDraftConcurrency}
+            min={1}
+          />
+          <NumberField
+            field="index_embed_batch_chunks"
+            label="Embed batch size"
+            hint="Chunks packed into a single POST during a repo index — small files merge so each POST carries a full payload. 0 means one POST per file."
+            value={draftIndexBatch}
+            recommended={rec?.index_embed_batch_chunks ?? 64}
+            source={src?.index_embed_batch_chunks}
+            onChange={onDraftIndexBatch}
+          />
+          <NumberField
+            field="chunk_max_concurrent"
+            label="Chunker concurrency"
+            hint="Tree-sitter (wasm) parser instances running at once — the chunker's own concurrency, independent of embedding. Each holds ~69 MiB, so this bounds peak chunker memory. Applies live, no restart."
+            value={draftChunkConc}
+            recommended={rec?.chunk_max_concurrent ?? 3}
+            source={src?.chunk_max_concurrent}
+            onChange={onDraftChunkConc}
+          />
+          {isOllama ? (
+            <NumberField
+              field="llama_batch_size"
+              label="Llama batch"
+              hint="Logical batch passed to llama-server (-b). 0 matches the context window."
+              value={draftBatch}
+              recommended={rec?.llama_batch_size ?? 'ctx'}
+              source={src?.llama_batch_size}
+              onChange={onDraftBatch}
+              min={1}
+            />
+          ) : null}
+        </div>
+      </CardBody>
     </Card>
   );
 }

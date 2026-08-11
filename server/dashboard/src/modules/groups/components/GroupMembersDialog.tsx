@@ -1,29 +1,24 @@
 import { useState } from 'react';
-import { Loader2, Trash2, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Button } from '@/ui/button';
+import type { Group } from '@/api/types';
+import { Badge } from '@/ui/badge';
+import { Button, Dots } from '@/ui/button';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
 } from '@/ui/dialog';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/ui/select';
-import type { Group } from '@/api/types';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/ui/select';
 import { useUsers } from '@/modules/users/hooks';
 import { useAddGroupMember, useGroupMembers, useRemoveGroupMember } from '../hooks';
 
-// Admin-only: manage which users belong to a view-group. Members get
-// read/search access to whatever is shared to the group.
+// Admin-only: who belongs to a view group. Members get read/search access to
+// everything shared to it.
 export function GroupMembersDialog({ group }: { group: Group }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState('');
@@ -41,7 +36,7 @@ export function GroupMembersDialog({ group }: { group: Group }) {
       await addMember.mutateAsync({ id: group.id, userId: selected });
       setSelected('');
     } catch (err) {
-      toast.error('Failed to add member', {
+      toast.error('Could not add the member', {
         description: err instanceof ApiError ? err.detail : String(err),
       });
     }
@@ -51,34 +46,37 @@ export function GroupMembersDialog({ group }: { group: Group }) {
     try {
       await removeMember.mutateAsync({ id: group.id, userId });
     } catch (err) {
-      toast.error('Failed to remove member', {
+      toast.error('Could not remove the member', {
         description: err instanceof ApiError ? err.detail : String(err),
       });
     }
   }
 
+  const list = members.data?.members ?? [];
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="outline" size="sm">
-          <UserPlus className="mr-1 h-4 w-4" />
-          Members
-        </Button>
+        <Button size="sm">Members</Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>{group.name} — members</DialogTitle>
-          <DialogDescription>
-            Members can read and search every external project and workspace
-            shared to this group.
-          </DialogDescription>
+          <DialogTitle>{group.name}</DialogTitle>
+          <span className="ml-auto font-mono text-[11.5px] font-normal text-muted">
+            {list.length} member{list.length === 1 ? '' : 's'}
+          </span>
         </DialogHeader>
+        <DialogBody>
+          <DialogDescription>
+            Members can read and search every external project and workspace shared to this group.
+          </DialogDescription>
 
-        <div className="flex items-end gap-2">
-          <div className="flex-1">
+          <div className="flex items-end gap-2">
             <Select value={selected} onValueChange={setSelected}>
-              <SelectTrigger>
-                <SelectValue placeholder={candidates.length ? 'Add a user…' : 'All users are members'} />
+              <SelectTrigger className="flex-1" aria-label="Add a user">
+                <SelectValue
+                  placeholder={candidates.length ? 'Add a user…' : 'Every user is a member'}
+                />
               </SelectTrigger>
               <SelectContent>
                 {candidates.map((u) => (
@@ -88,40 +86,35 @@ export function GroupMembersDialog({ group }: { group: Group }) {
                 ))}
               </SelectContent>
             </Select>
+            <Button variant="primary" onClick={add} disabled={!selected || addMember.isPending}>
+              {addMember.isPending ? <Dots /> : null}
+              Add
+            </Button>
           </div>
-          <Button onClick={add} disabled={!selected || addMember.isPending}>
-            {addMember.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
-            Add
-          </Button>
-        </div>
 
-        <div className="max-h-64 space-y-1 overflow-y-auto">
-          {members.isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
-          ) : (members.data?.members ?? []).length === 0 ? (
-            <p className="text-sm text-muted-foreground">No members yet.</p>
-          ) : (
-            members.data!.members.map((m) => (
-              <div
-                key={m.user_id}
-                className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
-              >
-                <span className="truncate">
-                  {m.email}
-                  <span className="ml-2 text-xs capitalize text-muted-foreground">{m.role}</span>
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void remove(m.user_id)}
-                  disabled={removeMember.isPending}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
-              </div>
-            ))
-          )}
-        </div>
+          <div className="max-h-64 overflow-y-auto border">
+            {members.isLoading ? (
+              <p className="m-0 px-3.5 py-3 font-mono text-[12px] text-muted">loading…</p>
+            ) : list.length === 0 ? (
+              <p className="m-0 px-3.5 py-3 text-sm text-dim">No members yet.</p>
+            ) : (
+              list.map((m) => (
+                <div key={m.user_id} className="cix-row py-2.5">
+                  <span className="min-w-0 flex-1 truncate text-sm">{m.email}</span>
+                  <Badge variant="quiet">{m.role}</Badge>
+                  <Button
+                    variant="quietDanger"
+                    size="sm"
+                    onClick={() => void remove(m.user_id)}
+                    disabled={removeMember.isPending}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

@@ -1,18 +1,18 @@
-import { Badge } from '@/ui/badge';
+import { Status } from '@/ui/badge';
 import type { TunnelState } from './types';
 
-const VARIANT: Record<TunnelState, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  live: 'default',
-  connecting: 'secondary',
-  failed: 'destructive',
-  disabled: 'outline',
+const TONE: Record<TunnelState, 'ok' | 'busy' | 'warn' | 'idle'> = {
+  live: 'ok',
+  connecting: 'warn',
+  failed: 'busy',
+  disabled: 'idle',
 };
 
 export function TunnelStateBadge({ state }: { state?: TunnelState }) {
   if (!state) return null;
   return (
-    <Badge variant={VARIANT[state] ?? 'outline'} className="capitalize">
+    <Status tone={TONE[state] ?? 'idle'} className="font-mono text-[11.5px] uppercase tracking-[0.14em]">
       {state}
-    </Badge>
+    </Status>
   );
 }

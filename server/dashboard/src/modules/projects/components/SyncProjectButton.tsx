@@ -1,20 +1,19 @@
-import { Loader2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Button, type ButtonProps } from '@/ui/button';
+import { Button, Dots, type ButtonProps } from '@/ui/button';
 import { useReindexProject } from '../hooks';
 
 // SyncProjectButton triggers a SOFT update: the server fetches the latest
-// commits and runs an incremental index over just the tree.Diff change set
-// (no indexed_sha clear). This is the cheap, common path — for a from-scratch
-// rebuild use the Reindex button. External projects only.
+// commits and incrementally indexes just the tree.Diff change set (no
+// indexed_sha clear). The cheap, common path — for a from-scratch rebuild use
+// the Reindex button. External projects only.
 //
-// variant/size/className are forwarded to the underlying Button so callers can
-// render it prominently (project detail header) or compact (project card).
+// variant/size/className forward to the Button so callers can render it
+// prominently (detail header) or compact (list row).
 export function SyncProjectButton({
   hash,
   hostPath,
-  variant = 'default',
+  variant,
   size = 'sm',
   className,
 }: {
@@ -35,8 +34,9 @@ export function SyncProjectButton({
         toast.success('Sync enqueued', { description: `${hostPath} — pull + incremental` });
       }
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : String(err);
-      toast.error('Failed to enqueue sync', { description: detail });
+      toast.error('Could not enqueue the sync', {
+        description: err instanceof ApiError ? err.detail : String(err),
+      });
     }
   }
 
@@ -47,13 +47,9 @@ export function SyncProjectButton({
       className={className}
       onClick={onClick}
       disabled={sync.isPending}
-      title="Sync — pull the latest commits and incrementally index the changed files."
+      title="Pull the latest commits and incrementally index the changed files."
     >
-      {sync.isPending ? (
-        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-      ) : (
-        <RefreshCw className="mr-1 h-4 w-4" />
-      )}
+      {sync.isPending ? <Dots /> : null}
       Sync
     </Button>
   );

@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Loader2, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Button } from '@/ui/button';
+import { Button, Dots } from '@/ui/button';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -12,12 +12,11 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/ui/dialog';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
+import { Field, Input } from '@/ui/input';
 import { useCreateGroup } from '../hooks';
 
-// Admin-only: create a view-group. External projects and workspaces are later
-// shared TO a group, granting its members read/search access.
+// Admin-only. External projects and workspaces are later shared TO a group,
+// which is what grants its members read/search access.
 export function CreateGroupDialog() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
@@ -35,11 +34,11 @@ export function CreateGroupDialog() {
     if (!trimmed) return;
     try {
       await create.mutateAsync({ name: trimmed, description: description.trim() });
-      toast.success('Group created');
+      toast.success('Group created', { description: trimmed });
       setOpen(false);
       reset();
     } catch (err) {
-      toast.error('Failed to create group', {
+      toast.error('Could not create the group', {
         description: err instanceof ApiError ? err.detail : String(err),
       });
     }
@@ -54,46 +53,40 @@ export function CreateGroupDialog() {
       }}
     >
       <DialogTrigger asChild>
-        <Button>
-          <Plus className="mr-1 h-4 w-4" />
-          New group
-        </Button>
+        <Button variant="primary">New group</Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Create view-group</DialogTitle>
-          <DialogDescription>
-            A view-group is a set of users. Share external projects and
-            workspaces to it to grant the members read/search access.
-          </DialogDescription>
+          <DialogTitle>Create a view group</DialogTitle>
         </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="group-name">Name</Label>
+        <DialogBody>
+          <DialogDescription>
+            A group is a set of users. Share external projects and workspaces to it to grant the
+            members read and search access.
+          </DialogDescription>
+          <Field label="Name" htmlFor="group-name">
             <Input
               id="group-name"
               autoFocus
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Product agents"
+              placeholder="product-agents"
             />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="group-desc">Description</Label>
+          </Field>
+          <Field label="Description" htmlFor="group-desc" hint="Optional.">
             <Input
               id="group-desc"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Optional"
             />
-          </div>
-        </div>
+          </Field>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={create.isPending}>
             Cancel
           </Button>
-          <Button onClick={onSubmit} disabled={create.isPending || !name.trim()}>
-            {create.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+          <Button variant="primary" onClick={onSubmit} disabled={create.isPending || !name.trim()}>
+            {create.isPending ? <Dots /> : null}
             Create
           </Button>
         </DialogFooter>

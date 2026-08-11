@@ -2,51 +2,40 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { forwardRef, type HTMLAttributes } from 'react';
 import { cn } from '@/lib/cn';
 
-const alertVariants = cva(
-  'relative w-full rounded-lg border px-4 py-3 text-sm [&>svg+div]:translate-y-[-3px] [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-4 [&>svg]:text-foreground [&>svg~*]:pl-7',
-  {
-    variants: {
-      variant: {
-        default: 'bg-background text-foreground',
-        destructive:
-          'border-destructive/50 text-destructive dark:border-destructive [&>svg]:text-destructive',
-      },
+// Callout: 1.5px outline plus a 6px bar on the left edge. Replaces every
+// "long explanatory paragraph floating in the layout" — prose that matters
+// gets a border, prose that doesn't gets deleted.
+const calloutVariants = cva('cix-callout', {
+  variants: {
+    variant: {
+      default: '',
+      warn: 'is-warn',
+      danger: 'is-danger',
+      ok: 'is-ok',
     },
-    defaultVariants: { variant: 'default' },
-  }
-);
+  },
+  defaultVariants: { variant: 'default' },
+});
 
-export const Alert = forwardRef<
+export const Callout = forwardRef<
   HTMLDivElement,
-  HTMLAttributes<HTMLDivElement> & VariantProps<typeof alertVariants>
+  HTMLAttributes<HTMLDivElement> & VariantProps<typeof calloutVariants>
 >(({ className, variant, ...props }, ref) => (
   <div
     ref={ref}
-    role="alert"
-    className={cn(alertVariants({ variant }), className)}
+    role={variant === 'danger' ? 'alert' : 'note'}
+    className={cn(calloutVariants({ variant }), className)}
     {...props}
   />
 ));
-Alert.displayName = 'Alert';
+Callout.displayName = 'Callout';
 
-export const AlertTitle = forwardRef<HTMLHeadingElement, HTMLAttributes<HTMLHeadingElement>>(
-  ({ className, ...props }, ref) => (
-    <h5
-      ref={ref}
-      className={cn('mb-1 font-medium leading-none tracking-tight', className)}
-      {...props}
-    />
-  )
+export const CalloutTitle = forwardRef<HTMLElement, HTMLAttributes<HTMLElement>>(
+  ({ className, ...props }, ref) => <b ref={ref} className={className} {...props} />
 );
-AlertTitle.displayName = 'AlertTitle';
+CalloutTitle.displayName = 'CalloutTitle';
 
-export const AlertDescription = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div
-      ref={ref}
-      className={cn('text-sm [&_p]:leading-relaxed', className)}
-      {...props}
-    />
-  )
+export const CalloutBody = forwardRef<HTMLParagraphElement, HTMLAttributes<HTMLParagraphElement>>(
+  ({ className, ...props }, ref) => <p ref={ref} className={className} {...props} />
 );
-AlertDescription.displayName = 'AlertDescription';
+CalloutBody.displayName = 'CalloutBody';

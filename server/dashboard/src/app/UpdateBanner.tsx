@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react';
-import { ArrowUpCircle, X } from 'lucide-react';
 import { useServerStatus } from '@/lib/useServerStatus';
-import { cn } from '@/lib/cn';
 import { formatVersion } from '@/lib/version';
 
 const dismissKey = (version: string) => `cix.update-dismissed.${version}`;
 
-// UpdateBanner renders at the top of the dashboard shell when the
-// server-side version checker reports a newer `server/v*` release on
-// GitHub. Dismissals are namespaced by the latest version, so dismissing
-// 0.6.0 silences the banner only until 0.6.1 ships.
+// A full-width ink strip above the sidebar+main row when the server-side
+// version checker finds a newer `server/v*` release. Ink rather than a green
+// wash: this is information, not a success state, and green is reserved for
+// "the thing is alive".
+//
+// Dismissals are namespaced by the latest version, so dismissing 0.6.0
+// silences the banner only until 0.6.1 ships.
 export function UpdateBanner() {
   const { data } = useServerStatus();
   const latest = data?.latest_version ?? null;
@@ -17,8 +18,8 @@ export function UpdateBanner() {
 
   const [dismissed, setDismissed] = useState(false);
 
-  // Re-evaluate the localStorage flag whenever the latest version changes
-  // — a fresh release should re-show the banner even within an open tab.
+  // Re-evaluate the localStorage flag whenever the latest version changes —
+  // a fresh release should re-show the banner even within an open tab.
   useEffect(() => {
     if (!latest) {
       setDismissed(false);
@@ -37,42 +38,35 @@ export function UpdateBanner() {
   return (
     <div
       role="status"
-      className={cn(
-        'flex items-center gap-3 border-b border-emerald-200 bg-emerald-50 px-5 py-2',
-        'text-sm text-emerald-900',
-        'dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-100',
-      )}
+      className="flex flex-none items-center gap-3 border-b bg-ink px-[18px] py-2 text-[13px] text-surface"
     >
-      <ArrowUpCircle className="h-4 w-4 shrink-0" aria-hidden />
-      <div className="flex-1">
-        cix-server <strong>{formatVersion(latest)}</strong> is available
+      <span aria-hidden className="cix-dot is-busy" />
+      <span className="min-w-0 flex-1 truncate">
+        cix-server <b className="font-mono">{formatVersion(latest)}</b> is available
         {data?.server_version ? (
-          <> (you're running {formatVersion(data.server_version)})</>
+          <span className="text-line-quiet">
+            {' '}
+            — you are on <span className="font-mono">{formatVersion(data.server_version)}</span>
+          </span>
         ) : null}
-        {data?.release_url ? (
-          <>
-            {' — '}
-            <a
-              href={data.release_url}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="font-medium underline underline-offset-2 hover:no-underline"
-            >
-              release notes
-            </a>
-          </>
-        ) : null}
-      </div>
+      </span>
+      {data?.release_url ? (
+        <a
+          href={data.release_url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="flex-none border-b-[1.5px] border-surface font-semibold text-surface hover:border-accent hover:text-accent"
+        >
+          Release notes
+        </a>
+      ) : null}
       <button
         type="button"
         onClick={onDismiss}
         aria-label="Dismiss update notification"
-        className={cn(
-          'rounded-md p-1 transition-colors',
-          'hover:bg-emerald-100 dark:hover:bg-emerald-900/40',
-        )}
+        className="flex h-6 w-6 flex-none items-center justify-center font-mono text-surface hover:bg-surface hover:text-ink"
       >
-        <X className="h-4 w-4" aria-hidden />
+        ✕
       </button>
     </div>
   );

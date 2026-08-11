@@ -1,7 +1,8 @@
-import { Loader2 } from 'lucide-react';
-import { Button } from '@/ui/button';
+import { Button, Dots } from '@/ui/button';
+import { Chip } from '@/ui/code';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -14,15 +15,14 @@ interface Props {
   onOpenChange: (next: boolean) => void;
   onConfirm: () => void;
   isPending: boolean;
-  // Per-field summary the dialog renders so the admin sees exactly what
-  // they're about to apply before the sidecar gets killed.
+  // Per-field summary so the admin sees exactly what is about to be applied
+  // before the sidecar gets killed.
   changes: Array<{ field: string; from: string; to: string }>;
 }
 
-// SaveAndRestartDialog confirms a runtime-config save that will trigger an
-// embedding-sidecar restart. Active indexing batches will fail mid-call —
-// not a quiet operation — so we always require explicit confirm before the
-// PUT + restart cascade fires.
+// Saving runtime config restarts the embedding sidecar and fails whatever
+// indexing batches are mid-call — not a quiet operation, so it is always
+// confirmed, with the diff spelled out.
 export function SaveAndRestartDialog({
   open,
   onOpenChange,
@@ -32,38 +32,39 @@ export function SaveAndRestartDialog({
 }: Props) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Apply config and restart sidecar?</DialogTitle>
-          <DialogDescription>
-            Saving will write the overrides to the database, then drain the
-            embedding queue (up to 30s) and restart llama-server. Indexing
-            batches in flight at restart time will fail — re-run{' '}
-            <code className="rounded bg-muted px-1 py-0.5 text-xs">cix reindex</code>{' '}
-            for affected projects.
-          </DialogDescription>
+          <DialogTitle>Apply config and restart the sidecar?</DialogTitle>
         </DialogHeader>
-        {changes.length > 0 ? (
-          <ul className="space-y-1 rounded-md border bg-muted/30 p-3 text-xs">
-            {changes.map((c) => (
-              <li key={c.field} className="font-mono">
-                <span className="text-muted-foreground">{c.field}: </span>
-                <span className="line-through text-muted-foreground">{c.from}</span>
-                <span className="mx-1">→</span>
-                <span>{c.to}</span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-xs text-muted-foreground">No field changes — restart only.</p>
-        )}
+        <DialogBody>
+          <DialogDescription>
+            The overrides are written to the database, then the embedding queue drains for up to
+            30 s and llama-server restarts. Batches in flight at that moment fail — re-run{' '}
+            <Chip>cix reindex</Chip> for the affected projects.
+          </DialogDescription>
+
+          {changes.length > 0 ? (
+            <ul className="m-0 flex list-none flex-col gap-1.5 border p-3 font-mono text-[12.5px]">
+              {changes.map((c) => (
+                <li key={c.field} className="flex flex-wrap items-baseline gap-2">
+                  <span className="text-muted">{c.field}</span>
+                  <span className="text-faint line-through">{c.from}</span>
+                  <span aria-hidden>→</span>
+                  <span className="font-bold">{c.to}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="cix-hint m-0">no field changes — restart only</p>
+          )}
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={isPending}>
             Cancel
           </Button>
-          <Button onClick={onConfirm} disabled={isPending}>
-            {isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
-            Save &amp; Restart
+          <Button variant="danger" onClick={onConfirm} disabled={isPending}>
+            {isPending ? <Dots /> : null}
+            Save &amp; restart
           </Button>
         </DialogFooter>
       </DialogContent>

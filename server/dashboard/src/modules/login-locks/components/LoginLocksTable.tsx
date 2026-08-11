@@ -1,62 +1,55 @@
 import type { LoginLock } from '@/api/types';
-import { Badge } from '@/ui/badge';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/ui/table';
+import { Badge, StatusDot } from '@/ui/badge';
+import { Table, TBody, THead, TR, TH, TD } from '@/ui/table';
 import { formatDateTime, formatRelative } from '@/lib/formatDate';
 import { ResetLockButton } from './ResetLockButton';
 
 export function LoginLocksTable({ locks }: { locks: LoginLock[] }) {
   return (
-    <div className="rounded-md border">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead className="w-[140px]">Type</TableHead>
-            <TableHead>IP</TableHead>
-            <TableHead>Email</TableHead>
-            <TableHead className="text-right">Attempts</TableHead>
-            <TableHead>Frees</TableHead>
-            <TableHead className="text-right">Actions</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {locks.map((l) => (
-            <TableRow key={`${l.type}|${l.ip}|${l.email ?? ''}`}>
-              <TableCell>
-                {l.type === 'ip_email' ? (
-                  <Badge variant="secondary" title="Per-account: this email from this IP">
-                    IP + email
-                  </Badge>
-                ) : (
-                  <Badge variant="outline" title="Per-IP: many emails from one source">
-                    IP only
-                  </Badge>
-                )}
-              </TableCell>
-              <TableCell className="font-mono text-xs">{l.ip}</TableCell>
-              <TableCell className="font-medium">{l.email || '—'}</TableCell>
-              <TableCell className="text-right tabular-nums text-muted-foreground">
-                {l.attempts}/{l.limit}
-              </TableCell>
-              <TableCell
-                className="text-xs text-muted-foreground"
-                title={formatDateTime(l.expires_at)}
-              >
-                {formatRelative(l.expires_at)}
-              </TableCell>
-              <TableCell className="text-right">
-                <ResetLockButton lock={l} />
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
+    <Table card>
+      <THead>
+        <TR>
+          <TH className="w-[130px]">Scope</TH>
+          <TH>IP</TH>
+          <TH>Email</TH>
+          <TH align="right">Attempts</TH>
+          <TH>Frees</TH>
+          <TH align="right">Actions</TH>
+        </TR>
+      </THead>
+      <TBody>
+        {locks.map((l) => (
+          <TR key={`${l.type}|${l.ip}|${l.email ?? ''}`}>
+            <TD>
+              {l.type === 'ip_email' ? (
+                <Badge variant="outline" title="Per-account: this email from this IP">
+                  ip + email
+                </Badge>
+              ) : (
+                <Badge variant="warn" title="Per-IP: many emails from one source">
+                  ip only
+                </Badge>
+              )}
+            </TD>
+            <TD mono>{l.ip}</TD>
+            <TD>
+              <span className="flex items-center gap-2.5">
+                <StatusDot tone="busy" />
+                <span className="font-semibold">{l.email || '—'}</span>
+              </span>
+            </TD>
+            <TD mono align="right" className="tabular-nums">
+              {l.attempts}/{l.limit}
+            </TD>
+            <TD mono title={formatDateTime(l.expires_at)}>
+              {formatRelative(l.expires_at)}
+            </TD>
+            <TD align="right">
+              <ResetLockButton lock={l} />
+            </TD>
+          </TR>
+        ))}
+      </TBody>
+    </Table>
   );
 }

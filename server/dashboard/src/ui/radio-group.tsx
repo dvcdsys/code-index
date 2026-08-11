@@ -1,42 +1,70 @@
-import * as React from "react"
-import * as RadioGroupPrimitive from "@radix-ui/react-radio-group"
-import { Circle } from "lucide-react"
+import * as RadioGroupPrimitive from '@radix-ui/react-radio-group';
+import { forwardRef, type ComponentPropsWithoutRef, type ElementRef, type ReactNode } from 'react';
+import { cn } from '@/lib/cn';
 
-import { cn } from "@/lib/cn"
+// The radio is the one circle in the system — 18px ring, 9px accent dot.
+// Everything else, including the checkbox, is square.
+export const RadioGroup = forwardRef<
+  ElementRef<typeof RadioGroupPrimitive.Root>,
+  ComponentPropsWithoutRef<typeof RadioGroupPrimitive.Root>
+>(({ className, ...props }, ref) => (
+  <RadioGroupPrimitive.Root ref={ref} className={cn('grid gap-2.5', className)} {...props} />
+));
+RadioGroup.displayName = RadioGroupPrimitive.Root.displayName;
 
-const RadioGroup = React.forwardRef<
-  React.ElementRef<typeof RadioGroupPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof RadioGroupPrimitive.Root>
->(({ className, ...props }, ref) => {
+export const RadioGroupItem = forwardRef<
+  ElementRef<typeof RadioGroupPrimitive.Item>,
+  ComponentPropsWithoutRef<typeof RadioGroupPrimitive.Item>
+>(({ className, ...props }, ref) => (
+  <RadioGroupPrimitive.Item
+    ref={ref}
+    className={cn(
+      'flex h-[18px] w-[18px] flex-none items-center justify-center rounded-full border bg-surface',
+      'disabled:cursor-default disabled:border-line-quiet disabled:bg-track',
+      className
+    )}
+    {...props}
+  >
+    <RadioGroupPrimitive.Indicator className="block h-[9px] w-[9px] rounded-full bg-accent" />
+  </RadioGroupPrimitive.Item>
+));
+RadioGroupItem.displayName = RadioGroupPrimitive.Item.displayName;
+
+// A radio rendered as a selectable panel — the shape the Server page uses for
+// "Hugging Face / Local file". The whole box is the hit target; the selected
+// one gets the ink outline, the rest stay quiet.
+export function RadioCard({
+  value,
+  id,
+  title,
+  hint,
+  selected,
+  disabled,
+  className,
+}: {
+  value: string;
+  id: string;
+  title: ReactNode;
+  hint?: ReactNode;
+  selected: boolean;
+  disabled?: boolean;
+  className?: string;
+}) {
   return (
-    <RadioGroupPrimitive.Root
-      className={cn("grid gap-2", className)}
-      {...props}
-      ref={ref}
-    />
-  )
-})
-RadioGroup.displayName = RadioGroupPrimitive.Root.displayName
-
-const RadioGroupItem = React.forwardRef<
-  React.ElementRef<typeof RadioGroupPrimitive.Item>,
-  React.ComponentPropsWithoutRef<typeof RadioGroupPrimitive.Item>
->(({ className, ...props }, ref) => {
-  return (
-    <RadioGroupPrimitive.Item
-      ref={ref}
+    <label
+      htmlFor={id}
       className={cn(
-        "aspect-square h-4 w-4 rounded-full border border-primary text-primary ring-offset-background focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+        'flex min-w-0 cursor-pointer items-start gap-3 border p-3.5 transition-colors',
+        selected ? 'border-ink bg-surface' : 'border-line-quiet bg-surface hover:bg-warm',
+        disabled && 'cursor-default opacity-60',
         className
       )}
-      {...props}
     >
-      <RadioGroupPrimitive.Indicator className="flex items-center justify-center">
-        <Circle className="h-2.5 w-2.5 fill-current text-current" />
-      </RadioGroupPrimitive.Indicator>
-    </RadioGroupPrimitive.Item>
-  )
-})
-RadioGroupItem.displayName = RadioGroupPrimitive.Item.displayName
-
-export { RadioGroup, RadioGroupItem }
+      <RadioGroupItem value={value} id={id} disabled={disabled} className="mt-0.5" />
+      <span className="min-w-0">
+        <span className="block text-sm font-semibold">{title}</span>
+        {hint ? <span className="cix-hint mt-1 block truncate">{hint}</span> : null}
+      </span>
+    </label>
+  );
+}

@@ -1,4 +1,3 @@
-import { Home } from 'lucide-react';
 import type { Module } from '../types';
 import HomePage from './HomePage';
 
@@ -8,7 +7,6 @@ import HomePage from './HomePage';
 export const HomeModule: Module = {
   id: 'home',
   label: 'Home',
-  icon: Home,
   path: '/',
   element: HomePage,
   weight: 0,

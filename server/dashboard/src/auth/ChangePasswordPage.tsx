@@ -1,17 +1,16 @@
 import { useState, type FormEvent } from 'react';
 import { ApiError, api } from '@/api/client';
 import type { ChangePasswordRequest } from '@/api/types';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Button } from '@/ui/button';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
+import { Callout } from '@/ui/alert';
+import { Button, Dots } from '@/ui/button';
+import { Field, Input } from '@/ui/input';
 import { toast } from '@/ui/sonner';
+import { AuthShell } from './AuthShell';
 import { useAuth } from './useAuth';
 
-// Forced password-change page — reached either right after a bootstrap
-// admin first logs in, or after an admin invite. Server-side: a successful
-// POST /auth/change-password ALSO revokes every other session for this
-// user, so we log out and bounce back to /login on success.
+// Forced password change — reached right after a bootstrap admin's first
+// login, or after an admin invite. A successful POST also revokes every other
+// session for this user server-side, so we log out and bounce to /login.
 export default function ChangePasswordPage() {
   const { logout } = useAuth();
   const [current, setCurrent] = useState('');
@@ -20,24 +19,26 @@ export default function ChangePasswordPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const mismatch = confirm.length > 0 && next !== confirm;
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     if (next !== confirm) {
-      setError('New password and confirmation must match.');
+      setError('The new password and its confirmation must match.');
       return;
     }
     if (next.length < 8) {
-      setError('New password must be at least 8 characters.');
+      setError('The new password must be at least 8 characters.');
       return;
     }
     setSubmitting(true);
     try {
       const req: ChangePasswordRequest = { current_password: current, new_password: next };
       await api.post('/auth/change-password', req);
-      toast.success('Password updated. Please sign in with your new password.');
-      // Server already invalidated this session — calling logout cleans up
-      // the cookie + clears cached /me so App.tsx falls back to LoginPage.
+      toast.success('Password updated — sign in with the new one.');
+      // The server already invalidated this session; logout clears the cookie
+      // and the cached /me so App falls back to LoginPage.
       await logout();
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : 'Unexpected error. Try again.');
@@ -47,69 +48,73 @@ export default function ChangePasswordPage() {
   }
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-muted/20 px-4">
-      <div className="w-full max-w-sm">
-        <div className="mb-8 text-center">
-          <div className="text-2xl font-semibold tracking-tight">Change your password</div>
-          <div className="mt-1 text-sm text-muted-foreground">
-            For security, you must set a new password before continuing.
-          </div>
-        </div>
+    <AuthShell
+      title="Change your password"
+      subtitle="A new password is required before this account can be used."
+      footer="Changing the password signs out every other session for this account."
+    >
+      <form onSubmit={onSubmit} className="flex flex-col gap-4">
+        <Field label="Current password" htmlFor="current">
+          <Input
+            id="current"
+            type="password"
+            autoComplete="current-password"
+            autoFocus
+            required
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            disabled={submitting}
+          />
+        </Field>
 
-        <form onSubmit={onSubmit} className="space-y-4 rounded-lg border bg-background p-6 shadow-sm">
-          <div className="space-y-1.5">
-            <Label htmlFor="current">Current password</Label>
-            <Input
-              id="current"
-              type="password"
-              autoComplete="current-password"
-              required
-              value={current}
-              onChange={(e) => setCurrent(e.target.value)}
-              disabled={submitting}
-            />
-          </div>
+        <Field label="New password" htmlFor="next" hint="At least 8 characters.">
+          <Input
+            id="next"
+            type="password"
+            autoComplete="new-password"
+            required
+            minLength={8}
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            disabled={submitting}
+          />
+        </Field>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="next">New password</Label>
-            <Input
-              id="next"
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={8}
-              value={next}
-              onChange={(e) => setNext(e.target.value)}
-              disabled={submitting}
-            />
-          </div>
+        <Field
+          label="Confirm new password"
+          htmlFor="confirm"
+          error={mismatch ? 'Does not match.' : undefined}
+        >
+          <Input
+            id="confirm"
+            type="password"
+            autoComplete="new-password"
+            required
+            minLength={8}
+            invalid={mismatch}
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            disabled={submitting}
+          />
+        </Field>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="confirm">Confirm new password</Label>
-            <Input
-              id="confirm"
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={8}
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              disabled={submitting}
-            />
-          </div>
+        {error && (
+          <Callout variant="danger">
+            <b>Could not update the password</b>
+            <p>{error}</p>
+          </Callout>
+        )}
 
-          {error && (
-            <Alert variant="destructive">
-              <AlertTitle>Could not update password</AlertTitle>
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
+        <Button type="submit" variant="primary" className="mt-1 w-full" disabled={submitting}>
+          {submitting ? (
+            <>
+              <Dots /> Updating
+            </>
+          ) : (
+            'Update password'
           )}
-
-          <Button type="submit" className="w-full" disabled={submitting}>
-            {submitting ? 'Updating…' : 'Update password'}
-          </Button>
-        </form>
-      </div>
-    </div>
+        </Button>
+      </form>
+    </AuthShell>
   );
 }
