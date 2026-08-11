@@ -8,6 +8,11 @@
 LLAMA_VERSION ?= b10238
 LLAMA_REPO    ?= ggml-org/llama.cpp
 
+# Where fetch-llama.sh keeps checksum-verified release archives. Outside the
+# repo on purpose: it survives `make clean` and a fresh clone, which is what
+# makes a version bump (or a re-clone) cost no network.
+LLAMA_CACHE_DIR ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/cix/llama
+
 # `make bundle OS=... ARCH=...` supports only darwin-arm64 in Phase 3.
 OS   ?= darwin
 ARCH ?= arm64
@@ -93,6 +98,13 @@ help:
 	@echo "  dashboard-dev      — run vite dev server on :5173 (proxies /api to :21847)"
 	@echo "  dashboard-clean    — remove built dashboard artefacts (keeps PLACEHOLDER.html)"
 	@echo "  clean              — remove dist/"
+	@echo ""
+	@echo "build / bundle / run skip any step that would reproduce identical output."
+	@echo "Force one:"
+	@echo "  LLAMA_FORCE=1      — refetch llama.cpp, restage dist/llama/, rebuild the bundle"
+	@echo "  BUNDLE_FORCE=1     — re-copy + re-sign the bundle's llama/ only"
+	@echo "  DASHBOARD_FORCE=1  — rebuild the React dashboard"
+	@echo "Verified llama.cpp archives are cached in $(LLAMA_CACHE_DIR) (override LLAMA_CACHE_DIR)."
 
 # `go build` embeds internal/httpapi/dashboard/dist/ via go:embed — the
 # dashboard must be built first so the binary picks up fresh assets.
@@ -118,6 +130,8 @@ fetch-llama:
 	LLAMA_OS=$(OS) \
 	LLAMA_ARCH=$(ARCH) \
 	LLAMA_STRICT=$(LLAMA_STRICT) \
+	LLAMA_FORCE=$(LLAMA_FORCE) \
+	LLAMA_CACHE_DIR=$(LLAMA_CACHE_DIR) \
 	DEST_DIR=$(LLAMA_DIR) \
 	CHECKSUMS_FILE=$(ROOT)/scripts/llama-checksums.txt \
 	$(ROOT)/scripts/fetch-llama.sh
@@ -131,19 +145,40 @@ bundle: fetch-llama build
 	@# up by DYLD") — but the bundle is the directory that actually ships and
 	@# runs. A b8914 bundle upgraded in place kept 9 stale dylibs (13 MB),
 	@# including libllama.0.0.8914.dylib, sitting next to the b10238 set.
-	rm -rf $(BUNDLE_DIR)/llama
-	mkdir -p $(BUNDLE_DIR)/llama
-	cp -R $(LLAMA_DIR)/. $(BUNDLE_DIR)/llama/
-ifeq ($(OS),darwin)
-	@# macOS Sequoia (26+) tightened amfid: ad-hoc-signed binaries whose
-	@# linked dylibs carry stale signatures or a com.apple.provenance
-	@# xattr from the previous bundle get SIGKILL'd within milliseconds
-	@# of execve — supervisor sees "signal: killed" with empty stderr.
-	@# `cp -R` creates new files macOS treats as untrusted, so the strip
-	@# + deep re-sign must run on every bundle, not just first install.
-	@xattr -cr $(BUNDLE_DIR)/llama/
-	@codesign --force --deep --sign - $(BUNDLE_DIR)/llama/llama-server
-endif
+	@#
+	@# …and skip the whole thing when the bundle already holds the exact
+	@# version staged in dist/llama. `make run` goes through here on every
+	@# server restart; copying 52 MB and re-signing it to produce a
+	@# byte-identical tree is pure latency. The comparison is on the
+	@# .llama-version stamp fetch-llama.sh writes last, so a bundle assembled
+	@# from an interrupted fetch has no stamp and is always rebuilt.
+	@# BUNDLE_FORCE=1 rebuilds regardless.
+	@#
+	@# When the copy DOES run on macOS, the xattr strip + deep re-sign run with
+	@# it, every time. Sequoia (26+) tightened amfid: ad-hoc-signed binaries
+	@# whose linked dylibs carry stale signatures or a com.apple.provenance
+	@# xattr from the previous bundle get SIGKILL'd within milliseconds of
+	@# execve — the supervisor sees "signal: killed" with empty stderr. `cp -R`
+	@# creates new files macOS treats as untrusted, so re-signing is tied to
+	@# the copy and must never be skipped independently of it.
+	@# LLAMA_FORCE implies BUNDLE_FORCE. A forced refetch means the operator
+	@# distrusts what is in dist/llama; re-staging it and then leaving the
+	@# bundle on its old copy — which the stamp comparison would happily do,
+	@# the version being unchanged — would defeat the point of asking.
+	@if [ "$(BUNDLE_FORCE)" != "1" ] && [ "$(LLAMA_FORCE)" != "1" ] \
+	    && [ -x "$(BUNDLE_DIR)/llama/llama-server" ] \
+	    && [ -f "$(LLAMA_DIR)/.llama-version" ] \
+	    && cmp -s "$(BUNDLE_DIR)/llama/.llama-version" "$(LLAMA_DIR)/.llama-version"; then \
+	    echo "→ bundle llama/ already at $$(cat $(LLAMA_DIR)/.llama-version) — skipping copy + codesign"; \
+	else \
+	    rm -rf $(BUNDLE_DIR)/llama; \
+	    mkdir -p $(BUNDLE_DIR)/llama; \
+	    cp -R $(LLAMA_DIR)/. $(BUNDLE_DIR)/llama/; \
+	    if [ "$(OS)" = "darwin" ]; then \
+	        xattr -cr $(BUNDLE_DIR)/llama/; \
+	        codesign --force --deep --sign - $(BUNDLE_DIR)/llama/llama-server; \
+	    fi; \
+	fi
 	@echo "Bundle ready: $(BUNDLE_DIR)"
 	@echo "Optional:    tar czf $(DIST_DIR)/$(BUNDLE_NAME).tar.gz -C $(DIST_DIR) $(BUNDLE_NAME)"
 
@@ -334,12 +369,34 @@ dashboard-gen-types:
 # day-to-day rebuilds where node_modules already exists this is wasteful;
 # fall through to a no-op when node_modules is present and the lockfile
 # hasn't changed since the last install.
+#
+# The build itself is content-addressed against DASHBOARD_STAMP: `make run`
+# pulls this target in on every server restart, and re-running tsc + vite to
+# emit the same bundle is the single biggest chunk of a no-op rebuild. The
+# stamp records the digest of every build input (see the script for what
+# counts) and is written only after a build succeeds, so an interrupted or
+# failing build never leaves a stamp that would suppress the retry.
+#
+# Escape hatches: DASHBOARD_FORCE=1 to rebuild anyway; `make dashboard-clean`
+# drops the stamp along with the output.
+DASHBOARD_STAMP := $(DASHBOARD_DIR)/.build-stamp
+
 dashboard-build:
 	@if [ ! -d "$(DASHBOARD_DIR)/node_modules" ]; then \
 	    echo "→ npm ci (no node_modules/)"; \
 	    cd $(DASHBOARD_DIR) && npm ci; \
 	fi
-	cd $(DASHBOARD_DIR) && npm run gen:api && npm run build
+	@want=$$($(ROOT)/scripts/dashboard-inputs-hash.sh "$(DASHBOARD_DIR)" "$(ROOT)/../doc/openapi.yaml"); \
+	if [ "$(DASHBOARD_FORCE)" != "1" ] \
+	    && [ -f "$(DASHBOARD_OUT)/index.html" ] \
+	    && [ -f "$(DASHBOARD_STAMP)" ] \
+	    && [ "$$(cat $(DASHBOARD_STAMP))" = "$$want" ]; then \
+	    echo "→ dashboard unchanged ($${want}) — skipping build (DASHBOARD_FORCE=1 to rebuild)"; \
+	else \
+	    rm -f "$(DASHBOARD_STAMP)"; \
+	    (cd $(DASHBOARD_DIR) && npm run gen:api && npm run build) || exit 1; \
+	    printf '%s\n' "$$want" > "$(DASHBOARD_STAMP)"; \
+	fi
 
 dashboard-dev: dashboard-gen-types
 	cd $(DASHBOARD_DIR) && npm run dev
@@ -352,3 +409,7 @@ dashboard-clean:
 	    find $(DASHBOARD_OUT) -mindepth 1 ! -name .gitkeep -exec rm -rf {} +; \
 	    echo "→ Cleaned $(DASHBOARD_OUT) (kept .gitkeep)"; \
 	fi
+	@# The stamp lives outside dist/ (it must not end up inside the embed FS),
+	@# so it has to be dropped explicitly — otherwise the next build sees a
+	@# matching digest and skips, leaving dist/ empty.
+	@rm -f "$(DASHBOARD_STAMP)"
