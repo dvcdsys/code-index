@@ -2,8 +2,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import type {
   ActiveEmbeddingProvider,
+  CleanRequest,
+  CleanResult,
   EmbeddingProviderList,
   ModelList,
+  ReclaimAnalysis,
+  ResourceUsage,
   RestartAccepted,
   RuntimeConfig,
   RuntimeConfigUpdate,
@@ -18,6 +22,7 @@ export const serverKeys = {
   models: ['server', 'models'] as const,
   embeddingProviders: ['server', 'embedding-providers'] as const,
   activeProvider: ['server', 'embedding-provider', 'active'] as const,
+  resources: ['server', 'resources'] as const,
 };
 
 export function useRuntimeConfig() {
@@ -104,6 +109,41 @@ export function useActiveProvider() {
     queryKey: serverKeys.activeProvider,
     queryFn: ({ signal }) =>
       api.get<ActiveEmbeddingProvider>('/admin/embedding-providers/active', { signal }),
+  });
+}
+
+// useResourceUsage reports memory and disk. The disk figures come from real
+// directory walks — several seconds on a large index — so this is deliberately
+// NOT polled: it refetches when the section mounts and after a clean.
+export function useResourceUsage() {
+  return useQuery({
+    queryKey: serverKeys.resources,
+    queryFn: ({ signal }) => api.get<ResourceUsage>('/admin/resources', { signal }),
+    staleTime: 30_000,
+  });
+}
+
+// useAnalyzeReclaimable is a mutation, not a query, on purpose: it is
+// admin-triggered, expensive, and has a server-side side effect (it caches the
+// analysis the clean call redeems). As a query it would fire on mount and on
+// every cache invalidation. Its `data` is the rendered analysis, and
+// `reset()` is how the section clears it.
+export function useAnalyzeReclaimable() {
+  return useMutation({
+    mutationFn: () => api.post<ReclaimAnalysis>('/admin/resources/analyze'),
+  });
+}
+
+export function useCleanResources() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CleanRequest) => api.post<CleanResult>('/admin/resources/clean', body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: serverKeys.resources });
+      // A clean can drop vector collections and cloned checkouts, so the
+      // per-project storage numbers on Projects are stale afterwards.
+      qc.invalidateQueries({ queryKey: ['projects'] });
+    },
   });
 }
 

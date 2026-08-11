@@ -20,6 +20,7 @@ import { RuntimeParamsSection } from './sections/RuntimeParamsSection';
 import { SidecarRail } from './sections/SidecarRail';
 import { AdvancedSection } from './sections/AdvancedSection';
 import { EmbeddingProviderSection } from './sections/EmbeddingProviderSection';
+import { ResourcesSection } from './sections/ResourcesSection';
 import { SaveAndRestartDialog } from './components/SaveAndRestartDialog';
 
 interface Draft {
@@ -252,6 +253,10 @@ export default function ServerPage() {
             onDraftChunkConc={(n) => setDraft({ ...draft, chunk_max_concurrent: n })}
             isOllama={isOllama}
           />
+
+          {/* Provider-independent: memory, disk and reclaimable garbage exist
+              regardless of who computes the embeddings. */}
+          <ResourcesSection />
         </div>
 
         {isOllama ? (
