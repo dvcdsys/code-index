@@ -96,8 +96,26 @@ export default function ServerPage() {
   // /status is already polled for the status bar, and its embedding_provider
   // field is the LIVE active provider — the right signal for "show the ollama
   // cards?". Defaulting to ollama while it loads avoids a flash of empty page.
+  //
+  // The catch: "live" means Service.CurrentKind(), which returns "" whenever
+  // the provider is nil — precisely the window in which the sidecar is being
+  // torn down and rebuilt. So every Save & restart made /status report an
+  // empty kind, and `?? 'ollama'` does not catch "": the page decided it was
+  // talking to a remote provider and unmounted the model card, the runtime
+  // params card and the sidecar rail. Worse, useRestartSidecar invalidates
+  // this very query on settle, so the refetch lands at the emptiest possible
+  // moment and the answer then sits in cache until the 30s poll — which is
+  // why the cards only came back on a reload.
+  //
+  // "" is *unknown*, not *remote*. Hold the last kind we actually saw and
+  // only ever switch layout on a positively-reported one.
   const serverStatus = useServerStatus();
-  const activeKind = serverStatus.data?.embedding_provider ?? 'ollama';
+  const reportedKind = serverStatus.data?.embedding_provider;
+  const [lastKnownKind, setLastKnownKind] = useState<string | null>(null);
+  useEffect(() => {
+    if (reportedKind) setLastKnownKind(reportedKind);
+  }, [reportedKind]);
+  const activeKind = reportedKind || lastKnownKind || 'ollama';
   const isOllama = activeKind === 'ollama';
 
   const [draft, setDraft] = useState<Draft | null>(null);
