@@ -25,7 +25,6 @@ function isAbsPath(v: string): boolean {
   return v.startsWith('/');
 }
 
-
 // Exactly one model source, chosen with two radio panels:
 //   repo — from cix's own GGUF cache, or a repo ID to download on first use
 //   path — an absolute .gguf already on this host

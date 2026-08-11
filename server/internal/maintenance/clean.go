@@ -49,10 +49,8 @@ type CleanResult struct {
 // Partial failure is normal and is reported, not raised: one unreadable
 // directory must not stop the other forty from being reclaimed.
 func (s *Service) Clean(ctx context.Context, analysisID string, selected []CategoryID) (*CleanResult, error) {
-	a, ok := s.cache.get(analysisID)
-	if !ok {
-		return nil, ErrAnalysisExpired
-	}
+	// Validate the selection BEFORE consuming the analysis, so a typo in the
+	// category list does not cost the admin their scan.
 	if len(selected) == 0 {
 		return nil, ErrNoCategories
 	}
@@ -64,8 +62,12 @@ func (s *Service) Clean(ctx context.Context, analysisID string, selected []Categ
 		want[id] = true
 	}
 
-	// Whatever happens below, the cached picture is wrong afterwards.
-	defer s.cache.invalidate()
+	// take() consumes the analysis atomically: an id is good for exactly one
+	// clean. Whatever happens below, the cached picture is wrong afterwards.
+	a, ok := s.cache.take(analysisID)
+	if !ok {
+		return nil, ErrAnalysisExpired
+	}
 
 	st, err := s.readScanState(ctx)
 	if err != nil {

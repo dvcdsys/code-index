@@ -49,10 +49,41 @@ type Usage struct {
 // Usage samples memory and walks the four storage locations.
 //
 // The walks are the expensive part — the vector store is one file per document
-// and can hold hundreds of thousands of them, which measures at a few seconds.
-// That is why the dashboard renders this card behind a skeleton and does not
-// poll it aggressively.
+// and can hold hundreds of thousands of them, which measures at a few seconds
+// of CPU. Concurrent callers therefore share one walk and one result, the same
+// way Analyze does: two open dashboards, or a dashboard plus a script, would
+// otherwise each walk the whole tree. The client-side staleTime does not help
+// here because it is per browser tab.
 func (s *Service) Usage(ctx context.Context) Usage {
+	if u, ok := s.usage.get(s.now()); ok {
+		return u
+	}
+	done, wait := s.usage.begin()
+	if done == nil {
+		select {
+		case <-wait:
+			if u, ok := s.usage.get(s.now()); ok {
+				return u
+			}
+			// Leader produced nothing usable; compute it ourselves rather than
+			// recursing, so a persistently failing leader cannot spin.
+		case <-ctx.Done():
+			return Usage{GeneratedAt: s.now(), Memory: readMemory()}
+		}
+	} else {
+		defer done()
+	}
+
+	out := s.computeUsage(ctx)
+	// Only cache a complete answer. A walk cut short by a cancelled request
+	// would otherwise pin wrong numbers for the whole TTL.
+	if ctx.Err() == nil {
+		s.usage.put(out, s.now())
+	}
+	return out
+}
+
+func (s *Service) computeUsage(ctx context.Context) Usage {
 	out := Usage{
 		GeneratedAt: s.now(),
 		Memory:      readMemory(),
@@ -105,7 +136,7 @@ func walkedDisk(ctx context.Context, id, label, path string) DiskUsage {
 	if _, err := os.Stat(path); err == nil {
 		d.Exists = true
 		if !ctxDone(ctx) {
-			if n, ok := DirSizeBytes(path); ok {
+			if n, ok := DirSizeBytes(ctx, path); ok {
 				d.UsedBytes = &n
 			}
 		}
@@ -131,11 +162,24 @@ func attachFS(d *DiskUsage, path string) {
 	}
 }
 
+// activeGGUFCacheDir is where cached model weights live.
+//
+// The provider is asked first, then config. The fallback matters: with
+// embeddings disabled the provider reports nothing, and without it both the
+// "Model cache" disk row and the whole unused-models category would vanish
+// while the files sat on disk taking up gigabytes. Reporting a directory is
+// safe on its own — nothing is deleted from it unless the ACTIVE MODEL is also
+// known, which is the guard that actually protects the weights in use.
 func (s *Service) activeGGUFCacheDir() string {
-	if s.d.ActiveGGUFCacheDir == nil {
-		return ""
+	if s.d.ActiveGGUFCacheDir != nil {
+		if dir := s.d.ActiveGGUFCacheDir(); dir != "" {
+			return dir
+		}
 	}
-	return s.d.ActiveGGUFCacheDir()
+	if s.d.Cfg != nil {
+		return s.d.Cfg.GGUFCacheDir
+	}
+	return ""
 }
 
 func (s *Service) activeChromaComponents() []string {

@@ -81,14 +81,14 @@ export function ResourcesSection() {
       setConfirmOpen(false);
       forgetAnalysis();
 
-      const failed = res.categories.reduce((n, c) => n + c.failed_count, 0);
+      const failed = res.categories.reduce((n, c) => n + (c.failed_count ?? 0), 0);
       const skipped = res.categories.reduce((n, c) => n + (c.skipped_count ?? 0), 0);
       if (failed || skipped) {
-        toast.warning(`Reclaimed ${formatBytes(res.reclaimed_bytes)}`, {
+        toast.warning(`Reclaimed ${formatBytes(res.reclaimed_bytes, { zero: '0 B' })}`, {
           description: `${failed} failed, ${skipped} skipped — run Analyze again to see what is left.`,
         });
       } else {
-        toast.success(`Reclaimed ${formatBytes(res.reclaimed_bytes)}`);
+        toast.success(`Reclaimed ${formatBytes(res.reclaimed_bytes, { zero: '0 B' })}`);
       }
     } catch (err) {
       // 409 means the analysis expired or was already spent. Nothing was
@@ -116,7 +116,11 @@ export function ResourcesSection() {
         aside={
           <Button size="sm" onClick={onAnalyze} disabled={busy}>
             {analyze.isPending ? <Dots /> : null}
-            {analyze.isPending ? 'Analyzing' : analysis ? 'Re-analyze' : 'Clean'}
+            {/* Says Analyze, not Clean: this button only ever measures. The
+                destructive one lives in the footer once there is something to
+                act on, and a destructive feature is the last place to let a
+                label disagree with the action. */}
+            {analyze.isPending ? 'Analyzing' : analysis ? 'Re-analyze' : 'Analyze'}
           </Button>
         }
       />
@@ -218,7 +222,7 @@ export function ResourcesSection() {
           <span className="cix-hint">
             {selected.size === 0
               ? 'Nothing selected'
-              : `${formatBytes(chosenBytes)} selected across ${selected.size} categories`}
+              : `${formatBytes(chosenBytes, { zero: '0 B' })} selected across ${selected.size} categories`}
           </span>
           <Button
             variant="danger"

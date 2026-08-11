@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,6 +217,58 @@ func TestClean_InvalidatesTheAnalysis(t *testing.T) {
 	}
 	if _, err := f.svc.Clean(context.Background(), a.ID, []CategoryID{CatOrphanCollections}); !errors.Is(err, ErrAnalysisExpired) {
 		t.Errorf("second clean error = %v, want ErrAnalysisExpired", err)
+	}
+}
+
+// An analysis id buys exactly one clean. Two concurrent requests carrying the
+// same id must not both run: the deletions are idempotent so nothing breaks,
+// but the second would report bytes the first already reclaimed.
+func TestClean_AnalysisIsSingleUseUnderConcurrency(t *testing.T) {
+	f := newFixture(t)
+	f.index(t, "/dead/one")
+	f.index(t, "/dead/two")
+	a := f.analyze(t)
+
+	const callers = 6
+	var wg sync.WaitGroup
+	results := make([]*CleanResult, callers)
+	errs := make([]error, callers)
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = f.svc.Clean(context.Background(), a.ID, []CategoryID{CatOrphanCollections})
+		}()
+	}
+	wg.Wait()
+
+	won := 0
+	for i := range callers {
+		switch {
+		case errs[i] == nil:
+			won++
+		case errors.Is(errs[i], ErrAnalysisExpired):
+		default:
+			t.Errorf("caller %d got unexpected error %v", i, errs[i])
+		}
+	}
+	if won != 1 {
+		t.Fatalf("%d callers succeeded, want exactly 1", won)
+	}
+}
+
+// A selection the server cannot honour must not burn the analysis — the admin
+// should be able to correct the request and clean without re-scanning.
+func TestClean_BadSelectionLeavesTheAnalysisUsable(t *testing.T) {
+	f := newFixture(t)
+	f.index(t, "/dead/project")
+	a := f.analyze(t)
+
+	if _, err := f.svc.Clean(context.Background(), a.ID, []CategoryID{"nonsense"}); !errors.Is(err, ErrUnknownCategory) {
+		t.Fatalf("bad category error = %v, want ErrUnknownCategory", err)
+	}
+	if _, err := f.svc.Clean(context.Background(), a.ID, []CategoryID{CatOrphanCollections}); err != nil {
+		t.Errorf("the analysis was consumed by a rejected selection: %v", err)
 	}
 }
 

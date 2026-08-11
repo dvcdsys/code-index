@@ -43,14 +43,22 @@ var pathHashRE = regexp.MustCompile(`^[0-9a-f]{16}$`)
 // governs how long the returned id stays redeemable by Clean, not how long a
 // response may be reused.
 func (s *Service) Analyze(ctx context.Context) (*Analysis, error) {
+	// Snapshot what is cached before waiting, so a follower can tell the
+	// leader's fresh result from whatever happened to be sitting there.
+	before := s.cache.latestID()
 	done, wait := s.cache.beginScan()
 	if done == nil {
 		select {
 		case <-wait:
-			if a := s.cache.latest(); a != nil {
+			// Only adopt the leader's result if it is actually new AND still
+			// inside its TTL. Without both checks a follower could be handed a
+			// twenty-minute-old analysis — the leader's scan having failed, or
+			// its result having been consumed by a Clean meanwhile — and would
+			// return 200 with a stale picture whose id then 409s.
+			if a := s.cache.latest(); a != nil && a.ID != before && s.cache.fresh(a) {
 				return a, nil
 			}
-			// The leader failed; fall through and scan ourselves.
+			// No usable result from the leader; scan ourselves.
 			return s.Analyze(ctx)
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -250,7 +258,7 @@ func (s *Service) scanOrphanCollections(ctx context.Context, st *scanState, heap
 			Key:        col.Name,
 			Label:      col.Name,
 			Detail:     fmt.Sprintf("%d documents", col.Documents),
-			SizeBytes:  dirSizeOrZero(col.Dir),
+			SizeBytes:  dirSizeOrZero(ctx, col.Dir),
 			path:       col.Dir,
 			collection: col.Name,
 		})
@@ -316,7 +324,7 @@ func (s *Service) scanOrphanRepos(ctx context.Context, st *scanState) (Category,
 			Key:       name,
 			Label:     repoLabel(dir, name),
 			Detail:    detail,
-			SizeBytes: dirSizeOrZero(dir),
+			SizeBytes: dirSizeOrZero(ctx, dir),
 			path:      dir,
 		})
 	}
@@ -373,7 +381,7 @@ func (s *Service) scanStaleNamespaces(ctx context.Context) (Category, []string) 
 			Key:       dir,
 			Label:     strings.TrimPrefix(dir, base+string(os.PathSeparator)),
 			Detail:    "inactive namespace",
-			SizeBytes: dirSizeOrZero(dir),
+			SizeBytes: dirSizeOrZero(ctx, dir),
 			path:      dir,
 		})
 	}
@@ -388,7 +396,7 @@ func (s *Service) scanStaleNamespaces(ctx context.Context) (Category, []string) 
 	// Sizing the active namespace means walking every document in the index,
 	// so only pay for it when there is actually something to compare against.
 	if len(c.Items) > 0 {
-		activeSize := dirSizeOrZero(active)
+		activeSize := dirSizeOrZero(ctx, active)
 		for _, it := range c.Items {
 			if it.SizeBytes > activeSize {
 				c.DefaultSelected = false
@@ -416,6 +424,19 @@ func namespaceLeaves(base string) []string {
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			return
+		}
+		// A completely empty directory below the container is a leftover
+		// namespace whose collections are already gone — zero bytes, but
+		// listing it is what lets a clean actually leave nothing behind
+		// instead of "nothing except some empty directories". Only ever
+		// when it holds NOTHING at all: a directory with loose files in it
+		// is something we do not understand, and unexplained files are not
+		// ours to delete.
+		if len(entries) == 0 {
+			if depth >= 1 {
+				out = append(out, dir)
+			}
 			return
 		}
 		var subdirs []string

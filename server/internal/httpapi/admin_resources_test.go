@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/maintenance"
 	"github.com/dvcdsys/code-index/server/internal/projects"
+	"github.com/dvcdsys/code-index/server/internal/repocloner"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
 
@@ -39,14 +41,17 @@ func TestResourceEndpoints_AdminOnly(t *testing.T) {
 
 func TestResourceEndpoints_RejectAnonymous(t *testing.T) {
 	f := newAdminFixture(t)
-	for _, path := range []string{
-		"/api/v1/admin/resources",
-		"/api/v1/admin/resources/analyze",
-		"/api/v1/admin/resources/clean",
+	// Each route with the method it actually serves. Hitting a POST-only path
+	// with GET would return 405 before auth ever runs, which proves nothing
+	// about the gate.
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/admin/resources"},
+		{http.MethodPost, "/api/v1/admin/resources/analyze"},
+		{http.MethodPost, "/api/v1/admin/resources/clean"},
 	} {
-		rr, _ := doReq(t, f.authTestFixture, "", http.MethodGet, path, nil)
-		if rr.Code != http.StatusUnauthorized && rr.Code != http.StatusMethodNotAllowed {
-			t.Errorf("anonymous %s = %d, want 401", path, rr.Code)
+		rr, body := doReq(t, f.authTestFixture, "", c.method, c.path, nil)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("anonymous %s %s = %d, want 401 (body: %s)", c.method, c.path, rr.Code, body)
 		}
 	}
 }
@@ -172,6 +177,53 @@ func TestResourceUsage_WithoutConfigIs503(t *testing.T) {
 	rr, body := doReq(t, f.authTestFixture, adminCookie(t, f), http.MethodGet, "/api/v1/admin/resources", nil)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("usage without config = %d, want 503 (body: %s)", rr.Code, body)
+	}
+}
+
+// Deleting a project must take its off-database residue with it, or the
+// backlog this whole feature exists to clear starts refilling immediately.
+func TestDeleteProject_RemovesCollectionAndCheckout(t *testing.T) {
+	f := newResourceFixture(t)
+	cookie := adminCookie(t, f.adminFixture)
+
+	hash := projects.HashPath("/live/project")
+	clone := repocloner.LocalDirFor(f.Deps.DataDir, hash)
+	if err := os.MkdirAll(clone, 0o755); err != nil {
+		t.Fatalf("mkdir clone: %v", err)
+	}
+	collectionDir := f.store.CollectionDir("/live/project")
+	if _, err := os.Stat(collectionDir); err != nil {
+		t.Fatalf("precondition: collection dir missing: %v", err)
+	}
+
+	rr, body := doReq(t, f.authTestFixture, cookie, http.MethodDelete, "/api/v1/projects/"+hash, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d, want 204 (body: %s)", rr.Code, body)
+	}
+	if _, err := os.Stat(collectionDir); !os.IsNotExist(err) {
+		t.Errorf("vector collection survived the delete (err=%v)", err)
+	}
+	if _, err := os.Stat(clone); !os.IsNotExist(err) {
+		t.Errorf("cloned checkout survived the delete (err=%v)", err)
+	}
+	if n := f.store.Count("/live/project"); n != 0 {
+		t.Errorf("%d documents still resident after delete, want 0", n)
+	}
+
+	// And the analysis should now find nothing — the delete cleaned up after
+	// itself rather than leaving work for the Resources screen.
+	rr, body = doReq(t, f.authTestFixture, cookie, http.MethodPost, "/api/v1/admin/resources/analyze", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("analyze = %d (body: %s)", rr.Code, body)
+	}
+	var analysis maintenance.Analysis
+	if err := json.Unmarshal(body, &analysis); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, c := range analysis.Categories {
+		if c.ID == maintenance.CatOrphanRepos && c.ItemCount != 0 {
+			t.Errorf("delete left %d orphaned checkouts behind", c.ItemCount)
+		}
 	}
 }
 

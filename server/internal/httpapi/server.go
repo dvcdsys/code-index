@@ -244,7 +244,7 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request, path openapi
 		return
 	}
 	out := projectToOpenAPI(p)
-	s.enrichProjectStorage(&out, p)
+	s.enrichProjectStorage(r.Context(), &out, p)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -255,7 +255,7 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request, path openapi
 //
 // Prefers Deps.Cfg and falls back to the embedding service's copy, so the
 // fields still populate when embeddings are disabled.
-func (s *Server) enrichProjectStorage(out *openapi.Project, p *projects.Project) {
+func (s *Server) enrichProjectStorage(ctx context.Context, out *openapi.Project, p *projects.Project) {
 	cfg := s.Deps.Cfg
 	if cfg == nil {
 		if es, ok := s.Deps.EmbeddingSvc.(*embeddings.Service); ok && es != nil {
@@ -287,7 +287,7 @@ func (s *Server) enrichProjectStorage(out *openapi.Project, p *projects.Project)
 	if m, ok := s.Deps.VectorStore.(vectorstore.Maintainer); ok && m != nil {
 		if dir := m.CollectionDir(p.HostPath); dir != "" {
 			out.ChromaPath = ptrString(dir)
-			if sz, ok := maintenance.DirSizeBytes(dir); ok {
+			if sz, ok := maintenance.DirSizeBytes(ctx, dir); ok {
 				out.ChromaSizeBytes = &sz
 			}
 		}
@@ -331,13 +331,24 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path open
 	if p == nil {
 		return
 	}
-	// Drop any queued clone/index work first. Otherwise a job that fires a
-	// second after we remove the checkout simply re-creates it, and the
-	// project we just deleted grows a new directory out of nowhere.
+	// Stop the pipeline before removing anything, the same two steps
+	// ForceStopIndex takes. Dequeuing alone is not enough: deleting a
+	// `running` row does not stop the goroutine behind it (see the note on
+	// jobs.DeleteByDedupeKeys), so an index already in flight would keep
+	// writing chunks and vectors and re-create the collection and checkout
+	// moments after the artifact cleanup removed them.
 	if s.Deps.Jobs != nil {
 		hash := projects.HashPath(p.HostPath)
 		if _, err := s.Deps.Jobs.DeleteByDedupeKeys(r.Context(), "clone:"+hash, "index:"+hash); err != nil {
 			s.Deps.Logger.Warn("delete project: clear queued jobs", "project", p.HostPath, "err", err)
+		}
+	}
+	if s.Deps.Indexer != nil {
+		if _, err := s.Deps.Indexer.CancelIndexing(r.Context(), p.HostPath); err != nil {
+			// Best effort: a live session that refuses to cancel leaves an
+			// orphan the Resources screen can reclaim, which is a better
+			// outcome than refusing to delete the project.
+			s.Deps.Logger.Warn("delete project: cancel active index session", "project", p.HostPath, "err", err)
 		}
 	}
 	if err := projects.Delete(r.Context(), s.Deps.DB, p.HostPath, s.projectArtifacts()); err != nil {
@@ -367,7 +378,18 @@ func (s *Server) projectArtifacts() *projects.Artifacts {
 	}
 	if s.Deps.DataDir != "" {
 		art.RemoveCloneDir = func(hostPath string) error {
-			return os.RemoveAll(repocloner.LocalDirFor(s.Deps.DataDir, projects.HashPath(hostPath)))
+			hash := projects.HashPath(hostPath)
+			dir := repocloner.LocalDirFor(s.Deps.DataDir, hash)
+			if s.Deps.RepoLocks == nil {
+				return os.RemoveAll(dir)
+			}
+			// Same write lock the clone worker takes to rewrite a worktree,
+			// and the counterpart of the read lock the file/tree handlers
+			// take. Removing the tree out from under either is exactly what
+			// the registry exists to prevent.
+			return s.Deps.RepoLocks.WithWrite(hash, func() error {
+				return os.RemoveAll(dir)
+			})
 		}
 	}
 	if art.DropCollection == nil && art.RemoveCloneDir == nil {

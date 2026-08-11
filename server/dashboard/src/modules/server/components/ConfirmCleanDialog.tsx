@@ -38,7 +38,7 @@ export function ConfirmCleanDialog({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <span className="cix-dot is-busy" aria-hidden />
-          <DialogTitle>Delete {items} items and free {formatBytes(total)}?</DialogTitle>
+          <DialogTitle>Delete {items} items and free {formatBytes(total, { zero: '0 B' })}?</DialogTitle>
         </DialogHeader>
         <DialogBody>
           <DialogDescription>
@@ -73,7 +73,7 @@ export function ConfirmCleanDialog({
           </Button>
           <Button variant="danger" onClick={onConfirm} disabled={isPending}>
             {isPending ? <Dots /> : null}
-            Clean {formatBytes(total)}
+            Clean {formatBytes(total, { zero: '0 B' })}
           </Button>
         </DialogFooter>
       </DialogContent>

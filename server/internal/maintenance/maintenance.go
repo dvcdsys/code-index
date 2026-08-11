@@ -121,6 +121,7 @@ type Deps struct {
 type Service struct {
 	d     Deps
 	cache *analysisCache
+	usage *usageCache
 }
 
 // New returns a Service. Callers may construct one per request; the analysis
@@ -133,7 +134,7 @@ func New(d Deps) *Service {
 	if d.Logger == nil {
 		d.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	}
-	return &Service{d: d, cache: newAnalysisCache(analysisTTL, d.Now)}
+	return &Service{d: d, cache: newAnalysisCache(analysisTTL, d.Now), usage: &usageCache{}}
 }
 
 func (s *Service) now() time.Time { return s.d.Now() }
@@ -200,16 +201,29 @@ type Analysis struct {
 }
 
 // DirSizeBytes walks dir and sums regular-file sizes. Returns (0,false) on any
-// error (missing dir, permission, …) so callers can omit the number rather
-// than report a misleading 0.
+// error (missing dir, permission, cancelled context) so callers can omit the
+// number rather than report a misleading 0.
+//
+// The context is checked every so many entries: on a vector store that is one
+// file per document these walks visit hundreds of thousands of entries, and a
+// client that has already hung up should not be able to leave the server
+// finishing the tree anyway.
 //
 // Lives here rather than in httpapi because both the resource endpoints and
 // the project-detail card need it and there must be exactly one copy.
-func DirSizeBytes(dir string) (int64, bool) {
+func DirSizeBytes(ctx context.Context, dir string) (int64, bool) {
 	var total int64
+	var seen int
 	walkErr := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		// Checking every entry would make ctx.Err() a meaningful share of the
+		// walk's cost; every 512 keeps cancellation prompt for free.
+		if seen++; seen%512 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		if d.IsDir() {
 			return nil
@@ -229,8 +243,8 @@ func DirSizeBytes(dir string) (int64, bool) {
 
 // dirSizeOrZero is the convenience form for places that already know the
 // directory should exist and want a number to add up.
-func dirSizeOrZero(dir string) int64 {
-	n, _ := DirSizeBytes(dir)
+func dirSizeOrZero(ctx context.Context, dir string) int64 {
+	n, _ := DirSizeBytes(ctx, dir)
 	return n
 }
 
