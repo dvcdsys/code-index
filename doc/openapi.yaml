@@ -4353,7 +4353,7 @@ components:
 
     MaintenanceOperation:
       type: object
-      required: [run_id, kind, phase, started_at]
+      required: [run_id, kind, phase]
       properties:
         run_id:
           type: string
@@ -4384,7 +4384,13 @@ components:
             during the restart. `interrupted` is a previous run that did not
             finish — the database was brought back to a consistent state and
             the operation can simply be re-run.
-        started_at: { type: string, format: date-time }
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Absent when nothing has run. A zero date would read as a bug
+            rather than as "nothing has happened".
         finished_at: { type: string, format: date-time, nullable: true }
         bytes_total:
           type: integer

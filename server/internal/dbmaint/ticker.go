@@ -98,7 +98,7 @@ func (s *Service) runScheduledReclaim(ctx context.Context) {
 	st := State{
 		RunID:     newRunID(),
 		Kind:      KindReclaim,
-		StartedAt: started,
+		StartedAt: &started,
 		PID:       os.Getpid(),
 	}
 	finished := time.Now().UTC()

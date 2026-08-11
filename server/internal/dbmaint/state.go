@@ -130,10 +130,13 @@ func (f Fingerprint) Equal(o Fingerprint) bool {
 // State is the journal: everything a fresh process needs to know about an
 // operation that a previous process may not have survived.
 type State struct {
-	RunID      string     `json:"run_id"`
-	Kind       Kind       `json:"kind"`
-	Phase      Phase      `json:"phase"`
-	StartedAt  time.Time  `json:"started_at"`
+	RunID string `json:"run_id"`
+	Kind  Kind   `json:"kind"`
+	Phase Phase  `json:"phase"`
+	// StartedAt is a pointer so an idle journal omits it entirely. A zero
+	// time.Time marshals as year 1, and a date in year 1 on a dashboard reads
+	// as a bug rather than as "nothing has happened".
+	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 
 	// PID and Version identify the process that wrote this. A journal naming

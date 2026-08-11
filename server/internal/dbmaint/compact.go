@@ -82,11 +82,12 @@ func (s *Service) Compact(ctx context.Context, enableIncremental bool) (State, e
 		}
 	}
 
+	startedAt := time.Now().UTC()
 	st := State{
 		RunID:             newRunID(),
 		Kind:              KindCompact,
 		Phase:             PhasePreparing,
-		StartedAt:         time.Now().UTC(),
+		StartedAt:         &startedAt,
 		PID:               os.Getpid(),
 		BytesTotal:        (stats.PageCount - stats.FreelistPages) * stats.PageSize,
 		EnableIncremental: enableIncremental,
@@ -243,18 +244,26 @@ func (s *Service) runCompaction(st State) {
 		return
 	}
 	s.d.Logger.Info("database copy complete, restarting to adopt it",
-		"run_id", st.RunID, "bytes", size, "took", elapsed.Round(time.Second))
+		"run_id", st.RunID, "bytes", size, "took", elapsed.Round(time.Second).String())
 	s.d.RequestRestart()
 }
 
 // copyInto runs VACUUM INTO on a connection of its own.
 //
-// The connection matters. modernc applies DSN pragmas to every connection it
-// opens, and a populated database records a pending auto_vacuum change even
-// though setting it is otherwise a no-op — which VACUUM INTO then carries into
-// the copy. Sharing a pool that had the pragma set would silently produce an
-// incremental copy on every run, whether or not the admin asked for one. This
-// pool has no auto_vacuum in its DSN, and the mode is set explicitly here.
+// The connection matters, and it is guarded twice.
+//
+// modernc applies DSN pragmas to every connection it opens, and a populated
+// database records a pending auto_vacuum change even though setting it is
+// otherwise a no-op — which VACUUM INTO then carries into the copy. Measured:
+// a mode-none database opened with auto_vacuum(INCREMENTAL) only in its DSN
+// produces a copy in incremental mode. Since db.buildDSN now carries exactly
+// that pragma, copying through the shared pool would silently convert a legacy
+// database on every run and make enable_incremental decorative.
+//
+// So this pool omits the pragma *and* the mode is set explicitly below. Either
+// alone is sufficient; both are cheap, and TestCompact_CopyKeepsTheSourceMode-
+// UnlessAsked fails only when both are removed, which is the honest statement
+// of what is protecting what.
 func (s *Service) copyInto(ctx context.Context, target string, incremental bool) error {
 	pool, err := openDedicated(s.d.DBPath, 1)
 	if err != nil {

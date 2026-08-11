@@ -309,7 +309,7 @@ func adopt(ctx context.Context, dbPath string, p Paths, st State, logger *slog.L
 		st.Error = "the compacted copy failed verification and was discarded: " + err.Error()
 		return finish(dbPath, st, logger, LevelError, st.Error)
 	}
-	logger.Info("compacted copy verified", "took", time.Since(started).Round(time.Millisecond))
+	logger.Info("compacted copy verified", "took", time.Since(started).Round(time.Millisecond).String())
 
 	// Fold the live database's log into it so the file is self-contained
 	// before it is renamed away from its sidecars.

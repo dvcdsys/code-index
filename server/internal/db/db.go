@@ -1402,6 +1402,24 @@ func buildDSN(path string) (string, error) {
 	v.Add("_pragma", "journal_mode(WAL)")
 	v.Add("_pragma", "foreign_keys(ON)")
 	v.Add("_pragma", "busy_timeout(5000)")
+	// Incremental auto-vacuum, so a database created by this build can return
+	// its own free space without being rebuilt.
+	//
+	// Only a brand-new file takes it: SQLite silently ignores the pragma on a
+	// database that already has tables, so every existing install stays in
+	// whatever mode it is in and an upgrade changes nothing. Switching a
+	// populated database is an explicit, admin-initiated compaction.
+	//
+	// Measured cost on an indexing-shaped workload (120k wide rows inserted in
+	// batched transactions, then a bulk delete): +1.5% on insert, no
+	// difference on delete, identical file size. The pointer-map pages this
+	// maintains are what make incremental reclaim possible at all.
+	//
+	// Note this applies to EVERY connection, and a connection carries the
+	// pending mode into any VACUUM INTO it runs — which is why the compactor
+	// opens its own pool without this pragma and sets the mode explicitly. See
+	// dbmaint.copyInto.
+	v.Add("_pragma", "auto_vacuum(INCREMENTAL)")
 
 	if path == ":memory:" {
 		return ":memory:?" + v.Encode(), nil

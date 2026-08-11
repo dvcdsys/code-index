@@ -224,10 +224,10 @@ func ScheduleFor(ctx context.Context, sdb *sql.DB, env ScheduleEnv, mode AutoVac
 
 // applyJournalOutcome folds the last run's result in from the journal.
 func applyJournalOutcome(s *Schedule, st State) {
-	if st.Phase == PhaseIdle || st.StartedAt.IsZero() {
+	if st.Phase == PhaseIdle || st.StartedAt == nil {
 		return
 	}
-	at := st.StartedAt
+	at := *st.StartedAt
 	if st.FinishedAt != nil {
 		at = *st.FinishedAt
 	}
