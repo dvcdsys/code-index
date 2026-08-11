@@ -112,7 +112,10 @@ export function ResourcesSection() {
   return (
     <Card>
       <CardHead
-        title="Resources"
+        // Not "Resources" — the tab already says that, and a card head that
+        // repeats its container tells the reader nothing. This one names what
+        // the numbers below actually are.
+        title="Storage & memory"
         aside={
           <Button size="sm" onClick={onAnalyze} disabled={busy}>
             {analyze.isPending ? <Dots /> : null}
