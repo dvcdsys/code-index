@@ -36,15 +36,34 @@ const progressInterval = 2 * time.Second
 // failure that costs a restart.
 const quiesceBudget = 2 * time.Minute
 
+// TargetMode is the reclaim mode a compaction should leave the file in.
+type TargetMode string
+
+const (
+	// TargetKeep preserves whatever the database is in today.
+	TargetKeep TargetMode = "keep"
+	// TargetNone rebuilds without incremental reclaim.
+	TargetNone TargetMode = "none"
+	// TargetIncremental rebuilds with it.
+	TargetIncremental TargetMode = "incremental"
+)
+
 // Compact starts a background rebuild and returns the initial state.
 //
 // Everything that can refuse happens synchronously, before anything is
 // stopped: a caller that gets an error here is on a server that never left
 // normal service. Past that point the operation owns the process — it will
 // finish and restart, or fail and restart.
-func (s *Service) Compact(ctx context.Context, enableIncremental bool) (State, error) {
+func (s *Service) Compact(ctx context.Context, target TargetMode) (State, error) {
 	if s.d.RequestRestart == nil || s.d.Quiesce == nil {
 		return State{}, errors.New("database compaction is not wired on this server")
+	}
+	switch target {
+	case "", TargetKeep:
+		target = TargetKeep
+	case TargetNone, TargetIncremental:
+	default:
+		return State{}, fmt.Errorf("unknown auto_vacuum target %q", target)
 	}
 
 	s.mu.Lock()
@@ -84,14 +103,14 @@ func (s *Service) Compact(ctx context.Context, enableIncremental bool) (State, e
 
 	startedAt := time.Now().UTC()
 	st := State{
-		RunID:             newRunID(),
-		Kind:              KindCompact,
-		Phase:             PhasePreparing,
-		StartedAt:         &startedAt,
-		PID:               os.Getpid(),
-		BytesTotal:        (stats.PageCount - stats.FreelistPages) * stats.PageSize,
-		EnableIncremental: enableIncremental,
-		Message:           "stopping background work before the copy begins",
+		RunID:      newRunID(),
+		Kind:       KindCompact,
+		Phase:      PhasePreparing,
+		StartedAt:  &startedAt,
+		PID:        os.Getpid(),
+		BytesTotal: (stats.PageCount - stats.FreelistPages) * stats.PageSize,
+		AutoVacuum: string(target),
+		Message:    "stopping background work before the copy begins",
 	}
 	s.record(&st, LevelInfo, st.Message)
 	if err := Save(s.d.DBPath, st); err != nil {
@@ -196,7 +215,7 @@ func (s *Service) runCompaction(st State) {
 
 	stopProgress := s.trackProgress(&st, p.Copy)
 	started := time.Now()
-	err = s.copyInto(ctx, p.Copy, st.EnableIncremental)
+	err = s.copyInto(ctx, p.Copy, TargetMode(st.AutoVacuum))
 	elapsed := time.Since(started)
 	stopProgress()
 	if err != nil {
@@ -264,7 +283,24 @@ func (s *Service) runCompaction(st State) {
 // alone is sufficient; both are cheap, and TestCompact_CopyKeepsTheSourceMode-
 // UnlessAsked fails only when both are removed, which is the honest statement
 // of what is protecting what.
-func (s *Service) copyInto(ctx context.Context, target string, incremental bool) error {
+// copyInto runs VACUUM INTO on a connection of its own, leaving the copy in
+// the requested reclaim mode.
+//
+// The connection matters, and it is guarded twice.
+//
+// modernc applies DSN pragmas to every connection it opens, and a connection
+// carries a pending auto_vacuum change into any VACUUM INTO it runs — even on a
+// database where setting it was otherwise a no-op. Measured: a mode-none
+// database opened with auto_vacuum(INCREMENTAL) only in its DSN produces a copy
+// in incremental mode. Since db.buildDSN now carries exactly that pragma,
+// copying through the shared pool would silently convert a legacy database on
+// every run and make the request field decorative.
+//
+// So this pool omits the pragma *and* the mode is set explicitly below. Either
+// alone is sufficient; both are cheap, and TestCompact_CopyKeepsTheSourceMode-
+// UnlessAsked fails only when both are removed, which is the honest statement
+// of what is protecting what.
+func (s *Service) copyInto(ctx context.Context, target string, want TargetMode) error {
 	pool, err := openDedicated(s.d.DBPath, 1)
 	if err != nil {
 		return err
@@ -277,14 +313,17 @@ func (s *Service) copyInto(ctx context.Context, target string, incremental bool)
 	defer conn.Close()
 
 	mode := "NONE"
-	if incremental {
+	switch want {
+	case TargetIncremental:
 		mode = "INCREMENTAL"
-	} else {
-		// Preserve whatever the source is in rather than forcing it to none:
-		// an admin who is already on incremental has not asked to leave it.
+	case TargetNone:
+		mode = "NONE"
+	default: // TargetKeep
 		var v int64
-		if err := conn.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&v); err == nil &&
-			autoVacuumFromPragma(v) == AutoVacuumIncremental {
+		if err := conn.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&v); err != nil {
+			return fmt.Errorf("read the source auto_vacuum mode: %w", err)
+		}
+		if autoVacuumFromPragma(v) == AutoVacuumIncremental {
 			mode = "INCREMENTAL"
 		}
 	}

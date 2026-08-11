@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/dvcdsys/code-index/server/internal/dbmaint"
 )
@@ -193,7 +194,7 @@ func (s *Server) CompactDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		EnableIncremental bool `json:"enable_incremental"`
+		AutoVacuum string `json:"auto_vacuum"`
 	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -202,7 +203,7 @@ func (s *Server) CompactDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st, err := svc.Compact(r.Context(), body.EnableIncremental)
+	st, err := svc.Compact(r.Context(), dbmaint.TargetMode(body.AutoVacuum))
 	if err != nil {
 		switch {
 		case errors.Is(err, dbmaint.ErrCompactionRunning):
@@ -212,6 +213,8 @@ func (s *Server) CompactDatabase(w http.ResponseWriter, r *http.Request) {
 				"an indexing or clone job is in flight — compaction takes the server read-only and would fail it mid-run")
 		case errors.Is(err, dbmaint.ErrInsufficientDisk):
 			writeError(w, http.StatusInsufficientStorage, err.Error())
+		case strings.HasPrefix(err.Error(), "unknown auto_vacuum target"):
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
 		default:
 			s.Deps.Logger.Error("start database compaction", "err", err)
 			writeError(w, http.StatusInternalServerError, "compact: "+err.Error())

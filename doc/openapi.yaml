@@ -793,13 +793,18 @@ paths:
         anything that slips past the first two layers is refused by SQLite
         itself rather than landing outside the snapshot.
 
-        Set `enable_incremental` to also switch the file to incremental
-        auto-vacuum. SQLite can only change the mode of a populated database
-        by rebuilding it, so the switch costs exactly one compaction and is
-        folded into this one — but it is not free afterwards: incremental mode
-        maintains pointer-map pages, so every page allocated or freed carries
-        an extra write. On a server whose hot path is bulk-inserting chunk and
-        symbol rows, that cost lands on indexing.
+        `auto_vacuum` changes the file's reclaim mode on the way through.
+        SQLite can only change the mode of a populated database by rebuilding
+        it, so either direction costs exactly one compaction and is folded into
+        this one. `keep` leaves it as it is.
+
+        Incremental mode is what makes
+        `POST /api/v1/admin/database/reclaim` possible, and it is not free:
+        it maintains pointer-map pages, so every page allocated or freed
+        carries an extra write. Measured on an indexing-shaped workload that
+        is +1.5% on insert. Switching back to `none` is offered for the same
+        reason it is offered at all — it is the admin's call, and the cost is
+        stated rather than decided for them.
 
         Crash safety: progress is journalled to a state file beside the
         database, written atomically, and every combination of that state and
@@ -4343,13 +4348,14 @@ components:
     CompactRequest:
       type: object
       properties:
-        enable_incremental:
-          type: boolean
-          default: false
+        auto_vacuum:
+          type: string
+          enum: [keep, none, incremental]
+          default: keep
           description: |
-            Also switch the file to incremental auto-vacuum. Free, in the
-            sense that a populated database can only change mode by being
-            rebuilt — which is what this operation already does.
+            The reclaim mode the rebuilt file should have. `keep` preserves
+            whatever the database is in today. Both other values cost the same
+            rebuild that is already happening, in either direction.
 
     MaintenanceOperation:
       type: object
@@ -4400,7 +4406,11 @@ components:
         bytes_done: { type: integer, format: int64, nullable: true }
         percent: { type: number, minimum: 0, maximum: 100, nullable: true }
         freed_bytes: { type: integer, format: int64, nullable: true }
-        enable_incremental: { type: boolean, nullable: true }
+        auto_vacuum:
+          type: string
+          enum: [keep, none, incremental]
+          nullable: true
+          description: The reclaim mode this run was asked to produce.
         message:
           type: string
           nullable: true

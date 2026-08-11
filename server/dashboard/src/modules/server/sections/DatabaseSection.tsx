@@ -29,7 +29,7 @@ export function DatabaseSection() {
   const checkpoint = useCheckpointWal();
 
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [viaToggle, setViaToggle] = useState(false);
+  const [toggleTo, setToggleTo] = useState<'incremental' | 'none' | null>(null);
 
   const db = state.data;
   const op = db?.operation ?? null;
@@ -41,7 +41,7 @@ export function DatabaseSection() {
 
   const onConfirmCompact = () => {
     compact.mutate(
-      { enable_incremental: viaToggle },
+      { auto_vacuum: toggleTo ?? 'keep' },
       {
         onSuccess: () => {
           setConfirmOpen(false);
@@ -159,17 +159,18 @@ export function DatabaseSection() {
             <SwitchRow
               id="db-incremental"
               checked={db.auto_vacuum === 'incremental'}
-              disabled={busy || db.auto_vacuum === 'incremental'}
+              disabled={busy}
               onCheckedChange={(next) => {
-                if (!next) return; // turning it off would also mean a rebuild; not offered
-                setViaToggle(true);
+                // Both directions cost a rebuild, and both are offered. The
+                // dialog states the price; the decision is the admin's.
+                setToggleTo(next ? 'incremental' : 'none');
                 setConfirmOpen(true);
               }}
               label="Incremental reclaim"
               hint={
                 db.auto_vacuum === 'incremental'
-                  ? 'Free pages can be returned to the filesystem without a rebuild.'
-                  : 'Off. Turning it on rebuilds the database once, and costs a little on every index run afterwards.'
+                  ? 'On. Free pages can be returned without a rebuild, at about 1.5% on indexing writes.'
+                  : 'Off. Space is only returned by compacting. Switching either way rebuilds the database once.'
               }
             />
 
@@ -202,7 +203,7 @@ export function DatabaseSection() {
               size="sm"
               variant="danger"
               onClick={() => {
-                setViaToggle(false);
+                setToggleTo(null);
                 setConfirmOpen(true);
               }}
               disabled={busy || !!db.blocked_reason}
@@ -222,7 +223,7 @@ export function DatabaseSection() {
           onConfirm={onConfirmCompact}
           isPending={compact.isPending}
           state={db}
-          viaToggle={viaToggle}
+          toggleTo={toggleTo}
         />
       ) : null}
     </Card>

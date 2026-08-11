@@ -149,7 +149,10 @@ type State struct {
 	BytesDone  int64 `json:"bytes_done,omitempty"`
 	FreedBytes int64 `json:"freed_bytes,omitempty"`
 
-	EnableIncremental bool `json:"enable_incremental,omitempty"`
+	// AutoVacuum is the reclaim mode this run was asked to produce: "keep",
+	// "none" or "incremental". Recorded so a run that outlives its process
+	// can still say what it was for.
+	AutoVacuum string `json:"auto_vacuum,omitempty"`
 
 	// Source is read under the freeze; Copy is read back from the finished
 	// copy. Both are recorded so the reconciler can re-verify at boot without

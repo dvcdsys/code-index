@@ -104,21 +104,21 @@ func TestCompact_CopyKeepsTheSourceModeUnlessAsked(t *testing.T) {
 	svc := New(Deps{DB: shared, DBPath: path, Logger: slog.New(slog.DiscardHandler)})
 
 	out := filepath.Join(dir, "copy.db")
-	if err := svc.copyInto(context.Background(), out, false); err != nil {
+	if err := svc.copyInto(context.Background(), out, TargetKeep); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 	if got := modeOf(t, out); got != AutoVacuumNone {
-		t.Errorf("a copy made without enable_incremental is in %q mode; it must match the source (%q)",
+		t.Errorf("a copy made with auto_vacuum=keep is in %q mode; it must match the source (%q)",
 			got, AutoVacuumNone)
 	}
 
-	// And asking for it does switch the copy.
+	// Asking for incremental switches the copy...
 	out2 := filepath.Join(dir, "copy2.db")
-	if err := svc.copyInto(context.Background(), out2, true); err != nil {
+	if err := svc.copyInto(context.Background(), out2, TargetIncremental); err != nil {
 		t.Fatalf("copy with enable_incremental: %v", err)
 	}
 	if got := modeOf(t, out2); got != AutoVacuumIncremental {
-		t.Errorf("a copy made with enable_incremental is in %q mode, want %q", got, AutoVacuumIncremental)
+		t.Errorf("a copy made with auto_vacuum=incremental is in %q mode, want %q", got, AutoVacuumIncremental)
 	}
 	_ = os.Remove(out)
 }
@@ -139,7 +139,7 @@ func TestCompact_CopyPreservesIncrementalWithoutBeingAsked(t *testing.T) {
 	svc := New(Deps{DB: sdb, DBPath: path, Logger: slog.New(slog.DiscardHandler)})
 
 	out := filepath.Join(dir, "copy.db")
-	if err := svc.copyInto(context.Background(), out, false); err != nil {
+	if err := svc.copyInto(context.Background(), out, TargetKeep); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 	if got := modeOf(t, out); got != AutoVacuumIncremental {
@@ -168,5 +168,50 @@ func TestVerifyCopy_RejectsAWrongCopyWithoutQuickCheck(t *testing.T) {
 	// And the right one still passes.
 	if err := VerifyCopy(context.Background(), mine, want); err != nil {
 		t.Fatalf("the matching database failed verification: %v", err)
+	}
+}
+
+// The switch goes both ways. Turning incremental reclaim *off* costs the same
+// rebuild as turning it on, and that is the admin's call to make — the cost is
+// stated, not decided for them.
+func TestCompact_CopyCanTurnIncrementalOff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fresh.db")
+	sdb, err := db.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer sdb.Close()
+	if _, err := sdb.Exec(`CREATE TABLE t(a TEXT); INSERT INTO t VALUES('x')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if got := modeOf(t, path); got != AutoVacuumIncremental {
+		t.Fatalf("fixture is not incremental: %q", got)
+	}
+	svc := New(Deps{DB: sdb, DBPath: path, Logger: slog.New(slog.DiscardHandler)})
+
+	out := filepath.Join(dir, "copy.db")
+	if err := svc.copyInto(context.Background(), out, TargetNone); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if got := modeOf(t, out); got != AutoVacuumNone {
+		t.Errorf("copy mode = %q after asking for none; the toggle must work in both directions", got)
+	}
+}
+
+func TestCompact_RejectsAnUnknownTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.db")
+	sdb, err := db.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer sdb.Close()
+	svc := New(Deps{
+		DB: sdb, DBPath: path, Logger: slog.New(slog.DiscardHandler),
+		Quiesce:        func(context.Context) error { return nil },
+		RequestRestart: func() {},
+	})
+	if _, err := svc.Compact(context.Background(), TargetMode("sideways")); err == nil {
+		t.Fatal("an unknown auto_vacuum target was accepted")
 	}
 }

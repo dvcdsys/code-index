@@ -18,11 +18,11 @@ interface Props {
   onConfirm: () => void;
   isPending: boolean;
   state: DatabaseState;
-  // True when the admin arrived here from the incremental-reclaim toggle
-  // rather than from the compact button. Same operation, different reason,
+  // Set when the admin arrived here from the incremental-reclaim toggle,
+  // carrying the direction they moved it. Same operation, different reason,
   // and the dialog has to say which — a toggle that silently costs a restart
   // is the single most surprising thing in this feature.
-  viaToggle: boolean;
+  toggleTo: 'incremental' | 'none' | null;
 }
 
 function humanDuration(seconds: number): string {
@@ -36,27 +36,31 @@ export function ConfirmCompactDialog({
   onConfirm,
   isPending,
   state,
-  viaToggle,
+  toggleTo,
 }: Props) {
   const estimate = humanDuration(state.estimated_seconds);
+  const title = toggleTo
+    ? toggleTo === 'incremental'
+      ? 'Switching incremental reclaim on rebuilds the database'
+      : 'Switching incremental reclaim off rebuilds the database'
+    : `Compact the database and reclaim ${formatBytes(state.reclaimable_bytes, { zero: '0 B' })}?`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <span className="cix-dot is-busy" aria-hidden />
-          <DialogTitle>
-            {viaToggle
-              ? 'Switching to incremental reclaim rebuilds the database'
-              : `Compact the database and reclaim ${formatBytes(state.reclaimable_bytes, { zero: '0 B' })}?`}
-          </DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
         <DialogBody>
-          {viaToggle ? (
+          {toggleTo ? (
             <DialogDescription>
               SQLite can only change a populated database&rsquo;s reclaim mode by rebuilding it,
-              so turning this on costs exactly one compaction. It is the same operation as the
-              Compact button, with the same interruption.
+              so this costs exactly one compaction — in either direction. It is the same
+              operation as the Compact button, with the same interruption.{' '}
+              {toggleTo === 'none'
+                ? 'Afterwards the database can only reclaim space by being compacted again.'
+                : 'Afterwards free pages can be returned without a rebuild.'}
             </DialogDescription>
           ) : (
             <DialogDescription>
@@ -101,7 +105,7 @@ export function ConfirmCompactDialog({
           </Button>
           <Button variant="danger" onClick={onConfirm} disabled={isPending}>
             {isPending ? <Dots /> : null}
-            {viaToggle ? 'Rebuild and switch' : 'Compact now'}
+            {toggleTo ? 'Rebuild and switch' : 'Compact now'}
           </Button>
         </DialogFooter>
       </DialogContent>

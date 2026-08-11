@@ -17,9 +17,11 @@ Server → Resources → Database reports that and offers three ways to act on i
 | **Compact now** | Rebuilds the database into a fresh file and replaces it | A read-only window, then a restart |
 
 Reclaim needs the database to be in **incremental** auto-vacuum mode. Databases
-created by recent builds already are; older ones are not, and switching a
-populated database costs exactly one compaction, because that is the only way
-SQLite can change the mode.
+created by recent builds already are; older ones are not. The mode is a
+two-way switch in the Database block, and moving it in **either** direction
+costs exactly one compaction, because rebuilding the file is the only way
+SQLite can change the mode of a populated database. The dialog states the
+price; the decision is the admin's.
 
 Reclaim returns space but does not defragment. Compaction rebuilds the file and
 improves read locality, so it stays useful — just rarely, rather than as the
@@ -91,6 +93,11 @@ copy the check did not finish inside a 30-second budget, and since it runs at
 boot before the listener binds, it was buying thirty seconds of extra downtime
 and then discarding its own result.
 
+The state lives in a file rather than a table because the database is the thing
+being replaced: a row describing the operation could not be written during the
+read-only window, could not survive the swap, and could not be read back during
+the restart.
+
 ## What a real run looked like
 
 Against a copy of a production database, 8.25 GB with 47% waste:
@@ -108,10 +115,6 @@ Against a copy of a production database, 8.25 GB with 47% waste:
 The read-only window was 95 seconds; full unavailability was the ~30 seconds
 of restart after it.
 
-The state lives in a file rather than a table because the database is the thing
-being replaced: a row describing the operation could not be written during the
-read-only window, could not survive the swap, and could not be read back during
-the restart.
 
 ## Automatic reclaim
 
@@ -170,6 +173,9 @@ incremental    insert 1.676s   delete 133ms   file 71.7 MB
 created in incremental mode on the strength of that. Existing databases are
 left alone — the pragma is silently ignored on a file that already has tables,
 so upgrading changes nothing until an admin asks for it.
+
+If that 1.5% matters more than being able to reclaim space without a rebuild,
+the switch turns off as readily as it turns on.
 
 ## Monitoring
 
