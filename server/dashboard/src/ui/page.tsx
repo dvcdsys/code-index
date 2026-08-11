@@ -10,9 +10,12 @@ import { cn } from '@/lib/cn';
 // applies to the whole page. Once a page grows tabs, a header action either
 // follows the active tab — appearing and vanishing under the title, which reads
 // as a glitch — or hovers over tabs it has nothing to do with. The Server page
-// hit exactly that and moved "Save & restart" into its Runtime settings tab, as
-// a sticky bar above the form it acts on: same "cannot scroll it away", but
-// unambiguous about what it acts on. Tabbed pages should follow suit.
+// hit exactly that and moved "Save & restart" into its Runtime settings tab,
+// as a plain bar closing the form it acts on. Tabbed pages should follow suit.
+//
+// That bar was sticky at first, to keep the "cannot scroll it away" property.
+// It was worse: cards sliding under a pinned strip read as a rendering fault.
+// A form short enough to reach the end of does not need its action pinned.
 export function Page({
   title,
   subtitle,

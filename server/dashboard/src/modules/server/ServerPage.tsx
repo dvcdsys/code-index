@@ -211,17 +211,16 @@ export default function ServerPage() {
           </Callout>
         ) : null}
 
-        {/* The action sits with the form it acts on, and sticks to the top of
-            the tab so it cannot be scrolled away — the reason it used to live
-            in the page header. It stays mounted while disabled rather than
-            disappearing, because "greyed out with a reason" answers "why can't
-            I save?" and an absent button does not. */}
-        <div
-          className="sticky top-0 z-10 mb-5 flex items-center gap-3 border-b py-2.5"
-          // The scroll container has no background of its own, so a sticky
-          // child needs the page canvas explicitly or the cards show through.
-          style={{ background: 'var(--cix-canvas)' }}
-        >
+        {runtimeGrid(cfg.data, draft)}
+
+        {/* Closes the form, in normal flow. It was sticky for a while so it
+            could not be scrolled away, but a bar pinned over cards that slide
+            under it just looks like a rendering fault — and the form is short
+            enough that the end of it is where you arrive anyway.
+            Stays mounted while disabled rather than disappearing: "greyed out,
+            and here is why" answers "why can't I save?"; an absent button
+            leaves the reader looking for it. */}
+        <div className="mt-5 flex items-center gap-3 border-t py-3.5">
           <span className="cix-hint">
             {saveBlockedReason ??
               (dirty
@@ -239,8 +238,6 @@ export default function ServerPage() {
             {isOllama ? 'Save & restart' : 'Save'}
           </Button>
         </div>
-
-        {runtimeGrid(cfg.data, draft)}
       </>
     );
   }
