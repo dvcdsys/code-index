@@ -122,9 +122,14 @@ of restart after it.
 
 A schedule fires only when everything lines up at once: enabled, the interval
 has elapsed, the waste is over **both** thresholds, the clock is inside the
-window if one is set, no clone or index job is in flight, and — for a full
-compaction — there is room for the copy. Anything else and the tick is silent
-and tries again next hour.
+window if one is set, nothing is being indexed — neither a queued job nor a CLI
+push, which leaves no job row at all — and, for a full compaction, there is room
+for the copy. Anything else and the tick is silent and tries again next hour.
+
+A schedule that cannot be honoured as written is refused rather than
+half-honoured, and said so at startup. Half a window is the case that matters:
+the window would simply be dropped, and a compaction meant for 03:00 would
+freeze the server in the middle of the afternoon.
 
 Two thresholds rather than one: a percentage alone nags on a small database
 where 40% of 12 MB is not worth a window; an absolute figure alone nags on a
@@ -173,8 +178,16 @@ incremental    insert 1.676s   delete 133ms   file 71.7 MB
 
 **+1.5% on insert, no measurable difference elsewhere.** New databases are
 created in incremental mode on the strength of that. Existing databases are
-left alone — the pragma is silently ignored on a file that already has tables,
-so upgrading changes nothing until an admin asks for it.
+left alone: the mode is set once, on a file this server is creating, and never
+again.
+
+That is deliberately narrower than it first appears it needs to be. SQLite
+ignores the pragma on a populated database only when honouring it would mean
+moving pages — going to or from `none`. Between `full` and `incremental` it
+applies immediately, so setting it on every connection would have converted a
+database somebody had deliberately put in full auto-vacuum, on nothing more
+than an upgrade. The reclaim mode has a switch of its own; nothing else gets to
+move it.
 
 If that 1.5% matters more than being able to reclaim space without a rebuild,
 the switch turns off as readily as it turns on.

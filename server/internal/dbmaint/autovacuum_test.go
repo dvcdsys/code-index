@@ -39,9 +39,8 @@ func TestAutoVacuum_FreshDatabaseIsIncremental(t *testing.T) {
 	}
 }
 
-// An existing database is untouched. The pragma is silently ignored on a file
-// that already has tables, which is what makes it safe to apply to every
-// connection — an upgrade must not quietly change anybody's database.
+// An existing database is untouched: the mode is only ever set on a file this
+// build is creating. An upgrade must not quietly change anybody's database.
 func TestAutoVacuum_ExistingDatabaseIsNotConverted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 
@@ -72,14 +71,50 @@ func TestAutoVacuum_ExistingDatabaseIsNotConverted(t *testing.T) {
 	}
 }
 
-// The one that would fail without a dedicated pool for the copy.
+// A database in full auto-vacuum must survive being opened by this build.
 //
-// modernc applies DSN pragmas to every connection, and a connection carries a
-// pending auto_vacuum change into any VACUUM INTO it runs — even on a database
-// where setting it was otherwise a no-op. Copying through the shared pool
-// would therefore produce an incremental copy on every run regardless of what
-// the admin asked for, silently converting a legacy database and making the
-// request field decorative.
+// This is the case that made the mode a one-shot on a new file rather than a
+// DSN pragma on every connection. SQLite ignores `auto_vacuum` on a populated
+// database only when honouring it would mean moving pages — going to or from
+// `none`. Between `full` and `incremental` it applies immediately, so the DSN
+// form converted a full database on nothing more than a restart, and the
+// compaction that followed then recorded the converted mode as if it had
+// always been there.
+func TestAutoVacuum_FullDatabaseSurvivesBeingOpened(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "full.db")
+
+	full, err := sql.Open(db.DriverName,
+		"file:"+path+"?_pragma=auto_vacuum(FULL)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open full: %v", err)
+	}
+	if _, err := full.Exec(`CREATE TABLE t(a TEXT); INSERT INTO t VALUES('x')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	full.Close()
+	if got := modeOf(t, path); got != AutoVacuumFull {
+		t.Fatalf("fixture is in %q mode, want %q", got, AutoVacuumFull)
+	}
+
+	reopened, err := db.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	reopened.Close()
+
+	if got := modeOf(t, path); got != AutoVacuumFull {
+		t.Errorf("opening a full auto-vacuum database changed it to %q; the reclaim mode is the admin's to set", got)
+	}
+}
+
+// A copy preserves the source's mode unless a different one was asked for.
+//
+// The copy runs on a connection of its own, opened without any auto_vacuum
+// pragma and told explicitly which mode to produce. Both halves matter: a
+// connection carries a pending auto_vacuum change into any VACUUM INTO it runs,
+// even on a database where setting it was otherwise a no-op, so a copy taken
+// through a pool that had the pragma anywhere in its DSN would come out in that
+// mode regardless of what was requested.
 func TestCompact_CopyKeepsTheSourceModeUnlessAsked(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "legacy.db")
@@ -196,6 +231,42 @@ func TestCompact_CopyCanTurnIncrementalOff(t *testing.T) {
 	}
 	if got := modeOf(t, out); got != AutoVacuumNone {
 		t.Errorf("copy mode = %q after asking for none; the toggle must work in both directions", got)
+	}
+}
+
+// A database in FULL auto-vacuum is a mode this server never sets but may
+// well open — the file could have come from anywhere. Compacting it must
+// return its space without quietly changing a setting nobody asked about.
+func TestCompact_CopyPreservesFullAutoVacuum(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "full.db")
+
+	full, err := sql.Open(db.DriverName,
+		"file:"+path+"?_pragma=auto_vacuum(FULL)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open full: %v", err)
+	}
+	if _, err := full.Exec(`CREATE TABLE t(a TEXT); INSERT INTO t VALUES('x')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	full.Close()
+	if got := modeOf(t, path); got != AutoVacuumFull {
+		t.Fatalf("fixture is in %q mode, want %q", got, AutoVacuumFull)
+	}
+
+	sdb, err := db.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer sdb.Close()
+	svc := New(Deps{DB: sdb, DBPath: path, Logger: slog.New(slog.DiscardHandler)})
+
+	out := filepath.Join(dir, "copy.db")
+	if err := svc.copyInto(context.Background(), out, svc.currentMode(context.Background())); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if got := modeOf(t, out); got != AutoVacuumFull {
+		t.Errorf("copy mode = %q; compacting a full auto-vacuum database demoted it", got)
 	}
 }
 

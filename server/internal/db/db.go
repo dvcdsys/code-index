@@ -112,6 +112,10 @@ func OpenWith(opts OpenOptions) (*sql.DB, error) {
 		}
 	}
 
+	if err := seedNewDatabase(path); err != nil {
+		return nil, err
+	}
+
 	db, err := sql.Open(DriverName, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sql.Open: %w", err)
@@ -146,6 +150,59 @@ func OpenWith(opts OpenOptions) (*sql.DB, error) {
 	}
 
 	return db, nil
+}
+
+// seedNewDatabase puts a database this build is creating into incremental
+// auto-vacuum mode. A file that already exists is not touched at all.
+//
+// Incremental mode maintains pointer-map pages, which is what lets a database
+// return free space to the filesystem without being rebuilt. Measured cost on
+// an indexing-shaped workload (120k wide rows inserted in batched
+// transactions, then a bulk delete): +1.5% on insert, no difference on delete,
+// identical file size.
+//
+// Two facts about SQLite dictate this shape, and both were measured rather
+// than assumed:
+//
+//  1. auto_vacuum can only be moved off `none` before the header is written.
+//     Setting journal_mode=WAL writes it — so a pragma issued after the main
+//     pool is open is silently ignored, whatever order the statements appear
+//     in. Hence a separate connection that runs first.
+//  2. Between `full` and `incremental` the pragma applies immediately, to a
+//     populated database, at any time. So carrying it in the shared DSN — where
+//     it reaches every connection — silently converts a database somebody had
+//     deliberately put in full auto-vacuum, on nothing more than an upgrade.
+//     The reclaim mode is a setting with a switch of its own; nothing gets to
+//     change it behind the admin's back.
+//
+// An error here is not fatal: the mode is a performance property, and a server
+// that cannot start because it failed to set one is worse than a server whose
+// database has to be compacted by hand later.
+func seedNewDatabase(path string) error {
+	if path == "" || path == ":memory:" {
+		return nil
+	}
+	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+		return nil // an existing database keeps whatever mode it has
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	v := url.Values{}
+	v.Add("_pragma", "auto_vacuum(INCREMENTAL)")
+	v.Add("_pragma", "busy_timeout(5000)")
+	seed, err := sql.Open(DriverName, "file:"+path+"?"+v.Encode())
+	if err != nil {
+		return fmt.Errorf("open a new database to set its reclaim mode: %w", err)
+	}
+	defer seed.Close()
+	seed.SetMaxOpenConns(1)
+	// Setting the journal mode is what forces the header — and with it the
+	// reclaim mode — to disk while the database is still empty.
+	if _, err := seed.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		return fmt.Errorf("initialise %s: %w", path, err)
+	}
+	return nil
 }
 
 // HasTables reports whether the SQLite database at path contains ALL of
@@ -1402,24 +1459,7 @@ func buildDSN(path string) (string, error) {
 	v.Add("_pragma", "journal_mode(WAL)")
 	v.Add("_pragma", "foreign_keys(ON)")
 	v.Add("_pragma", "busy_timeout(5000)")
-	// Incremental auto-vacuum, so a database created by this build can return
-	// its own free space without being rebuilt.
-	//
-	// Only a brand-new file takes it: SQLite silently ignores the pragma on a
-	// database that already has tables, so every existing install stays in
-	// whatever mode it is in and an upgrade changes nothing. Switching a
-	// populated database is an explicit, admin-initiated compaction.
-	//
-	// Measured cost on an indexing-shaped workload (120k wide rows inserted in
-	// batched transactions, then a bulk delete): +1.5% on insert, no
-	// difference on delete, identical file size. The pointer-map pages this
-	// maintains are what make incremental reclaim possible at all.
-	//
-	// Note this applies to EVERY connection, and a connection carries the
-	// pending mode into any VACUUM INTO it runs — which is why the compactor
-	// opens its own pool without this pragma and sets the mode explicitly. See
-	// dbmaint.copyInto.
-	v.Add("_pragma", "auto_vacuum(INCREMENTAL)")
+	// auto_vacuum is deliberately NOT set here — see setInitialAutoVacuum.
 
 	if path == ":memory:" {
 		return ":memory:?" + v.Encode(), nil

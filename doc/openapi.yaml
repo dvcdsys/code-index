@@ -4451,9 +4451,13 @@ components:
         freed_bytes: { type: integer, format: int64, nullable: true }
         auto_vacuum:
           type: string
-          enum: [none, incremental]
+          enum: [none, incremental, full]
           nullable: true
-          description: The reclaim mode this run leaves the database in.
+          description: |
+            The reclaim mode this run leaves the database in. `full` never
+            appears on a request — it cannot be set through this API — but a
+            compaction of a database already in that mode preserves it, and
+            says so here.
         message:
           type: string
           nullable: true
