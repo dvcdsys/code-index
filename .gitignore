@@ -61,6 +61,9 @@ mac/dist/
 # Marketing site (site/) build artifacts
 site/node_modules/
 site/dist/
+# `wrangler pages dev site/dist` — used to reproduce Cloudflare Pages' header
+# and not-found behaviour locally — drops its state here.
+.wrangler/
 # Dashboard build output — produced by `make dashboard-build`.
 # A committed `.gitkeep` keeps dist/ non-empty so `//go:embed all:dist` works
 # on a fresh clone (the embed.FS needs at least one entry). The real
