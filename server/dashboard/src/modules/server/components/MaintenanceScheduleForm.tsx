@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ApiError } from '@/api/client';
 import type { DatabaseState, MaintenanceScheduleUpdate } from '@/api/types';
 import { formatBytes } from '@/lib/formatBytes';
+import { formatDateTime } from '@/lib/formatDate';
 import { toast } from 'sonner';
 import { Callout } from '@/ui/alert';
 import { Button, Dots } from '@/ui/button';
@@ -17,13 +18,11 @@ interface Props {
   mode: Mode;
 }
 
+// The shared formatter renders an absent date as an em dash. Here the absence
+// is the interesting part — an upgraded server has no history at all — so it
+// gets words instead.
 function formatWhen(iso: string | null | undefined): string {
-  // "never run" and "run at the epoch" have to look different. An upgraded
-  // server has no history at all, and a zeroed date reads as a bug.
-  if (!iso) return 'never run';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return 'never run';
-  return d.toLocaleString();
+  return iso ? formatDateTime(iso) : 'never run';
 }
 
 export function MaintenanceScheduleForm({ disabled, mode }: Props) {

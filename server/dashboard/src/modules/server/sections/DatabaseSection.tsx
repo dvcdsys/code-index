@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ApiError } from '@/api/client';
+import { isActivePhase } from '@/api/types';
 import { formatBytes } from '@/lib/formatBytes';
 import { toast } from 'sonner';
 import { Callout } from '@/ui/alert';
@@ -35,8 +36,7 @@ export function DatabaseSection() {
 
   const db = state.data;
   const op = db?.operation ?? null;
-  const running =
-    !!op && !['idle', 'done', 'failed', 'interrupted'].includes(op.phase ?? 'idle');
+  const running = isActivePhase(op?.phase);
   const busy =
     running || compact.isPending || reclaim.isPending || checkpoint.isPending || setMode.isPending;
 
@@ -131,10 +131,7 @@ export function DatabaseSection() {
                   title: `${db.freelist_pages} free pages of ${db.page_count}`,
                 },
                 { label: 'Write-ahead log', value: formatBytes(db.wal_bytes, { zero: '0 B' }) },
-                {
-                  label: 'Reclaim mode',
-                  value: db.auto_vacuum === 'incremental' ? 'incremental' : db.auto_vacuum,
-                },
+                { label: 'Reclaim mode', value: db.auto_vacuum },
               ]}
             />
 

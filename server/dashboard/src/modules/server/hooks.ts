@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
+import { isActivePhase } from '@/api/types';
 import type {
   ActiveEmbeddingProvider,
   CheckpointResult,
@@ -199,11 +200,7 @@ export function useDatabaseState() {
     // changes when something is done to it.
     refetchInterval: (q) => {
       const data = q.state.data as DatabaseState | undefined;
-      const phase = data?.operation?.phase;
-      if (phase && phase !== 'idle' && phase !== 'done' && phase !== 'failed' && phase !== 'interrupted') {
-        return 2_000;
-      }
-      return false;
+      return isActivePhase(data?.operation?.phase) ? 2_000 : false;
     },
     refetchIntervalInBackground: false,
   });

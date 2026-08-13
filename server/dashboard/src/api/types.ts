@@ -114,3 +114,21 @@ export type ReclaimResult = components['schemas']['ReclaimResult'];
 export type CheckpointResult = components['schemas']['CheckpointResult'];
 export type MaintenanceSchedule = components['schemas']['MaintenanceSchedule'];
 export type MaintenanceScheduleUpdate = components['schemas']['MaintenanceScheduleUpdate'];
+
+// Phases in which something is actually happening to the database, as opposed
+// to the terminal ones that only report what happened.
+//
+// One definition, because three components need the answer — the banner, the
+// polling interval and the disabled state of the controls — and three copies
+// had already started to disagree about which phases count.
+const ACTIVE_PHASES: ReadonlySet<string> = new Set([
+  'preparing',
+  'copying',
+  'ready_to_swap',
+  'swapping',
+  'restarting',
+]);
+
+export function isActivePhase(phase: string | null | undefined): boolean {
+  return !!phase && ACTIVE_PHASES.has(phase);
+}
