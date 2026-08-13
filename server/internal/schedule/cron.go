@@ -8,6 +8,12 @@
 // handler called in-process when the time comes. A task that wants durable,
 // retryable work enqueues it into `jobs`; that is the seam between the two.
 //
+// One recurring job is still outside it: internal/versioncheck keeps its own
+// ticker. Its period is CIX_VERSION_CHECK_INTERVAL, a released, duration-valued
+// variable, and a duration does not survive the trip through crontab — 6h maps
+// cleanly, 7h does not exist. Moving it means either breaking that variable or
+// carrying both forms, which is a decision of its own rather than a tidy-up.
+//
 // Database compaction is the reason it cannot simply live in the job queue:
 // compaction drains that queue as part of taking the server read-only, so a
 // trigger inside it would be draining itself.

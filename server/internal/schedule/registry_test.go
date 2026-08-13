@@ -588,3 +588,93 @@ func TestRegistry_DefaultEnabledIsAskedEachTime(t *testing.T) {
 		t.Error("the default was captured at registration; it must be asked each time")
 	}
 }
+
+// A task switched off between the loop's read and its write must not get one
+// more run out of it. Sub-millisecond window, but a run of the compaction task
+// is a frozen server and a restart.
+func TestRegistry_DoesNotFireATaskDisabledUnderIt(t *testing.T) {
+	r, sdb, clock := fixture(t)
+	rec := &recorder{clock: clock}
+	r.Register(daily(rec, false), nil)
+	ctx := context.Background()
+
+	if err := r.considerOne(ctx, "test.daily"); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+	// What Save writes when an admin turns it off.
+	if _, err := sdb.Exec(
+		`UPDATE scheduled_tasks SET configured = 1, enabled = 0 WHERE name = 'test.daily'`); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	claimed, err := r.claim(ctx, "test.daily", "0 0 * * *",
+		clock.Now(), clock.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimed {
+		t.Error("the slot was claimed for a task that had just been switched off")
+	}
+	var status sql.NullString
+	if err := sdb.QueryRow(
+		`SELECT last_status FROM scheduled_tasks WHERE name = 'test.daily'`).Scan(&status); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if status.String == "running" {
+		t.Error("the row was marked running for a run that must not happen")
+	}
+}
+
+// The loop sleeps until the earliest armed run rather than polling.
+func TestRegistry_SleepsUntilTheNextRunRatherThanPolling(t *testing.T) {
+	r, _, clock := fixture(t)
+	rec := &recorder{clock: clock}
+	r.Register(daily(rec, false), nil)
+	ctx := context.Background()
+
+	if err := r.considerOne(ctx, "test.daily"); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+	// Armed for midnight, twelve hours out: the wait is the cap, not a tick.
+	if d := r.untilNext(ctx); d != maxSleep {
+		t.Errorf("sleep = %s, want the %s cap", d, maxSleep)
+	}
+
+	// Five minutes before the slot, it waits exactly that long.
+	clock.set(time.Date(2026, 8, 13, 23, 58, 0, 0, time.Local))
+	if d := r.untilNext(ctx); d != 2*time.Minute {
+		t.Errorf("sleep = %s, want 2m — the wait tracks the armed time", d)
+	}
+}
+
+// Saving nudges the loop, so a new expression takes effect now rather than
+// after the sleep that was armed for the old one.
+func TestRegistry_SaveWakesTheLoop(t *testing.T) {
+	r, _, _ := fixture(t)
+	rec := &recorder{clock: &fakeClock{}}
+	r.Register(daily(rec, false), nil)
+
+	if _, err := r.Save(context.Background(), "test.daily", strptr("0 4 * * *"), nil, ""); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	select {
+	case <-r.wake:
+	default:
+		t.Error("saving a schedule did not wake the loop; the change waits out the current sleep")
+	}
+}
+
+// Who changed a schedule is read back, not merely stored.
+func TestRegistry_ReportsWhoChangedTheSchedule(t *testing.T) {
+	r, _, _ := fixture(t)
+	rec := &recorder{clock: &fakeClock{}}
+	r.Register(daily(rec, false), nil)
+
+	got, err := r.Save(context.Background(), "test.daily", strptr("0 4 * * *"), nil, "admin@example.test")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if got.UpdatedBy != "admin@example.test" {
+		t.Errorf("updated_by = %q, want the saving admin", got.UpdatedBy)
+	}
+}

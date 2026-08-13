@@ -28,6 +28,7 @@ type taskRow struct {
 	lastStatus string
 	lastError  string
 	lastMillis int64
+	updatedBy  string
 }
 
 func (r *Registry) load(ctx context.Context, name string) (taskRow, error) {
@@ -38,13 +39,14 @@ func (r *Registry) load(ctx context.Context, name string) (taskRow, error) {
 		cronUsed, status, errText sql.NullString
 		nextRun, lastRun          sql.NullString
 		millis                    sql.NullInt64
-		cron                      sql.NullString
+		cron, updatedBy           sql.NullString
 	)
 	err := r.db.QueryRowContext(ctx, `
 		SELECT configured, cron, enabled, cron_used, next_run_at, last_run_at,
-		       last_status, last_error, last_millis
+		       last_status, last_error, last_millis, updated_by
 		  FROM scheduled_tasks WHERE name = ?`, name).
-		Scan(&configured, &cron, &enabled, &cronUsed, &nextRun, &lastRun, &status, &errText, &millis)
+		Scan(&configured, &cron, &enabled, &cronUsed, &nextRun, &lastRun, &status, &errText,
+			&millis, &updatedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return taskRow{}, nil
 	}
@@ -62,7 +64,53 @@ func (r *Registry) load(ctx context.Context, name string) (taskRow, error) {
 	row.lastStatus = status.String
 	row.lastError = errText.String
 	row.lastMillis = millis.Int64
+	row.updatedBy = updatedBy.String
 	return row, nil
+}
+
+// loadAll reads every row in one query.
+//
+// The loop and the API both want the whole table; asking for it a row at a
+// time was an N+1 that grew with the number of registered tasks, for a table
+// that will always fit in a page.
+func (r *Registry) loadAll(ctx context.Context) (map[string]taskRow, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT name, configured, cron, enabled, cron_used, next_run_at, last_run_at,
+		       last_status, last_error, last_millis, updated_by
+		  FROM scheduled_tasks`)
+	if err != nil {
+		return nil, fmt.Errorf("select scheduled_tasks: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]taskRow{}
+	for rows.Next() {
+		var (
+			name                            string
+			configured                      int64
+			enabled, millis                 sql.NullInt64
+			cron, cronUsed, status, errText sql.NullString
+			nextRun, lastRun, updatedBy     sql.NullString
+		)
+		if err := rows.Scan(&name, &configured, &cron, &enabled, &cronUsed, &nextRun,
+			&lastRun, &status, &errText, &millis, &updatedBy); err != nil {
+			return nil, fmt.Errorf("scan scheduled_tasks: %w", err)
+		}
+		out[name] = taskRow{
+			found:      true,
+			configured: configured != 0,
+			cron:       cron.String,
+			enabled:    enabled.Int64 != 0,
+			cronUsed:   cronUsed.String,
+			nextRunAt:  parseTime(nextRun),
+			lastRunAt:  parseTime(lastRun),
+			lastStatus: status.String,
+			lastError:  errText.String,
+			lastMillis: millis.Int64,
+			updatedBy:  updatedBy.String,
+		}
+	}
+	return out, rows.Err()
 }
 
 // arm records when a task is next due, without claiming a run.
@@ -78,7 +126,8 @@ func (r *Registry) arm(ctx context.Context, name, cron string, next time.Time) e
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			cron_used   = excluded.cron_used,
-			next_run_at = excluded.next_run_at`,
+			next_run_at = excluded.next_run_at,
+			updated_at  = excluded.updated_at`,
 		name, cron, formatTime(next), formatTime(r.now()))
 	if err != nil {
 		return fmt.Errorf("arm scheduled task %q: %w", name, err)
@@ -88,8 +137,15 @@ func (r *Registry) arm(ctx context.Context, name, cron string, next time.Time) e
 
 // claim marks the slot as taken and moves the schedule on, before the handler
 // runs. See the call site for why the ordering is load-bearing.
-func (r *Registry) claim(ctx context.Context, name, cron string, at, next time.Time) error {
-	_, err := r.db.ExecContext(ctx, `
+//
+// It reports whether the slot was actually taken. The WHERE clause is what
+// makes that answer meaningful: an admin who switched the task off between the
+// loop's read and this write would otherwise get one more run out of it. The
+// window is sub-millisecond, but a run of `db.compact` is a frozen server and a
+// restart, and "we had already decided" is not a good answer to "I turned it
+// off".
+func (r *Registry) claim(ctx context.Context, name, cron string, at, next time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO scheduled_tasks (name, cron_used, next_run_at, last_run_at, last_status, updated_at)
 		VALUES (?, ?, ?, ?, 'running', ?)
 		ON CONFLICT(name) DO UPDATE SET
@@ -97,12 +153,18 @@ func (r *Registry) claim(ctx context.Context, name, cron string, at, next time.T
 			next_run_at = excluded.next_run_at,
 			last_run_at = excluded.last_run_at,
 			last_status = 'running',
-			last_error  = NULL`,
+			last_error  = NULL,
+			updated_at  = excluded.updated_at
+		WHERE scheduled_tasks.configured = 0 OR scheduled_tasks.enabled = 1`,
 		name, cron, formatTime(next), formatTime(at), formatTime(r.now()))
 	if err != nil {
-		return fmt.Errorf("claim the slot for %q: %w", name, err)
+		return false, fmt.Errorf("claim the slot for %q: %w", name, err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim the slot for %q: %w", name, err)
+	}
+	return n > 0, nil
 }
 
 // clearStaleRuns marks runs left in flight by a previous process. The status

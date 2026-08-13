@@ -111,6 +111,13 @@ export function ScheduleRow({ task, disabled }: Props) {
   );
 }
 
+// Milliseconds are the wire unit; nobody reads a schedule in milliseconds.
+function formatDuration(ms: number): string {
+  if (ms < 1_000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`;
+  return `${Math.round(ms / 60_000)} min`;
+}
+
 // The preview comes from the server, computed by the parser that will actually
 // fire the task. Evaluating the expression here would be a second cron
 // implementation whose only job is to disagree with the first one.
@@ -118,6 +125,12 @@ function NextRuns({ task }: { task: ScheduledTask }) {
   const runs = task.next_runs ?? [];
   return (
     <span className="cix-hint pl-[100px]">
+      {task.running ? (
+        <>
+          <span className="cix-dot is-busy mr-1.5" aria-hidden />
+          Running now ·{' '}
+        </>
+      ) : null}
       {runs.length > 0 ? (
         <>
           Next: {runs.map((r) => formatDateTime(r)).join(' · ')}
@@ -128,9 +141,12 @@ function NextRuns({ task }: { task: ScheduledTask }) {
       {task.last_run_at ? (
         <>
           {' · '}last ran {formatDateTime(task.last_run_at)}
+          {task.last_millis ? ` in ${formatDuration(task.last_millis)}` : null}
           {task.last_status === 'failed' ? ` — failed: ${task.last_error ?? 'see the log'}` : null}
+          {task.last_status === 'interrupted' ? ' — interrupted' : null}
         </>
       ) : null}
+      {task.updated_by ? <>{' · '}set by {task.updated_by}</> : null}
       {!task.catch_up ? ' · a run missed while the server is down is skipped, not run late.' : null}
     </span>
   );

@@ -4539,10 +4539,19 @@ components:
         last_run_at: { type: string, format: date-time, nullable: true }
         last_status:
           type: string
-          enum: [running, ok, failed]
+          enum: [running, ok, failed, interrupted]
+          description: |
+            `interrupted` is a run the server did not survive — the status is
+            written before the handler and cleared after it, so anything still
+            marked running at startup belongs to a process that did not return.
         last_error: { type: string }
         last_millis: { type: integer, format: int64 }
-        running: { type: boolean }
+        updated_by:
+          type: string
+          description: Who last saved this schedule. Absent while it is still on a default.
+        running:
+          type: boolean
+          description: True while the task's handler is executing.
 
     ScheduleUpdate:
       type: object

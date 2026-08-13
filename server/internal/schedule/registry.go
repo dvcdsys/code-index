@@ -11,9 +11,19 @@ import (
 	"time"
 )
 
-// tick is how often the clock is consulted. Cron resolves to the minute, so
-// this only has to be fast enough that a run lands inside its own minute.
-const tick = 30 * time.Second
+// maxSleep bounds how long the loop will wait between passes, and grace bounds
+// how late a slot may fire and still count as that slot.
+//
+// The loop sleeps until the earliest next_run_at rather than polling: a server
+// with two daily tasks has no reason to wake 2 880 times a day to be told it is
+// not time yet. The cap exists because this runs on laptops — a suspended host
+// does not advance Go's monotonic clock, so a timer armed for eight hours can
+// come back arbitrarily late — and grace is larger than the cap so that ordinary
+// lateness never looks like a missed slot to a task that refuses to catch up.
+const (
+	maxSleep = 5 * time.Minute
+	grace    = 10 * time.Minute
+)
 
 // Handler is the work a task does. The context is cancelled on shutdown.
 type Handler func(ctx context.Context) error
@@ -68,7 +78,10 @@ type State struct {
 	LastStatus  string      `json:"last_status,omitempty"`
 	LastError   string      `json:"last_error,omitempty"`
 	LastMillis  int64       `json:"last_millis,omitempty"`
-	Running     bool        `json:"running"`
+	// UpdatedBy is who last saved this schedule. Surfaced rather than merely
+	// stored: a column nothing ever reads is a column nobody can trust.
+	UpdatedBy string `json:"updated_by,omitempty"`
+	Running   bool   `json:"running"`
 }
 
 // Registry owns the clock for every recurring task in the server.
@@ -88,6 +101,10 @@ type Registry struct {
 	// that asks background writers to stop is entitled to assume they have,
 	// and the compactor's quiesce is exactly that caller.
 	handlers sync.WaitGroup
+
+	// wake re-arms the loop when a schedule changes, so a saved expression
+	// takes effect now rather than after the current sleep.
+	wake chan struct{}
 
 	stopped chan struct{}
 	once    sync.Once
@@ -109,6 +126,7 @@ func New(sdb *sql.DB, logger *slog.Logger) *Registry {
 		now:     time.Now,
 		tasks:   map[string]*entry{},
 		running: map[string]bool{},
+		wake:    make(chan struct{}, 1),
 		stopped: make(chan struct{}),
 	}
 }
@@ -159,20 +177,53 @@ func (r *Registry) Run(ctx context.Context) {
 		r.logger.Warn("could not clear interrupted scheduled runs", "err", err)
 	}
 
-	// A pass on start, so a task whose slot passed while the process was down
-	// is dealt with — caught up or stepped over — rather than waiting out a
-	// whole tick first.
-	r.runDue(ctx)
-
-	t := time.NewTicker(tick)
-	defer t.Stop()
 	for {
+		// A pass immediately, so a task whose slot passed while the process was
+		// down is dealt with — caught up or stepped over — rather than waiting.
+		r.runDue(ctx)
+
+		timer := time.NewTimer(r.untilNext(ctx))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-t.C:
-			r.runDue(ctx)
+		case <-timer.C:
+		case <-r.wake:
+			// A schedule changed under us; re-arm against the new time rather
+			// than sleeping out the old one.
+			timer.Stop()
 		}
+	}
+}
+
+// untilNext is how long to sleep before the next pass: the earliest armed run,
+// clamped. A task with no armed time yet resolves on the next pass anyway, so
+// the clamp is also what gets a freshly registered task off the ground.
+func (r *Registry) untilNext(ctx context.Context) time.Duration {
+	rows, err := r.loadAll(ctx)
+	if err != nil {
+		r.logger.Warn("could not read the task schedule; retrying shortly", "err", err)
+		return time.Minute
+	}
+	now := r.now()
+	sleep := maxSleep
+	for _, row := range rows {
+		if row.nextRunAt == nil {
+			continue
+		}
+		if d := row.nextRunAt.Sub(now); d < sleep {
+			sleep = d
+		}
+	}
+	return max(sleep, time.Second)
+}
+
+// nudge asks the loop to re-arm. Non-blocking: a wake already pending is as
+// good as another.
+func (r *Registry) nudge() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
 	}
 }
 
@@ -263,7 +314,7 @@ func (r *Registry) considerOne(ctx context.Context, name string) error {
 
 	// The slot has arrived, or passed while nobody was watching.
 	late := now.Sub(*next)
-	if !e.task.CatchUp && late > tick*2 {
+	if !e.task.CatchUp && late > grace {
 		// Crontab semantics: a slot missed is a slot lost. Step over it rather
 		// than firing hours later, which for anything that freezes the server
 		// would be a read-only window nobody asked for.
@@ -286,8 +337,13 @@ func (r *Registry) considerOne(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := r.claim(ctx, name, cron, now, upcoming); err != nil {
+	claimed, err := r.claim(ctx, name, cron, now, upcoming)
+	if err != nil {
 		return err
+	}
+	if !claimed {
+		// Switched off between the read and the write.
+		return nil
 	}
 
 	r.mu.Lock()
@@ -339,6 +395,10 @@ func (r *Registry) invoke(ctx context.Context, name string, t Task) {
 
 // List reports every registered task as it currently resolves.
 func (r *Registry) List(ctx context.Context) ([]State, error) {
+	rows, err := r.loadAll(ctx)
+	if err != nil {
+		return nil, err
+	}
 	r.mu.Lock()
 	names := append([]string(nil), r.order...)
 	entries := make(map[string]*entry, len(r.tasks))
@@ -349,37 +409,44 @@ func (r *Registry) List(ctx context.Context) ([]State, error) {
 
 	out := make([]State, 0, len(names))
 	for _, name := range names {
-		e := entries[name]
-		row, err := r.load(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-		cron, enabled, configured := r.resolve(e, row)
-		st := State{
-			Name:        e.task.Name,
-			Title:       e.task.Title,
-			Description: e.task.Description,
-			Cron:        cron,
-			Enabled:     enabled,
-			Configured:  configured,
-			CatchUp:     e.task.CatchUp,
-			LastRunAt:   row.lastRunAt,
-			LastStatus:  row.lastStatus,
-			LastError:   row.lastError,
-			LastMillis:  row.lastMillis,
-			Running:     busy[name],
-		}
-		if enabled {
-			if runs, err := NextRuns(cron, r.now(), 3); err == nil {
-				st.NextRuns = runs
-			}
-		}
-		if st.NextRuns == nil {
-			st.NextRuns = []time.Time{}
-		}
-		out = append(out, st)
+		out = append(out, r.stateOf(entries[name], rows[name], busy[name]))
 	}
 	return out, nil
+}
+
+// stateOf renders one task for the API.
+func (r *Registry) stateOf(e *entry, row taskRow, busy bool) State {
+	cron, enabled, configured := r.resolve(e, row)
+	st := State{
+		Name:        e.task.Name,
+		Title:       e.task.Title,
+		Description: e.task.Description,
+		Cron:        cron,
+		Enabled:     enabled,
+		Configured:  configured,
+		CatchUp:     e.task.CatchUp,
+		NextRuns:    []time.Time{},
+		LastRunAt:   row.lastRunAt,
+		LastStatus:  row.lastStatus,
+		LastError:   row.lastError,
+		LastMillis:  row.lastMillis,
+		UpdatedBy:   row.updatedBy,
+		Running:     busy,
+	}
+	if enabled {
+		runs, err := NextRuns(cron, r.now(), 3)
+		if err != nil {
+			// An expression that resolves but cannot be projected is worth
+			// saying out loud: the dashboard would otherwise render an empty
+			// preview that reads the same as "not due for a while".
+			r.logger.Warn("could not project the next runs for a scheduled task",
+				"task", e.task.Name, "cron", cron, "err", err)
+			st.LastError = st.LastError + " (this schedule has no upcoming run)"
+		} else {
+			st.NextRuns = runs
+		}
+	}
+	return st
 }
 
 // Save applies an admin's change to one task.
@@ -424,16 +491,17 @@ func (r *Registry) Save(ctx context.Context, name string, cron *string, enabled 
 		return State{}, err
 	}
 
-	all, err := r.List(ctx)
+	// The loop may be asleep until a slot that is no longer the next one.
+	r.nudge()
+
+	saved, err := r.load(ctx, name)
 	if err != nil {
 		return State{}, err
 	}
-	for _, s := range all {
-		if s.Name == name {
-			return s, nil
-		}
-	}
-	return State{}, fmt.Errorf("%w: %q", ErrUnknownTask, name)
+	r.mu.Lock()
+	busy := r.running[name]
+	r.mu.Unlock()
+	return r.stateOf(e, saved, busy), nil
 }
 
 // resolve applies the precedence: a saved row beats the environment, which

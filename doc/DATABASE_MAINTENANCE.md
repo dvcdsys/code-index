@@ -192,9 +192,22 @@ schedule saved in the dashboard overrides the environment.
 ### The scheduler underneath
 
 `internal/schedule` is a general registry, not a database feature: a table of
-named tasks, one goroutine watching the clock, and a handler called in-process
-when a task is due. Polling, cleanup and update checks can hang off the same
+named tasks, one timer armed at the earliest of them, and a handler called
+in-process when a task is due. Polling and cleanup can hang off the same
 machinery.
+
+It sleeps until the next armed run rather than polling — a server with two
+daily tasks has no reason to wake every thirty seconds to be told it is not
+time yet — with the wait capped at five minutes, because a suspended laptop
+does not advance the monotonic clock and a timer armed for eight hours can come
+back arbitrarily late.
+
+The one recurring job still outside it is the update check, which keeps its own
+ticker: its period is `CIX_VERSION_CHECK_INTERVAL`, a released duration-valued
+variable, and a duration does not survive the trip through crontab — `6h` maps
+cleanly, `7h` does not exist at all. Moving it means either breaking that
+variable or carrying both forms, which is a decision of its own rather than a
+tidy-up.
 
 It is deliberately **not** a job queue. The server already has one — the `jobs`
 table, with retries, dedupe and a worker — and a second persistence model beside

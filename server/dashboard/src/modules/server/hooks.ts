@@ -205,7 +205,13 @@ export function useDatabaseState() {
     // Observed live — the sibling queries came back on their own intervals
     // while this card sat on "Failed to fetch" until the page was reloaded.
     refetchInterval: (q) => {
-      if (q.state.status === 'error') return 3_000;
+      if (q.state.status === 'error') {
+        // Back off. A tab left open against a server that is not coming back
+        // would otherwise knock on its door every three seconds until the
+        // laptop lid closes.
+        const tries = q.state.fetchFailureCount;
+        return Math.min(3_000 * 2 ** Math.max(0, tries - 1), 60_000);
+      }
       const data = q.state.data as DatabaseState | undefined;
       return isActivePhase(data?.operation?.phase) ? 2_000 : false;
     },
