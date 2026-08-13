@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/db"
+	"github.com/dvcdsys/code-index/server/internal/dbmaint"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/users"
 )
@@ -32,6 +34,15 @@ func runResetPassword(email string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	// Settle any interrupted compaction first. Without this, a database
+	// caught mid-swap is either missing (the stat below would report "not
+	// found" at a path that is perfectly correct) or is the pre-compaction
+	// original that the next server start would replace — so the reset would
+	// land in a file about to be discarded.
+	if err := dbmaint.Reconcile(context.Background(), cfg.SQLitePath, slog.Default()); err != nil {
+		return fmt.Errorf("reconcile database maintenance state: %w", err)
 	}
 
 	// Opening a missing path would CREATE an empty DB and "successfully"

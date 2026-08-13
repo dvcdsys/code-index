@@ -200,7 +200,6 @@ func TestListWorkspaceProjects_ServiceMissing(t *testing.T) {
 	}
 }
 
-
 // TestLink_Duplicate confirms the workspace_projects PRIMARY KEY
 // catches a re-link as 409. Same project, same workspace, twice.
 func TestLink_Duplicate(t *testing.T) {

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Sidebar } from './Sidebar';
 import { StatusBar } from './StatusBar';
+import { MaintenanceBanner } from './MaintenanceBanner';
 import { UpdateBanner } from './UpdateBanner';
 
 // The app is a column: [banner] [sidebar | main] [status bar].
@@ -15,6 +16,7 @@ import { UpdateBanner } from './UpdateBanner';
 export function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="cix-app">
+      <MaintenanceBanner />
       <UpdateBanner />
       <div className="cix-body">
         <Sidebar />

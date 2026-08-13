@@ -57,3 +57,18 @@ type fsStats struct {
 	TotalBytes int64
 	FreeBytes  int64
 }
+
+// DiskFree reports free and total bytes on the volume holding path, and
+// whether the platform could answer at all.
+//
+// Exported for internal/dbmaint: compaction writes a full second copy of the
+// database beside the original, so it has to refuse to start when the volume
+// cannot hold both. Rather than add a fourth build-tagged file there, it
+// borrows the three that already exist here.
+func DiskFree(path string) (free, total int64, ok bool) {
+	st, ok := diskStats(path)
+	if !ok {
+		return 0, 0, false
+	}
+	return st.FreeBytes, st.TotalBytes, true
+}

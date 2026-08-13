@@ -85,7 +85,7 @@ func AdoptLegacyModelDB(target, legacy string, logger *slog.Logger) error {
 
 	logger.Info("storage: adopting legacy per-model DB as the model-independent system DB",
 		"legacy", legacy, "target", target)
-	if err := checkpointWAL(legacy); err != nil {
+	if err := CheckpointWAL(legacy); err != nil {
 		return fmt.Errorf("checkpoint legacy db %s: %w", legacy, err)
 	}
 	if err := os.Rename(legacy, target); err != nil {
@@ -98,10 +98,14 @@ func AdoptLegacyModelDB(target, legacy string, logger *slog.Logger) error {
 	return nil
 }
 
-// checkpointWAL opens path with a single connection, drains its WAL into
+// CheckpointWAL opens path with a single connection, drains its WAL into
 // the main database file via wal_checkpoint(TRUNCATE), and closes. After
 // this the main .db file is self-contained and safe to rename.
-func checkpointWAL(path string) error {
+//
+// Exported for internal/dbmaint, whose boot-time swap has the same
+// requirement and the same trap behind it: a database renamed away from its
+// -wal leaves the log shadowing whatever file later takes its name.
+func CheckpointWAL(path string) error {
 	// WAL + busy_timeout via the DSN; single connection so the checkpoint
 	// is not racing a sibling connection.
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"

@@ -23,6 +23,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
+	"github.com/dvcdsys/code-index/server/internal/schedule"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
@@ -80,6 +81,10 @@ type Deps struct {
 	// vectorstore.Interface so production can supply a *vectorstore.Holder
 	// (swappable on provider switch) while tests pass a raw *Store.
 	VectorStore vectorstore.Interface
+	// Schedules is the registry of recurring tasks. Nil-safe: the admin
+	// endpoints answer 503 without one, which is what a router-only test gets.
+	Schedules *schedule.Registry
+
 	// Indexer drives the three-phase index protocol (Phase 5). Nil-safe: the
 	// indexing endpoints return 503 when absent.
 	Indexer *indexer.Service
@@ -121,6 +126,11 @@ type Deps struct {
 	// project-detail card ended up reporting no vector-store size at all.
 	// Nil in router-only tests; the resource handlers then 503.
 	Cfg *config.Config
+	// DBMaint carries the hooks database compaction needs to reach the rest
+	// of the process. Zero value disables compaction while leaving the
+	// reporting and reclaim endpoints working, which is what router-only
+	// tests get.
+	DBMaint DBMaintHooks
 	// RepoLocks serialises file reads against the clone worker's worktree
 	// rewrite. Shared (same instance) with repojobs.Deps.RepoLocks. Nil-safe:
 	// NewRouter allocates a private registry when unset (tests).
@@ -182,7 +192,17 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(structuredLogger(d.Logger))
 	r.Use(limitBodySize())
 
-	srv := &Server{Deps: d, loginLimiter: newLoginLimiter(), maintenance: newMaintenanceService(d)}
+	srv := &Server{
+		Deps:         d,
+		loginLimiter: newLoginLimiter(),
+		maintenance:  newMaintenanceService(d),
+		dbmaint:      newDBMaintService(d),
+	}
+
+	// Write freeze — installed before auth on purpose: the GitHub webhook
+	// route is a write that isPublicPath exempts from authentication, and a
+	// gate inside requireAuth would never see it.
+	r.Use(maintenanceGate(d.DBMaint.Gate))
 
 	// Auth — the middleware is installed unless AuthDisabled is true. Every
 	// authenticated route accepts EITHER an active session cookie OR a

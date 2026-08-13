@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/access"
+	"github.com/dvcdsys/code-index/server/internal/dbmaint"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
@@ -43,6 +44,12 @@ type Server struct {
 	// NewRouter because it owns the analysis cache — the id returned by
 	// analyze has to still resolve when clean comes back holding it.
 	maintenance *maintenance.Service
+
+	// dbmaint backs the database compaction endpoints. Built once by
+	// NewRouter because it caches the copy throughput measured by the last
+	// compaction, which is what turns the duration estimate from a guess
+	// into a measurement.
+	dbmaint *dbmaint.Service
 }
 
 // Compile-time assertion that Server implements the generated interface.
@@ -54,6 +61,24 @@ var _ openapi.ServerInterface = (*Server)(nil)
 
 // GetHealth — GET /health (public).
 func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
+	// While the database is frozen for compaction, report healthy without
+	// touching it.
+	//
+	// This is not cosmetic. The probe below needs a connection from a pool of
+	// eight, and during a freeze it may not get one within its one-second
+	// budget — so the container healthcheck (30 s interval, 3 retries) would
+	// mark the server unhealthy and any restart policy would kill it in the
+	// middle of the compaction. The server is deliberately read-only here,
+	// not unwell, and the reason is carried in the payload so a caller that
+	// cares can tell the difference.
+	if s.Deps.DBMaint.Gate.Frozen() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "ok",
+			"maintenance": true,
+			"reason":      "the database is being compacted; reads are served, changes are refused",
+		})
+		return
+	}
 	if s.Deps.DB != nil {
 		pingCtx, cancel := context.WithTimeout(r.Context(), time.Second)
 		defer cancel()

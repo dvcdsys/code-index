@@ -473,6 +473,44 @@ CREATE TABLE IF NOT EXISTS tunnel_config (
     updated_at      TEXT    NOT NULL,
     updated_by      TEXT
 );
+
+-- scheduled_tasks is when each recurring task runs (migration 20). One row per
+-- task, keyed by the stable name its owner registers under.
+--
+-- The schedule is a crontab expression rather than an interval, because an
+-- interval is measured from the last run and therefore drifts: one manual run
+-- at 18:00 moves every subsequent nightly run to 18:00. cron is anchored to
+-- the clock, which is what an operator means by "every night at midnight".
+--
+-- next_run_at is derived, never authoritative — it is recomputed from cron and
+-- the current time whenever it is missing or was derived from a different
+-- expression (cron_used). That is what makes a missed slot impossible to
+-- lose: even an empty or nonsensical row re-arms itself on the next tick.
+--
+-- last_run_at is stamped *before* the handler runs, not after. One of these
+-- tasks re-executes the whole process as its final step, so a slot still
+-- marked due when the new process starts would fire it again, and again.
+--
+-- The configured column separates the two kinds of write this table takes. The
+-- scheduler itself writes only the derived columns — cron_used, next_run_at,
+-- and the outcome of the last run — and must never touch cron or enabled,
+-- because arming a task is not the same as somebody choosing to enable it.
+-- Only an admin saving a schedule sets configured, and only a configured row
+-- overrides the built-in default.
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    name         TEXT PRIMARY KEY,
+    configured   INTEGER NOT NULL DEFAULT 0,
+    cron         TEXT,
+    enabled      INTEGER,
+    cron_used    TEXT,
+    next_run_at  TEXT,
+    last_run_at  TEXT,
+    last_status  TEXT,
+    last_error   TEXT,
+    last_millis  INTEGER,
+    updated_at   TEXT NOT NULL,
+    updated_by   TEXT
+);
 `
 
 // ExpectedTables lists the tables the schema creates. Used by db_test and by
@@ -500,5 +538,6 @@ var ExpectedTables = []string{
 	"chunks_meta",
 	"chunks_fts",
 	"tunnel_config",
+	"scheduled_tasks",
 	"schema_migrations",
 }

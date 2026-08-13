@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dvcdsys/code-index/server/internal/schedule"
 )
 
 // Config holds all runtime settings. Port defaults to 21847 — the same
@@ -195,6 +197,17 @@ type Config struct {
 	// PollSchedulerTick is how often the shared poll scheduler scans for
 	// due repos. Source: CIX_POLL_SCHEDULER_TICK (default 30s).
 	PollSchedulerTick time.Duration
+
+	// Automatic database maintenance, CIX_DB_MAINTENANCE_*. All nil unless the
+	// variable is set. They exist for deployments driven by a compose file,
+	// where nobody is going to open the dashboard to switch anything on.
+	//
+	// DBMaintenanceCron is a crontab expression and supplies the default
+	// timing for the database tasks; a schedule saved in the dashboard still
+	// wins over it. The thresholds decide whether a due run is worth doing.
+	DBMaintenanceCron           *string
+	DBMaintenanceMinFreePercent *int
+	DBMaintenanceMinFreeBytes   *int64
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -466,6 +479,34 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.PollSchedulerTick = pollTick
+
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_CRON"); ok {
+		expr := strings.TrimSpace(v)
+		if err := schedule.Validate(expr); err != nil {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_CRON: %w", err)
+		}
+		c.DBMaintenanceCron = &expr
+	}
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_MIN_FREE_PERCENT"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_PERCENT: %w", err)
+		}
+		if n < 0 || n > 100 {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_PERCENT must be between 0 and 100, got %d", n)
+		}
+		c.DBMaintenanceMinFreePercent = &n
+	}
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_MIN_FREE_BYTES"); ok {
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_BYTES: %w", err)
+		}
+		if n < 0 {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_BYTES must not be negative, got %d", n)
+		}
+		c.DBMaintenanceMinFreeBytes = &n
+	}
 
 	return c, nil
 }
