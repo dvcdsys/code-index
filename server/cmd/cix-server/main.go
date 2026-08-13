@@ -690,13 +690,7 @@ func run() (restart bool, err error) {
 		Freeze:         dbGate.Freeze,
 		Thaw:           dbGate.Thaw,
 		RequestRestart: func() { restartOnce.Do(func() { close(restartCh) }) },
-		ActiveJobs: func(ctx context.Context) (int, error) {
-			var n int
-			err := database.QueryRowContext(ctx, `
-				SELECT COUNT(*) FROM jobs
-				WHERE status IN ('pending','running') AND type IN ('clone_repo','index_repo')`).Scan(&n)
-			return n, err
-		},
+		ActiveJobs:     dbmaint.ActiveWorkCounter(database, idx.ActiveSessions),
 		Env: dbmaint.ScheduleEnv{
 			Enabled:         cfg.DBMaintenanceEnabled,
 			Mode:            cfg.DBMaintenanceMode,
@@ -811,6 +805,20 @@ func run() (restart bool, err error) {
 	shutdownCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		if restart {
+			// A compacted copy is verified and journalled, and nothing brings
+			// this process back if it exits here — re-executing *is* the
+			// restart mechanism, there is no supervisor behind it. So one slow
+			// in-flight request outliving the drain budget must not be allowed
+			// to take the server down with the swap left undone. Force the
+			// listener closed instead, or the new image cannot bind.
+			logger.Error("graceful shutdown timed out; restarting anyway to adopt the compacted database",
+				"err", err)
+			if cerr := srv.Close(); cerr != nil {
+				logger.Warn("could not force the listener closed", "err", cerr)
+			}
+			return true, nil
+		}
 		return false, fmt.Errorf("graceful shutdown: %w", err)
 	}
 	logger.Info("server stopped")
