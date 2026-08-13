@@ -75,6 +75,7 @@ var registeredMigrations = []migration{
 	{18, "projects_full_sync_required", func(db *sql.DB, _ OpenOptions) error { return migrateProjectsFullSyncRequired(db) }},
 	{19, "maintenance_settings", func(db *sql.DB, _ OpenOptions) error { return migrateMaintenanceSettings(db) }},
 	{20, "scheduled_tasks", func(db *sql.DB, _ OpenOptions) error { return migrateScheduledTasks(db) }},
+	{21, "drop_maintenance_settings", func(db *sql.DB, _ OpenOptions) error { return migrateDropMaintenanceSettings(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -387,14 +388,23 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
 		return fmt.Errorf("create scheduled_tasks: %w", err)
 	}
 
-	// maintenance_settings goes with it. Migration 19 created it to hold the
-	// schedule plus two thresholds; the schedule moved here, and the thresholds
-	// turned out not to want a table — what an admin adjusts is *when* a task
-	// runs, while how much waste is worth acting on is a property of the
-	// deployment, so it is a built-in default with an environment override.
-	// Keeping the table would leave a row an admin could save and nothing would
-	// ever read. Migration 19 shipped in this same unreleased branch, so there
-	// is no deployment whose settings are being discarded.
+	return nil
+}
+
+// migrateDropMaintenanceSettings removes the table migration 19 created.
+//
+// It held the schedule plus two thresholds. The schedule moved to
+// scheduled_tasks in migration 20, and the thresholds turned out not to want a
+// table at all: what an admin adjusts is *when* a task runs, while how much
+// waste is worth acting on is a property of the deployment — a built-in default
+// with an environment override. Keeping it would leave a table an admin could
+// write to and nothing would ever read.
+//
+// A step of its own rather than a line inside migration 20, because 20 has
+// already run on the branch it shipped on and would never run again there.
+// Both migrations are unreleased, so nothing outside this branch is affected
+// either way.
+func migrateDropMaintenanceSettings(db *sql.DB) error {
 	if _, err := db.Exec(`DROP TABLE IF EXISTS maintenance_settings`); err != nil {
 		return fmt.Errorf("drop maintenance_settings: %w", err)
 	}
