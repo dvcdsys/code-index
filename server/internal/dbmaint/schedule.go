@@ -155,29 +155,7 @@ func ScheduleFor(ctx context.Context, sdb *sql.DB, env ScheduleEnv, mode AutoVac
 		FieldWindowEndHour: SourceRecommended,
 	}
 
-	if env.Enabled != nil {
-		out.Enabled, out.Source[FieldEnabled] = *env.Enabled, SourceEnv
-	}
-	if env.Mode != nil {
-		out.Mode, out.Source[FieldMode] = ScheduleMode(*env.Mode), SourceEnv
-	}
-	if env.IntervalHours != nil {
-		out.IntervalHours, out.Source[FieldIntervalHours] = *env.IntervalHours, SourceEnv
-	}
-	if env.MinFreePercent != nil {
-		out.MinFreePercent, out.Source[FieldMinFreePercent] = *env.MinFreePercent, SourceEnv
-	}
-	if env.MinFreeBytes != nil {
-		out.MinFreeBytes, out.Source[FieldMinFreeBytes] = *env.MinFreeBytes, SourceEnv
-	}
-	if env.WindowStartHour != nil {
-		v := *env.WindowStartHour
-		out.WindowStartHour, out.Source[FieldWindowStartHour] = &v, SourceEnv
-	}
-	if env.WindowEndHour != nil {
-		v := *env.WindowEndHour
-		out.WindowEndHour, out.Source[FieldWindowEndHour] = &v, SourceEnv
-	}
+	applyEnv(&out, env)
 
 	row, ok, err := loadScheduleRow(ctx, sdb)
 	if err != nil {
@@ -249,6 +227,62 @@ func applyJournalOutcome(s *Schedule, st State) {
 		// Still running: report no outcome rather than a stale one.
 		s.LastRunAt = nil
 	}
+}
+
+// applyEnv folds the CIX_DB_MAINTENANCE_* layer onto a schedule, recording
+// where each value it touched came from. A nil Source map is allowed, so the
+// startup check can reuse this without inventing one.
+func applyEnv(out *Schedule, env ScheduleEnv) {
+	from := func(field string) {
+		if out.Source != nil {
+			out.Source[field] = SourceEnv
+		}
+	}
+	if env.Enabled != nil {
+		out.Enabled = *env.Enabled
+		from(FieldEnabled)
+	}
+	if env.Mode != nil {
+		out.Mode = ScheduleMode(*env.Mode)
+		from(FieldMode)
+	}
+	if env.IntervalHours != nil {
+		out.IntervalHours = *env.IntervalHours
+		from(FieldIntervalHours)
+	}
+	if env.MinFreePercent != nil {
+		out.MinFreePercent = *env.MinFreePercent
+		from(FieldMinFreePercent)
+	}
+	if env.MinFreeBytes != nil {
+		out.MinFreeBytes = *env.MinFreeBytes
+		from(FieldMinFreeBytes)
+	}
+	if env.WindowStartHour != nil {
+		v := *env.WindowStartHour
+		out.WindowStartHour = &v
+		from(FieldWindowStartHour)
+	}
+	if env.WindowEndHour != nil {
+		v := *env.WindowEndHour
+		out.WindowEndHour = &v
+		from(FieldWindowEndHour)
+	}
+}
+
+// ValidateEnv checks the environment layer on its own, so a deployment
+// configured entirely by compose file learns at startup that its schedule is
+// unusable rather than discovering it by never running — or, worse, by running
+// at the wrong time.
+//
+// It is separate from the API's validation because the two are enforced
+// differently. A bad PUT is refused outright; a bad environment cannot be
+// refused (the server still has to start), so it is reported here and the
+// scheduler declines to act on it.
+func ValidateEnv(env ScheduleEnv) error {
+	s := recommendedSchedule(AutoVacuumIncremental)
+	applyEnv(&s, env)
+	return ValidateSchedule(s)
 }
 
 // ValidateSchedule rejects values that would produce a schedule that can

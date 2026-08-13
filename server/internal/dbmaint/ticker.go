@@ -2,6 +2,7 @@ package dbmaint
 
 import (
 	"context"
+	"errors"
 	"os"
 	"time"
 )
@@ -46,12 +47,32 @@ func (s *Service) StopScheduler(ctx context.Context) error {
 }
 
 func (s *Service) scheduleTickOnce(ctx context.Context) {
+	// A rebuild owns the process while it runs, including the journal. Ticking
+	// on top of one would at best waste work and at worst overwrite the record
+	// of an operation that is about to restart the server.
+	s.mu.Lock()
+	busy := s.running
+	s.mu.Unlock()
+	if busy {
+		return
+	}
+
 	sched, err := s.Schedule(ctx)
 	if err != nil {
 		s.d.Logger.Warn("could not read the maintenance schedule", "err", err)
 		return
 	}
 	if !sched.Enabled {
+		return
+	}
+	// An unusable schedule is refused rather than half-honoured. The env layer
+	// is not validated when it is read — it cannot be, config.Load has no
+	// database to merge it against — so this is where a compose file that sets
+	// a window start and forgets the end gets caught. Honouring it would drop
+	// the window entirely and freeze the server in the middle of the day.
+	if err := ValidateSchedule(sched); err != nil {
+		s.d.Logger.Warn("automatic database maintenance is configured but unusable; skipping",
+			"err", err, "fix", "correct the CIX_DB_MAINTENANCE_* variables or the schedule in the dashboard")
 		return
 	}
 	stats, err := s.Stats(ctx)
@@ -115,7 +136,28 @@ func (s *Service) runScheduledReclaim(ctx context.Context) {
 		s.d.Logger.Info("scheduled database reclaim complete",
 			"pages_freed", res.PagesFreed, "bytes_freed", res.BytesFreed)
 	}
+	if errors.Is(err, context.Canceled) {
+		// The reclaim was interrupted by the shutdown or the quiesce that
+		// precedes a rebuild. That is not an outcome worth reporting, and
+		// writing it would put "reclaim failed" on screen for what was in fact
+		// a clean stop.
+		s.d.Logger.Info("scheduled database reclaim stopped early", "reason", "shutting down")
+		return
+	}
 	s.record(&st, LevelInfo, st.Message)
+
+	// The journal has one owner at a time. A rebuild journals `preparing`
+	// before it quiesces, and this reclaim may well be the work being drained —
+	// so a Save here would land on top of it and report "reclaim done" for a
+	// server that is frozen and about to restart. The lock is held across the
+	// write so the answer cannot go stale between asking and acting.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		s.d.Logger.Info("not recording the scheduled reclaim: a database rebuild has taken over",
+			"bytes_freed", st.FreedBytes)
+		return
+	}
 	if serr := Save(s.d.DBPath, st); serr != nil {
 		s.d.Logger.Warn("could not record the scheduled reclaim", "err", serr)
 	}
