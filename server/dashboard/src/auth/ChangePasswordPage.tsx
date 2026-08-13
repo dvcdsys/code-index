@@ -21,20 +21,26 @@ export default function ChangePasswordPage() {
 
   const mismatch = confirm.length > 0 && next !== confirm;
 
-  async function onSubmit(e: FormEvent) {
+  async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    // Same reason as the login form: a password manager can fill these without
+    // React seeing an input event, so the form is the source of truth.
+    const data = new FormData(e.currentTarget);
+    const currentPw = String(data.get('current') ?? '') || current;
+    const nextPw = String(data.get('next') ?? '') || next;
+    const confirmPw = String(data.get('confirm') ?? '') || confirm;
     setError(null);
-    if (next !== confirm) {
+    if (nextPw !== confirmPw) {
       setError('The new password and its confirmation must match.');
       return;
     }
-    if (next.length < 8) {
+    if (nextPw.length < 8) {
       setError('The new password must be at least 8 characters.');
       return;
     }
     setSubmitting(true);
     try {
-      const req: ChangePasswordRequest = { current_password: current, new_password: next };
+      const req: ChangePasswordRequest = { current_password: currentPw, new_password: nextPw };
       await api.post('/auth/change-password', req);
       toast.success('Password updated — sign in with the new one.');
       // The server already invalidated this session; logout clears the cookie
@@ -57,6 +63,7 @@ export default function ChangePasswordPage() {
         <Field label="Current password" htmlFor="current">
           <Input
             id="current"
+            name="current"
             type="password"
             autoComplete="current-password"
             autoFocus
@@ -70,6 +77,7 @@ export default function ChangePasswordPage() {
         <Field label="New password" htmlFor="next" hint="At least 8 characters.">
           <Input
             id="next"
+            name="next"
             type="password"
             autoComplete="new-password"
             required
@@ -87,6 +95,7 @@ export default function ChangePasswordPage() {
         >
           <Input
             id="confirm"
+            name="confirm"
             type="password"
             autoComplete="new-password"
             required

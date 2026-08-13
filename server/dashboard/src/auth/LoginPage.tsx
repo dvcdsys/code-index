@@ -15,12 +15,18 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function onSubmit(e: FormEvent) {
+  async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    // Read the credentials off the form, not out of state. A password manager
+    // can fill both fields without React ever seeing an input event, and then
+    // the state copy is empty while the form is visibly filled.
+    const data = new FormData(e.currentTarget);
+    const submittedEmail = String(data.get('email') ?? '').trim() || email;
+    const submittedPassword = String(data.get('password') ?? '') || password;
     setError(null);
     setSubmitting(true);
     try {
-      await login({ email, password });
+      await login({ email: submittedEmail, password: submittedPassword });
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : 'Could not reach the server. Try again.');
     } finally {
@@ -38,6 +44,7 @@ export default function LoginPage() {
         <Field label="Email" htmlFor="email">
           <Input
             id="email"
+            name="email"
             type="email"
             autoComplete="username"
             autoFocus
@@ -51,6 +58,7 @@ export default function LoginPage() {
         <Field label="Password" htmlFor="password">
           <Input
             id="password"
+            name="password"
             type="password"
             autoComplete="current-password"
             required
@@ -67,12 +75,12 @@ export default function LoginPage() {
           </Callout>
         )}
 
-        <Button
-          type="submit"
-          variant="primary"
-          className="mt-1 w-full"
-          disabled={submitting || !email || !password}
-        >
+        {/* Disabled only while the request is in flight. Gating it on the two
+            state values also gates Enter: a browser skips implicit submission
+            when the form's default button is disabled, so an autofilled form
+            (state empty, fields visibly full) had a dead Enter key. `required`
+            on both inputs is what catches an actually-empty submit. */}
+        <Button type="submit" variant="primary" className="mt-1 w-full" disabled={submitting}>
           {submitting ? (
             <>
               <Dots /> Signing in

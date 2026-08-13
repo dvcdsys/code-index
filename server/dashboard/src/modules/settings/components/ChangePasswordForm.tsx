@@ -19,19 +19,25 @@ export function ChangePasswordForm() {
 
   const mismatch = confirm.length > 0 && next !== confirm;
 
-  async function onSubmit(e: FormEvent) {
+  async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    // Read off the form: a password manager can fill these without React
+    // seeing an input event, which would post an empty current password.
+    const data = new FormData(e.currentTarget);
+    const currentPw = String(data.get('current') ?? '') || current;
+    const nextPw = String(data.get('next') ?? '') || next;
+    const confirmPw = String(data.get('confirm') ?? '') || confirm;
     setError(null);
-    if (next !== confirm) {
+    if (nextPw !== confirmPw) {
       setError('The new password and its confirmation must match.');
       return;
     }
-    if (next.length < 8) {
+    if (nextPw.length < 8) {
       setError('The new password must be at least 8 characters.');
       return;
     }
     try {
-      await change.mutateAsync({ current_password: current, new_password: next });
+      await change.mutateAsync({ current_password: currentPw, new_password: nextPw });
       toast.success('Password updated', { description: 'Sign in again with the new one.' });
       await logout();
     } catch (err) {
@@ -45,6 +51,7 @@ export function ChangePasswordForm() {
         <Field label="Current" htmlFor="set-current">
           <Input
             id="set-current"
+            name="current"
             type="password"
             autoComplete="current-password"
             required
@@ -56,6 +63,7 @@ export function ChangePasswordForm() {
         <Field label="New" htmlFor="set-next" hint="≥ 8 characters">
           <Input
             id="set-next"
+            name="next"
             type="password"
             autoComplete="new-password"
             required
@@ -72,6 +80,7 @@ export function ChangePasswordForm() {
         >
           <Input
             id="set-confirm"
+            name="confirm"
             type="password"
             autoComplete="new-password"
             required
