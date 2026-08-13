@@ -1,0 +1,74 @@
+<!doctype html>
+<!--
+  Cloudflare Pages serves this file, with a real 404 status, for any path that
+  does not match a built asset. Without it Pages answers those requests with
+  the root index.html and a 200 — which, combined with the year-long immutable
+  Cache-Control that public/_headers puts on /assets/*, let a deploy-window
+  miss on a hashed bundle poison visitors' browser caches with HTML pretending
+  to be JavaScript. The module then failed its MIME check and the whole page
+  rendered blank until the cache entry expired (a year) or the asset URL
+  changed. Keep this file: it is what makes a missing asset fail loudly.
+
+  Deliberately standalone — no bundle, no webfont, no image — so it renders
+  even when the assets it is reporting on are the thing that is broken.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Not found · cix · CodeIndeX</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <meta name="theme-color" content="#F2E6CF">
+  <style>
+    :root {
+      --bg: #F2E6CF;
+      --paper: #F8EFDC;
+      --ink: #1F1410;
+      --ink-mute: #7C5F50;
+      --red: #D63D2C;
+    }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    main {
+      background: var(--paper);
+      border: 3px solid var(--ink);
+      border-radius: 22px;
+      box-shadow: 8px 8px 0 var(--ink);
+      max-width: 34rem;
+      padding: 2.5rem;
+      text-align: center;
+    }
+    .code { font: 700 4rem/1 ui-monospace, "SF Mono", Menlo, monospace; color: var(--red); margin: 0; }
+    h1 { font-size: 1.5rem; margin: 0.75rem 0 0.5rem; }
+    p { color: var(--ink-mute); line-height: 1.6; margin: 0 0 1.5rem; }
+    a {
+      display: inline-block;
+      background: var(--red);
+      color: var(--paper);
+      border: 3px solid var(--ink);
+      border-radius: 999px;
+      padding: 0.6rem 1.4rem;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    a:hover { background: var(--ink); }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="code">404</p>
+    <h1>Nothing indexed at this path</h1>
+    <p>The page you asked for does not exist. If you landed here from a link on the site, it is a bug worth reporting.</p>
+    <a href="/">Back to codeindex.app</a>
+  </main>
+</body>
+</html>
