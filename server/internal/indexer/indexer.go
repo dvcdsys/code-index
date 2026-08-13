@@ -1197,6 +1197,25 @@ func (s *Service) FailIndexing(ctx context.Context, projectPath, runID string) {
 // Status + session helpers
 // ---------------------------------------------------------------------------
 
+// ActiveSessions counts index runs currently in flight.
+//
+// The three-phase protocol (begin → files → finish) lives here and nowhere
+// else: a CLI push creates no row in the jobs table, so anything that asks
+// "is this server busy indexing?" by counting jobs sees an idle server in the
+// middle of a run. Database compaction asks exactly that before taking the
+// server read-only, which is why this exists.
+func (s *Service) ActiveSessions() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, sess := range s.sessions {
+		if sess.status == "active" {
+			n++
+		}
+	}
+	return n
+}
+
 // GetProgress returns the active session progress for a project, or nil if no
 // active session. Mirrors Python get_progress.
 func (s *Service) GetProgress(projectPath string) *Progress {

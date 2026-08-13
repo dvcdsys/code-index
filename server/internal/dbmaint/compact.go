@@ -24,12 +24,6 @@ var (
 	ErrInsufficientDisk = errors.New("not enough free disk space for the compacted copy")
 )
 
-// progressInterval is how often the journal is refreshed while copying. Each
-// update is an fsynced file write, so this is deliberately slow relative to a
-// UI poll — the copy's size on disk is the real progress signal and the
-// dashboard can read it at whatever rate it likes.
-const progressInterval = 2 * time.Second
-
 // quiesceBudget bounds waiting for background work to drain. Far more
 // generous than the 10 s shutdown budget: a large index run has to be allowed
 // to finish rather than be killed, and a timeout here is a post-no-return
@@ -78,29 +72,37 @@ func (s *Service) startRebuild(ctx context.Context, mode AutoVacuum) (State, err
 		return State{}, errors.New("database compaction is not wired on this server")
 	}
 
+	// Claim the run *before* the preflight, not after it.
+	//
+	// The preflight is slow — pragmas, a job count, an fsynced journal write —
+	// and a check that drops the lock before the claim is not a claim at all.
+	// Two clicks a second apart both passed it, and the loser's cleanup then
+	// deletes the winner's half-written copy and thaws the write gate in the
+	// middle of its snapshot, which is the one failure mode this whole feature
+	// exists to avoid. Everything that can refuse gives the claim back.
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
 		return State{}, ErrCompactionRunning
 	}
+	s.running = true
 	s.mu.Unlock()
+
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+		}
+	}()
 
 	stats, err := s.Stats(ctx)
 	if err != nil {
 		return State{}, err
 	}
-	if s.d.ActiveJobs != nil {
-		n, err := s.d.ActiveJobs(ctx)
-		if err != nil {
-			return State{}, fmt.Errorf("check for in-flight jobs: %w", err)
-		}
-		if n > 0 {
-			return State{}, ErrJobsInFlight
-		}
-	}
-	if stats.FreeDiskBytes > 0 && stats.FreeDiskBytes < stats.RequiredDiskBytes {
-		return State{}, fmt.Errorf("%w: %d bytes free, %d needed",
-			ErrInsufficientDisk, stats.FreeDiskBytes, stats.RequiredDiskBytes)
+	if err := s.checkPreconditions(ctx, stats); err != nil {
+		return State{}, err
 	}
 
 	p := PathsFor(s.d.DBPath)
@@ -129,12 +131,62 @@ func (s *Service) startRebuild(ctx context.Context, mode AutoVacuum) (State, err
 		return State{}, fmt.Errorf("write the maintenance journal: %w", err)
 	}
 
-	s.mu.Lock()
-	s.running = true
-	s.mu.Unlock()
-
+	handedOff = true
 	go s.runCompaction(st)
 	return st, nil
+}
+
+// checkPreconditions reports what would make a rebuild refuse right now.
+//
+// Shared with BlockedReason so the dashboard disables the control for exactly
+// the conditions the request would reject on. The two disagreeing is worse
+// than either being wrong: an admin clicks an enabled button and gets a toast
+// explaining it was never going to work.
+func (s *Service) checkPreconditions(ctx context.Context, stats Stats) error {
+	if s.d.ActiveJobs != nil {
+		n, err := s.d.ActiveJobs(ctx)
+		if err != nil {
+			return fmt.Errorf("check for in-flight jobs: %w", err)
+		}
+		if n > 0 {
+			return ErrJobsInFlight
+		}
+	}
+	if stats.FreeDiskBytes > 0 && stats.FreeDiskBytes < stats.RequiredDiskBytes {
+		return fmt.Errorf("%w: %d bytes free, %d needed",
+			ErrInsufficientDisk, stats.FreeDiskBytes, stats.RequiredDiskBytes)
+	}
+	return nil
+}
+
+// BlockedReason is why a rebuild cannot start right now, or "" when one can.
+//
+// Rendered next to the Compact control and used to disable it. It takes the
+// stats the caller already read rather than reading them again, so the number
+// on screen and the verdict beside it come from one observation.
+func (s *Service) BlockedReason(ctx context.Context, stats Stats) string {
+	if s.d.RequestRestart == nil || s.d.Quiesce == nil {
+		return "this server cannot rebuild its database — compaction is not wired on this build"
+	}
+	s.mu.Lock()
+	running := s.running
+	s.mu.Unlock()
+	if running {
+		return "a database rebuild is already running"
+	}
+	switch err := s.checkPreconditions(ctx, stats); {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrJobsInFlight):
+		return "an indexing or clone job is in flight — a rebuild takes the server read-only and would fail it mid-run"
+	case errors.Is(err, ErrInsufficientDisk):
+		return fmt.Sprintf("not enough free disk space: the copy needs about %s and %s is free",
+			humanBytes(stats.RequiredDiskBytes), humanBytes(stats.FreeDiskBytes))
+	default:
+		// A counter that cannot answer is not a reason to promise the rebuild
+		// will work.
+		return "cannot tell whether the server is busy right now: " + err.Error()
+	}
 }
 
 // runCompaction owns the operation from the point of no return onwards.
@@ -186,6 +238,25 @@ func (s *Service) runCompaction(st State) {
 		return
 	}
 
+	// The connection that will write the copy is opened, and its reclaim mode
+	// pinned, *before* the write lock is taken.
+	//
+	// The order is load-bearing. `PRAGMA auto_vacuum=…` opens a write
+	// transaction of its own — it has to, it may need page 1 — so running it
+	// while the freezer holds BEGIN IMMEDIATE blocks for the full busy timeout
+	// and then fails the compaction with SQLITE_BUSY. That is not hypothetical:
+	// it is why every rebuild of an already-incremental database stalled for 30
+	// seconds and gave up, while a legacy mode-none database was fine (asking
+	// for the mode a database is already in is short-circuited before the lock
+	// is needed, which is exactly the case the first end-to-end run happened to
+	// exercise).
+	cp, err := newCopier(ctx, s.d.DBPath, AutoVacuum(st.AutoVacuum))
+	if err != nil {
+		fail("preparing the copy connection", err)
+		return
+	}
+	defer cp.Close()
+
 	// The freeze that actually guarantees the snapshot. A dedicated pool, not
 	// a connection from the shared one: this is held for the whole copy and
 	// must not spend one of the server's eight.
@@ -225,11 +296,9 @@ func (s *Service) runCompaction(st State) {
 		return
 	}
 
-	stopProgress := s.trackProgress(&st, p.Copy)
 	started := time.Now()
-	err = s.copyInto(ctx, p.Copy, AutoVacuum(st.AutoVacuum))
+	err = cp.into(ctx, p.Copy)
 	elapsed := time.Since(started)
-	stopProgress()
 	if err != nil {
 		fail("copying the database", err)
 		return
@@ -279,24 +348,20 @@ func (s *Service) runCompaction(st State) {
 	s.d.RequestRestart()
 }
 
-// copyInto runs VACUUM INTO on a connection of its own.
+// copier owns the connection that writes the compacted copy, with the reclaim
+// mode of the copy already pinned on it.
 //
-// The connection matters, and it is guarded twice.
-//
-// modernc applies DSN pragmas to every connection it opens, and a populated
-// database records a pending auto_vacuum change even though setting it is
-// otherwise a no-op — which VACUUM INTO then carries into the copy. Measured:
-// a mode-none database opened with auto_vacuum(INCREMENTAL) only in its DSN
-// produces a copy in incremental mode. Since db.buildDSN now carries exactly
-// that pragma, copying through the shared pool would silently convert a legacy
-// database on every run and make enable_incremental decorative.
-//
-// So this pool omits the pragma *and* the mode is set explicitly below. Either
-// alone is sufficient; both are cheap, and TestCompact_CopyKeepsTheSourceMode-
-// UnlessAsked fails only when both are removed, which is the honest statement
-// of what is protecting what.
-// copyInto runs VACUUM INTO on a connection of its own, leaving the copy in
-// the requested reclaim mode.
+// It is a type rather than one function because the two halves have to happen
+// on either side of the write freeze: the mode is set before the lock exists,
+// the copy is taken while it is held. Splitting them keeps the connection —
+// and therefore the pending mode — identical across both.
+type copier struct {
+	pool *sql.DB
+	conn *sql.Conn
+}
+
+// newCopier opens a connection of its own and pins the mode the copy will be
+// created in.
 //
 // The connection matters, and it is guarded twice.
 //
@@ -304,67 +369,70 @@ func (s *Service) runCompaction(st State) {
 // carries a pending auto_vacuum change into any VACUUM INTO it runs — even on a
 // database where setting it was otherwise a no-op. Measured: a mode-none
 // database opened with auto_vacuum(INCREMENTAL) only in its DSN produces a copy
-// in incremental mode. Since db.buildDSN now carries exactly that pragma,
-// copying through the shared pool would silently convert a legacy database on
-// every run and make the request field decorative.
+// in incremental mode. Copying through a pool with that pragma anywhere in its
+// DSN would therefore convert a legacy database on a run nobody asked it of,
+// and make the requested mode decorative.
 //
 // So this pool omits the pragma *and* the mode is set explicitly below. Either
 // alone is sufficient; both are cheap, and TestCompact_CopyKeepsTheSourceMode-
 // UnlessAsked fails only when both are removed, which is the honest statement
 // of what is protecting what.
-func (s *Service) copyInto(ctx context.Context, target string, want AutoVacuum) error {
-	pool, err := openDedicated(s.d.DBPath, 1)
+func newCopier(ctx context.Context, dbPath string, want AutoVacuum) (*copier, error) {
+	pool, err := openDedicated(dbPath, 1)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer pool.Close()
 	conn, err := pool.Conn(ctx)
 	if err != nil {
-		return err
+		pool.Close()
+		return nil, err
 	}
-	defer conn.Close()
 
-	pragma := "NONE"
-	if want == AutoVacuumIncremental {
+	// Every mode is named explicitly. Folding FULL into the default would
+	// silently demote a database that was in full auto-vacuum — a mode this
+	// server never sets but a file it opens may well be in — on a run that
+	// asked only for its space back.
+	var pragma string
+	switch want {
+	case AutoVacuumIncremental:
 		pragma = "INCREMENTAL"
+	case AutoVacuumFull:
+		pragma = "FULL"
+	default:
+		pragma = "NONE"
 	}
 	if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum=`+pragma); err != nil {
-		return fmt.Errorf("set auto_vacuum=%s: %w", pragma, err)
+		conn.Close()
+		pool.Close()
+		return nil, fmt.Errorf("set auto_vacuum=%s: %w", pragma, err)
 	}
+	return &copier{pool: pool, conn: conn}, nil
+}
+
+// into writes the compacted copy. Safe to call with the write freeze held —
+// VACUUM INTO only reads the source.
+func (c *copier) into(ctx context.Context, target string) error {
 	// Bound, not interpolated: a data directory can contain a quote.
-	if _, err := conn.ExecContext(ctx, `VACUUM INTO ?`, target); err != nil {
+	if _, err := c.conn.ExecContext(ctx, `VACUUM INTO ?`, target); err != nil {
 		return fmt.Errorf("vacuum into %s: %w", target, err)
 	}
 	return nil
 }
 
-// trackProgress refreshes the journal with the copy's size while it grows.
-// Returns a function that stops it and waits for the goroutine to finish, so
-// no update can land after the terminal state has been written.
-func (s *Service) trackProgress(st *State, copyPath string) func() {
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		t := time.NewTicker(progressInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-t.C:
-				snapshot := *st
-				snapshot.BytesDone = sizeOrZero(copyPath)
-				if err := Save(s.d.DBPath, snapshot); err != nil {
-					s.d.Logger.Warn("could not record compaction progress", "err", err)
-				}
-			}
-		}
-	}()
-	return func() {
-		close(stop)
-		<-done
+func (c *copier) Close() {
+	c.conn.Close()
+	c.pool.Close()
+}
+
+// copyInto is the whole sequence on one call, for callers with no freeze to
+// work around.
+func (s *Service) copyInto(ctx context.Context, target string, want AutoVacuum) error {
+	c, err := newCopier(ctx, s.d.DBPath, want)
+	if err != nil {
+		return err
 	}
+	defer c.Close()
+	return c.into(ctx, target)
 }
 
 // openDedicated opens a pool of its own on the database, with no auto_vacuum

@@ -36,8 +36,41 @@ type Deps struct {
 	// RequestRestart asks the process to shut down cleanly and re-execute
 	// itself, which is how a compacted copy is adopted.
 	RequestRestart func()
-	// ActiveJobs counts in-flight clone and index jobs.
+	// ActiveJobs counts in-flight indexing work. Build it with
+	// ActiveWorkCounter — counting the jobs table alone is not enough.
 	ActiveJobs func(ctx context.Context) (int, error)
+}
+
+// ActiveWorkCounter builds the in-flight-work counter that compaction refuses
+// on, from the two places indexing work actually lives.
+//
+// The jobs table holds server-side clone and index jobs. It does not hold a
+// CLI push: the three-phase protocol (begin → files → finish) keeps its state
+// in the indexer's session map and creates no row at all. A guard that counted
+// only the table would see an idle server in the middle of an index run,
+// freeze writes under it, and — in full mode — restart the process mid-protocol
+// and leave the project half indexed.
+//
+// It is a constructor rather than two fields because there were two call sites
+// building this by hand and they had already drifted.
+func ActiveWorkCounter(sdb *sql.DB, sessions func() int) func(context.Context) (int, error) {
+	return func(ctx context.Context) (int, error) {
+		n := 0
+		if sessions != nil {
+			n = sessions()
+		}
+		if sdb == nil {
+			return n, nil
+		}
+		var queued int
+		err := sdb.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM jobs
+			WHERE status IN ('pending','running') AND type IN ('clone_repo','index_repo')`).Scan(&queued)
+		if err != nil {
+			return 0, err
+		}
+		return n + queued, nil
+	}
 }
 
 // Service is the admin-facing surface over database maintenance.
@@ -67,12 +100,15 @@ func New(d Deps) *Service {
 	if st, ok, err := Load(d.DBPath); err == nil && ok {
 		s.throughput = st.ThroughputBytesPerSec
 	}
+	// Say so at startup rather than at the first tick an hour later. The
+	// scheduler refuses to act on an invalid schedule either way; this is what
+	// tells the operator why nothing is happening.
+	if err := ValidateEnv(d.Env); err != nil {
+		d.Logger.Error("CIX_DB_MAINTENANCE_* does not describe a usable schedule; automatic database maintenance will not run",
+			"err", err)
+	}
 	return s
 }
-
-// ActiveJobsFunc exposes the in-flight job counter the service was wired
-// with, so a caller can build one service and reuse its wiring.
-func (s *Service) ActiveJobsFunc() func(context.Context) (int, error) { return s.d.ActiveJobs }
 
 // Stats reports the size, waste and advice for the database file.
 func (s *Service) Stats(ctx context.Context) (Stats, error) {
@@ -129,6 +165,15 @@ func (s *Service) Status() State {
 	}
 	if evs, err := ReadEvents(s.d.DBPath, maxJournalEvents); err == nil && len(evs) > 0 {
 		st.Events = evs
+	}
+	// Progress is measured here rather than written into the journal on a
+	// timer. The copy's size on disk *is* the progress, recovery never reads
+	// the figure, and an fsynced journal write every couple of seconds is a
+	// poor way to spend the read-only window.
+	if st.Phase == PhaseCopying {
+		if n := sizeOrZero(PathsFor(s.d.DBPath).Copy); n > 0 {
+			st.BytesDone = n
+		}
 	}
 	return st
 }

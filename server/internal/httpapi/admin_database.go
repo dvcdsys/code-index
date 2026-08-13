@@ -47,6 +47,10 @@ func newDBMaintService(d Deps) *dbmaint.Service {
 	if d.DBMaint.Gate != nil {
 		freeze, thaw = d.DBMaint.Gate.Freeze, d.DBMaint.Gate.Thaw
 	}
+	var sessions func() int
+	if d.Indexer != nil {
+		sessions = d.Indexer.ActiveSessions
+	}
 	return dbmaint.New(dbmaint.Deps{
 		DB:             d.DB,
 		DBPath:         d.Cfg.SQLitePath,
@@ -55,13 +59,7 @@ func newDBMaintService(d Deps) *dbmaint.Service {
 		RequestRestart: d.DBMaint.RequestRestart,
 		Freeze:         freeze,
 		Thaw:           thaw,
-		ActiveJobs: func(ctx context.Context) (int, error) {
-			var n int
-			err := d.DB.QueryRowContext(ctx, `
-				SELECT COUNT(*) FROM jobs
-				WHERE status IN ('pending','running') AND type IN ('clone_repo','index_repo')`).Scan(&n)
-			return n, err
-		},
+		ActiveJobs: dbmaint.ActiveWorkCounter(d.DB, sessions),
 		Env: dbmaint.ScheduleEnv{
 			Enabled:         d.Cfg.DBMaintenanceEnabled,
 			Mode:            d.Cfg.DBMaintenanceMode,
@@ -109,6 +107,9 @@ func (s *Server) GetDatabaseState(w http.ResponseWriter, r *http.Request) {
 		Operation     *dbmaint.State `json:"operation"`
 	}{Stats: stats}
 
+	if reason := svc.BlockedReason(r.Context(), stats); reason != "" {
+		out.BlockedReason = &reason
+	}
 	if op := svc.Status(); op.Phase != dbmaint.PhaseIdle {
 		out.Operation = &op
 	}

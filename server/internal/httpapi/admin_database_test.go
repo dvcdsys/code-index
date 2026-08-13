@@ -26,6 +26,7 @@ var databaseRoutes = []struct {
 	{http.MethodPost, "/api/v1/admin/database/checkpoint"},
 	{http.MethodGet, "/api/v1/admin/database/schedule"},
 	{http.MethodPut, "/api/v1/admin/database/schedule"},
+	{http.MethodPut, "/api/v1/admin/database/auto-vacuum"},
 }
 
 func TestDatabaseEndpoints_RequireAdmin(t *testing.T) {
@@ -252,5 +253,55 @@ func TestCompact_RefusesWithJobsInFlightAndStopsNothing(t *testing.T) {
 	}
 	if restarted {
 		t.Error("a restart was requested for a compaction that never started")
+	}
+}
+
+// The dashboard disables the Compact control on blocked_reason and renders it
+// as the explanation. A field that is always null means the button is always
+// enabled and the admin discovers the refusal from a toast after clicking.
+func TestDatabaseState_ReportsWhyCompactionIsBlocked(t *testing.T) {
+	f := newAdminFixture(t)
+	f.Deps.DBMaint = DBMaintHooks{
+		Gate:           &dbmaint.Gate{},
+		Quiesce:        func(context.Context) error { return nil },
+		RequestRestart: func() {},
+	}
+	router := NewRouter(f.Deps)
+	admin := adminCookie(t, f)
+
+	read := func() (*string, int) {
+		t.Helper()
+		req := withCookie(httptest.NewRequest(http.MethodGet, "/api/v1/admin/database", nil), admin)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		var body struct {
+			BlockedReason *string `json:"blocked_reason"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rr.Body.String())
+		}
+		return body.BlockedReason, rr.Code
+	}
+
+	reason, code := read()
+	if code != http.StatusOK {
+		t.Fatalf("GET /api/v1/admin/database = %d", code)
+	}
+	if reason != nil {
+		t.Fatalf("blocked_reason = %q on an idle server, want null", *reason)
+	}
+
+	if _, err := f.Deps.DB.Exec(`
+		INSERT INTO jobs (id, type, status, dedupe_key, payload, scheduled_at, created_at)
+		VALUES ('j1', 'index_repo', 'running', 'index:x', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+
+	reason, _ = read()
+	if reason == nil {
+		t.Fatal("blocked_reason is null with a job in flight, but a compact request would be refused with 409")
+	}
+	if *reason == "" {
+		t.Error("blocked_reason is present but empty; the dashboard renders it as the explanation")
 	}
 }
