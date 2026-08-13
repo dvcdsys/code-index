@@ -172,6 +172,54 @@ func TestNextAfter_FiresAfterTheJumpForAnHourThatDoesNotExist(t *testing.T) {
 	}
 }
 
+// The rescue has to search the gap at the expression's own resolution.
+//
+// gronx takes an optional leading seconds field, so `30 30 3 * * *` is 03:30:30
+// — and a rescue that steps through the vanished hour a minute at a time only
+// ever asks about second zero, matches nothing, and hands the day back to the
+// bug it exists to fix.
+func TestNextAfter_FiresAfterTheJumpForAScheduleWithSeconds(t *testing.T) {
+	loc := kyiv(t)
+	next, err := NextAfter("30 30 3 * * *", at(loc, 2027, time.March, 27, 12, 0))
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	want := at(loc, 2027, time.March, 28, 4, 0)
+	if !next.Equal(want) {
+		t.Errorf("03:30:30 -> %s, want %s — the day was skipped entirely",
+			next.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+
+	// An ordinary day still fires to the second, not rounded to the minute.
+	ordinary, err := NextAfter("30 30 3 * * *", at(loc, 2027, time.March, 29, 0, 0))
+	if err != nil {
+		t.Fatalf("ordinary: %v", err)
+	}
+	if w := time.Date(2027, time.March, 29, 3, 30, 30, 0, loc); !ordinary.Equal(w) {
+		t.Errorf("ordinary day -> %s, want %s", ordinary.Format(time.RFC3339), w.Format(time.RFC3339))
+	}
+}
+
+// The jump that swallows a run is not always the next one.
+//
+// ZoneBounds only answers about the interval containing the instant it is
+// handed, so asking in June meets October's fallback first — where nothing
+// vanishes — and stopping there loses the following March. For a yearly
+// expression that is not a missed night, it is a missed year.
+func TestNextAfter_FindsAJumpThatIsNotTheNextOne(t *testing.T) {
+	loc := kyiv(t)
+	// 28 March 2027 is Kyiv's spring forward, so 03:00 that day never happens.
+	next, err := NextAfter("0 3 28 3 *", at(loc, 2026, time.June, 1, 0, 0))
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	want := at(loc, 2027, time.March, 28, 4, 0)
+	if !next.Equal(want) {
+		t.Errorf("-> %s, want %s — one autumn transition in the way and the year is gone",
+			next.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+}
+
 // An hour on either side of the gap is ordinary and must not be touched.
 func TestNextAfter_LeavesTheHoursAroundTheGapAlone(t *testing.T) {
 	loc := kyiv(t)

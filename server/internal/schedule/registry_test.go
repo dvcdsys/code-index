@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -644,6 +645,108 @@ func TestRegistry_SleepsUntilTheNextRunRatherThanPolling(t *testing.T) {
 	clock.set(time.Date(2026, 8, 13, 23, 58, 0, 0, time.Local))
 	if d := r.untilNext(ctx); d != 2*time.Minute {
 		t.Errorf("sleep = %s, want 2m — the wait tracks the armed time", d)
+	}
+}
+
+// A row nothing will ever move forward must not pin the loop to its floor.
+//
+// considerOne steps straight over a task that is switched off, so an armed time
+// left on its row stays in the past and stays the earliest one there is — and
+// the loop wakes every second, forever, to be told so again. That is three
+// queries a second against a task explicitly turned off: worse than the polling
+// this same change set removed.
+func TestRegistry_ADisabledTaskDoesNotPinTheLoop(t *testing.T) {
+	t.Run("saving a disabled task arms it for nothing", func(t *testing.T) {
+		r, sdb, _ := fixture(t)
+		rec := &recorder{clock: &fakeClock{}}
+		r.Register(daily(rec, false), nil)
+
+		off := false
+		if _, err := r.Save(context.Background(), "test.daily", nil, &off, ""); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		var next sql.NullString
+		if err := sdb.QueryRow(
+			`SELECT next_run_at FROM scheduled_tasks WHERE name = 'test.daily'`).Scan(&next); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if next.Valid {
+			t.Errorf("next_run_at = %q on a task that is switched off", next.String)
+		}
+	})
+
+	t.Run("a row armed by an older build is ignored", func(t *testing.T) {
+		r, sdb, clock := fixture(t)
+		rec := &recorder{clock: clock}
+		r.Register(daily(rec, false), nil)
+		ctx := context.Background()
+
+		// Exactly the state the previous build left behind: armed, then
+		// disabled, then the moment came and went.
+		if err := r.considerOne(ctx, "test.daily"); err != nil {
+			t.Fatalf("arm: %v", err)
+		}
+		if _, err := sdb.Exec(
+			`UPDATE scheduled_tasks SET configured = 1, enabled = 0 WHERE name = 'test.daily'`); err != nil {
+			t.Fatalf("disable: %v", err)
+		}
+		clock.set(time.Date(2026, 8, 14, 5, 0, 0, 0, time.Local)) // past midnight's slot
+
+		if d := r.untilNext(ctx); d != maxSleep {
+			t.Errorf("sleep = %s, want the %s cap — the loop is spinning on a task that will never run", d, maxSleep)
+		}
+	})
+
+	t.Run("a row for a task this build no longer has is ignored", func(t *testing.T) {
+		r, sdb, clock := fixture(t)
+		rec := &recorder{clock: clock}
+		r.Register(daily(rec, false), nil)
+		ctx := context.Background()
+
+		// Deleting a task from the code leaves its row on every database that
+		// ever ran the older build, and nothing will ever claim it again.
+		if _, err := sdb.Exec(
+			`INSERT INTO scheduled_tasks (name, cron_used, next_run_at, updated_at)
+			 VALUES ('test.removed', '0 0 * * *', ?, '2026-01-01T00:00:00Z')`,
+			clock.Now().Add(-72*time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		if d := r.untilNext(ctx); d != maxSleep {
+			t.Errorf("sleep = %s, want the %s cap — an orphaned row is pinning the loop", d, maxSleep)
+		}
+	})
+}
+
+// A schedule that cannot be projected says so on its own, rather than being
+// glued to an empty last_error with a space in front of it.
+func TestRegistry_ReportsASchedulesWithNoUpcomingRunReadably(t *testing.T) {
+	r, sdb, _ := fixture(t)
+	rec := &recorder{clock: &fakeClock{}}
+	r.Register(daily(rec, false), nil)
+
+	// Save refuses this, so it can only arrive the way it actually would: a row
+	// written by a build whose validation was weaker.
+	if _, err := sdb.Exec(
+		`INSERT INTO scheduled_tasks (name, configured, cron, enabled, updated_at)
+		 VALUES ('test.daily', 1, '0 0 30 2 *', 1, '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	states, err := r.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(states))
+	}
+	got := states[0].LastError
+	if got == "" {
+		t.Fatal("a schedule that will never fire reported nothing at all")
+	}
+	if got != strings.TrimSpace(got) {
+		t.Errorf("last_error = %q — it is padded onto an error that was not there", got)
+	}
+	if len(states[0].NextRuns) != 0 {
+		t.Errorf("next_runs = %v for an expression that has none", states[0].NextRuns)
 	}
 }
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dvcdsys/code-index/server/internal/db"
@@ -279,6 +281,60 @@ func TestAdvise_RequiresBothThresholds(t *testing.T) {
 		if reason == "" {
 			t.Errorf("%s: no reason given", c.name)
 		}
+	}
+}
+
+// A threshold of zero means that dimension does not gate. Reading it as a
+// number to compare against instead made `>= 0` true of every database in
+// existence: an empty freelist came out Urgent, advising the operator to
+// reclaim 0 B, and no input could reach VerdictOK at all.
+func TestAdvise_AThresholdOfZeroDoesNotMakeEverythingUrgent(t *testing.T) {
+	off := Thresholds{MinFreePercent: 0, MinFreeBytes: 0}
+
+	got, reason := advise(Stats{PageCount: 1000, PageSize: 4096}, off)
+	if got != VerdictOK {
+		t.Errorf("verdict = %q for a database with nothing on the freelist, want %q", got, VerdictOK)
+	}
+	if strings.Contains(reason, "0 B") {
+		t.Errorf("reason = %q — it offers to return nothing to the filesystem", reason)
+	}
+
+	// Real waste, no floor set: nothing to be urgent about, and nothing to call
+	// ordinary headroom either. The figure is reported and left there.
+	got, reason = advise(Stats{ReclaimablePercent: 50, ReclaimableBytes: 4 << 30}, off)
+	if got != VerdictOK {
+		t.Errorf("verdict = %q with both thresholds turned off, want %q", got, VerdictOK)
+	}
+	if strings.Contains(reason, "headroom") {
+		t.Errorf("reason = %q — 4 GiB is not described as normal headroom", reason)
+	}
+	if !strings.Contains(reason, "4.0 GiB") {
+		t.Errorf("reason = %q — it does not say how much is wasted", reason)
+	}
+}
+
+// One dimension turned off still leaves the other one gating. This is the
+// setting an operator reaches for on a host where only the ratio matters.
+func TestAdvise_OneThresholdOffStillGatesOnTheOther(t *testing.T) {
+	percentOnly := Thresholds{MinFreePercent: 25}
+	if got, _ := advise(Stats{ReclaimablePercent: 50, ReclaimableBytes: 4 << 20}, percentOnly); got != VerdictUrgent {
+		t.Errorf("verdict = %q at 50%% against a 25%% floor, want %q", got, VerdictUrgent)
+	}
+	if got, _ := advise(Stats{ReclaimablePercent: 30, ReclaimableBytes: 4 << 20}, percentOnly); got != VerdictRecommended {
+		t.Errorf("verdict = %q at 30%% against a 25%% floor, want %q", got, VerdictRecommended)
+	}
+	if got, _ := advise(Stats{ReclaimablePercent: 10, ReclaimableBytes: 4 << 20}, percentOnly); got != VerdictOK {
+		t.Errorf("verdict = %q at 10%% against a 25%% floor, want %q", got, VerdictOK)
+	}
+}
+
+// The urgent threshold is eight times a figure that comes from the environment.
+// Wrapping it round would invert the setting: the strictest floor expressible
+// would become a negative one, which every database clears.
+func TestAdvise_AnAbsurdlyLargeThresholdDoesNotWrapAround(t *testing.T) {
+	huge := Thresholds{MinFreePercent: 1, MinFreeBytes: math.MaxInt64 / 4}
+	if got, _ := advise(Stats{ReclaimablePercent: 99, ReclaimableBytes: 4 << 30}, huge); got == VerdictUrgent {
+		t.Error("verdict = urgent against a threshold no database can ever meet")
 	}
 }
 

@@ -164,10 +164,11 @@ never starts blocking anybody's server on its own.**
   otherwise never run at all on a laptop that is asleep every night.
 - **The next run is computed from the clock**, never from when the previous one
   finished, so a slow run cannot make the schedule drift.
-- **Daylight saving is wall-clock.** On the spring forward an expression naming
-  an hour that does not exist that day is skipped; on the autumn repeat it fires
-  once. Losing one nightly reclaim a year is not worth the machinery that fixing
-  it would need, but it is a documented behaviour rather than a surprise.
+- **Daylight saving is wall-clock.** On the spring forward, an expression
+  naming an hour that does not exist that day runs at the first valid instant
+  after the jump — 03:00 in Kyiv fires at 04:00 — which is what vixie cron does
+  and the only alternative to silently missing a night once a year. On the
+  autumn repeat it fires once, not twice.
 - **An expression that can never match is refused**, not accepted and silently
   never run. `0 0 30 2 *` is a configuration error.
 

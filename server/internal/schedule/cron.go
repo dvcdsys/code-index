@@ -38,6 +38,16 @@ const horizon = 10 * 365 * 24 * time.Hour
 // one matching-ish instant, so this is generous for any real expression.
 const maxProbes = 512
 
+// maxTransitions bounds the walk over clock changes in skippedByClockChange.
+// Two a year in every zone that has them, against a ten-year horizon.
+//
+// The walk only reaches its far end for an expression whose next run is years
+// away, and only such an expression pays for the search. Measured for three
+// projected runs, from June, in Europe/Kyiv: 33 µs for a nightly expression,
+// 153 µs for a yearly one, 7.2 ms for a yearly one carrying seconds — the last
+// being both the worst case and one nobody writes.
+const maxTransitions = 64
+
 var gron = gronx.New()
 
 // Validate reports whether expr is a usable crontab expression.
@@ -120,38 +130,60 @@ func NextAfter(expr string, after time.Time) (time.Time, error) {
 // this: if the expression matches any minute inside the vanished hour, the run
 // happens at the first instant the clock is valid again.
 //
-// Only the first transition between the two times is considered. A second one
-// inside the same interval would mean the next run is more than half a year
-// out, at which point one missed slot is not the interesting problem.
+// Every transition between the two times is considered, not just the first.
+// ZoneBounds only ever answers about the interval containing the instant it is
+// asked about, and for a sparse expression the interesting jump is rarely the
+// nearest one: `0 3 28 3 *` asked in June meets the autumn change first, and
+// stopping there would lose the whole of the following March.
 func skippedByClockChange(expr string, after, next time.Time) (time.Time, bool) {
 	loc := after.Location()
-	_, end := after.ZoneBounds()
-	if end.IsZero() || !end.After(after) || end.After(next) {
-		return time.Time{}, false
-	}
-	_, before := end.Add(-time.Second).Zone()
-	_, atEnd := end.Zone()
-	delta := time.Duration(atEnd-before) * time.Second
-	if delta <= 0 {
-		return time.Time{}, false // falling back, or no real change: nothing vanishes
-	}
-
-	// The wall clock jumps from (W - delta) to W at this instant, so every
-	// minute in between is a time that did not occur.
-	//
-	// The arithmetic is on the calendar fields, not on the instant: an hour
-	// before the transition *as an instant* is still an hour of real time and
-	// lands at 02:00, whereas the hour that vanished is 03:00–04:00. UTC is the
-	// carrier precisely because it has no transitions to normalise against —
-	// and the due check reads the fields, never the offset.
-	w := end.In(loc)
-	last := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), 0, 0, time.UTC)
-	for f := last.Add(-delta); f.Before(last); f = f.Add(time.Minute) {
-		if due, err := gron.IsDue(expr, f); err == nil && due {
-			return end, true
+	step := probeStep(expr)
+	cursor := after
+	for range maxTransitions {
+		_, end := cursor.ZoneBounds()
+		if end.IsZero() || !end.After(cursor) || !end.Before(next) {
+			// No further change before the candidate we already have.
+			return time.Time{}, false
 		}
+		_, before := end.Add(-time.Second).Zone()
+		_, atEnd := end.Zone()
+		// A negative delta is the clock falling back, where nothing vanishes.
+		if delta := time.Duration(atEnd-before) * time.Second; delta > 0 {
+			// The wall clock jumps from (W - delta) to W at this instant, so
+			// every moment in between is a time that did not occur.
+			//
+			// The arithmetic is on the calendar fields, not on the instant: an
+			// hour before the transition *as an instant* is still an hour of
+			// real time and lands at 02:00, whereas the hour that vanished is
+			// 03:00–04:00. UTC is the carrier precisely because it has no
+			// transitions to normalise against — and the due check reads the
+			// fields, never the offset.
+			w := end.In(loc)
+			last := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), w.Second(), 0, time.UTC)
+			for f := last.Add(-delta); f.Before(last); f = f.Add(step) {
+				if due, err := gron.IsDue(expr, f); err == nil && due {
+					return end, true
+				}
+			}
+		}
+		cursor = end
 	}
 	return time.Time{}, false
+}
+
+// probeStep is how finely the vanished hour above has to be searched.
+//
+// gronx takes an optional leading seconds field, and Segments normalises every
+// expression to carry one, so a literal "0" there means the expression can only
+// match on the minute and a minute-wide step covers it. Anything else — "30",
+// "*/10" — has to be walked a second at a time, or the rescue steps straight
+// over the very schedule it exists for and loses the day after all.
+func probeStep(expr string) time.Duration {
+	segs, err := gronx.Segments(expr)
+	if err != nil || len(segs) == 0 || segs[0] == "0" {
+		return time.Minute
+	}
+	return time.Second
 }
 
 // NextRuns returns the next n runs after `after`.

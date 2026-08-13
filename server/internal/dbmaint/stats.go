@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"os"
 
 	"github.com/dvcdsys/code-index/server/internal/maintenance"
@@ -145,24 +146,62 @@ func ReadStats(ctx context.Context, sdb *sql.DB, dbPath string, measuredThroughp
 // advise renders the verdict from the *resolved* thresholds, not from the
 // constants, so an operator who moved them does not read one number on screen
 // while the automation acts on another.
+// A threshold of zero is legal and means that dimension does not gate — so it
+// is skipped rather than compared against, which is not the same thing. `>= 0`
+// is true of every database ever measured, and reading the two thresholds that
+// way made an empty freelist "Urgent", advised returning 0 B to the filesystem,
+// and left VerdictOK unreachable.
 func advise(s Stats, th Thresholds) (Verdict, string) {
-	urgentPercent, urgentBytes := th.MinFreePercent*8/5, th.MinFreeBytes*8
+	if s.ReclaimableBytes == 0 {
+		return VerdictOK, "The database has no wasted space."
+	}
+	// meets reports whether the waste clears a floor that is actually set.
+	// Both dimensions at zero means no floor at all, which is a reason to say
+	// nothing rather than a reason to say everything.
+	meets := func(pct int, bytes int64) bool {
+		if pct <= 0 && bytes <= 0 {
+			return false
+		}
+		if pct > 0 && s.ReclaimablePercent < float64(pct) {
+			return false
+		}
+		if bytes > 0 && s.ReclaimableBytes < bytes {
+			return false
+		}
+		return true
+	}
 	switch {
-	case s.ReclaimablePercent >= float64(urgentPercent) && s.ReclaimableBytes >= urgentBytes:
+	case meets(th.MinFreePercent*8/5, times8(th.MinFreeBytes)):
 		return VerdictUrgent, fmt.Sprintf(
 			"%.0f%% of the database file is empty space — compacting would return about %s to the filesystem.",
 			s.ReclaimablePercent, humanBytes(s.ReclaimableBytes))
-	case s.ReclaimablePercent >= float64(th.MinFreePercent) && s.ReclaimableBytes >= th.MinFreeBytes:
+	case meets(th.MinFreePercent, th.MinFreeBytes):
 		return VerdictRecommended, fmt.Sprintf(
 			"%.0f%% of the database file is empty space (%s). Compacting is worth doing when you can spare the window.",
 			s.ReclaimablePercent, humanBytes(s.ReclaimableBytes))
-	case s.ReclaimableBytes == 0:
-		return VerdictOK, "The database has no wasted space."
+	case th.MinFreePercent <= 0 && th.MinFreeBytes <= 0:
+		// Nothing to judge against, so the figure is reported without a
+		// recommendation attached to it. Calling 4 GB "normal working headroom"
+		// because the operator turned the thresholds off would be worse than
+		// saying nothing.
+		return VerdictOK, fmt.Sprintf(
+			"%.0f%% of the database file is empty space (%s). No waste threshold is set, so there is nothing to measure that against.",
+			s.ReclaimablePercent, humanBytes(s.ReclaimableBytes))
 	default:
 		return VerdictOK, fmt.Sprintf(
 			"%s of the database file is empty space, which is normal working headroom.",
 			humanBytes(s.ReclaimableBytes))
 	}
+}
+
+// times8 saturates rather than wrapping. The urgent threshold is a multiple of
+// a figure that arrives from the environment, and an int64 that overflows to a
+// negative one would turn the strictest possible setting into no setting at all.
+func times8(n int64) int64 {
+	if n > math.MaxInt64/8 {
+		return math.MaxInt64
+	}
+	return n * 8
 }
 
 func humanBytes(n int64) string {

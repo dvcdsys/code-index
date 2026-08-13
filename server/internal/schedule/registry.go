@@ -199,16 +199,36 @@ func (r *Registry) Run(ctx context.Context) {
 // untilNext is how long to sleep before the next pass: the earliest armed run,
 // clamped. A task with no armed time yet resolves on the next pass anyway, so
 // the clamp is also what gets a freshly registered task off the ground.
+//
+// Only rows this build will actually act on count. A row nothing will ever move
+// forward pins the loop to its one-second floor for good: considerOne steps
+// straight over a task that is disabled or unknown, so its armed time stays in
+// the past and stays the earliest, and the loop wakes every second to be told
+// so again. Both are ordinary states, not corruption — an admin switching a
+// task off leaves the first, and deleting a task from the code leaves the
+// second on every database that ever ran the older build.
 func (r *Registry) untilNext(ctx context.Context) time.Duration {
 	rows, err := r.loadAll(ctx)
 	if err != nil {
 		r.logger.Warn("could not read the task schedule; retrying shortly", "err", err)
 		return time.Minute
 	}
+	r.mu.Lock()
+	entries := make(map[string]*entry, len(r.tasks))
+	maps.Copy(entries, r.tasks)
+	r.mu.Unlock()
+
 	now := r.now()
 	sleep := maxSleep
-	for _, row := range rows {
+	for name, row := range rows {
 		if row.nextRunAt == nil {
+			continue
+		}
+		e := entries[name]
+		if e == nil {
+			continue
+		}
+		if _, enabled, _ := r.resolve(e, row); !enabled {
 			continue
 		}
 		if d := row.nextRunAt.Sub(now); d < sleep {
@@ -441,7 +461,12 @@ func (r *Registry) stateOf(e *entry, row taskRow, busy bool) State {
 			// preview that reads the same as "not due for a while".
 			r.logger.Warn("could not project the next runs for a scheduled task",
 				"task", e.task.Name, "cron", cron, "err", err)
-			st.LastError = st.LastError + " (this schedule has no upcoming run)"
+			const note = "this schedule has no upcoming run"
+			if st.LastError == "" {
+				st.LastError = note
+			} else {
+				st.LastError += " (" + note + ")"
+			}
 		} else {
 			st.NextRuns = runs
 		}
@@ -483,11 +508,20 @@ func (r *Registry) Save(ctx context.Context, name string, cron *string, enabled 
 
 	// Re-arm from the new expression immediately, so the preview the admin is
 	// looking at and the time the server will actually fire are the same thing.
-	upcoming, err := NextAfter(nextCron, r.now())
-	if err != nil {
-		return State{}, fmt.Errorf("%w: %s", ErrInvalidCron, err)
+	//
+	// A task being switched off is armed for nothing instead. Leaving a time on
+	// a row nothing will act on is how the row goes stale, and switching a task
+	// back on re-arms it from the clock anyway — which is also the only correct
+	// answer, since the slots it sat out are not owed to it.
+	var upcoming *time.Time
+	if nextEnabled {
+		n, err := NextAfter(nextCron, r.now())
+		if err != nil {
+			return State{}, fmt.Errorf("%w: %s", ErrInvalidCron, err)
+		}
+		upcoming = &n
 	}
-	if err := r.upsert(ctx, name, storeCron, nextCron, nextEnabled, &upcoming, by); err != nil {
+	if err := r.upsert(ctx, name, storeCron, nextCron, nextEnabled, upcoming, by); err != nil {
 		return State{}, err
 	}
 
