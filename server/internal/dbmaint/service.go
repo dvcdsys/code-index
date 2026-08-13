@@ -17,11 +17,13 @@ type Deps struct {
 	// DBPath is the database file. Everything this package writes — the
 	// journal, the event log, the candidate copy — lives beside it.
 	DBPath string
-	// Thresholds override the built-in "is it worth reclaiming" figures, for
-	// the unusual deployment that needs different ones. Zero values keep the
-	// defaults.
-	Thresholds Thresholds
-	Logger     *slog.Logger
+	// MinFreePercent and MinFreeBytes override the built-in "is it worth
+	// reclaiming" figures. Pointers, not values: zero is a legitimate setting
+	// — it means "run whenever the schedule says, however little there is" —
+	// and a plain int cannot tell that apart from "not configured".
+	MinFreePercent *int
+	MinFreeBytes   *int64
+	Logger         *slog.Logger
 
 	// The hooks below are how compaction reaches the rest of the server
 	// without this package importing the job queue, the scheduler or the
@@ -96,11 +98,11 @@ func New(d Deps) *Service {
 		d.Logger = slog.Default()
 	}
 	s := &Service{d: d, thresholds: DefaultThresholds()}
-	if d.Thresholds.MinFreePercent > 0 {
-		s.thresholds.MinFreePercent = d.Thresholds.MinFreePercent
+	if d.MinFreePercent != nil {
+		s.thresholds.MinFreePercent = *d.MinFreePercent
 	}
-	if d.Thresholds.MinFreeBytes > 0 {
-		s.thresholds.MinFreeBytes = d.Thresholds.MinFreeBytes
+	if d.MinFreeBytes != nil {
+		s.thresholds.MinFreeBytes = *d.MinFreeBytes
 	}
 	// A previous run's measured rate outlives the process that measured it.
 	if st, ok, err := Load(d.DBPath); err == nil && ok {
@@ -114,12 +116,7 @@ func (s *Service) Stats(ctx context.Context) (Stats, error) {
 	s.mu.Lock()
 	rate := s.throughput
 	s.mu.Unlock()
-	return ReadStats(ctx, s.d.DB, s.d.DBPath, rate)
-}
-
-// Checkpoint folds the write-ahead log back into the database file.
-func (s *Service) Checkpoint(ctx context.Context) (CheckpointResult, error) {
-	return Checkpoint(ctx, s.d.DB, s.d.DBPath)
+	return ReadStats(ctx, s.d.DB, s.d.DBPath, rate, s.thresholds)
 }
 
 // Reclaim returns free pages to the filesystem, up to maxPages (0 = all).

@@ -30,10 +30,14 @@ type Task struct {
 	// Description is one sentence on what running it does, including the cost.
 	Description string
 
-	// DefaultCron and DefaultEnabled apply until an admin saves something, and
-	// on a server that has never been configured.
-	DefaultCron    string
-	DefaultEnabled bool
+	// DefaultCron applies until an admin saves something.
+	DefaultCron string
+	// DefaultEnabled is asked every time the schedule is resolved, not once at
+	// registration. Whether a task makes sense can change under a running
+	// server — the database's reclaim is only meaningful in incremental mode,
+	// and that mode is a switch on the same page — so a value captured at boot
+	// would be stale until the next restart, in both directions.
+	DefaultEnabled func() bool
 
 	// CatchUp says what to do about a slot that passed while the process was
 	// not running.
@@ -80,6 +84,11 @@ type Registry struct {
 	order   []string
 	running map[string]bool
 
+	// handlers counts task goroutines in flight. Stop joins them: a caller
+	// that asks background writers to stop is entitled to assume they have,
+	// and the compactor's quiesce is exactly that caller.
+	handlers sync.WaitGroup
+
 	stopped chan struct{}
 	once    sync.Once
 }
@@ -117,6 +126,17 @@ func (r *Registry) Register(t Task, envCron *string) {
 	if err := Validate(t.DefaultCron); err != nil {
 		panic(fmt.Sprintf("schedule: task %q has an unusable default cron: %v", t.Name, err))
 	}
+	// Validated once, here, rather than on every resolve: parsing plus the
+	// probe loop is not free, and an operator's typo should be reported at
+	// startup rather than silently dropping them onto the built-in default
+	// every time the dashboard asks.
+	if envCron != nil {
+		if err := Validate(*envCron); err != nil {
+			r.logger.Error("the environment supplies an unusable schedule for this task; falling back to its default",
+				"task", t.Name, "cron", *envCron, "err", err)
+			envCron = nil
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, dup := r.tasks[t.Name]; dup {
@@ -129,6 +149,15 @@ func (r *Registry) Register(t Task, envCron *string) {
 // Run drives the registry until ctx is cancelled.
 func (r *Registry) Run(ctx context.Context) {
 	defer r.once.Do(func() { close(r.stopped) })
+
+	// A run marked in flight by a process that is no longer here did not
+	// finish, it was interrupted. Nothing else will ever correct it — the
+	// status is written before the handler and cleared after — so a host that
+	// powers off nightly would show a permanent phantom "running" on the
+	// dashboard until the next slot came round.
+	if err := r.clearStaleRuns(ctx); err != nil {
+		r.logger.Warn("could not clear interrupted scheduled runs", "err", err)
+	}
 
 	// A pass on start, so a task whose slot passed while the process was down
 	// is dealt with — caught up or stepped over — rather than waiting out a
@@ -147,15 +176,33 @@ func (r *Registry) Run(ctx context.Context) {
 	}
 }
 
-// Stop waits for Run to return. Callers that need to know background writers
-// have actually stopped — the database compactor does — use this rather than
-// merely cancelling.
+// Stop waits for the loop to exit *and* for every handler it started to
+// return. Callers that need to know background writers have actually stopped —
+// the database compactor does — use this rather than merely cancelling.
+//
+// Joining the handlers is the whole point. Waiting only for the loop would
+// have honoured the letter of the contract and none of its meaning: a reclaim
+// in the middle of `incremental_vacuum` would sail straight through the
+// compaction's quiesce and go on writing into the database being copied. The
+// handlers hold no HTTP connection, so the route gate cannot see them either.
 func (r *Registry) Stop(ctx context.Context) error {
 	select {
 	case <-r.stopped:
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+	// Safe to Wait now: handlers are only started from the loop, and the loop
+	// has returned.
+	drained := make(chan struct{})
+	go func() {
+		r.handlers.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("a scheduled task was still running: %w", ctx.Err())
 	}
 }
 
@@ -246,7 +293,11 @@ func (r *Registry) considerOne(ctx context.Context, name string) error {
 	r.mu.Lock()
 	r.running[name] = true
 	r.mu.Unlock()
-	go r.invoke(ctx, name, e.task)
+	r.handlers.Add(1)
+	go func() {
+		defer r.handlers.Done()
+		r.invoke(ctx, name, e.task)
+	}()
 	return nil
 }
 
@@ -272,10 +323,11 @@ func (r *Registry) invoke(ctx context.Context, name string, t Task) {
 	switch {
 	case err == nil:
 	case errors.Is(err, context.Canceled):
-		// Interrupted by shutdown. Not an outcome worth reporting as a failure
-		// — it says nothing about the task.
+		// Interrupted by shutdown. Not a failure — it says nothing about the
+		// task — but it must not be left as "running" either, or the dashboard
+		// reports a run that nothing will ever finish.
 		r.logger.Info("scheduled task stopped early", "task", name, "reason", "shutting down")
-		return
+		status, msg = "interrupted", "stopped while the server was shutting down"
 	default:
 		status, msg = "failed", err.Error()
 		r.logger.Warn("scheduled task failed", "task", name, "err", err)
@@ -353,6 +405,14 @@ func (r *Registry) Save(ctx context.Context, name string, cron *string, enabled 
 	if err := Validate(nextCron); err != nil {
 		return State{}, fmt.Errorf("%w: %s", ErrInvalidCron, err)
 	}
+	// Persist the expression only when this request supplied one. Otherwise a
+	// PATCH that merely flips the switch would freeze whatever the expression
+	// currently resolves to — including one that came from the environment —
+	// into the row, and clearing the variable would no longer change anything.
+	var storeCron *string
+	if cron != nil {
+		storeCron = &nextCron
+	}
 
 	// Re-arm from the new expression immediately, so the preview the admin is
 	// looking at and the time the server will actually fire are the same thing.
@@ -360,7 +420,7 @@ func (r *Registry) Save(ctx context.Context, name string, cron *string, enabled 
 	if err != nil {
 		return State{}, fmt.Errorf("%w: %s", ErrInvalidCron, err)
 	}
-	if err := r.upsert(ctx, name, nextCron, nextEnabled, &upcoming, by); err != nil {
+	if err := r.upsert(ctx, name, storeCron, nextCron, nextEnabled, &upcoming, by); err != nil {
 		return State{}, err
 	}
 
@@ -379,8 +439,11 @@ func (r *Registry) Save(ctx context.Context, name string, cron *string, enabled 
 // resolve applies the precedence: a saved row beats the environment, which
 // beats what the task was registered with.
 func (r *Registry) resolve(e *entry, row taskRow) (cron string, enabled, configured bool) {
-	cron, enabled = e.task.DefaultCron, e.task.DefaultEnabled
-	if e.envCron != nil && Validate(*e.envCron) == nil {
+	cron = e.task.DefaultCron
+	if e.task.DefaultEnabled != nil {
+		enabled = e.task.DefaultEnabled()
+	}
+	if e.envCron != nil {
 		cron = *e.envCron
 	}
 	// A row exists as soon as the scheduler arms the task, which is not a

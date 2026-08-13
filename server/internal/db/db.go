@@ -387,30 +387,16 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
 		return fmt.Errorf("create scheduled_tasks: %w", err)
 	}
 
-	has, err := columnExists(db, "maintenance_settings", "interval_hours")
-	if err != nil {
-		return err
-	}
-	if !has {
-		return nil // already the new shape
-	}
-	stmts := []string{
-		`CREATE TABLE maintenance_settings_new (
-    id                INTEGER PRIMARY KEY CHECK(id=1),
-    min_free_percent  INTEGER,
-    min_free_bytes    INTEGER,
-    updated_at        TEXT NOT NULL,
-    updated_by        TEXT
-)`,
-		`INSERT INTO maintenance_settings_new (id, min_free_percent, min_free_bytes, updated_at, updated_by)
-		 SELECT id, min_free_percent, min_free_bytes, updated_at, updated_by FROM maintenance_settings`,
-		`DROP TABLE maintenance_settings`,
-		`ALTER TABLE maintenance_settings_new RENAME TO maintenance_settings`,
-	}
-	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
-			return fmt.Errorf("rebuild maintenance_settings: %w", err)
-		}
+	// maintenance_settings goes with it. Migration 19 created it to hold the
+	// schedule plus two thresholds; the schedule moved here, and the thresholds
+	// turned out not to want a table — what an admin adjusts is *when* a task
+	// runs, while how much waste is worth acting on is a property of the
+	// deployment, so it is a built-in default with an environment override.
+	// Keeping the table would leave a row an admin could save and nothing would
+	// ever read. Migration 19 shipped in this same unreleased branch, so there
+	// is no deployment whose settings are being discarded.
+	if _, err := db.Exec(`DROP TABLE IF EXISTS maintenance_settings`); err != nil {
+		return fmt.Errorf("drop maintenance_settings: %w", err)
 	}
 	return nil
 }

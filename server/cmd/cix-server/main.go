@@ -146,15 +146,6 @@ func envPositiveInt(key string) int {
 	return 0
 }
 
-// deref is the zero value when a pointer-typed optional config field is unset.
-func deref[T any](p *T) T {
-	if p == nil {
-		var zero T
-		return zero
-	}
-	return *p
-}
-
 func parseLogLevel(s string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "debug":
@@ -704,13 +695,19 @@ func run() (restart bool, err error) {
 		Thaw:           dbGate.Thaw,
 		RequestRestart: func() { restartOnce.Do(func() { close(restartCh) }) },
 		ActiveJobs:     dbmaint.ActiveWorkCounter(database, idx.ActiveSessions),
-		Thresholds: dbmaint.Thresholds{
-			MinFreePercent: deref(cfg.DBMaintenanceMinFreePercent),
-			MinFreeBytes:   deref(cfg.DBMaintenanceMinFreeBytes),
-		},
+		MinFreePercent: cfg.DBMaintenanceMinFreePercent,
+		MinFreeBytes:   cfg.DBMaintenanceMinFreeBytes,
 	})
 	for _, t := range dbMaintSvc.Tasks() {
-		schedReg.Register(t, cfg.DBMaintenanceCron)
+		// The environment supplies a default for the *reclaim* schedule only.
+		// One variable feeding both would mean an operator who set a nightly
+		// reclaim time gets a full rebuild — freeze plus restart — at that same
+		// hour the moment anybody switches compaction on.
+		var envCron *string
+		if t.Name == dbmaint.TaskReclaim {
+			envCron = cfg.DBMaintenanceCron
+		}
+		schedReg.Register(t, envCron)
 	}
 	go schedReg.Run(bgCtx)
 

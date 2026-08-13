@@ -98,7 +98,7 @@ func daily(rec *recorder, catchUp bool) Task {
 		Name:           "test.daily",
 		Title:          "Daily",
 		DefaultCron:    "0 0 * * *",
-		DefaultEnabled: true,
+		DefaultEnabled: alwaysOn,
 		CatchUp:        catchUp,
 		Handler:        rec.handler,
 	}
@@ -290,7 +290,7 @@ func TestRegistry_DoesNotOverlapItself(t *testing.T) {
 	rec := &recorder{clock: clock, block: make(chan struct{})}
 	r.Register(Task{
 		Name: "test.minutely", Title: "Minutely",
-		DefaultCron: "* * * * *", DefaultEnabled: true,
+		DefaultCron: "* * * * *", DefaultEnabled: alwaysOn,
 		Handler: rec.handler,
 	}, nil)
 	ctx := context.Background()
@@ -322,7 +322,7 @@ func TestRegistry_SurvivesAPanickingHandler(t *testing.T) {
 	r, sdb, clock := fixture(t)
 	r.Register(Task{
 		Name: "test.boom", Title: "Boom",
-		DefaultCron: "0 0 * * *", DefaultEnabled: true,
+		DefaultCron: "0 0 * * *", DefaultEnabled: alwaysOn,
 		Handler: func(context.Context) error { panic("no") },
 	}, nil)
 	ctx := context.Background()
@@ -355,7 +355,7 @@ func TestRegistry_DisabledNeverRuns(t *testing.T) {
 	r, _, clock := fixture(t)
 	rec := &recorder{clock: clock}
 	task := daily(rec, true)
-	task.DefaultEnabled = false
+	task.DefaultEnabled = func() bool { return false }
 	r.Register(task, nil)
 	ctx := context.Background()
 
@@ -419,3 +419,172 @@ func TestRegistry_PrecedenceIsDatabaseThenEnvironmentThenDefault(t *testing.T) {
 }
 
 func strptr(s string) *string { return &s }
+
+func alwaysOn() bool { return true }
+
+// Stop must not return while a handler is still running.
+//
+// This is the contract the database compactor buys its safety with: it calls
+// Stop as part of quiescing, then freezes writes and copies the file. A reclaim
+// still inside `incremental_vacuum` when Stop returned would go on writing into
+// the database being copied, and the HTTP write gate cannot see it — the
+// handler holds no request.
+func TestRegistry_StopWaitsForHandlersToFinish(t *testing.T) {
+	r, _, clock := fixture(t)
+	release := make(chan struct{})
+	rec := &recorder{clock: clock, block: release}
+	r.Register(daily(rec, false), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := r.considerOne(ctx, "test.daily"); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+	clock.set(time.Date(2026, 8, 14, 0, 0, 0, 0, time.Local))
+	if err := r.considerOne(ctx, "test.daily"); err != nil {
+		t.Fatalf("fire: %v", err)
+	}
+	waitFor(t, "the handler to start", func() bool { return rec.count() == 1 })
+
+	// The loop was never started, so close its channel by hand: this test is
+	// about the handler half of Stop.
+	r.once.Do(func() { close(r.stopped) })
+
+	returned := make(chan error, 1)
+	go func() { returned <- r.Stop(context.Background()) }()
+
+	select {
+	case err := <-returned:
+		t.Fatalf("Stop returned (%v) while a handler was still running — the compactor "+
+			"would now freeze and copy the database underneath it", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Errorf("Stop = %v, want nil once the handler finished", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop never returned after the handler finished")
+	}
+	cancel()
+}
+
+// And it reports rather than hangs when the handler outlives the budget.
+func TestRegistry_StopReportsAHandlerThatWillNotFinish(t *testing.T) {
+	r, _, clock := fixture(t)
+	release := make(chan struct{})
+	defer close(release)
+	rec := &recorder{clock: clock, block: release}
+	r.Register(daily(rec, false), nil)
+
+	ctx := context.Background()
+	if err := r.considerOne(ctx, "test.daily"); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+	clock.set(time.Date(2026, 8, 14, 0, 0, 0, 0, time.Local))
+	if err := r.considerOne(ctx, "test.daily"); err != nil {
+		t.Fatalf("fire: %v", err)
+	}
+	waitFor(t, "the handler to start", func() bool { return rec.count() == 1 })
+	r.once.Do(func() { close(r.stopped) })
+
+	bounded, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := r.Stop(bounded); err == nil {
+		t.Error("Stop reported success with a handler still running")
+	}
+}
+
+// A run marked in flight by a process that never came back is interrupted, not
+// running. Nothing else corrects it, so a host that powers off nightly would
+// show a permanent phantom on the dashboard.
+func TestRegistry_ClearsARunLeftBehindByADeadProcess(t *testing.T) {
+	r, sdb, _ := fixture(t)
+	rec := &recorder{clock: &fakeClock{}}
+	r.Register(daily(rec, false), nil)
+
+	if _, err := sdb.Exec(`
+		INSERT INTO scheduled_tasks (name, cron_used, next_run_at, last_run_at, last_status, updated_at)
+		VALUES ('test.daily', '0 0 * * *', '2030-01-01T00:00:00Z', '2026-08-13T00:00:00Z',
+		        'running', '2026-08-13T00:00:00Z')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := r.clearStaleRuns(context.Background()); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	var status, lastErr sql.NullString
+	if err := sdb.QueryRow(
+		`SELECT last_status, last_error FROM scheduled_tasks WHERE name = 'test.daily'`).
+		Scan(&status, &lastErr); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if status.String != "interrupted" {
+		t.Errorf("last_status = %q, want %q", status.String, "interrupted")
+	}
+	if lastErr.String == "" {
+		t.Error("no explanation recorded for the interrupted run")
+	}
+}
+
+// Flipping the switch must not freeze the expression the environment is
+// supplying. Otherwise clearing the variable would stop changing anything, and
+// an operator would have no way back short of editing the database.
+func TestRegistry_SaveDoesNotPersistAnExpressionItWasNotGiven(t *testing.T) {
+	r, sdb, _ := fixture(t)
+	rec := &recorder{clock: &fakeClock{}}
+	r.Register(daily(rec, false), strptr("0 5 * * *"))
+	ctx := context.Background()
+
+	enabled := true
+	if _, err := r.Save(ctx, "test.daily", nil, &enabled, ""); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	var cron sql.NullString
+	if err := sdb.QueryRow(`SELECT cron FROM scheduled_tasks WHERE name = 'test.daily'`).Scan(&cron); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if cron.Valid {
+		t.Errorf("cron was persisted as %q by a request that only set the switch", cron.String)
+	}
+
+	// An explicit expression is persisted, as it should be.
+	if _, err := r.Save(ctx, "test.daily", strptr("0 6 * * *"), nil, ""); err != nil {
+		t.Fatalf("save cron: %v", err)
+	}
+	if err := sdb.QueryRow(`SELECT cron FROM scheduled_tasks WHERE name = 'test.daily'`).Scan(&cron); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if cron.String != "0 6 * * *" {
+		t.Errorf("cron = %q, want the saved expression", cron.String)
+	}
+}
+
+// The default is asked at resolve time, not captured at registration: whether
+// a task makes sense can change under a running server.
+func TestRegistry_DefaultEnabledIsAskedEachTime(t *testing.T) {
+	r, _, _ := fixture(t)
+	rec := &recorder{clock: &fakeClock{}}
+	on := false
+	task := daily(rec, false)
+	task.DefaultEnabled = func() bool { return on }
+	r.Register(task, nil)
+
+	list, err := r.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if list[0].Enabled {
+		t.Fatal("enabled before the condition held")
+	}
+	on = true
+	list, err = r.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !list[0].Enabled {
+		t.Error("the default was captured at registration; it must be asked each time")
+	}
+}

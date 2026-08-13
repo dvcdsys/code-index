@@ -3,7 +3,6 @@ import { api } from '@/api/client';
 import { isActivePhase } from '@/api/types';
 import type {
   ActiveEmbeddingProvider,
-  CheckpointResult,
   AutoVacuumRequest,
   DatabaseState,
   MaintenanceOperation,
@@ -236,14 +235,6 @@ export function useUpdateSchedule() {
     onSuccess: (task) =>
       qc.setQueryData(serverKeys.schedules, (prev: ScheduledTask[] | undefined) =>
         prev ? prev.map((t) => (t.name === task.name ? task : t)) : [task]),
-  });
-}
-
-export function useCheckpointWal() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => api.post<CheckpointResult>('/admin/database/checkpoint'),
-    onSuccess: () => qc.invalidateQueries({ queryKey: serverKeys.database }),
   });
 }
 

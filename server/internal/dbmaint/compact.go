@@ -51,7 +51,7 @@ func (s *Service) SetAutoVacuum(ctx context.Context, mode AutoVacuum) (State, bo
 	switch mode {
 	case AutoVacuumNone, AutoVacuumIncremental:
 	default:
-		return State{}, false, fmt.Errorf("%w: unknown reclaim mode %q", ErrInvalidSchedule, mode)
+		return State{}, false, fmt.Errorf("%w: unknown reclaim mode %q", ErrInvalidMode, mode)
 	}
 	if s.currentMode(ctx) == mode {
 		return State{

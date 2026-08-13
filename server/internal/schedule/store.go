@@ -105,6 +105,21 @@ func (r *Registry) claim(ctx context.Context, name, cron string, at, next time.T
 	return nil
 }
 
+// clearStaleRuns marks runs left in flight by a previous process. The status
+// is written before the handler and cleared after it, so anything still saying
+// "running" when this process starts belongs to one that did not come back.
+func (r *Registry) clearStaleRuns(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE scheduled_tasks
+		   SET last_status = 'interrupted',
+		       last_error  = 'the server stopped before this run finished'
+		 WHERE last_status = 'running'`)
+	if err != nil {
+		return fmt.Errorf("clear interrupted runs: %w", err)
+	}
+	return nil
+}
+
 // record stores the outcome of a finished run.
 func (r *Registry) record(ctx context.Context, name, status, errText string, took time.Duration) error {
 	var e any
@@ -123,23 +138,33 @@ func (r *Registry) record(ctx context.Context, name, status, errText string, too
 }
 
 // upsert applies an admin's change.
-func (r *Registry) upsert(ctx context.Context, name, cron string, enabled bool, next *time.Time, by string) error {
-	var byVal any
+//
+// storeCron is the expression to persist, or nil when this request did not
+// supply one — the column then keeps whatever it had, so a schedule that is
+// still resolving from the environment goes on doing so. effectiveCron is what
+// the task will actually run on, and is what next_run_at was derived from.
+func (r *Registry) upsert(ctx context.Context, name string, storeCron *string,
+	effectiveCron string, enabled bool, next *time.Time, by string) error {
+
+	var byVal, cronVal any
 	if by != "" {
 		byVal = by
+	}
+	if storeCron != nil {
+		cronVal = *storeCron
 	}
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO scheduled_tasks (name, configured, cron, enabled, cron_used, next_run_at, updated_at, updated_by)
 		VALUES (?, 1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			configured  = 1,
-			cron        = excluded.cron,
+			cron        = COALESCE(excluded.cron, scheduled_tasks.cron),
 			enabled     = excluded.enabled,
 			cron_used   = excluded.cron_used,
 			next_run_at = excluded.next_run_at,
 			updated_at  = excluded.updated_at,
 			updated_by  = excluded.updated_by`,
-		name, cron, boolToInt(enabled), cron, formatTimePtr(next), formatTime(r.now()), byVal)
+		name, cronVal, boolToInt(enabled), effectiveCron, formatTimePtr(next), formatTime(r.now()), byVal)
 	if err != nil {
 		return fmt.Errorf("save scheduled task %q: %w", name, err)
 	}

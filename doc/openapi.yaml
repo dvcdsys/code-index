@@ -883,32 +883,6 @@ paths:
         "503":
           $ref: "#/components/responses/ResourcesUnavailable"
 
-  /api/v1/admin/database/checkpoint:
-    post:
-      operationId: checkpointWal
-      tags: [admin]
-      summary: Fold the write-ahead log back into the database (admin only)
-      description: |
-        Runs `PRAGMA wal_checkpoint(TRUNCATE)`. Seconds at most, no maintenance
-        window, and it only moves data that is already durable — the cheap
-        first thing to try when the `-wal` file has grown large.
-
-        A checkpoint can be blocked by long-running readers, in which case it
-        returns what it managed to move rather than failing.
-      responses:
-        "200":
-          description: Checkpoint finished
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CheckpointResult"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "503":
-          $ref: "#/components/responses/ResourcesUnavailable"
-
   /api/v1/admin/database/auto-vacuum:
     put:
       operationId: setAutoVacuumMode
@@ -4527,19 +4501,6 @@ components:
           format: int64
           minimum: 0
           description: What is left on the freelist after this call.
-
-    CheckpointResult:
-      type: object
-      required: [pages_checkpointed, wal_bytes_before, wal_bytes_after, blocked]
-      properties:
-        pages_checkpointed: { type: integer, format: int64, minimum: 0 }
-        wal_bytes_before: { type: integer, format: int64, minimum: 0 }
-        wal_bytes_after: { type: integer, format: int64, minimum: 0 }
-        blocked:
-          type: boolean
-          description: |
-            True when a reader prevented the log from being fully folded in.
-            Not an error — the checkpoint moved what it could.
 
     ScheduledTask:
       type: object

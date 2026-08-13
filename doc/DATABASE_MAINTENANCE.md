@@ -6,15 +6,23 @@ has since gained stays large and mostly empty. The instance that prompted this
 feature was **8.86 GB with 48% of the file on the freelist** — 4.3 GB of
 nothing.
 
-Server → Resources → Database reports that and offers three ways to act on it.
+Server → Resources → Database reports that and offers two ways to act on it.
 
-## The three actions
+## The two actions
 
 | | What it does | Cost |
 |---|---|---|
-| **Checkpoint log** | Folds the write-ahead log back into the database file | Seconds, no window |
 | **Reclaim now** | Returns free pages to the filesystem in bounded chunks | Milliseconds per chunk, no window, no restart |
 | **Compact now** | Rebuilds the database into a fresh file and replaces it | A read-only window, then a restart |
+
+Reclaim folds the write-ahead log back into the database file as part of its
+work, because in WAL mode the file does not actually shrink until that has
+happened. There is no separate control for it: SQLite checkpoints the log
+automatically once it reaches 1000 pages — 4 MB, which is where it sits — so a
+button offering to reclaim those 4 MB from a multi-gigabyte database would be
+duplicating the automatic behaviour in the ordinary case and unavailable in
+the one case it would matter, since a log that has grown large is a log some
+reader is holding open.
 
 Reclaim needs the database to be in **incremental** auto-vacuum mode. That is a
 **setting**, not an action, and it lives on its own two-way switch. Compaction

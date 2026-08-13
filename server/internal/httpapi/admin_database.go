@@ -107,24 +107,6 @@ func (s *Server) GetDatabaseState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// CheckpointWal — POST /api/v1/admin/database/checkpoint.
-func (s *Server) CheckpointWal(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.mustBeAdmin(w, r); !ok {
-		return
-	}
-	svc := s.databaseService(w)
-	if svc == nil {
-		return
-	}
-	res, err := svc.Checkpoint(r.Context())
-	if err != nil {
-		s.Deps.Logger.Error("checkpoint wal", "err", err)
-		writeError(w, http.StatusInternalServerError, "checkpoint: "+err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
-}
-
 // ReclaimFreePages — POST /api/v1/admin/database/reclaim.
 func (s *Server) ReclaimFreePages(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.mustBeAdmin(w, r); !ok {
@@ -230,7 +212,7 @@ func (s *Server) SetAutoVacuumMode(w http.ResponseWriter, r *http.Request) {
 	st, changed, err := svc.SetAutoVacuum(r.Context(), dbmaint.AutoVacuum(body.Mode))
 	if err != nil {
 		switch {
-		case errors.Is(err, dbmaint.ErrInvalidSchedule):
+		case errors.Is(err, dbmaint.ErrInvalidMode):
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 		case errors.Is(err, dbmaint.ErrCompactionRunning):
 			writeError(w, http.StatusConflict, "a database compaction is already running")

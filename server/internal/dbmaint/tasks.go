@@ -17,7 +17,8 @@ const (
 	TaskCompact = "db.compact"
 )
 
-// Thresholds gate whether a scheduled run is worth doing at all.
+// Thresholds gate whether a scheduled run is worth doing at all, and are the
+// same figures the dashboard's verdict is computed from.
 //
 // Two of them rather than one: a percentage alone nags on a small database
 // where 40% of 12 MB is not worth the work, and an absolute figure alone nags
@@ -59,11 +60,16 @@ func (s *Service) Tasks() []schedule.Task {
 			Description: "Returns the database's free pages to the filesystem. " +
 				"Milliseconds, no read-only window, no restart.",
 			DefaultCron: "0 3 * * *",
-			// On by default only where it can actually work. A database
-			// carried over from an older install is not in incremental mode
-			// and the only thing automation could do for it is the expensive
-			// rebuild — so an upgrade starts nothing on its own.
-			DefaultEnabled: s.currentMode(context.Background()) == AutoVacuumIncremental,
+			// On by default only where it can actually work, asked afresh each
+			// time. A database carried over from an older install is not in
+			// incremental mode and the only thing automation could do for it is
+			// the expensive rebuild — so an upgrade starts nothing on its own.
+			// And the mode is a switch on the same page, so reading it once at
+			// registration would leave the default stale in both directions
+			// until the next restart.
+			DefaultEnabled: func() bool {
+				return s.currentMode(context.Background()) == AutoVacuumIncremental
+			},
 			// Cheap and interruption-free, so a laptop that was asleep at 03:00
 			// runs it on waking rather than never running it at all.
 			CatchUp: true,
@@ -75,7 +81,7 @@ func (s *Service) Tasks() []schedule.Task {
 			Description: "Rebuilds the database into a fresh file. Takes the server read-only " +
 				"for the copy, then restarts it.",
 			DefaultCron:    "0 4 * * 0",
-			DefaultEnabled: false,
+			DefaultEnabled: func() bool { return false },
 			// Never late. "We noticed at 09:00" would mean a read-only window
 			// and a restart in the middle of the working day.
 			CatchUp: false,
@@ -86,6 +92,15 @@ func (s *Service) Tasks() []schedule.Task {
 
 // reclaimTask is the scheduled bounded reclaim.
 func (s *Service) reclaimTask(ctx context.Context) error {
+	// A rebuild owns the database while it runs, and this does not go through
+	// the HTTP write gate — `incremental_vacuum` and the checkpoint that
+	// follows it write straight through the shared pool, where no middleware
+	// can see them. Starting one on top of a compaction would put writes into
+	// the file being copied.
+	if s.rebuildRunning() {
+		s.d.Logger.Debug("scheduled reclaim skipped: a database rebuild is running")
+		return nil
+	}
 	stats, err := s.Stats(ctx)
 	if err != nil {
 		return fmt.Errorf("read database statistics: %w", err)
@@ -116,6 +131,9 @@ func (s *Service) reclaimTask(ctx context.Context) error {
 
 // compactTask is the scheduled full rebuild.
 func (s *Service) compactTask(ctx context.Context) error {
+	if s.rebuildRunning() {
+		return nil
+	}
 	stats, err := s.Stats(ctx)
 	if err != nil {
 		return fmt.Errorf("read database statistics: %w", err)
@@ -132,6 +150,13 @@ func (s *Service) compactTask(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// rebuildRunning reports whether a compaction owns the database right now.
+func (s *Service) rebuildRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
 }
 
 func (s *Service) inFlight(ctx context.Context) (int, error) {
@@ -181,5 +206,6 @@ func (s *Service) journalReclaim(started time.Time, freed int64) {
 	}
 }
 
-// ErrInvalidSchedule is kept for the handlers that map errors to status codes.
-var ErrInvalidSchedule = errors.New("invalid schedule")
+// ErrInvalidMode is returned when a reclaim mode is not one this server can
+// set.
+var ErrInvalidMode = errors.New("invalid reclaim mode")

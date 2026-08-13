@@ -230,7 +230,7 @@ func TestReadStats_ReportsWasteAndMode(t *testing.T) {
 		t.Fatalf("checkpoint: %v", err)
 	}
 
-	st, err := ReadStats(context.Background(), sdb, path, 0)
+	st, err := ReadStats(context.Background(), sdb, path, 0, DefaultThresholds())
 	if err != nil {
 		t.Fatalf("read stats: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestAdvise_RequiresBothThresholds(t *testing.T) {
 		{"both urgent thresholds met", 48, 4 << 30, VerdictUrgent},
 	}
 	for _, c := range cases {
-		got, reason := advise(Stats{ReclaimablePercent: c.percent, ReclaimableBytes: c.bytes})
+		got, reason := advise(Stats{ReclaimablePercent: c.percent, ReclaimableBytes: c.bytes}, DefaultThresholds())
 		if got != c.want {
 			t.Errorf("%s: verdict = %q, want %q", c.name, got, c.want)
 		}
@@ -292,7 +292,7 @@ func TestAdvise_TheCaseThatPromptedThis(t *testing.T) {
 	}
 	s.ReclaimableBytes = s.FreelistPages * s.PageSize
 	s.ReclaimablePercent = float64(s.FreelistPages) / float64(s.PageCount) * 100
-	if got, _ := advise(s); got != VerdictUrgent {
+	if got, _ := advise(s, DefaultThresholds()); got != VerdictUrgent {
 		t.Errorf("verdict = %q for a database that is 48%% empty, want %q", got, VerdictUrgent)
 	}
 }

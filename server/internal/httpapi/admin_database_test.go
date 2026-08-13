@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/dvcdsys/code-index/server/internal/dbmaint"
+	"github.com/dvcdsys/code-index/server/internal/schedule"
 )
 
 // databaseRoutes are the admin endpoints this feature adds. Every one of them
@@ -23,7 +24,6 @@ var databaseRoutes = []struct {
 	{http.MethodGet, "/api/v1/admin/database"},
 	{http.MethodPost, "/api/v1/admin/database/compact"},
 	{http.MethodPost, "/api/v1/admin/database/reclaim"},
-	{http.MethodPost, "/api/v1/admin/database/checkpoint"},
 	{http.MethodPut, "/api/v1/admin/database/auto-vacuum"},
 	{http.MethodGet, "/api/v1/admin/schedules"},
 	{http.MethodPut, "/api/v1/admin/schedules/db.reclaim"},
@@ -303,5 +303,122 @@ func TestDatabaseState_ReportsWhyCompactionIsBlocked(t *testing.T) {
 	}
 	if *reason == "" {
 		t.Error("blocked_reason is present but empty; the dashboard renders it as the explanation")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Recurring tasks
+// ---------------------------------------------------------------------------
+
+// The gating table above proves a non-admin cannot reach these. It does not
+// prove an admin can: the fixture leaves Deps.Schedules nil, so every call
+// lands in the 503 branch and a regression in the error mapping or the
+// response envelope would pass the whole suite unnoticed.
+func newScheduleFixture(t *testing.T) (*adminFixture, http.Handler, string) {
+	t.Helper()
+	f := newAdminFixture(t)
+	reg := schedule.New(f.Deps.DB, f.Deps.Logger)
+	reg.Register(schedule.Task{
+		Name:           "test.nightly",
+		Title:          "Nightly",
+		Description:    "Does nothing, on a schedule.",
+		DefaultCron:    "0 3 * * *",
+		DefaultEnabled: func() bool { return true },
+		Handler:        func(context.Context) error { return nil },
+	}, nil)
+	f.Deps.Schedules = reg
+	return f, NewRouter(f.Deps), adminCookie(t, f)
+}
+
+func TestListSchedules_ReturnsTheRegisteredTasks(t *testing.T) {
+	f, router, admin := newScheduleFixture(t)
+
+	req := withCookie(httptest.NewRequest(http.MethodGet, "/api/v1/admin/schedules", nil), admin)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/admin/schedules = %d (%s), want 200", rr.Code, rr.Body.String())
+	}
+
+	var body struct {
+		Tasks []schedule.State `json:"tasks"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rr.Body.String())
+	}
+	if len(body.Tasks) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(body.Tasks))
+	}
+	got := body.Tasks[0]
+	if got.Name != "test.nightly" || got.Cron != "0 3 * * *" {
+		t.Errorf("task = %+v, want the registered name and cron", got)
+	}
+	if got.Configured {
+		t.Error("a task nobody has saved reports as configured")
+	}
+	if len(got.NextRuns) != 3 {
+		t.Errorf("got %d next runs, want 3 — the dashboard previews the schedule from these",
+			len(got.NextRuns))
+	}
+	_ = f
+}
+
+func TestUpdateSchedule_SavesAndReArms(t *testing.T) {
+	_, router, admin := newScheduleFixture(t)
+
+	req := withCookie(httptest.NewRequest(http.MethodPut, "/api/v1/admin/schedules/test.nightly",
+		strings.NewReader(`{"cron":"0 0 * * *"}`)), admin)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT = %d (%s), want 200", rr.Code, rr.Body.String())
+	}
+	var got schedule.State
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Cron != "0 0 * * *" {
+		t.Errorf("cron = %q, want the saved expression", got.Cron)
+	}
+	if !got.Configured {
+		t.Error("a saved schedule does not report as configured")
+	}
+	// The response has to carry the runs the server will actually keep —
+	// the dashboard renders these as the preview.
+	if len(got.NextRuns) == 0 {
+		t.Fatal("no next runs returned after a save")
+	}
+	if h := got.NextRuns[0].Local().Hour(); h != 0 {
+		t.Errorf("first run is at %02d:00, want midnight — the save did not re-arm", h)
+	}
+}
+
+// An expression that parses but can never match is a configuration error, and
+// must not be accepted as a schedule that silently never fires.
+func TestUpdateSchedule_RefusesAnUnusableExpression(t *testing.T) {
+	_, router, admin := newScheduleFixture(t)
+
+	for _, body := range []string{`{"cron":"0 0 30 2 *"}`, `{"cron":"nonsense"}`} {
+		req := withCookie(httptest.NewRequest(http.MethodPut,
+			"/api/v1/admin/schedules/test.nightly", strings.NewReader(body)), admin)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnprocessableEntity {
+			t.Errorf("PUT %s = %d (%s), want 422", body, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestUpdateSchedule_UnknownTaskIs404(t *testing.T) {
+	_, router, admin := newScheduleFixture(t)
+	req := withCookie(httptest.NewRequest(http.MethodPut, "/api/v1/admin/schedules/nope",
+		strings.NewReader(`{"enabled":true}`)), admin)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("PUT an unregistered task = %d (%s), want 404", rr.Code, rr.Body.String())
 	}
 }

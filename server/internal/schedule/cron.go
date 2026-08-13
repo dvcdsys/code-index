@@ -91,11 +91,61 @@ func NextAfter(expr string, after time.Time) (time.Time, error) {
 			return time.Time{}, fmt.Errorf("check %q: %w", expr, err)
 		}
 		if due {
+			if gap, ok := skippedByClockChange(expr, after, cand); ok {
+				return gap, nil
+			}
 			return cand, nil
 		}
 		cursor = cand
 	}
 	return time.Time{}, fmt.Errorf("%q has no run within the next ten years", expr)
+}
+
+// skippedByClockChange reports a run that the spring-forward would otherwise
+// swallow, and the instant to run it at instead.
+//
+// On the morning the clocks go forward an hour of wall time does not happen:
+// in Kyiv 03:00 becomes 04:00, so `0 3 * * *` matches no instant that day and
+// pure wall-clock arithmetic simply moves to tomorrow. That is a nightly task
+// silently missing a night, once a year, with nothing in the log — and CatchUp
+// cannot rescue it, because no slot was ever armed to be late for.
+//
+// vixie cron runs those jobs once, immediately after the jump, and so does
+// this: if the expression matches any minute inside the vanished hour, the run
+// happens at the first instant the clock is valid again.
+//
+// Only the first transition between the two times is considered. A second one
+// inside the same interval would mean the next run is more than half a year
+// out, at which point one missed slot is not the interesting problem.
+func skippedByClockChange(expr string, after, next time.Time) (time.Time, bool) {
+	loc := after.Location()
+	_, end := after.ZoneBounds()
+	if end.IsZero() || !end.After(after) || end.After(next) {
+		return time.Time{}, false
+	}
+	_, before := end.Add(-time.Second).Zone()
+	_, atEnd := end.Zone()
+	delta := time.Duration(atEnd-before) * time.Second
+	if delta <= 0 {
+		return time.Time{}, false // falling back, or no real change: nothing vanishes
+	}
+
+	// The wall clock jumps from (W - delta) to W at this instant, so every
+	// minute in between is a time that did not occur.
+	//
+	// The arithmetic is on the calendar fields, not on the instant: an hour
+	// before the transition *as an instant* is still an hour of real time and
+	// lands at 02:00, whereas the hour that vanished is 03:00–04:00. UTC is the
+	// carrier precisely because it has no transitions to normalise against —
+	// and the due check reads the fields, never the offset.
+	w := end.In(loc)
+	last := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), 0, 0, time.UTC)
+	for f := last.Add(-delta); f.Before(last); f = f.Add(time.Minute) {
+		if due, err := gron.IsDue(expr, f); err == nil && due {
+			return end, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // NextRuns returns the next n runs after `after`.

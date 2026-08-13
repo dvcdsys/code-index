@@ -111,7 +111,6 @@ export type MaintenanceOperation = components['schemas']['MaintenanceOperation']
 export type MaintenanceEvent = components['schemas']['MaintenanceEvent'];
 export type ReclaimRequest = components['schemas']['ReclaimRequest'];
 export type ReclaimResult = components['schemas']['ReclaimResult'];
-export type CheckpointResult = components['schemas']['CheckpointResult'];
 // Recurring tasks. Not database-specific — the registry is generic and the
 // database's reclaim and compaction are simply its first two entries.
 export type ScheduledTask = components['schemas']['ScheduledTask'];

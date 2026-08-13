@@ -135,31 +135,61 @@ func TestNextAfter_OverrunSkipsRatherThanQueues(t *testing.T) {
 	}
 }
 
-// Daylight saving, documented rather than fought.
+// The hour that does not happen.
 //
 // Kyiv springs forward on the last Sunday of March: 03:00 becomes 04:00, so
-// 03:30 does not exist that day. Wall-clock matching therefore skips the run
-// entirely, where vixie cron would fire it just after the jump. For the tasks
-// on this scheduler — returning free pages to the filesystem — losing one run a
-// year is not worth the machinery that fixing it would need, but it must not be
-// a surprise, so it is pinned here.
-func TestNextAfter_SkipsAnHourThatDoesNotExistOnTheSpringForward(t *testing.T) {
+// nothing in [03:00, 04:00) occurs that day. Pure wall-clock arithmetic finds
+// no match and moves to tomorrow — a nightly task quietly missing a night once
+// a year, with nothing in the log, and CatchUp powerless because no slot was
+// ever armed to be late for. vixie cron runs those jobs right after the jump,
+// and so does this.
+func TestNextAfter_FiresAfterTheJumpForAnHourThatDoesNotExist(t *testing.T) {
 	loc := kyiv(t)
-	next, err := NextAfter("30 3 * * *", at(loc, 2027, time.March, 27, 12, 0))
+	// 2027-03-28 in Kyiv: 03:00 EET -> 04:00 EEST.
+	for _, expr := range []string{"30 3 * * *", "0 3 * * *", "59 3 * * *"} {
+		next, err := NextAfter(expr, at(loc, 2027, time.March, 27, 12, 0))
+		if err != nil {
+			t.Fatalf("%s: %v", expr, err)
+		}
+		want := at(loc, 2027, time.March, 28, 4, 0) // the first valid instant
+		if !next.Equal(want) {
+			t.Errorf("%s -> %s, want %s — the run inside the vanished hour must not be lost",
+				expr, next.Format(time.RFC3339), want.Format(time.RFC3339))
+		}
+	}
+
+	// And it happens once, not once per skipped minute.
+	first, err := NextAfter("30 3 * * *", at(loc, 2027, time.March, 27, 12, 0))
 	if err != nil {
-		t.Fatalf("next: %v", err)
+		t.Fatalf("first: %v", err)
 	}
-	if want := at(loc, 2027, time.March, 29, 3, 30); !next.Equal(want) {
-		t.Errorf("next = %s, want %s (the 28th has no 03:30 in this zone)",
-			next.Format(time.RFC3339), want.Format(time.RFC3339))
-	}
-	// The hour before the gap is untouched.
-	next, err = NextAfter("30 2 * * *", at(loc, 2027, time.March, 27, 12, 0))
+	second, err := NextAfter("30 3 * * *", first)
 	if err != nil {
-		t.Fatalf("next: %v", err)
+		t.Fatalf("second: %v", err)
 	}
-	if want := at(loc, 2027, time.March, 28, 2, 30); !next.Equal(want) {
-		t.Errorf("next = %s, want %s", next.Format(time.RFC3339), want.Format(time.RFC3339))
+	if want := at(loc, 2027, time.March, 29, 3, 30); !second.Equal(want) {
+		t.Errorf("the run after it = %s, want %s", second.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+}
+
+// An hour on either side of the gap is ordinary and must not be touched.
+func TestNextAfter_LeavesTheHoursAroundTheGapAlone(t *testing.T) {
+	loc := kyiv(t)
+	from := at(loc, 2027, time.March, 27, 12, 0)
+	for _, c := range []struct {
+		expr string
+		want time.Time
+	}{
+		{"30 2 * * *", at(loc, 2027, time.March, 28, 2, 30)},
+		{"30 4 * * *", at(loc, 2027, time.March, 28, 4, 30)},
+	} {
+		next, err := NextAfter(c.expr, from)
+		if err != nil {
+			t.Fatalf("%s: %v", c.expr, err)
+		}
+		if !next.Equal(c.want) {
+			t.Errorf("%s -> %s, want %s", c.expr, next.Format(time.RFC3339), c.want.Format(time.RFC3339))
+		}
 	}
 }
 

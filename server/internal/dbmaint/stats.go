@@ -44,11 +44,12 @@ const (
 // a small database where 40% of 12 MB is not worth a maintenance window; an
 // absolute figure alone nags on a large one where 500 MB of slack is normal
 // operating headroom.
+// The recommend thresholds are the configurable ones; "urgent" is derived from
+// them — 1.6× the percentage and 8× the size — so moving one moves both and the
+// two verdicts cannot cross over.
 const (
 	recommendPercent = 25
 	recommendBytes   = 256 << 20 // 256 MiB
-	urgentPercent    = 40
-	urgentBytes      = 2 << 30 // 2 GiB
 )
 
 // copyThroughputBytesPerSec seeds the duration estimate before a real
@@ -88,7 +89,7 @@ type Stats struct {
 //
 // Cheap by construction: page_count and freelist_count are header reads, not
 // scans, so this is safe to poll and safe to call on every dashboard load.
-func ReadStats(ctx context.Context, sdb *sql.DB, dbPath string, measuredThroughput int64) (Stats, error) {
+func ReadStats(ctx context.Context, sdb *sql.DB, dbPath string, measuredThroughput int64, th Thresholds) (Stats, error) {
 	out := Stats{Path: dbPath}
 
 	pragmas := []struct {
@@ -121,7 +122,7 @@ func ReadStats(ctx context.Context, sdb *sql.DB, dbPath string, measuredThroughp
 	if out.PageCount > 0 {
 		out.ReclaimablePercent = float64(out.FreelistPages) / float64(out.PageCount) * 100
 	}
-	out.Verdict, out.VerdictReason = advise(out)
+	out.Verdict, out.VerdictReason = advise(out, th)
 
 	// The copy is roughly the live pages; the freelist is what disappears.
 	expectedCopy := (out.PageCount - out.FreelistPages) * out.PageSize
@@ -141,13 +142,17 @@ func ReadStats(ctx context.Context, sdb *sql.DB, dbPath string, measuredThroughp
 	return out, nil
 }
 
-func advise(s Stats) (Verdict, string) {
+// advise renders the verdict from the *resolved* thresholds, not from the
+// constants, so an operator who moved them does not read one number on screen
+// while the automation acts on another.
+func advise(s Stats, th Thresholds) (Verdict, string) {
+	urgentPercent, urgentBytes := th.MinFreePercent*8/5, th.MinFreeBytes*8
 	switch {
-	case s.ReclaimablePercent >= urgentPercent && s.ReclaimableBytes >= urgentBytes:
+	case s.ReclaimablePercent >= float64(urgentPercent) && s.ReclaimableBytes >= urgentBytes:
 		return VerdictUrgent, fmt.Sprintf(
 			"%.0f%% of the database file is empty space — compacting would return about %s to the filesystem.",
 			s.ReclaimablePercent, humanBytes(s.ReclaimableBytes))
-	case s.ReclaimablePercent >= recommendPercent && s.ReclaimableBytes >= recommendBytes:
+	case s.ReclaimablePercent >= float64(th.MinFreePercent) && s.ReclaimableBytes >= th.MinFreeBytes:
 		return VerdictRecommended, fmt.Sprintf(
 			"%.0f%% of the database file is empty space (%s). Compacting is worth doing when you can spare the window.",
 			s.ReclaimablePercent, humanBytes(s.ReclaimableBytes))

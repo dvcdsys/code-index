@@ -474,24 +474,6 @@ CREATE TABLE IF NOT EXISTS tunnel_config (
     updated_by      TEXT
 );
 
--- maintenance_settings holds the single row of thresholds for automatic
--- database reclaim (migrations 19, 20). *When* to run lives in
--- scheduled_tasks; this answers only "is it worth running".
---
--- Config only: the outcome of a run lives in the journal file beside the
--- database, because a compaction replaces the database and nothing written
--- during one survives into the new file.
---
--- No row is inserted here, by either the schema or the migration. Its absence
--- means "never configured" and the built-in thresholds apply.
-CREATE TABLE IF NOT EXISTS maintenance_settings (
-    id                INTEGER PRIMARY KEY CHECK(id=1),
-    min_free_percent  INTEGER,
-    min_free_bytes    INTEGER,
-    updated_at        TEXT NOT NULL,
-    updated_by        TEXT
-);
-
 -- scheduled_tasks is when each recurring task runs (migration 20). One row per
 -- task, keyed by the stable name its owner registers under.
 --
@@ -556,7 +538,6 @@ var ExpectedTables = []string{
 	"chunks_meta",
 	"chunks_fts",
 	"tunnel_config",
-	"maintenance_settings",
 	"scheduled_tasks",
 	"schema_migrations",
 }

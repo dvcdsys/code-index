@@ -11,7 +11,6 @@ import { SwitchRow } from '@/ui/switch';
 import { ConfirmCompactDialog } from '../components/ConfirmCompactDialog';
 import { ScheduleRow } from '../components/ScheduleRow';
 import {
-  useCheckpointWal,
   useCompactDatabase,
   useDatabaseState,
   useReclaimFreePages,
@@ -29,7 +28,6 @@ export function DatabaseSection() {
   const state = useDatabaseState();
   const compact = useCompactDatabase();
   const reclaim = useReclaimFreePages();
-  const checkpoint = useCheckpointWal();
   const setMode = useSetAutoVacuum();
   const schedules = useSchedules();
 
@@ -39,8 +37,7 @@ export function DatabaseSection() {
   const db = state.data;
   const op = db?.operation ?? null;
   const running = isActivePhase(op?.phase);
-  const busy =
-    running || compact.isPending || reclaim.isPending || checkpoint.isPending || setMode.isPending;
+  const busy = running || compact.isPending || reclaim.isPending || setMode.isPending;
 
   const describe = (err: unknown) => (err instanceof ApiError ? err.detail : String(err));
 
@@ -86,37 +83,9 @@ export function DatabaseSection() {
     );
   };
 
-  const onCheckpoint = () => {
-    checkpoint.mutate(undefined, {
-      onSuccess: (res) => {
-        const freed = res.wal_bytes_before - res.wal_bytes_after;
-        if (res.blocked) {
-          toast.warning('Checkpoint partially blocked', {
-            description: 'A reader held the log open; the rest goes on the next attempt.',
-          });
-        } else if (freed > 0) {
-          toast.success(`Folded ${formatBytes(freed)} of write-ahead log back in`);
-        } else {
-          toast.info('The write-ahead log was already empty');
-        }
-      },
-      onError: (err) => toast.error('Checkpoint failed', { description: describe(err) }),
-    });
-  };
-
   return (
     <Card>
-      <CardHead
-        title="Database"
-        aside={
-          db && db.wal_bytes > 0 ? (
-            <Button size="sm" variant="ghost" onClick={onCheckpoint} disabled={busy}>
-              {checkpoint.isPending ? <Dots /> : null}
-              Checkpoint log
-            </Button>
-          ) : null
-        }
-      />
+      <CardHead title="Database" />
       <CardBody className="flex flex-col gap-5">
         {state.isLoading ? <Skeleton className="h-32" /> : null}
 
