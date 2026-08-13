@@ -267,8 +267,12 @@ export default function ServerPage() {
             memory and disk are worth reading precisely when the rest of this
             page is failing to load. */}
         <TabsContent value="resources">
-          <ResourcesSection />
+          {/* Stacked like every other multi-card view on the page. Dropped in
+              bare, the two cards butt against each other and read as one. */}
+          <div className="flex flex-col gap-5">
+            <ResourcesSection />
             <DatabaseSection />
+          </div>
         </TabsContent>
       </Tabs>
 
