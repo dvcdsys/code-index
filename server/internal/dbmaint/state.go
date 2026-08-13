@@ -25,8 +25,10 @@
 package dbmaint
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -149,9 +151,9 @@ type State struct {
 	BytesDone  int64 `json:"bytes_done,omitempty"`
 	FreedBytes int64 `json:"freed_bytes,omitempty"`
 
-	// AutoVacuum is the reclaim mode this run was asked to produce: "keep",
-	// "none" or "incremental". Recorded so a run that outlives its process
-	// can still say what it was for.
+	// AutoVacuum is the reclaim mode this run leaves the database in: "none",
+	// "incremental", or "full" for a database already in that mode. Recorded
+	// so a run that outlives its process can still say what it was for.
 	AutoVacuum string `json:"auto_vacuum,omitempty"`
 
 	// Source is read under the freeze; Copy is read back from the finished
@@ -176,9 +178,24 @@ const (
 	journalName = "maintenance.json"
 	logName     = "maintenance.log"
 
-	// maxJournalEvents bounds what the journal carries. The log file keeps
-	// everything; this is only what the dashboard renders.
+	// maxJournalEvents bounds what the journal carries. This is only what the
+	// dashboard renders.
 	maxJournalEvents = 50
+
+	// tailBytes bounds what ReadEvents will read off the end of the trail.
+	//
+	// It is a bound on work done for an *unauthenticated* caller: the public
+	// status endpoint reads the trail on every poll, so without this the cost
+	// of one request grows with the history of the server and anyone can drive
+	// it at whatever rate they like. 128 KB is far more than the ~50 lines the
+	// dashboard shows.
+	tailBytes = 128 << 10
+
+	// maxLogBytes is when the trail is rolled over. One generation is kept, so
+	// the record of an operation survives the run after it, and the pair is
+	// bounded — a file nothing ever truncates is a slow disk leak on a server
+	// that reclaims space for a living.
+	maxLogBytes = 4 << 20
 )
 
 // JournalPath is the journal for a database at dbPath. It lives beside the
@@ -308,7 +325,9 @@ func AppendEvent(dbPath string, ev Event) error {
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
-	f, err := os.OpenFile(LogPath(dbPath), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	path := LogPath(dbPath)
+	rotateIfLarge(path)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open event log: %w", err)
 	}
@@ -319,17 +338,56 @@ func AppendEvent(dbPath string, ev Event) error {
 	return nil
 }
 
+// rotateIfLarge rolls the trail over once it passes maxLogBytes, keeping one
+// previous generation. Best-effort: a failure to rotate is not a reason to
+// lose the event that prompted it.
+func rotateIfLarge(path string) {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() < maxLogBytes {
+		return
+	}
+	_ = os.Rename(path, path+".1")
+}
+
 // ReadEvents returns the most recent n events from the trail, oldest first.
-// A malformed line is skipped rather than failing the read: the log is
-// diagnostic, and one bad line must not hide the rest.
+//
+// Only the tail of the file is read, never the whole thing. This is called on
+// every poll of the public status endpoint, so its cost has to be a function
+// of what is being displayed rather than of how long the server has been
+// running. A malformed line is skipped rather than failing the read: the log
+// is diagnostic, and one bad line must not hide the rest.
 func ReadEvents(dbPath string, n int) ([]Event, error) {
-	raw, err := os.ReadFile(LogPath(dbPath))
+	f, err := os.Open(LogPath(dbPath))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, fmt.Errorf("open event log: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat event log: %w", err)
+	}
+
+	size := info.Size()
+	offset := int64(0)
+	if size > tailBytes {
+		offset = size - tailBytes
+	}
+	raw := make([]byte, size-offset)
+	if _, err := io.ReadFull(io.NewSectionReader(f, offset, size-offset), raw); err != nil {
 		return nil, fmt.Errorf("read event log: %w", err)
 	}
+	if offset > 0 {
+		// The first line in the window is almost certainly cut in half.
+		if i := bytes.IndexByte(raw, '\n'); i >= 0 {
+			raw = raw[i+1:]
+		} else {
+			raw = nil
+		}
+	}
+
 	var out []Event
 	start := 0
 	for i := 0; i <= len(raw); i++ {

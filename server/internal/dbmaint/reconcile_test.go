@@ -623,6 +623,132 @@ func TestReadEvents_MissingLogIsNotAnError(t *testing.T) {
 	}
 }
 
+// The swap deletes the displaced original's -wal, and an uncheckpointed log
+// holds committed transactions the file itself does not. If the checkpoint is
+// allowed to fail and the swap proceeds anyway, the displaced original is
+// silently short of its last writes — and that file is exactly what the
+// rollback path restores when the copy is then lost. So a failed checkpoint
+// aborts the whole adoption: keep the database, discard the copy.
+func TestAdopt_RefusesWhenTheLogCannotBeFoldedIn(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "projects.db")
+	p := PathsFor(live)
+
+	// A real, verifiable candidate...
+	src := filepath.Join(dir, "src.db")
+	makeDB(t, src, 3)
+	vacuumInto(t, src, p.Copy)
+	fp := fingerprintOf(t, p.Copy)
+
+	// ...and a live file whose log cannot be folded in, because it is not a
+	// database at all. Standing in for the disk, permission and damaged-log
+	// failures that are awkward to produce on demand and land in the same
+	// branch.
+	const garbage = "this is not a database\n"
+	if err := os.WriteFile(live, []byte(garbage), 0o600); err != nil {
+		t.Fatalf("write live: %v", err)
+	}
+
+	if err := Save(live, State{RunID: "r1", Kind: KindCompact, Phase: PhaseReadyToSwap, Source: &fp}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+
+	if err := Reconcile(context.Background(), live, quietLogger()); err != nil {
+		t.Fatalf("reconcile returned an error instead of keeping the database: %v", err)
+	}
+
+	if exists(p.Copy) {
+		t.Error("the compacted copy is still present after an adoption that could not proceed")
+	}
+	if exists(p.Old) {
+		t.Fatal("the original was displaced even though its log could not be folded in")
+	}
+	got, err := os.ReadFile(live)
+	if err != nil {
+		t.Fatalf("read live: %v", err)
+	}
+	if string(got) != garbage {
+		t.Error("the live database was modified by an adoption that was supposed to refuse")
+	}
+
+	st, _, err := Load(live)
+	if err != nil {
+		t.Fatalf("load journal: %v", err)
+	}
+	if st.Phase != PhaseFailed {
+		t.Errorf("phase = %q, want %q — a refused adoption has to be reported", st.Phase, PhaseFailed)
+	}
+	if st.Error == "" {
+		t.Error("the journal records no reason for the refusal")
+	}
+}
+
+// The public status endpoint reads this on every poll, unauthenticated. Its
+// cost has to be a function of what is displayed, not of how long the server
+// has been running.
+func TestReadEvents_ReadsOnlyTheTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "projects.db")
+
+	// Comfortably past the tail window, without writing megabytes one line at
+	// a time.
+	const padding = 2 << 10
+	const events = (tailBytes / padding) * 3
+	for i := range events {
+		if err := AppendEvent(path, Event{
+			Level:   LevelInfo,
+			Phase:   PhaseCopying,
+			Message: fmt.Sprintf("%d-%s", i, strings.Repeat("x", padding)),
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	// n = 0 asks for everything the reader is willing to give. It must still
+	// be bounded.
+	all, err := ReadEvents(path, 0)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if len(all) == 0 {
+		t.Fatal("no events read")
+	}
+	if len(all) >= events {
+		t.Errorf("read %d of %d events; the whole trail is being parsed on every poll", len(all), events)
+	}
+
+	// And the tail is the *newest* end of the file, not the oldest.
+	last := all[len(all)-1]
+	if !strings.HasPrefix(last.Message, fmt.Sprintf("%d-", events-1)) {
+		t.Errorf("the last event read is %.20q…, want the most recently appended", last.Message)
+	}
+}
+
+// A trail nothing ever truncates is a slow disk leak on a server whose job is
+// reclaiming space.
+func TestAppendEvent_RollsTheTrailOver(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "projects.db")
+
+	big := strings.Repeat("y", 64<<10)
+	for i := 0; i < (maxLogBytes/len(big))+2; i++ {
+		if err := AppendEvent(path, Event{Level: LevelInfo, Message: big}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	info, err := os.Stat(LogPath(path))
+	if err != nil {
+		t.Fatalf("stat log: %v", err)
+	}
+	if info.Size() >= maxLogBytes {
+		t.Errorf("the trail is %d bytes and still growing; it was never rolled over", info.Size())
+	}
+	if !exists(LogPath(path) + ".1") {
+		t.Error("no previous generation was kept; the record of the last run was simply deleted")
+	}
+}
+
 // The journal is read by a *different* process than the one that wrote it, so
 // its wire shape has to be stable JSON, not Go-internal state.
 func TestState_SerialisesAsPlainJSON(t *testing.T) {

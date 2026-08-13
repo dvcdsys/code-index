@@ -285,10 +285,7 @@ func adopt(ctx context.Context, dbPath string, p Paths, st State, logger *slog.L
 		// adopting an unverifiable copy risks everything.
 		logger.Error("a compacted copy is waiting but the journal records nothing to verify it against",
 			"copy", p.Copy, "action", "discarding the copy and keeping the current database")
-		if err := os.Remove(p.Copy); err != nil {
-			return fmt.Errorf("remove unverifiable copy %s: %w", p.Copy, err)
-		}
-		if err := SyncDir(dirOf(dbPath)); err != nil {
+		if err := discardCopy(dbPath, p); err != nil {
 			return err
 		}
 		return finishInterrupted(dbPath, st, logger,
@@ -299,11 +296,8 @@ func adopt(ctx context.Context, dbPath string, p Paths, st State, logger *slog.L
 	if err := VerifyCopy(ctx, p.Copy, *st.Source); err != nil {
 		logger.Error("compacted copy failed verification; keeping the current database",
 			"copy", p.Copy, "err", err)
-		if rerr := os.Remove(p.Copy); rerr != nil {
-			return fmt.Errorf("remove unverified copy %s: %w", p.Copy, rerr)
-		}
-		if serr := SyncDir(dirOf(dbPath)); serr != nil {
-			return serr
+		if rerr := discardCopy(dbPath, p); rerr != nil {
+			return rerr
 		}
 		st.Phase = PhaseFailed
 		st.Error = "the compacted copy failed verification and was discarded: " + err.Error()
@@ -313,9 +307,25 @@ func adopt(ctx context.Context, dbPath string, p Paths, st State, logger *slog.L
 
 	// Fold the live database's log into it so the file is self-contained
 	// before it is renamed away from its sidecars.
+	//
+	// This has to succeed, and a failure aborts the whole adoption. The swap
+	// deletes those sidecars, and an uncheckpointed log holds committed
+	// transactions that the file itself does not: deleting it would leave the
+	// displaced original silently short of its last writes, and the displaced
+	// original is what the rollback path restores if the copy is then lost.
+	// Nothing else has the database open at this point, so a failure here is a
+	// real problem — disk, permissions, a damaged log — and the right answer is
+	// to keep the database exactly as it is and let a human look at it.
 	if err := storage.CheckpointWAL(p.Live); err != nil {
-		logger.Warn("could not checkpoint the live database before swapping; continuing",
-			"err", err)
+		logger.Error("could not fold the write-ahead log into the database before swapping; keeping the current database",
+			"live", p.Live, "err", err)
+		if rerr := discardCopy(dbPath, p); rerr != nil {
+			return rerr
+		}
+		st.Phase = PhaseFailed
+		st.Error = "the write-ahead log could not be folded into the database before the swap, " +
+			"so the compacted copy was discarded and nothing was replaced: " + err.Error()
+		return finish(dbPath, st, logger, LevelError, st.Error)
 	}
 
 	// Journal the intent before the first rename: from here on the file set
@@ -411,6 +421,15 @@ func finish(dbPath string, st State, logger *slog.Logger, lvl Level, msg string)
 		return fmt.Errorf("record the outcome of the compaction: %w", err)
 	}
 	return nil
+}
+
+// discardCopy removes a candidate that will not be adopted and makes the
+// removal durable, so the next boot does not find it again and wonder.
+func discardCopy(dbPath string, p Paths) error {
+	if err := os.Remove(p.Copy); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove the compacted copy %s: %w", p.Copy, err)
+	}
+	return SyncDir(dirOf(dbPath))
 }
 
 func exists(path string) bool {
