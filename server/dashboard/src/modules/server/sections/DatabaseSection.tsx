@@ -9,12 +9,13 @@ import { Card, CardBody, CardFoot, CardHead, KV, StatStrip } from '@/ui/card';
 import { Skeleton } from '@/ui/skeleton';
 import { SwitchRow } from '@/ui/switch';
 import { ConfirmCompactDialog } from '../components/ConfirmCompactDialog';
-import { MaintenanceScheduleForm } from '../components/MaintenanceScheduleForm';
+import { ScheduleRow } from '../components/ScheduleRow';
 import {
   useCheckpointWal,
   useCompactDatabase,
   useDatabaseState,
   useReclaimFreePages,
+  useSchedules,
   useSetAutoVacuum,
 } from '../hooks';
 
@@ -30,6 +31,7 @@ export function DatabaseSection() {
   const reclaim = useReclaimFreePages();
   const checkpoint = useCheckpointWal();
   const setMode = useSetAutoVacuum();
+  const schedules = useSchedules();
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [toggleTo, setToggleTo] = useState<'incremental' | 'none' | null>(null);
@@ -116,11 +118,24 @@ export function DatabaseSection() {
         }
       />
       <CardBody className="flex flex-col gap-5">
-        {state.isLoading ? (
-          <Skeleton className="h-32" />
-        ) : state.isError ? (
-          <Callout variant="warn">Could not read the database state: {describe(state.error)}</Callout>
-        ) : db ? (
+        {state.isLoading ? <Skeleton className="h-32" /> : null}
+
+        {/* A failure here is usually not a failure. Rebuilding the database
+            restarts the server, so for about a minute every request from this
+            card is refused — and rendering "TypeError: Failed to fetch" for
+            the expected middle of an operation the admin just started reads as
+            a broken server. The numbers stay on screen underneath, stale but
+            true, rather than being replaced by an error. */}
+        {state.isError ? (
+          <Callout variant="warn">
+            {state.error instanceof ApiError
+              ? `Could not read the database state: ${describe(state.error)}`
+              : 'The server is not answering. If it was just asked to rebuild the database it is ' +
+                'restarting to adopt the new file — this page recovers on its own.'}
+          </Callout>
+        ) : null}
+
+        {db ? (
           <>
             <StatStrip
               items={[
@@ -180,7 +195,13 @@ export function DatabaseSection() {
               }
             />
 
-            <MaintenanceScheduleForm disabled={busy} mode={db.auto_vacuum} />
+            {schedules.data && schedules.data.length > 0 ? (
+              <div className="flex flex-col gap-4 border-t pt-4">
+                {schedules.data.map((task) => (
+                  <ScheduleRow key={task.name} task={task} disabled={busy} />
+                ))}
+              </div>
+            ) : null}
           </>
         ) : null}
       </CardBody>

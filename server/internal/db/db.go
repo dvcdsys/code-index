@@ -74,6 +74,7 @@ var registeredMigrations = []migration{
 	}},
 	{18, "projects_full_sync_required", func(db *sql.DB, _ OpenOptions) error { return migrateProjectsFullSyncRequired(db) }},
 	{19, "maintenance_settings", func(db *sql.DB, _ OpenOptions) error { return migrateMaintenanceSettings(db) }},
+	{20, "scheduled_tasks", func(db *sql.DB, _ OpenOptions) error { return migrateScheduledTasks(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -346,6 +347,70 @@ CREATE TABLE IF NOT EXISTS maintenance_settings (
 )`)
 	if err != nil {
 		return fmt.Errorf("create maintenance_settings: %w", err)
+	}
+	return nil
+}
+
+// migrateScheduledTasks introduces the recurring-task table and moves the
+// schedule out of maintenance_settings.
+//
+// Migration 19 gave maintenance_settings an interval and an optional hour
+// window. That shape is replaced here by a crontab expression in
+// scheduled_tasks, for two reasons: an interval measured from the last run
+// drifts (one manual run at 18:00 moves every subsequent nightly run to 18:00,
+// which is not what "every night" means), and the schedule is not specific to
+// database maintenance — polling, cleanup and update checks want the same
+// machinery, and a per-feature schedule table would be the wrong place for it.
+//
+// The dropped columns are not translated into rows. Migration 19 shipped in
+// the same unreleased change as this one, so there is no deployment anywhere
+// whose interval is worth carrying forward — and inventing a cron expression
+// on somebody's behalf is exactly the kind of surprise automation this feature
+// is careful to avoid. Thresholds are carried over, because those an admin may
+// genuinely have set.
+func migrateScheduledTasks(db *sql.DB) error {
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    name         TEXT PRIMARY KEY,
+    configured   INTEGER NOT NULL DEFAULT 0,
+    cron         TEXT,
+    enabled      INTEGER,
+    cron_used    TEXT,
+    next_run_at  TEXT,
+    last_run_at  TEXT,
+    last_status  TEXT,
+    last_error   TEXT,
+    last_millis  INTEGER,
+    updated_at   TEXT NOT NULL,
+    updated_by   TEXT
+)`); err != nil {
+		return fmt.Errorf("create scheduled_tasks: %w", err)
+	}
+
+	has, err := columnExists(db, "maintenance_settings", "interval_hours")
+	if err != nil {
+		return err
+	}
+	if !has {
+		return nil // already the new shape
+	}
+	stmts := []string{
+		`CREATE TABLE maintenance_settings_new (
+    id                INTEGER PRIMARY KEY CHECK(id=1),
+    min_free_percent  INTEGER,
+    min_free_bytes    INTEGER,
+    updated_at        TEXT NOT NULL,
+    updated_by        TEXT
+)`,
+		`INSERT INTO maintenance_settings_new (id, min_free_percent, min_free_bytes, updated_at, updated_by)
+		 SELECT id, min_free_percent, min_free_bytes, updated_at, updated_by FROM maintenance_settings`,
+		`DROP TABLE maintenance_settings`,
+		`ALTER TABLE maintenance_settings_new RENAME TO maintenance_settings`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			return fmt.Errorf("rebuild maintenance_settings: %w", err)
+		}
 	}
 	return nil
 }

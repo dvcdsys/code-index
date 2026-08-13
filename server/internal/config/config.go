@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dvcdsys/code-index/server/internal/schedule"
 )
 
 // Config holds all runtime settings. Port defaults to 21847 — the same
@@ -196,18 +198,16 @@ type Config struct {
 	// due repos. Source: CIX_POLL_SCHEDULER_TICK (default 30s).
 	PollSchedulerTick time.Duration
 
-	// Automatic database reclaim, CIX_DB_MAINTENANCE_*. All nil unless the
-	// variable is set: absent means "fall through to the dashboard setting,
-	// then to a default derived from the database's own auto-vacuum mode".
-	// These exist for deployments driven by a compose file, where nobody is
-	// going to open the dashboard to switch anything on.
-	DBMaintenanceEnabled         *bool
-	DBMaintenanceMode            *string
-	DBMaintenanceIntervalHours   *int
-	DBMaintenanceMinFreePercent  *int
-	DBMaintenanceMinFreeBytes    *int64
-	DBMaintenanceWindowStartHour *int
-	DBMaintenanceWindowEndHour   *int
+	// Automatic database maintenance, CIX_DB_MAINTENANCE_*. All nil unless the
+	// variable is set. They exist for deployments driven by a compose file,
+	// where nobody is going to open the dashboard to switch anything on.
+	//
+	// DBMaintenanceCron is a crontab expression and supplies the default
+	// timing for the database tasks; a schedule saved in the dashboard still
+	// wins over it. The thresholds decide whether a due run is worth doing.
+	DBMaintenanceCron           *string
+	DBMaintenanceMinFreePercent *int
+	DBMaintenanceMinFreeBytes   *int64
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -480,41 +480,30 @@ func Load() (*Config, error) {
 	}
 	c.PollSchedulerTick = pollTick
 
-	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_ENABLED"); ok {
-		b, err := strconv.ParseBool(strings.TrimSpace(v))
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_CRON"); ok {
+		expr := strings.TrimSpace(v)
+		if err := schedule.Validate(expr); err != nil {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_CRON: %w", err)
+		}
+		c.DBMaintenanceCron = &expr
+	}
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_MIN_FREE_PERCENT"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil {
-			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_ENABLED: %w", err)
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_PERCENT: %w", err)
 		}
-		c.DBMaintenanceEnabled = &b
-	}
-	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_MODE"); ok {
-		m := strings.TrimSpace(v)
-		if m != "incremental" && m != "full" {
-			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MODE must be \"incremental\" or \"full\", got %q", m)
+		if n < 0 || n > 100 {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_PERCENT must be between 0 and 100, got %d", n)
 		}
-		c.DBMaintenanceMode = &m
-	}
-	for _, spec := range []struct {
-		key  string
-		into **int
-	}{
-		{"CIX_DB_MAINTENANCE_INTERVAL_HOURS", &c.DBMaintenanceIntervalHours},
-		{"CIX_DB_MAINTENANCE_MIN_FREE_PERCENT", &c.DBMaintenanceMinFreePercent},
-		{"CIX_DB_MAINTENANCE_WINDOW_START_HOUR", &c.DBMaintenanceWindowStartHour},
-		{"CIX_DB_MAINTENANCE_WINDOW_END_HOUR", &c.DBMaintenanceWindowEndHour},
-	} {
-		if v, ok := os.LookupEnv(spec.key); ok {
-			n, err := strconv.Atoi(strings.TrimSpace(v))
-			if err != nil {
-				return nil, fmt.Errorf("%s: %w", spec.key, err)
-			}
-			*spec.into = &n
-		}
+		c.DBMaintenanceMinFreePercent = &n
 	}
 	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_MIN_FREE_BYTES"); ok {
 		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_BYTES: %w", err)
+		}
+		if n < 0 {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_BYTES must not be negative, got %d", n)
 		}
 		c.DBMaintenanceMinFreeBytes = &n
 	}

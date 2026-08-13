@@ -970,70 +970,90 @@ paths:
         "503":
           $ref: "#/components/responses/ResourcesUnavailable"
 
-  /api/v1/admin/database/schedule:
+  /api/v1/admin/schedules:
     get:
-      operationId: getMaintenanceSchedule
+      operationId: listSchedules
       tags: [admin]
-      summary: Read the automatic reclaim schedule (admin only)
+      summary: List every recurring task and when it next runs (admin only)
       description: |
-        A server that has never been configured has no stored schedule; the
-        defaults are then derived from the database itself. A file created by
-        a recent server is already in incremental mode and gets daily
-        incremental reclaim; a database carried over from an older install is
-        in `none` mode and gets nothing until an admin opts in. That is
-        deliberate — an upgrade must never start blocking anybody's server on
-        its own.
+        One entry per task the server knows how to run on a schedule. The
+        timing is a crontab expression, and `next_runs` is computed by the
+        same parser that will actually fire it — a client must not evaluate
+        the expression itself, or its preview and the server's behaviour can
+        disagree.
 
-        `source` reports where each effective value came from, the same way
-        the runtime settings do.
+        `configured` is false while a task is still on its built-in or
+        environment default, which is how an upgraded server reports
+        automation nobody has opted into.
       responses:
         "200":
-          description: Effective schedule
+          description: Registered tasks
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/MaintenanceSchedule"
+                type: object
+                required: [tasks]
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ScheduledTask"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
         "503":
           $ref: "#/components/responses/ResourcesUnavailable"
-    put:
-      operationId: updateMaintenanceSchedule
-      tags: [admin]
-      summary: Change the automatic reclaim schedule (admin only)
-      description: |
-        A scheduled run fires only when every condition holds at once: enabled,
-        the interval has elapsed, the waste is over both thresholds, the clock
-        is inside the window if one is set, no clone or index job is in flight,
-        and — for `full` — there is room for the copy. Anything else and the
-        tick is skipped silently until the next hour.
 
-        `full` is allowed but is not the default, because it takes the server
-        read-only for minutes. Setting it without a window is accepted; the UI
-        is expected to say what that means.
+  /api/v1/admin/schedules/{name}:
+    put:
+      operationId: updateSchedule
+      tags: [admin]
+      summary: Change when a recurring task runs (admin only)
+      description: |
+        Absent fields are left unchanged.
+
+        An expression that parses but can never match — 30 February is the
+        honest example — is refused with `422` rather than accepted as a
+        schedule that silently never fires. Saving re-arms the task
+        immediately, so the next run returned here is the one the server will
+        actually keep.
+
+        Timing is interpreted in the server's local timezone. Crontab
+        semantics apply: a slot that passes while the process is not running
+        is not queued up and fired late, except for tasks that declare
+        `catch_up` — those are cheap enough that running one late is better
+        than a laptop asleep at 00:00 never running them at all.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+          description: Task identifier, e.g. `db.reclaim`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/MaintenanceScheduleUpdate"
+              $ref: "#/components/schemas/ScheduleUpdate"
       responses:
         "200":
-          description: Updated schedule
+          description: The task as it now resolves
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/MaintenanceSchedule"
+                $ref: "#/components/schemas/ScheduledTask"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/Unprocessable"
         "503":
           $ref: "#/components/responses/ResourcesUnavailable"
+
 
   /maintenance/status:
     get:
@@ -4521,82 +4541,55 @@ components:
             True when a reader prevented the log from being fully folded in.
             Not an error — the checkpoint moved what it could.
 
-    MaintenanceSchedule:
+    ScheduledTask:
       type: object
-      required:
-        [
-          enabled,
-          mode,
-          interval_hours,
-          min_free_percent,
-          min_free_bytes,
-          configured,
-          source,
-        ]
+      required: [name, title, cron, enabled, configured, catch_up, next_runs, last_run_at]
       properties:
-        enabled: { type: boolean }
-        mode:
+        name:
           type: string
-          enum: [incremental, full]
           description: |
-            `incremental` returns free pages to the filesystem in bounded
-            chunks and needs no window. `full` rebuilds the database and
-            takes the server read-only, then restarts it.
-        interval_hours: { type: integer, minimum: 1 }
-        min_free_percent:
-          type: integer
-          minimum: 0
-          maximum: 100
+            Stable identifier, used as the path parameter. It outlives renames
+            of whatever implements the task.
+        title: { type: string }
+        description: { type: string }
+        cron:
+          type: string
           description: |
-            Both thresholds must be met. A percentage alone nags on small
-            databases; an absolute figure alone nags on large ones.
-        min_free_bytes: { type: integer, format: int64, minimum: 0 }
-        window_start_hour:
-          type: integer
-          minimum: 0
-          maximum: 23
-          nullable: true
-          description: |
-            Local-time window the run must start inside. Null means any
-            hour. Mainly of interest for `full`.
-        window_end_hour: { type: integer, minimum: 0, maximum: 23, nullable: true }
+            Standard five-field crontab expression, in the server's local
+            timezone. `@daily` and friends are accepted.
+        enabled: { type: boolean }
         configured:
           type: boolean
           description: |
-            False when no admin has ever saved a schedule and the values are
-            derived from the database's own auto-vacuum mode. Upgraded
-            servers come up unconfigured and therefore disabled.
-        last_run_at:
-          type: string
-          format: date-time
-          nullable: true
-          description: Null when it has never run — render that, not an epoch date.
+            False while the task is still on its built-in or environment
+            default, i.e. nobody has chosen this schedule.
+        catch_up:
+          type: boolean
+          description: |
+            Whether a slot missed while the server was down runs late. False
+            follows crontab exactly; true is reserved for tasks cheap enough
+            that skipping them entirely would be worse.
+        next_runs:
+          type: array
+          description: |
+            The next few runs, computed server-side by the parser that fires
+            them. Empty when the task is disabled.
+          items: { type: string, format: date-time }
+        last_run_at: { type: string, format: date-time, nullable: true }
         last_status:
           type: string
-          enum: [ok, failed, skipped]
-          nullable: true
-        last_freed_bytes: { type: integer, format: int64, nullable: true }
-        last_error: { type: string, nullable: true }
-        source:
-          type: object
-          additionalProperties: { type: string, enum: [db, env, recommended] }
-          description: |
-            Where each effective value came from, so a compose-configured
-            server can explain a schedule nobody enabled in the dashboard.
+          enum: [running, ok, failed]
+        last_error: { type: string }
+        last_millis: { type: integer, format: int64 }
+        running: { type: boolean }
 
-    MaintenanceScheduleUpdate:
+    ScheduleUpdate:
       type: object
-      description: |
-        Absent fields are left unchanged. Explicit `null` on the window
-        fields clears the window.
+      description: Absent fields are left unchanged.
       properties:
+        cron: { type: string }
         enabled: { type: boolean }
-        mode: { type: string, enum: [incremental, full] }
-        interval_hours: { type: integer, minimum: 1 }
-        min_free_percent: { type: integer, minimum: 0, maximum: 100 }
-        min_free_bytes: { type: integer, format: int64, minimum: 0 }
-        window_start_hour: { type: integer, minimum: 0, maximum: 23, nullable: true }
-        window_end_hour: { type: integer, minimum: 0, maximum: 23, nullable: true }
+
 
     EmbeddingProviderList:
       type: object

@@ -40,6 +40,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/repojobs"
 	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
+	"github.com/dvcdsys/code-index/server/internal/schedule"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/storage"
@@ -143,6 +144,15 @@ func envPositiveInt(key string) int {
 		}
 	}
 	return 0
+}
+
+// deref is the zero value when a pointer-typed optional config field is unset.
+func deref[T any](p *T) T {
+	if p == nil {
+		var zero T
+		return zero
+	}
+	return *p
 }
 
 func parseLogLevel(s string) slog.Level {
@@ -666,14 +676,17 @@ func run() (restart bool, err error) {
 	// is not enough for any of them — the compactor needs to know they have
 	// *finished*, because a tick still in flight would write into a database
 	// that is about to be replaced.
-	var dbMaintSvc *dbmaint.Service
+	var (
+		dbMaintSvc *dbmaint.Service
+		schedReg   = schedule.New(database, logger)
+	)
 	quiesce := func(ctx context.Context) error {
 		bgCancel()
 		if err := pollSvc.Stop(ctx); err != nil {
 			return fmt.Errorf("poll scheduler did not stop: %w", err)
 		}
-		if err := dbMaintSvc.StopScheduler(ctx); err != nil {
-			return fmt.Errorf("maintenance scheduler did not stop: %w", err)
+		if err := schedReg.Stop(ctx); err != nil {
+			return fmt.Errorf("the recurring-task scheduler did not stop: %w", err)
 		}
 		jobsCancel()
 		if err := jobsSvc.Stop(ctx); err != nil {
@@ -691,17 +704,15 @@ func run() (restart bool, err error) {
 		Thaw:           dbGate.Thaw,
 		RequestRestart: func() { restartOnce.Do(func() { close(restartCh) }) },
 		ActiveJobs:     dbmaint.ActiveWorkCounter(database, idx.ActiveSessions),
-		Env: dbmaint.ScheduleEnv{
-			Enabled:         cfg.DBMaintenanceEnabled,
-			Mode:            cfg.DBMaintenanceMode,
-			IntervalHours:   cfg.DBMaintenanceIntervalHours,
-			MinFreePercent:  cfg.DBMaintenanceMinFreePercent,
-			MinFreeBytes:    cfg.DBMaintenanceMinFreeBytes,
-			WindowStartHour: cfg.DBMaintenanceWindowStartHour,
-			WindowEndHour:   cfg.DBMaintenanceWindowEndHour,
+		Thresholds: dbmaint.Thresholds{
+			MinFreePercent: deref(cfg.DBMaintenanceMinFreePercent),
+			MinFreeBytes:   deref(cfg.DBMaintenanceMinFreeBytes),
 		},
 	})
-	go dbMaintSvc.RunScheduler(bgCtx)
+	for _, t := range dbMaintSvc.Tasks() {
+		schedReg.Register(t, cfg.DBMaintenanceCron)
+	}
+	go schedReg.Run(bgCtx)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		DBMaint: httpapi.DBMaintHooks{
@@ -711,6 +722,7 @@ func run() (restart bool, err error) {
 			Quiesce:        quiesce,
 		},
 		DB:                database,
+		Schedules:         schedReg,
 		ServerVersion:     version,
 		APIVersion:        apiVersion,
 		Backend:           backend,

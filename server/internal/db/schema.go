@@ -474,27 +474,60 @@ CREATE TABLE IF NOT EXISTS tunnel_config (
     updated_by      TEXT
 );
 
--- maintenance_settings holds the single row configuring automatic database
--- reclaim (migration 19). Config only: the *outcome* of a run lives in the
--- journal file beside the database, because a compaction replaces the
--- database and nothing written during one survives into the new file.
+-- maintenance_settings holds the single row of thresholds for automatic
+-- database reclaim (migrations 19, 20). *When* to run lives in
+-- scheduled_tasks; this answers only "is it worth running".
+--
+-- Config only: the outcome of a run lives in the journal file beside the
+-- database, because a compaction replaces the database and nothing written
+-- during one survives into the new file.
 --
 -- No row is inserted here, by either the schema or the migration. Its absence
--- means "never configured", and the defaults are then derived from the
--- database's own auto-vacuum mode — so a server upgraded into this feature
--- comes up with automation off and cannot surprise anybody, while a database
--- created by a recent build comes up already sensible.
+-- means "never configured" and the built-in thresholds apply.
 CREATE TABLE IF NOT EXISTS maintenance_settings (
     id                INTEGER PRIMARY KEY CHECK(id=1),
-    enabled           INTEGER,
-    mode              TEXT,
-    interval_hours    INTEGER,
     min_free_percent  INTEGER,
     min_free_bytes    INTEGER,
-    window_start_hour INTEGER,
-    window_end_hour   INTEGER,
     updated_at        TEXT NOT NULL,
     updated_by        TEXT
+);
+
+-- scheduled_tasks is when each recurring task runs (migration 20). One row per
+-- task, keyed by the stable name its owner registers under.
+--
+-- The schedule is a crontab expression rather than an interval, because an
+-- interval is measured from the last run and therefore drifts: one manual run
+-- at 18:00 moves every subsequent nightly run to 18:00. cron is anchored to
+-- the clock, which is what an operator means by "every night at midnight".
+--
+-- next_run_at is derived, never authoritative — it is recomputed from cron and
+-- the current time whenever it is missing or was derived from a different
+-- expression (cron_used). That is what makes a missed slot impossible to
+-- lose: even an empty or nonsensical row re-arms itself on the next tick.
+--
+-- last_run_at is stamped *before* the handler runs, not after. One of these
+-- tasks re-executes the whole process as its final step, so a slot still
+-- marked due when the new process starts would fire it again, and again.
+--
+-- The configured column separates the two kinds of write this table takes. The
+-- scheduler itself writes only the derived columns — cron_used, next_run_at,
+-- and the outcome of the last run — and must never touch cron or enabled,
+-- because arming a task is not the same as somebody choosing to enable it.
+-- Only an admin saving a schedule sets configured, and only a configured row
+-- overrides the built-in default.
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    name         TEXT PRIMARY KEY,
+    configured   INTEGER NOT NULL DEFAULT 0,
+    cron         TEXT,
+    enabled      INTEGER,
+    cron_used    TEXT,
+    next_run_at  TEXT,
+    last_run_at  TEXT,
+    last_status  TEXT,
+    last_error   TEXT,
+    last_millis  INTEGER,
+    updated_at   TEXT NOT NULL,
+    updated_by   TEXT
 );
 `
 
@@ -524,5 +557,6 @@ var ExpectedTables = []string{
 	"chunks_fts",
 	"tunnel_config",
 	"maintenance_settings",
+	"scheduled_tasks",
 	"schema_migrations",
 }

@@ -24,9 +24,9 @@ var databaseRoutes = []struct {
 	{http.MethodPost, "/api/v1/admin/database/compact"},
 	{http.MethodPost, "/api/v1/admin/database/reclaim"},
 	{http.MethodPost, "/api/v1/admin/database/checkpoint"},
-	{http.MethodGet, "/api/v1/admin/database/schedule"},
-	{http.MethodPut, "/api/v1/admin/database/schedule"},
 	{http.MethodPut, "/api/v1/admin/database/auto-vacuum"},
+	{http.MethodGet, "/api/v1/admin/schedules"},
+	{http.MethodPut, "/api/v1/admin/schedules/db.reclaim"},
 }
 
 func TestDatabaseEndpoints_RequireAdmin(t *testing.T) {

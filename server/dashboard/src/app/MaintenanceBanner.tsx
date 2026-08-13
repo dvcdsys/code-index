@@ -97,13 +97,7 @@ export function MaintenanceBanner() {
 
   if (status.kind === 'idle') return null;
 
-  if (status.kind === 'unreachable') {
-    return (
-      <Strip busy>
-        The server is restarting to adopt the compacted database — reconnecting…
-      </Strip>
-    );
-  }
+  if (status.kind === 'unreachable') return <ReconnectingStrip />;
 
   const { op } = status;
 
@@ -130,6 +124,33 @@ export function MaintenanceBanner() {
           · {pct}% ({formatBytes(op.bytes_done ?? 0)} of {formatBytes(op.bytes_total ?? 0)})
         </span>
       ) : null}
+    </Strip>
+  );
+}
+
+// The gap between the process re-executing and the new one binding its
+// listener. Nothing answers during it — not even the status endpoint — so all
+// this can do is say what is happening and count.
+//
+// The counting is the point. Measured on a real 8.9 GB database: the copy took
+// 1m31s, the swap 2s, and coming back up 59s, because the server reloads its
+// whole vector index before it listens. A silent minute of refused connections
+// after an admin pressed a button reads as a server that died; the same minute
+// with a number ticking on it reads as a server that is working.
+function ReconnectingStrip() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setSeconds((s) => s + 1), 1_000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <Strip busy>
+      <b>The server is restarting to adopt the compacted database</b>
+      <span className="text-line-quiet">
+        {' '}
+        — it reloads its index before it can answer, which usually takes about a minute.
+        Reconnecting… {seconds}s
+      </span>
     </Strip>
   );
 }

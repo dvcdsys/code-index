@@ -59,16 +59,7 @@ func newDBMaintService(d Deps) *dbmaint.Service {
 		RequestRestart: d.DBMaint.RequestRestart,
 		Freeze:         freeze,
 		Thaw:           thaw,
-		ActiveJobs: dbmaint.ActiveWorkCounter(d.DB, sessions),
-		Env: dbmaint.ScheduleEnv{
-			Enabled:         d.Cfg.DBMaintenanceEnabled,
-			Mode:            d.Cfg.DBMaintenanceMode,
-			IntervalHours:   d.Cfg.DBMaintenanceIntervalHours,
-			MinFreePercent:  d.Cfg.DBMaintenanceMinFreePercent,
-			MinFreeBytes:    d.Cfg.DBMaintenanceMinFreeBytes,
-			WindowStartHour: d.Cfg.DBMaintenanceWindowStartHour,
-			WindowEndHour:   d.Cfg.DBMaintenanceWindowEndHour,
-		},
+		ActiveJobs:     dbmaint.ActiveWorkCounter(d.DB, sessions),
 	})
 }
 
@@ -259,99 +250,6 @@ func (s *Server) SetAutoVacuumMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, st)
-}
-
-// GetMaintenanceSchedule — GET /api/v1/admin/database/schedule.
-func (s *Server) GetMaintenanceSchedule(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.mustBeAdmin(w, r); !ok {
-		return
-	}
-	svc := s.databaseService(w)
-	if svc == nil {
-		return
-	}
-	sched, err := svc.Schedule(r.Context())
-	if err != nil {
-		s.Deps.Logger.Error("read maintenance schedule", "err", err)
-		writeError(w, http.StatusInternalServerError, "read schedule: "+err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, sched)
-}
-
-// UpdateMaintenanceSchedule — PUT /api/v1/admin/database/schedule.
-func (s *Server) UpdateMaintenanceSchedule(w http.ResponseWriter, r *http.Request) {
-	ac, ok := s.mustBeAdmin(w, r)
-	if !ok {
-		return
-	}
-	svc := s.databaseService(w)
-	if svc == nil {
-		return
-	}
-
-	// Decoded in two passes because the window bounds are nullable and
-	// "absent" has to mean something different from "explicitly null": the
-	// first says leave the window alone, the second says clear it. A single
-	// pass into pointer fields cannot tell them apart.
-	var raw map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "invalid JSON body")
-		return
-	}
-	var patch dbmaint.SchedulePatch
-	fields := map[string]any{
-		"enabled":          &patch.Enabled,
-		"mode":             &patch.Mode,
-		"interval_hours":   &patch.IntervalHours,
-		"min_free_percent": &patch.MinFreePercent,
-		"min_free_bytes":   &patch.MinFreeBytes,
-	}
-	for key, target := range fields {
-		msg, present := raw[key]
-		if !present {
-			continue
-		}
-		if err := json.Unmarshal(msg, target); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "invalid value for "+key)
-			return
-		}
-	}
-	for key, target := range map[string]*dbmaint.NullableInt{
-		"window_start_hour": &patch.WindowStartHour,
-		"window_end_hour":   &patch.WindowEndHour,
-	} {
-		msg, present := raw[key]
-		if !present {
-			continue
-		}
-		target.Set = true
-		if string(msg) == "null" {
-			continue
-		}
-		var v int
-		if err := json.Unmarshal(msg, &v); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "invalid value for "+key)
-			return
-		}
-		target.Value = &v
-	}
-
-	updatedBy := ""
-	if ac != nil {
-		updatedBy = ac.User.Email
-	}
-	sched, err := svc.SaveSchedule(r.Context(), patch, updatedBy)
-	if err != nil {
-		if errors.Is(err, dbmaint.ErrInvalidSchedule) {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
-			return
-		}
-		s.Deps.Logger.Error("save maintenance schedule", "err", err)
-		writeError(w, http.StatusInternalServerError, "save schedule: "+err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, sched)
 }
 
 // GetMaintenanceStatus — GET /maintenance/status (public).

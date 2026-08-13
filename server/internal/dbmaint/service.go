@@ -17,10 +17,11 @@ type Deps struct {
 	// DBPath is the database file. Everything this package writes — the
 	// journal, the event log, the candidate copy — lives beside it.
 	DBPath string
-	// Env is the CIX_DB_MAINTENANCE_* layer, for deployments configured by a
-	// compose file rather than by anyone opening the dashboard.
-	Env    ScheduleEnv
-	Logger *slog.Logger
+	// Thresholds override the built-in "is it worth reclaiming" figures, for
+	// the unusual deployment that needs different ones. Zero values keep the
+	// defaults.
+	Thresholds Thresholds
+	Logger     *slog.Logger
 
 	// The hooks below are how compaction reaches the rest of the server
 	// without this package importing the job queue, the scheduler or the
@@ -77,13 +78,12 @@ func ActiveWorkCounter(sdb *sql.DB, sessions func() int) func(context.Context) (
 type Service struct {
 	d Deps
 
+	// thresholds are the resolved "is it worth it" figures.
+	thresholds Thresholds
+
 	mu      sync.Mutex
 	running bool
 
-	// schedStopped is closed when RunScheduler returns, so StopScheduler can
-	// wait for it rather than merely cancel it.
-	schedStopped chan struct{}
-	schedDone    sync.Once
 	// throughput is the copy rate measured by the last compaction on this
 	// machine, used to estimate the next one. Zero until a compaction has run,
 	// at which point the estimate stops being a guess.
@@ -95,17 +95,16 @@ func New(d Deps) *Service {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
-	s := &Service{d: d, schedStopped: make(chan struct{})}
+	s := &Service{d: d, thresholds: DefaultThresholds()}
+	if d.Thresholds.MinFreePercent > 0 {
+		s.thresholds.MinFreePercent = d.Thresholds.MinFreePercent
+	}
+	if d.Thresholds.MinFreeBytes > 0 {
+		s.thresholds.MinFreeBytes = d.Thresholds.MinFreeBytes
+	}
 	// A previous run's measured rate outlives the process that measured it.
 	if st, ok, err := Load(d.DBPath); err == nil && ok {
 		s.throughput = st.ThroughputBytesPerSec
-	}
-	// Say so at startup rather than at the first tick an hour later. The
-	// scheduler refuses to act on an invalid schedule either way; this is what
-	// tells the operator why nothing is happening.
-	if err := ValidateEnv(d.Env); err != nil {
-		d.Logger.Error("CIX_DB_MAINTENANCE_* does not describe a usable schedule; automatic database maintenance will not run",
-			"err", err)
 	}
 	return s
 }
@@ -138,16 +137,6 @@ func (s *Service) currentMode(ctx context.Context) AutoVacuum {
 		return AutoVacuumNone
 	}
 	return autoVacuumFromPragma(v)
-}
-
-// Schedule resolves the effective automatic-reclaim schedule.
-func (s *Service) Schedule(ctx context.Context) (Schedule, error) {
-	return ScheduleFor(ctx, s.d.DB, s.d.Env, s.currentMode(ctx), s.Status())
-}
-
-// SaveSchedule applies a patch and returns the schedule as it now resolves.
-func (s *Service) SaveSchedule(ctx context.Context, patch SchedulePatch, updatedBy string) (Schedule, error) {
-	return SaveSchedule(ctx, s.d.DB, s.d.Env, s.currentMode(ctx), s.Status(), patch, updatedBy)
 }
 
 // Status is the public progress report. It reads the journal and the event

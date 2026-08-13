@@ -7,8 +7,8 @@ import type {
   AutoVacuumRequest,
   DatabaseState,
   MaintenanceOperation,
-  MaintenanceSchedule,
-  MaintenanceScheduleUpdate,
+  ScheduledTask,
+  ScheduleUpdate,
   ReclaimRequest,
   ReclaimResult,
   CleanRequest,
@@ -33,7 +33,7 @@ export const serverKeys = {
   activeProvider: ['server', 'embedding-provider', 'active'] as const,
   resources: ['server', 'resources'] as const,
   database: ['server', 'database'] as const,
-  maintenanceSchedule: ['server', 'database', 'schedule'] as const,
+  schedules: ['server', 'schedules'] as const,
 };
 
 export function useRuntimeConfig() {
@@ -198,7 +198,15 @@ export function useDatabaseState() {
     // Poll quickly while an operation is in flight so the numbers and the
     // button state track it; otherwise leave it alone — page geometry only
     // changes when something is done to it.
+    //
+    // Except on failure, where leaving it alone is exactly wrong. This is the
+    // one card that can take its own backend away: a compaction restarts the
+    // server, every request from here fails for about a minute, and with no
+    // interval and no cached data there is nothing left to trigger a refetch.
+    // Observed live — the sibling queries came back on their own intervals
+    // while this card sat on "Failed to fetch" until the page was reloaded.
     refetchInterval: (q) => {
+      if (q.state.status === 'error') return 3_000;
       const data = q.state.data as DatabaseState | undefined;
       return isActivePhase(data?.operation?.phase) ? 2_000 : false;
     },
@@ -206,19 +214,28 @@ export function useDatabaseState() {
   });
 }
 
-export function useMaintenanceSchedule() {
+// Every recurring task the server knows how to run, not just the database's.
+// The registry is generic, so this hook is the one place the dashboard will
+// read from as more tasks are hung off it.
+export function useSchedules() {
   return useQuery({
-    queryKey: serverKeys.maintenanceSchedule,
-    queryFn: ({ signal }) => api.get<MaintenanceSchedule>('/admin/database/schedule', { signal }),
+    queryKey: serverKeys.schedules,
+    queryFn: ({ signal }) =>
+      api.get<{ tasks: ScheduledTask[] }>('/admin/schedules', { signal }).then((r) => r.tasks),
   });
 }
 
-export function useUpdateMaintenanceSchedule() {
+export function useUpdateSchedule() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (patch: MaintenanceScheduleUpdate) =>
-      api.put<MaintenanceSchedule>('/admin/database/schedule', patch),
-    onSuccess: (data) => qc.setQueryData(serverKeys.maintenanceSchedule, data),
+    mutationFn: ({ name, ...patch }: ScheduleUpdate & { name: string }) =>
+      api.put<ScheduledTask>(`/admin/schedules/${encodeURIComponent(name)}`, patch),
+    // The server re-arms on save and returns the task as it now resolves —
+    // including the next runs it will actually keep — so the response replaces
+    // the cached entry rather than triggering a refetch that could race it.
+    onSuccess: (task) =>
+      qc.setQueryData(serverKeys.schedules, (prev: ScheduledTask[] | undefined) =>
+        prev ? prev.map((t) => (t.name === task.name ? task : t)) : [task]),
   });
 }
 

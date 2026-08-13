@@ -23,6 +23,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/jobs"
 	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
+	"github.com/dvcdsys/code-index/server/internal/schedule"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
@@ -80,6 +81,10 @@ type Deps struct {
 	// vectorstore.Interface so production can supply a *vectorstore.Holder
 	// (swappable on provider switch) while tests pass a raw *Store.
 	VectorStore vectorstore.Interface
+	// Schedules is the registry of recurring tasks. Nil-safe: the admin
+	// endpoints answer 503 without one, which is what a router-only test gets.
+	Schedules *schedule.Registry
+
 	// Indexer drives the three-phase index protocol (Phase 5). Nil-safe: the
 	// indexing endpoints return 503 when absent.
 	Indexer *indexer.Service

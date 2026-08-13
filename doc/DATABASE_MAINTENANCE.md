@@ -118,48 +118,88 @@ The read-only window was 95 seconds; full unavailability was the ~30 seconds
 of restart after it.
 
 
-## Automatic reclaim
+## Running it on a schedule
 
-A schedule fires only when everything lines up at once: enabled, the interval
-has elapsed, the waste is over **both** thresholds, the clock is inside the
-window if one is set, nothing is being indexed — neither a queued job nor a CLI
-push, which leaves no job row at all — and, for a full compaction, there is room
-for the copy. Anything else and the tick is silent and tries again next hour.
+Both operations can run on a **crontab expression**, in the server's local
+timezone, and each has its own on/off switch:
 
-A schedule that cannot be honoured as written is refused rather than
-half-honoured, and said so at startup. Half a window is the case that matters:
-the window would simply be dropped, and a compaction meant for 03:00 would
-freeze the server in the middle of the afternoon.
+| Task | Default | On by default |
+|---|---|---|
+| `db.reclaim` | `0 3 * * *` | only on a database already in incremental mode |
+| `db.compact` | `0 4 * * 0` | never |
 
-Two thresholds rather than one: a percentage alone nags on a small database
-where 40% of 12 MB is not worth a window; an absolute figure alone nags on a
-large one where 500 MB of slack is normal headroom.
+An interval would have been the smaller change and the wrong one. "Every 24
+hours" is measured from the last run, so a single manual compaction at 18:00
+moves every subsequent nightly run to 18:00 and it drifts from there. cron is
+anchored to the clock, which is what "every night at midnight" means.
+
+The schedule says *when to look*; the thresholds say *whether it is worth it*.
+A due run still does nothing unless the waste is over **both** 25% and 256 MB —
+a percentage alone nags on a small database where 40% of 12 MB is not worth the
+work, an absolute figure alone nags on a large one where 500 MB of slack is
+ordinary headroom. Indexing in flight also defers a run, including a CLI push,
+which holds no row in the jobs table.
 
 Defaults depend on the database's own mode. A file created by a recent build
-can reclaim incrementally, so daily reclaim is on. A database carried over from
-an older install cannot, and the only thing automation could do for it is the
-expensive rebuild — so it stays off until an admin opts in. **An upgrade never
-starts blocking anybody's server on its own.**
+can reclaim incrementally, so nightly reclaim is on. A database carried over
+from an older install cannot, and the only thing automation could do for it is
+the expensive rebuild — so it stays off until an admin opts in. **An upgrade
+never starts blocking anybody's server on its own.**
 
-Full compaction is allowed on a schedule but is never the default.
+### What crontab means here, exactly
+
+- **A missed slot is not queued up.** A run that overruns its own schedule
+  loses the slots it ran through rather than firing a burst afterwards.
+- **A slot missed while the server was down** is skipped for `db.compact` —
+  noticing at 09:00 would mean a read-only window in the middle of the working
+  day — and caught up for `db.reclaim`, which costs milliseconds and would
+  otherwise never run at all on a laptop that is asleep every night.
+- **The next run is computed from the clock**, never from when the previous one
+  finished, so a slow run cannot make the schedule drift.
+- **Daylight saving is wall-clock.** On the spring forward an expression naming
+  an hour that does not exist that day is skipped; on the autumn repeat it fires
+  once. Losing one nightly reclaim a year is not worth the machinery that fixing
+  it would need, but it is a documented behaviour rather than a surprise.
+- **An expression that can never match is refused**, not accepted and silently
+  never run. `0 0 30 2 *` is a configuration error.
+
+The dashboard shows the next three runs beside the field, computed on the
+server by the same parser that fires them — a second cron implementation in the
+browser could only ever disagree with the first.
 
 ### Configuration
 
 Set in the dashboard, or by environment for deployments nobody opens a
-dashboard for. The dashboard shows where each effective value came from.
+dashboard for.
 
 | Variable | Meaning |
 |---|---|
-| `CIX_DB_MAINTENANCE_ENABLED` | `true` / `false` |
-| `CIX_DB_MAINTENANCE_MODE` | `incremental` or `full` |
-| `CIX_DB_MAINTENANCE_INTERVAL_HOURS` | Minimum hours between runs |
+| `CIX_DB_MAINTENANCE_CRON` | Default schedule for the database tasks |
 | `CIX_DB_MAINTENANCE_MIN_FREE_PERCENT` | Waste threshold, percent of the file |
 | `CIX_DB_MAINTENANCE_MIN_FREE_BYTES` | Waste threshold, absolute |
-| `CIX_DB_MAINTENANCE_WINDOW_START_HOUR` | Local hour, 0–23; set both or neither |
-| `CIX_DB_MAINTENANCE_WINDOW_END_HOUR` | Local hour, 0–23; may wrap past midnight |
 
-A dashboard setting overrides the environment; the environment overrides the
-derived default.
+An invalid expression is refused at startup rather than at the first tick. A
+schedule saved in the dashboard overrides the environment.
+
+### The scheduler underneath
+
+`internal/schedule` is a general registry, not a database feature: a table of
+named tasks, one goroutine watching the clock, and a handler called in-process
+when a task is due. Polling, cleanup and update checks can hang off the same
+machinery.
+
+It is deliberately **not** a job queue. The server already has one — the `jobs`
+table, with retries, dedupe and a worker — and a second persistence model beside
+it would mean two places to look when something did not run. A task that wants
+durable, retryable work enqueues it into `jobs`; that is the seam. Compaction is
+the reason it could not simply live in the queue in the first place: it drains
+that queue as part of taking the server read-only, so a trigger inside it would
+be draining itself.
+
+The slot is claimed on disk **before** the handler runs. That is correctness,
+not bookkeeping: compaction re-executes the process as its final step, and a
+slot still marked due when the new process starts would fire it again, and
+again.
 
 ## Incremental auto-vacuum, and what it costs
 
