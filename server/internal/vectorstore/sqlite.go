@@ -222,8 +222,14 @@ func openDB(path string, mmapBytes int64, logger *slog.Logger) (*sql.DB, error) 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("vectorstore: create %s: %w", filepath.Dir(path), err)
 	}
+	// A zero-byte file counts as fresh: the driver creates the file on connect
+	// but the schema is written later, so any kill between the two (OOM,
+	// docker stop during first boot, a full disk) leaves an empty file behind.
+	// It holds no data and no version stamp; treating it as existing would
+	// send the upgrader to ATTACH an empty database and die on its first
+	// SELECT, turning a self-healing state into a fatal boot error.
 	fresh := false
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	if fi, err := os.Stat(path); os.IsNotExist(err) || (err == nil && fi.Size() == 0) {
 		fresh = true
 	}
 
@@ -313,11 +319,16 @@ func initDatabase(db *sql.DB, fresh bool) error {
 	if _, err := conn.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("vectorstore: create schema: %w", err)
 	}
-	// Stamped unconditionally: a fresh file is v2 by construction, and an
-	// existing one only reaches here after upgradeSchema has rebuilt it (which
-	// stamps it too — this is the belt to that braces).
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
-		return fmt.Errorf("vectorstore: stamp schema version: %w", err)
+	// Stamped only on a file this process just created. The rebuild stamps the
+	// files it upgrades itself, and a file from a NEWER binary must keep its
+	// own version: upgradeSchema deliberately leaves version >= ours alone,
+	// and an unconditional restamp here would mark that newer file as ours —
+	// so the next newer binary would run its upgrade against a file that is
+	// already upgraded. One old-binary run must not defeat the downgrade guard.
+	if fresh {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
+			return fmt.Errorf("vectorstore: stamp schema version: %w", err)
+		}
 	}
 	return nil
 }

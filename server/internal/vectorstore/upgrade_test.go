@@ -438,11 +438,18 @@ func TestDeleteCollectionByName_ReclaimsPages(t *testing.T) {
 	if err := s.DeleteCollectionByName(CollectionName("/big")); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
+	// The delete itself only moves pages to the freelist — reclaiming is a
+	// separate, batched call so a clean over N collections shuffles the file
+	// tail once, not N times. This mirrors how maintenance.Clean drives it.
+	if free := pragmaInt(t, s.db, "freelist_count"); free == 0 {
+		t.Errorf("freelist_count = 0 right after delete — expected freed pages awaiting ReclaimFreePages")
+	}
+	s.ReclaimFreePages(ctx)
 	after := pragmaInt(t, s.db, "page_count")
 	free := pragmaInt(t, s.db, "freelist_count")
 
 	if after >= before {
-		t.Errorf("page_count %d -> %d: the database did not shrink after a collection was deleted", before, after)
+		t.Errorf("page_count %d -> %d: the database did not shrink after delete + ReclaimFreePages", before, after)
 	}
 	if free != 0 {
 		t.Errorf("freelist_count = %d after the incremental vacuum, want 0 — those pages are disk the admin was told they got back", free)
@@ -462,4 +469,76 @@ func userVersionOf(t *testing.T, path string) int64 {
 	}
 	defer db.Close()
 	return pragmaInt(t, db, "user_version")
+}
+
+// A zero-byte vectors.db is what a kill between the driver creating the file
+// and the schema being written leaves behind (OOM, docker stop during first
+// boot, a full disk). It must be treated as a fresh database, not sent to the
+// upgrader — which would ATTACH an empty file and die on its first SELECT,
+// turning a self-healing state into a fatal boot error the operator can only
+// fix with rm.
+func TestOpen_TreatsAZeroByteDatabaseAsFresh(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, DBFileName), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open over a zero-byte database: %v", err)
+	}
+	defer s.Close()
+	if err := s.UpsertChunks(context.Background(), "/p",
+		[]Chunk{{Content: "c", FilePath: "a.go", StartLine: 1, EndLine: 2}},
+		[][]float32{{1, 0}}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if got := pragmaInt(t, s.db, "user_version"); got != schemaVersion {
+		t.Errorf("user_version = %d, want %d", got, schemaVersion)
+	}
+	if got := pragmaInt(t, s.db, "auto_vacuum"); got != 2 {
+		t.Errorf("auto_vacuum = %d, want 2 (incremental) — the fresh-file pragmas were skipped", got)
+	}
+}
+
+// A file stamped by a NEWER binary must keep its stamp. upgradeSchema already
+// leaves version >= ours alone; the trap was initDatabase restamping OUR
+// version unconditionally afterwards — one old-binary run against a new data
+// dir would remark a v3 file as v2, and the next v3 binary would then run its
+// upgrade against a file that is already v3.
+func TestOpen_DoesNotRestampANewerSchemaVersion(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := s.UpsertChunks(context.Background(), "/p",
+		[]Chunk{{Content: "c", FilePath: "a.go", StartLine: 1, EndLine: 2}},
+		[][]float32{{1, 0}}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	path := filepath.Join(dir, DBFileName)
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion+1)); err != nil {
+		t.Fatalf("stamp future version: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen of a newer-version file: %v", err)
+	}
+	defer s2.Close()
+	if got := pragmaInt(t, s2.db, "user_version"); got != int64(schemaVersion+1) {
+		t.Errorf("user_version = %d after a v%d binary opened a v%d file, want %d — the downgrade guard was defeated by the restamp",
+			got, schemaVersion, schemaVersion+1, schemaVersion+1)
+	}
 }
