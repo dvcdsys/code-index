@@ -30,14 +30,16 @@ func queryPlan(t *testing.T, s *Store, query string, args ...any) string {
 }
 
 // TestScanUsesCollectionIndex pins the one thing the scan's performance
-// depends on: it must walk idx_vec_coll_file, not the table btree.
+// depends on: it must walk idx_vec_coll — whose keys are (collection_id,
+// rowid) — and not the table btree, and not the file-path index.
 //
 // Delete-by-file plus reinsert (every save the file watcher sees) scatters a
-// collection's rows across the whole table. A table scan then reads — and
-// discards — rows belonging to other collections, measured at 3.3x slower
-// after a hundred edits of a single file. The index keeps the scan proportional
-// to the collection, forever. If a schema change ever makes SQLite drop the
-// index, this fails instead of the server quietly getting slower.
+// collection's rows across the whole table, so a plain scan reads and discards
+// rows belonging to other collections. idx_vec_coll keeps the scan
+// proportional to the collection AND in table order; the otherwise-usable
+// idx_vec_coll_file costs 1.8x because it hands the rows back in file_path
+// order. If a schema change ever makes SQLite pick something else, this fails
+// instead of the server quietly getting slower.
 func TestScanUsesCollectionIndex(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()
@@ -47,8 +49,12 @@ func TestScanUsesCollectionIndex(t *testing.T) {
 	}
 
 	plan := queryPlan(t, s, scanSQL, 1)
-	if !strings.Contains(plan, "idx_vec_coll_file") {
-		t.Errorf("scan plan does not use idx_vec_coll_file:\n%s", plan)
+	if !strings.Contains(plan, "idx_vec_coll ") && !strings.HasSuffix(plan, "idx_vec_coll") &&
+		!strings.Contains(plan, "idx_vec_coll (collection_id") {
+		t.Errorf("scan plan does not use idx_vec_coll:\n%s", plan)
+	}
+	if strings.Contains(plan, "idx_vec_coll_file") {
+		t.Errorf("scan plan uses the file-path index (1.8x slower):\n%s", plan)
 	}
 	if strings.Contains(plan, "SCAN vectors\n") || strings.HasSuffix(plan, "SCAN vectors") {
 		t.Errorf("scan plan falls back to a full table scan:\n%s", plan)
@@ -58,8 +64,8 @@ func TestScanUsesCollectionIndex(t *testing.T) {
 	// extra predicate, not a reason to pick another index.
 	filtered := scanSQL + " AND language = ?"
 	plan = queryPlan(t, s, filtered, 1, "go")
-	if !strings.Contains(plan, "idx_vec_coll_file") {
-		t.Errorf("filtered scan plan does not use idx_vec_coll_file:\n%s", plan)
+	if strings.Contains(plan, "idx_vec_coll_file") || !strings.Contains(plan, "idx_vec_coll") {
+		t.Errorf("filtered scan plan does not use idx_vec_coll:\n%s", plan)
 	}
 
 	// Delete-by-file must be an index seek, not a scan.

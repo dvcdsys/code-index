@@ -9,21 +9,24 @@ migration from the previous engine, and the environment variables that tune it.
 The previous engine was [chromem-go](https://github.com/philippgille/chromem-go),
 an in-memory vector database with gob-file persistence. It loads **every
 document of every collection into the process heap at startup and never
-evicts**. On a real 312k-document index that meant:
+evicts**. Measured on a real 312,334-document / 47-collection index, against
+this implementation on the same data:
 
 | | chromem-go | SQLite store |
 |---|---|---|
-| Resident memory, idle | **2209 MB** | **≈19 MB** |
-| Resident memory after 100 searches + a 47-collection fan-out | 2209 MB+ | **≈44 MB** |
+| Resident memory, idle | **2209 MB** | **19 MB** |
+| Resident memory after a fan-out over all 47 collections | 2209 MB+ | **26 MB** |
 | Time from process start to first answerable query | **47 s** | **≈1 ms** |
-| Search latency, 74k-doc collection, k=10 | 34 ms | ≈110 ms |
-| Disk | 2.5 GB of gob files | 1.1 GB |
+| Search latency, 74k-doc collection, k=10 / k=500 | 34 / 38 ms | 139 / 146 ms |
+| Fan-out over all 312k documents, warm | ~150 ms (estimated, all in RAM) | 510 ms |
+| Disk | 2.5 GB of gob files | 1.86 GB (chunk text included) |
+| Import of the whole index | — | 17 s |
 
 Memory was proportional to the index rather than to the work. It is now
 proportional to the work: nothing is loaded at open, and a query costs a few
 page-cache buffers that are returned to the OS when the connection goes idle.
-The trade is search latency — roughly 3x slower, and unchanged by the result
-limit (k=500 costs ~1.6% more than k=10).
+The trade is search latency — roughly 4x slower, and nearly unchanged by the
+result limit (k=500 costs 5% more than k=10, against 11% for chromem).
 
 ## Layout on disk
 
@@ -68,6 +71,7 @@ CREATE TABLE vectors (
   embedding     BLOB NOT NULL,            -- little-endian float32, dim = len/4
   PRIMARY KEY (collection_id, doc_id)
 );
+CREATE INDEX idx_vec_coll      ON vectors(collection_id);
 CREATE INDEX idx_vec_coll_file ON vectors(collection_id, file_path);
 
 CREATE TABLE vector_contents (
@@ -102,7 +106,7 @@ winners of a search: one extra lookup per result.
 ## Search
 
 ```
-SELECT rowid, embedding FROM vectors INDEXED BY idx_vec_coll_file
+SELECT rowid, embedding FROM vectors INDEXED BY idx_vec_coll
  WHERE collection_id = ?  [AND <metadata filters>]
 ```
 
@@ -111,13 +115,23 @@ similarity *is* the dot product) into a top-K min-heap that rejects a losing
 row with one comparison. Metadata and chunk text are fetched afterwards, for
 the winners only.
 
-`INDEXED BY` is not an optimisation hint, it is a guarantee. Delete-by-file
-followed by reinsert — what the file watcher does on every save — appends the
-new rows at the end of the table, so a collection's rows stop being contiguous.
-A plain table scan then reads and discards rows belonging to other collections:
-**measured 3.3x slower after 100 edits of a single file**. Walking the index
-visits only the collection's own rows however fragmented the table is, for a 7%
-steady-state cost. `TestScanUsesCollectionIndex` pins the plan.
+`INDEXED BY` is not an optimisation hint, it is a guarantee, and *which* index
+matters. Measured on the real index, scanning its largest (74k-row) collection:
+
+| driven by | | |
+|---|---|---|
+| `idx_vec_coll` | **137 ms** | keys are `(collection_id, rowid)` |
+| `idx_vec_coll_file` | 244 ms | keys are `(collection_id, file_path, rowid)` |
+| no index | 267 ms | walks all 312k rows and discards 76% of them |
+
+Delete-by-file followed by reinsert — what the file watcher does on every save
+— appends the new rows at the end of the table, so a collection's rows stop
+being contiguous and a plain table scan degrades without bound. Both indexes
+fix that (they visit only the collection's own rows), but SQLite appends the
+rowid to every index key, so `idx_vec_coll` also hands the rows back in *table*
+order and the row lookups stay sequential. The file-path index scatters them
+across the collection's whole rowid span, for 1.8x the time.
+`TestScanUsesCollectionIndex` pins the plan.
 
 The metadata filter (`where`) mirrors chromem's semantics exactly, including
 the two odd cases: an unknown key with a non-empty value matches nothing, and
@@ -175,7 +189,7 @@ of the matching chromem directory that is not already recorded in
   finished one. Progress is logged at `info` (the default level) every 10
   collections: `migrating vector store collections=12/47 docs=…`.
 - **Reference figures** — 312,334 documents across 47 collections imported in
-  7.7 s, producing a 1.1 GB database from a 2.5 GB gob tree.
+  17 s, producing a 1.86 GB database from a 2.5 GB gob tree.
 - **Before starting**, free space is checked (the database comes out at roughly
   half the size of the gob tree); an obviously impossible import fails the boot
   with a clear message rather than half-writing.

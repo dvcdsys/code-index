@@ -21,15 +21,22 @@ var scanSlots = make(chan struct{}, max(2, runtime.NumCPU()))
 
 // scanSQL streams one collection.
 //
-// INDEXED BY is not an optimisation hint, it is a guarantee. Delete-by-file
-// followed by reinsert (every file the watcher touches) appends the new rows
-// at the end of the table, so a collection's rows stop being contiguous; a
-// plain table scan then walks rows belonging to other collections and throws
-// them away — measured at a 3.3x slowdown after 100 edits of a single file.
-// Walking idx_vec_coll_file, whose keys are (collection_id, file_path, rowid),
-// visits only this collection's rows however fragmented the table is, for a 7%
-// steady-state cost. TestScanUsesCollectionIndex pins the plan.
-const scanSQL = `SELECT rowid, embedding FROM vectors INDEXED BY idx_vec_coll_file WHERE collection_id = ?`
+// INDEXED BY is not an optimisation hint, it is a guarantee, and the choice of
+// index is not arbitrary either. Both were measured on a real 312k-document
+// index, scanning its largest (74k-row) collection:
+//
+//	idx_vec_coll       137 ms   keys are (collection_id, rowid)
+//	idx_vec_coll_file  244 ms   keys are (collection_id, file_path, rowid)
+//	no index           267 ms   walks all 312k rows and discards 76%
+//
+// idx_vec_coll visits only this collection's rows — however fragmented the
+// table has become, and delete-by-file followed by reinsert (every file the
+// watcher touches) fragments it continuously — and yields them in table order,
+// so the row lookups are sequential. Driving the same scan from the file-path
+// index costs 1.8x because its keys are ordered by file_path, scattering the
+// lookups across the collection's whole rowid span.
+// TestScanUsesCollectionIndex pins the plan.
+const scanSQL = `SELECT rowid, embedding FROM vectors INDEXED BY idx_vec_coll WHERE collection_id = ?`
 
 // hydrateSQL fetches the metadata and chunk text of the winners only. The
 // LEFT JOIN keeps a result whose content row is somehow missing (which should

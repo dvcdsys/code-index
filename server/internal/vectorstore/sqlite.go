@@ -71,10 +71,18 @@ const idleConnTimeout = 30 * time.Second
 // chain. That would roughly double the pages a scan touches. Content is read
 // only for the K winners, so it costs one extra btree lookup per result.
 //
-// idx_vec_coll_file serves both delete-by-file and, via its collection_id
-// prefix, the scan (see scanSQL): walking the index visits only the
-// collection's own rows regardless of how fragmented the table has become
-// after watcher churn.
+// Two indexes, and the difference between them matters:
+//
+//   - idx_vec_coll is (collection_id, rowid) — SQLite appends the rowid to
+//     every index key — so walking it yields the collection's rows in TABLE
+//     order. That is the scan (see scanSQL): it visits only this collection's
+//     rows however fragmented the table is, and it touches the table pages
+//     sequentially.
+//   - idx_vec_coll_file serves delete-by-file. It also has a collection_id
+//     prefix, so it could drive the scan too — but its keys are ordered by
+//     file_path, which turns the row lookups into random access across the
+//     collection's whole rowid span. Measured on a real 312k-document index:
+//     244 ms versus 137 ms for idx_vec_coll on the same 74k-row collection.
 //
 // migration_state records which legacy chromem collections have been imported.
 // A row here means "this collection has been dealt with" — it is deliberately
@@ -97,6 +105,7 @@ CREATE TABLE IF NOT EXISTS vectors (
   embedding     BLOB NOT NULL,
   PRIMARY KEY (collection_id, doc_id)
 );
+CREATE INDEX IF NOT EXISTS idx_vec_coll ON vectors(collection_id);
 CREATE INDEX IF NOT EXISTS idx_vec_coll_file ON vectors(collection_id, file_path);
 CREATE TABLE IF NOT EXISTS vector_contents (
   collection_id INTEGER NOT NULL,
