@@ -137,6 +137,42 @@ func (u *updater) check(force bool) available {
 	return av
 }
 
+// latestRuntime answers "what server should I install", as opposed to "is there
+// a newer server than the one installed".
+//
+// The difference is what a 304 means. u.runtime replays an ETag so that an
+// update *check* costs nothing on the days nothing was published, and there
+// "not modified" correctly reads as "no news, keep what you had". An install is
+// a different question, and the ETag says nothing about whether this machine
+// has a runtime on disk: it describes GitHub's release listing, which is the
+// same for every Mac in the world.
+//
+// Conflating the two bricked first-run setup. The ETag outlives the process in
+// launcher.json, so any machine whose first launch completed one background
+// update check — every second launch, in other words — answered the install
+// query with 304, reported it as "could not find a cix server to install: not
+// modified", and kept doing so through retries and reinstalls until somebody
+// published a new server release.
+func (u *updater) latestRuntime(ctx context.Context) (release.Release, error) {
+	rel, err := u.runtime.Latest(ctx)
+	if !errors.Is(err, release.ErrNotModified) {
+		return rel, err
+	}
+	// The listing this process already saw is the one GitHub is declining to
+	// resend, so it is the right answer and costs no request.
+	if u.seenRuntime.Version != "" {
+		logf("runtime listing unchanged; installing the release this session already saw")
+		return u.seenRuntime, nil
+	}
+	// The ETag came from an earlier run, so the body it matched is gone. Ask
+	// again without it — on a copy, so the cached ETag stays intact for the
+	// cheap checks it exists for.
+	logf("runtime listing unchanged but nothing cached in this session; re-asking without the ETag")
+	fresh := *u.runtime
+	fresh.ETag = ""
+	return fresh.Latest(ctx)
+}
+
 // refresh polls one stream, keeping the previous answer when nothing came back.
 func (u *updater) refresh(what string, c *release.Client, previous release.Release, setETag func(*prefs, string)) release.Release {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

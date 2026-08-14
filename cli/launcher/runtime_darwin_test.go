@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -464,5 +465,100 @@ func TestUnpackRuntimeRejectsIncompleteTree(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dest); statErr == nil {
 		t.Error("the version directory was created despite the incomplete tree")
+	}
+}
+
+// serveStreamListing serves the releases API for the server/v* stream, honouring
+// If-None-Match the way GitHub does. Returns the base URL and a counter of the
+// 200s it answered.
+func serveStreamListing(t *testing.T, version, etag string) (base string, full *int) {
+	t.Helper()
+
+	served := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/dvcdsys/code-index/releases", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		served++
+		w.Header().Set("ETag", etag)
+		_, _ = io.WriteString(w, `[{"tag_name":"`+serverTagPrefix+version+`","html_url":"https://example.invalid","assets":[]}]`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL, &served
+}
+
+// A cached ETag says the release *listing* has not changed. It says nothing
+// about whether this machine has a runtime, so an install must not read a 304 as
+// "there is no server to install" — that turned every launch after the first
+// into a permanently unsetuppable app, since the ETag is persisted in
+// launcher.json and survives reinstalling.
+func TestLatestRuntimeIgnoresAStaleETag(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	const etag = `"cached-from-a-previous-run"`
+	base, served := serveStreamListing(t, "1.2.3", etag)
+	t.Setenv("CIX_UPDATE_BASE_URL", base)
+
+	// What the previous run left behind: an ETag, and no memory of the body it
+	// matched.
+	if err := savePrefs(prefs{RuntimeETag: etag}); err != nil {
+		t.Fatal(err)
+	}
+
+	u := newUpdater(bundle{})
+	rel, err := u.latestRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("latestRuntime: %v", err)
+	}
+	if rel.Version != "1.2.3" {
+		t.Errorf("version = %q, want 1.2.3", rel.Version)
+	}
+	if *served != 1 {
+		t.Errorf("full listings served = %d, want 1 (the retry without the ETag)", *served)
+	}
+	// The retry runs on a copy: the cached ETag is what keeps the routine checks
+	// off GitHub's rate limit, and an install must not spend it.
+	if u.runtime.ETag != etag {
+		t.Errorf("cached ETag = %q, want it left at %q", u.runtime.ETag, etag)
+	}
+	if p := loadPrefs(); p.RuntimeETag != etag {
+		t.Errorf("persisted ETag = %q, want it left at %q", p.RuntimeETag, etag)
+	}
+}
+
+// When this process already listed the stream, the 304 is confirming that
+// listing — no second request needed.
+func TestLatestRuntimeReusesTheListingThisSessionSaw(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	const etag = `"seen-this-session"`
+	base, served := serveStreamListing(t, "2.0.0", etag)
+	t.Setenv("CIX_UPDATE_BASE_URL", base)
+
+	u := newUpdater(bundle{})
+	// A background check, exactly as onReady runs one: 200, and the ETag is now
+	// cached both in memory and on disk. It lists twice — the app stream and the
+	// server stream are separate clients over the same endpoint.
+	u.check(true)
+	if u.seenRuntime.Version != "2.0.0" {
+		t.Fatalf("seenRuntime = %q, want 2.0.0", u.seenRuntime.Version)
+	}
+	afterCheck := *served
+
+	rel, err := u.latestRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("latestRuntime: %v", err)
+	}
+	if rel.Version != "2.0.0" {
+		t.Errorf("version = %q, want 2.0.0", rel.Version)
+	}
+	if *served != afterCheck {
+		t.Errorf("full listings served = %d, want %d — the 304 should have been answered from memory",
+			*served, afterCheck)
 	}
 }
