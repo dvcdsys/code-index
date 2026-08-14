@@ -401,9 +401,21 @@ func run() (restart bool, err error) {
 		// shaped fallback so toggling embeddings on/off doesn't move dirs.
 		components = []string{provider.KindOllama, provider.StorageSlug(cfg.EmbeddingModel)}
 	}
-	chromaDir := cfg.ChromaDirFor(components)
+	// openVectorStore opens the SQLite vector store for an embedding identity,
+	// pointing it at the chromem directory of the SAME identity. Opening is
+	// where a one-time import of the legacy gob files happens (once per
+	// namespace, recorded in the database, resumable); on a fresh install
+	// there is nothing to import and it is a file open.
+	openVectorStore := func(comps []string) (*vectorstore.Store, error) {
+		return vectorstore.OpenWith(vectorstore.Options{
+			Dir:             cfg.VectorDirFor(comps),
+			LegacyChromaDir: cfg.ChromaDirFor(comps),
+			MMapBytes:       cfg.VectorMMapSize,
+			Logger:          logger,
+		})
+	}
 
-	vs, err := vectorstore.Open(chromaDir)
+	vs, err := openVectorStore(components)
 	if err != nil {
 		return false, fmt.Errorf("open vectorstore: %w", err)
 	}
@@ -413,10 +425,15 @@ func run() (restart bool, err error) {
 	// Wire the live-reopen path used by SwitchProvider.
 	embedSvc.AttachVectorStore(
 		vsHolder,
-		cfg.ChromaDirFor,
-		vectorstore.Open,
+		openVectorStore,
 		func() error { return storage.MigrateFlatChromaToNested(cfg.ChromaPersistDir, logger) },
 	)
+	// The store owns an open SQLite pool now, so it is closed on the way out.
+	defer func() {
+		if err := vsHolder.Close(); err != nil {
+			logger.Error("vector store close", "err", err)
+		}
+	}()
 
 	idx := indexer.New(database, vsHolder, embedSvc, logger)
 	idx.SetEmbedIncludePath(cfg.EmbedIncludePath)

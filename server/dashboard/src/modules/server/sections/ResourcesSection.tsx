@@ -154,7 +154,7 @@ export function ResourcesSection() {
                 {
                   label: 'Vector documents',
                   value: vs ? vs.documents.toLocaleString() : '—',
-                  title: `${vs?.collections ?? 0} collections, all resident in memory`,
+                  title: `${vs?.collections ?? 0} collections in the vector database`,
                 },
                 { label: 'Disk used', value: formatBytes(diskTotal) },
               ]}

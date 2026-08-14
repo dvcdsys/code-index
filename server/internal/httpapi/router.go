@@ -119,8 +119,8 @@ type Deps struct {
 	// router-only tests; those handlers then 409 (no checkout on disk).
 	DataDir string
 	// Cfg is the process-wide env-derived config, for handlers that need to
-	// resolve on-disk locations (SQLitePath, ChromaPersistDir, GGUFCacheDir,
-	// ChromaDirFor). The alternative — type-asserting EmbeddingSvc to
+	// resolve on-disk locations (SQLitePath, VectorsDir, GGUFCacheDir,
+	// VectorDirFor). The alternative — type-asserting EmbeddingSvc to
 	// *embeddings.Service and calling Config() — silently yields nothing when
 	// embeddings are disabled or a fake is installed, which is how the
 	// project-detail card ended up reporting no vector-store size at all.

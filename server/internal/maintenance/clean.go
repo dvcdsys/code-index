@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -81,12 +79,11 @@ func (s *Service) Clean(ctx context.Context, analysisID string, selected []Categ
 
 	started := s.now()
 	out := &CleanResult{StartedAt: started}
-	freedCollections := false
 
 	// AllCategories order matters: orphan_collections runs first. Abandoned
-	// namespaces are removed with a raw os.RemoveAll, and doing that before
-	// chromem has been told to drop a collection would delete a directory it
-	// still holds in memory — leaving a ghost that the next write recreates.
+	// namespaces are removed with a raw os.RemoveAll, and doing that before the
+	// store has dropped the collection would pull the database out from under
+	// an open handle.
 	for _, id := range AllCategories {
 		if !want[id] {
 			continue
@@ -96,33 +93,15 @@ func (s *Service) Clean(ctx context.Context, analysisID string, selected []Categ
 			return nil, fmt.Errorf("%w: %q not present in this analysis", ErrUnknownCategory, id)
 		}
 		res := s.cleanCategory(ctx, cat, st)
-		if id == CatOrphanCollections && res.DeletedCount > 0 {
-			freedCollections = true
-		}
 		out.Categories = append(out.Categories, res)
 		out.ReclaimedBytes += res.ReclaimedBytes
 	}
 
-	// Dropping collections releases a large amount of heap at once, but the
-	// runtime holds the spans until a GC runs, so without this the reported
-	// heap would not move and the clean would read as having done nothing.
-	//
-	// How far RSS follows is platform-dependent, and worth being precise
-	// about: on Linux (the deployment target) the runtime returns pages with
-	// MADV_DONTNEED and resident memory drops with the heap. On darwin it uses
-	// MADV_FREE — the pages become reclaimable but stay resident until the OS
-	// is under pressure, so a local macOS run shows the heap fall while RSS
-	// stays flat. Measured here: heap 4.12 GB → 1.28 GB with RSS unmoved.
-	//
-	// Gated on an actual deletion: FreeOSMemory stops the world.
-	if freedCollections {
-		before := readMemory().HeapAllocBytes
-		runtime.GC()
-		debug.FreeOSMemory()
-		after := readMemory().HeapAllocBytes
-		s.d.Logger.Info("maintenance: released memory after collection cleanup",
-			"heap_before_bytes", before, "heap_after_bytes", after, "freed_bytes", before-after)
-	}
+	// No forced GC here any more. Dropping a collection used to free a large
+	// slice of the Go heap — chromem held every document resident — and the
+	// clean ended with runtime.GC() + debug.FreeOSMemory() so the reported
+	// heap would actually move. The SQLite store holds nothing per collection,
+	// so a stop-the-world pass would buy exactly nothing.
 
 	out.FinishedAt = s.now()
 	out.DurationMS = out.FinishedAt.Sub(started).Milliseconds()
@@ -195,24 +174,35 @@ func (s *Service) cleanCategory(ctx context.Context, cat Category, st *scanState
 		}
 
 	case CatStaleNamespaces:
-		active := s.activeChromaDir()
-		if active == "" {
+		active := s.activeNamespaceDirs()
+		if len(active) == 0 {
 			for _, it := range cat.all {
 				skip(it.Key, "active embedding namespace is unknown")
 			}
 			return res
 		}
-		base := ""
-		if s.d.Cfg != nil {
-			base = filepath.Clean(s.d.Cfg.ChromaPersistDir)
+		// Re-derive the containers rather than trusting the analysis: this is
+		// an os.RemoveAll, and the only thing standing between it and an
+		// arbitrary path is the check that the target lives inside one of the
+		// two vector-store trees.
+		var bases []string
+		for _, b := range s.namespaceBases() {
+			bases = append(bases, b.root)
 		}
 		for _, it := range cat.all {
 			p := filepath.Clean(it.path)
-			if base == "" || !isAncestor(base, p) {
+			inside := false
+			for _, base := range bases {
+				if isAncestor(base, p) {
+					inside = true
+					break
+				}
+			}
+			if !inside {
 				fail(it.Key, "path is outside the vector store directory")
 				continue
 			}
-			if p == active || isAncestor(p, active) || isAncestor(active, p) {
+			if isActiveNamespace(p, active) {
 				skip(it.Key, "this namespace is now active")
 				continue
 			}

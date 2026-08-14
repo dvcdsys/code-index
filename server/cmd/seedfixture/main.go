@@ -1,7 +1,7 @@
 //go:build ignore
 
 // seedfixture writes a small, self-contained cix data directory for manually
-// exercising the admin Resources screen: a few real chromem collections, some
+// exercising the admin Resources screen: a few real vector collections, some
 // cloned-checkout directories, and nothing else. Run it, point a server at the
 // directory, then register only SOME of the projects so the rest show up as
 // reclaimable.
@@ -27,9 +27,10 @@ func main() {
 	}
 	dir := os.Args[1]
 
-	ns := filepath.Join(dir, "chroma", "ollama", "awhiteside_coderankembed_q8_0_gguf")
+	ns := filepath.Join(dir, "vectors", "ollama", "awhiteside_coderankembed_q8_0_gguf")
 	store, err := vectorstore.Open(ns)
 	check(err)
+	defer store.Close()
 
 	// Three collections. Only the first is registered as a project later, so
 	// the other two are orphans.
@@ -40,16 +41,17 @@ func main() {
 		embs := make([][]float32, sizes[i])
 		for j := range chunks {
 			chunks[j] = vectorstore.Chunk{
-				Content:    fmt.Sprintf("func handler%d() error { return nil }", j),
-				FilePath:   fmt.Sprintf("pkg/mod%d.go", j%20),
-				StartLine:  j, EndLine: j + 8,
+				Content:   fmt.Sprintf("func handler%d() error { return nil }", j),
+				FilePath:  fmt.Sprintf("pkg/mod%d.go", j%20),
+				StartLine: j, EndLine: j + 8,
 				ChunkType: "function", SymbolName: fmt.Sprintf("handler%d", j), Language: "go",
 			}
 			embs[j] = make([]float32, 768)
 			embs[j][j%768] = 1
 		}
 		check(store.UpsertChunks(context.Background(), p, chunks, embs))
-		fmt.Printf("collection %-32s %d docs -> %s\n", p, sizes[i], store.CollectionDir(p))
+		size, _ := store.CollectionSizeBytes(p)
+		fmt.Printf("collection %-32s %d docs, %d bytes -> %s\n", p, sizes[i], size, store.DBPath())
 	}
 
 	// Cloned checkouts: one for the live project, two for projects that are

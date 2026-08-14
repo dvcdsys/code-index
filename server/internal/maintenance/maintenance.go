@@ -159,14 +159,20 @@ type Item struct {
 // renders. Labels and defaults live here rather than in React so the rules
 // (what is destructive, what is pre-selected) are decided once, on the server.
 type Category struct {
-	ID                CategoryID `json:"id"`
-	Label             string     `json:"label"`
-	Description       string     `json:"description"`
-	ItemCount         int        `json:"item_count"`
-	SizeBytes         int64      `json:"size_bytes"`
-	EstimatedRAMBytes int64      `json:"estimated_ram_bytes,omitempty"`
-	DefaultSelected   bool       `json:"default_selected"`
-	Destructive       bool       `json:"destructive"`
+	ID          CategoryID `json:"id"`
+	Label       string     `json:"label"`
+	Description string     `json:"description"`
+	ItemCount   int        `json:"item_count"`
+	SizeBytes   int64      `json:"size_bytes"`
+	// EstimatedRAMBytes is legacy: it existed for orphaned collections back
+	// when the vector store held every document in the Go heap and deleting
+	// one handed memory back. Nothing populates it now (the SQLite store's
+	// footprint is not proportional to what it stores), and omitempty keeps it
+	// off the wire. Kept in the schema so an older dashboard build does not
+	// break on a missing field.
+	EstimatedRAMBytes int64 `json:"estimated_ram_bytes,omitempty"`
+	DefaultSelected   bool  `json:"default_selected"`
+	Destructive       bool  `json:"destructive"`
 	// Items is the sample shown in the UI — at most maxItemsPerCategory.
 	Items          []Item `json:"items"`
 	ItemsTruncated bool   `json:"items_truncated"`

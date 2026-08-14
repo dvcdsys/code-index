@@ -1,21 +1,19 @@
 package vectorstore
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"fmt"
-	"path/filepath"
-	"sort"
 )
 
-// CollectionInfo describes one collection that is resident in the chromem-go
-// process image. Everything here is read from memory — chromem eagerly loads
-// every document of every collection at Open and never evicts, so counting is
-// free and does not touch the disk.
+// CollectionInfo describes one collection held by the store.
 type CollectionInfo struct {
-	Name      string // chromem collection name, e.g. "project_<md5hex>"
-	Documents int    // resident document count
-	Dir       string // on-disk persist directory for this collection
+	Name      string // collection name, e.g. "project_<md5hex>"
+	Documents int    // stored document count
+	// SizeBytes is the logical size of the collection's rows: embeddings,
+	// chunk text and metadata as stored. It excludes index entries and page
+	// slack, so it is a floor on the disk the collection occupies, not an
+	// exact figure — SQLite does not attribute pages to a WHERE clause.
+	SizeBytes int64
 }
 
 // Maintainer is the admin-only maintenance surface over the vector store.
@@ -23,21 +21,32 @@ type CollectionInfo struct {
 // Deliberately NOT part of Interface. Interface is the hot path (upsert /
 // search / delete-by-file) consumed by the indexer, repojobs and the search
 // handlers, and its doc comment promises it "mirrors *Store exactly". These
-// methods address collections by their raw chromem name rather than by project
-// path — meaningless to every Interface consumer, and folding them in would
-// force any future fake to stub four extra methods it never calls. Handlers
+// methods address collections by their raw collection name rather than by
+// project path — meaningless to every Interface consumer, and folding them in
+// would force any future fake to stub extra methods it never calls. Handlers
 // type-assert instead; in production the wired value is a *Holder, which
 // implements this, so the assertion always succeeds.
 type Maintainer interface {
-	// ListCollections returns every resident collection. Cheap: no I/O.
+	// ListCollections returns every collection with its document count and
+	// logical size. NOT free: it aggregates over the stored rows. Under
+	// chromem this was a walk of an in-memory map, and callers that ran it
+	// per request should cache the result (maintenance.Service already does).
 	ListCollections() []CollectionInfo
-	// DeleteCollectionByName drops a collection by its raw chromem name,
-	// removing both the in-memory documents and the on-disk directory.
+	// DeleteCollectionByName drops a collection and its documents. Deleting a
+	// name the store does not hold is a no-op, not an error.
 	DeleteCollectionByName(name string) error
-	// CollectionDir is the on-disk directory backing a project's collection.
-	CollectionDir(projectPath string) string
-	// BaseDir is the persist directory the store was opened at.
+	// CollectionSizeBytes is the logical size of one project's collection,
+	// and whether that project has a collection at all.
+	CollectionSizeBytes(projectPath string) (int64, bool)
+	// DBPath is the SQLite file backing the store.
+	DBPath() string
+	// BaseDir is the namespace directory the store was opened at.
 	BaseDir() string
+	// LegacyChromaDir is the chromem-go directory this store imported from,
+	// or "" when there was none. It still holds the pre-migration gob files:
+	// they are the rollback path and must never be classified as garbage
+	// while this namespace is the active one.
+	LegacyChromaDir() string
 }
 
 var (
@@ -45,59 +54,156 @@ var (
 	_ Maintainer = (*Holder)(nil)
 )
 
-// collectionDirName reproduces chromem-go's hash2hex: the first 4 bytes of the
-// SHA-256 of the collection name, hex-encoded — 8 characters.
-//
-// Pinned to github.com/philippgille/chromem-go v0.7.0, persistence.go:22. The
-// function is unexported there and Collection.persistDirectory is unexported
-// too, so a local copy is the only way to resolve a collection's directory.
-// TestCollectionDirName_MatchesChromemLayout guards the pin: it writes through
-// a real Store and stats the path this function returns, so a chromem upgrade
-// that changes the layout fails the build rather than silently reporting
-// missing directories (which is exactly the bug this replaces — the previous
-// code joined the logical collection name onto the namespace dir, a path that
-// never exists, so every project's vector-store size came back empty).
-func collectionDirName(name string) string {
-	sum := sha256.Sum256([]byte(name))
-	return hex.EncodeToString(sum[:4])
-}
+// sizeExprVectors / sizeExprContents are the per-row logical byte counts.
+const sizeExprVectors = `LENGTH(v.embedding) + LENGTH(v.doc_id) + LENGTH(v.file_path) +
+	LENGTH(v.chunk_type) + LENGTH(v.symbol_name) + LENGTH(v.language) + 16`
+
+const listCollectionsSQL = `
+SELECT c.name,
+       COUNT(v.rowid),
+       COALESCE(SUM(` + sizeExprVectors + `), 0)
+  FROM collections c
+  LEFT JOIN vectors v ON v.collection_id = c.id
+ GROUP BY c.id
+ ORDER BY c.name`
+
+const contentSizeSQL = `
+SELECT c.name, COALESCE(SUM(LENGTH(vc.content) + LENGTH(vc.doc_id)), 0)
+  FROM collections c
+  LEFT JOIN vector_contents vc ON vc.collection_id = c.id
+ GROUP BY c.id`
 
 // ListCollections implements Maintainer. Results are sorted by name so callers
 // (and their tests) see a stable order.
 func (s *Store) ListCollections() []CollectionInfo {
-	cols := s.db.ListCollections()
-	out := make([]CollectionInfo, 0, len(cols))
-	for name, col := range cols {
-		out = append(out, CollectionInfo{
-			Name:      name,
-			Documents: col.Count(),
-			Dir:       filepath.Join(s.baseDir, collectionDirName(name)),
-		})
+	if !s.acquire() {
+		return nil
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	defer s.release()
+
+	ctx := context.Background()
+	rows, err := s.db.QueryContext(ctx, listCollectionsSQL)
+	if err != nil {
+		s.logger.Error("vectorstore: list collections", "err", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var out []CollectionInfo
+	for rows.Next() {
+		var ci CollectionInfo
+		if err := rows.Scan(&ci.Name, &ci.Documents, &ci.SizeBytes); err != nil {
+			s.logger.Error("vectorstore: list collections", "err", err)
+			return nil
+		}
+		out = append(out, ci)
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Error("vectorstore: list collections", "err", err)
+		return nil
+	}
+
+	// Chunk text lives in its own table (see schemaSQL); fold it into the
+	// reported size with a second aggregate rather than a join that would
+	// multiply the row counts.
+	crows, err := s.db.QueryContext(ctx, contentSizeSQL)
+	if err != nil {
+		s.logger.Error("vectorstore: list collection contents", "err", err)
+		return out
+	}
+	defer crows.Close()
+	sizes := make(map[string]int64, len(out))
+	for crows.Next() {
+		var name string
+		var n int64
+		if err := crows.Scan(&name, &n); err != nil {
+			s.logger.Error("vectorstore: list collection contents", "err", err)
+			return out
+		}
+		sizes[name] = n
+	}
+	for i := range out {
+		out[i].SizeBytes += sizes[out[i].Name]
+	}
 	return out
+}
+
+// CollectionSizeBytes implements Maintainer.
+func (s *Store) CollectionSizeBytes(projectPath string) (int64, bool) {
+	if !s.acquire() {
+		return 0, false
+	}
+	defer s.release()
+
+	ctx := context.Background()
+	collID, ok, err := s.collectionID(ctx, collectionName(projectPath))
+	if err != nil || !ok {
+		return 0, false
+	}
+	var vecBytes, contentBytes int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(`+sizeExprVectors+`), 0) FROM vectors v WHERE v.collection_id = ?`,
+		collID).Scan(&vecBytes); err != nil {
+		return 0, false
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(LENGTH(content) + LENGTH(doc_id)), 0)
+		  FROM vector_contents WHERE collection_id = ?`, collID).Scan(&contentBytes); err != nil {
+		return 0, false
+	}
+	return vecBytes + contentBytes, true
 }
 
 // DeleteCollectionByName implements Maintainer.
 //
-// Caveat worth knowing at every call site: chromem's DeleteCollection is a
-// silent no-op returning nil for a name it does not hold in memory. It can
-// therefore never remove a directory that failed to load at startup — those
-// have to be removed with os.RemoveAll by the caller.
+// The migration_state row for the name is deliberately KEPT. It records that
+// the legacy chromem collection has already been dealt with; removing it would
+// make the next boot re-import from the gob files the admin just reclaimed.
 func (s *Store) DeleteCollectionByName(name string) error {
-	if err := s.db.DeleteCollection(name); err != nil {
+	if !s.acquire() {
+		return ErrClosed
+	}
+	defer s.release()
+
+	ctx := context.Background()
+	collID, ok, err := s.collectionID(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	for _, stmt := range []string{
+		`DELETE FROM vector_contents WHERE collection_id = ?`,
+		`DELETE FROM vectors WHERE collection_id = ?`,
+		`DELETE FROM collections WHERE id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt, collID); err != nil {
+			return fmt.Errorf("vectorstore delete collection %q: %w", name, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("vectorstore delete collection %q: %w", name, err)
 	}
+	s.forgetCollection(name)
 	return nil
 }
 
-// CollectionDir implements Maintainer.
-func (s *Store) CollectionDir(projectPath string) string {
-	return filepath.Join(s.baseDir, collectionDirName(collectionName(projectPath)))
-}
-
 // BaseDir implements Maintainer.
-func (s *Store) BaseDir() string { return s.baseDir }
+func (s *Store) BaseDir() string { return s.dir }
+
+// LegacyChromaDir implements Maintainer.
+func (s *Store) LegacyChromaDir() string { return s.legacyDir }
+
+// ---------------------------------------------------------------------------
+// Holder proxies
+// ---------------------------------------------------------------------------
 
 // ListCollections proxies to the active store; nil store yields nil.
 func (h *Holder) ListCollections() []CollectionInfo {
@@ -117,13 +223,22 @@ func (h *Holder) DeleteCollectionByName(name string) error {
 	return s.DeleteCollectionByName(name)
 }
 
-// CollectionDir proxies to the active store; nil store yields "".
-func (h *Holder) CollectionDir(projectPath string) string {
+// CollectionSizeBytes proxies to the active store; nil store yields (0,false).
+func (h *Holder) CollectionSizeBytes(projectPath string) (int64, bool) {
+	s := h.current()
+	if s == nil {
+		return 0, false
+	}
+	return s.CollectionSizeBytes(projectPath)
+}
+
+// DBPath proxies to the active store; nil store yields "".
+func (h *Holder) DBPath() string {
 	s := h.current()
 	if s == nil {
 		return ""
 	}
-	return s.CollectionDir(projectPath)
+	return s.DBPath()
 }
 
 // BaseDir proxies to the active store; nil store yields "".
@@ -133,4 +248,13 @@ func (h *Holder) BaseDir() string {
 		return ""
 	}
 	return s.BaseDir()
+}
+
+// LegacyChromaDir proxies to the active store; nil store yields "".
+func (h *Holder) LegacyChromaDir() string {
+	s := h.current()
+	if s == nil {
+		return ""
+	}
+	return s.LegacyChromaDir()
 }

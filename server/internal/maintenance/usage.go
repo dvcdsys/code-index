@@ -119,7 +119,14 @@ func (s *Service) computeUsage(ctx context.Context) Usage {
 		out.Disks = append(out.Disks, d)
 	}
 
-	if cfg.ChromaPersistDir != "" {
+	// The "chroma" row is the LIVE vector store — the SQLite databases under
+	// VectorsDir. The legacy chromem tree is deliberately not a second row:
+	// the disk id is an enumerated wire value the dashboard keys on, and the
+	// pre-migration gob files are reported (and reclaimed) through the
+	// abandoned-namespace category instead.
+	if cfg.VectorsDir != "" {
+		out.Disks = append(out.Disks, walkedDisk(ctx, DiskChroma, "Vector store", cfg.VectorsDir))
+	} else if cfg.ChromaPersistDir != "" {
 		out.Disks = append(out.Disks, walkedDisk(ctx, DiskChroma, "Vector store", cfg.ChromaPersistDir))
 	}
 	if root := s.reposRoot(); root != "" {
@@ -197,26 +204,52 @@ func (s *Service) activeModelRepo() string {
 	return s.d.ActiveModelRepo()
 }
 
-// activeChromaDir is the namespace directory currently being written to, or ""
-// when it cannot be determined. Callers MUST treat "" as "refuse to classify
+// activeNamespaceDirs lists every directory that belongs to the namespace
+// currently being written to. An EMPTY result means "refuse to classify
 // anything as stale" — guessing here means deleting the live index.
 //
-// The vector store's own base directory is the authoritative answer: it is
-// literally the path chromem was opened at. Reconstructing it from the
-// provider's storage components is a second-guess that goes wrong exactly when
-// it matters — with embeddings disabled the provider reports no components at
-// all, yet the server still opened a real namespace (main.go falls back to a
-// deterministic ollama-shaped one), and a mismatch there would put the live
-// directory on the deletion list.
-func (s *Service) activeChromaDir() string {
-	if s.d.VectorStore != nil {
-		if base := s.d.VectorStore.BaseDir(); base != "" {
-			return filepath.Clean(base)
+// There are normally two: the directory holding the live SQLite database, and
+// the chromem directory it was imported from. The second one still holds the
+// pre-migration gob files, which are the rollback path, so it has to be
+// protected for as long as this namespace is the active one.
+//
+// The vector store's own answers are authoritative: they are literally the
+// paths it was opened at. Reconstructing them from the provider's storage
+// components is a second-guess that goes wrong exactly when it matters — with
+// embeddings disabled the provider reports no components at all, yet the
+// server still opened a real namespace (main.go falls back to a deterministic
+// ollama-shaped one), and a mismatch there would put the live directory on the
+// deletion list.
+func (s *Service) activeNamespaceDirs() []string {
+	var out []string
+	add := func(dir string) {
+		if dir == "" {
+			return
 		}
+		dir = filepath.Clean(dir)
+		for _, existing := range out {
+			if existing == dir {
+				return
+			}
+		}
+		out = append(out, dir)
+	}
+	if s.d.VectorStore != nil {
+		add(s.d.VectorStore.BaseDir())
+		add(s.d.VectorStore.LegacyChromaDir())
+	}
+	if len(out) > 0 {
+		return out
 	}
 	comps := s.activeChromaComponents()
-	if len(comps) == 0 || s.d.Cfg == nil || s.d.Cfg.ChromaPersistDir == "" {
-		return ""
+	if len(comps) == 0 || s.d.Cfg == nil {
+		return nil
 	}
-	return filepath.Clean(s.d.Cfg.ChromaDirFor(comps))
+	if s.d.Cfg.VectorsDir != "" {
+		add(s.d.Cfg.VectorDirFor(comps))
+	}
+	if s.d.Cfg.ChromaPersistDir != "" {
+		add(s.d.Cfg.ChromaDirFor(comps))
+	}
+	return out
 }

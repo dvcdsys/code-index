@@ -304,17 +304,18 @@ func (s *Server) enrichProjectStorage(ctx context.Context, out *openapi.Project,
 			out.SqliteSizeBytes = &sz
 		}
 	}
-	// Ask the store where the collection actually lives. Deriving the path by
-	// hand here is what broke this before: the code joined the logical
-	// collection name (project_<md5>) onto the namespace directory, but
-	// chromem stores collections under a hash of that name, so the path never
-	// existed and the size was silently omitted on every single project.
+	// Ask the store how big this project's vectors are. There is no
+	// per-collection file to stat any more — a namespace is one SQLite
+	// database shared by every project — so the store sums the rows itself.
+	// The reported figure is the logical size of the collection's rows;
+	// index entries and page slack are not attributable to a collection and
+	// the file does not shrink on delete, so it is a floor, not a file size.
 	if m, ok := s.Deps.VectorStore.(vectorstore.Maintainer); ok && m != nil {
-		if dir := m.CollectionDir(p.HostPath); dir != "" {
-			out.ChromaPath = ptrString(dir)
-			if sz, ok := maintenance.DirSizeBytes(ctx, dir); ok {
-				out.ChromaSizeBytes = &sz
-			}
+		if path := m.DBPath(); path != "" {
+			out.ChromaPath = ptrString(path)
+		}
+		if sz, ok := m.CollectionSizeBytes(p.HostPath); ok {
+			out.ChromaSizeBytes = &sz
 		}
 	}
 }

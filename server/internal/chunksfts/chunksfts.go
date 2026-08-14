@@ -1,5 +1,5 @@
 // Package chunksfts maintains the BM25-searchable FTS5 mirror of every
-// chunk that lives in the chromem-go vector store.
+// chunk that lives in the vector store.
 //
 // We index the same chunk content (plus symbol_name and file_path) into
 // a trigram-tokenized FTS5 virtual table so that workspace search can
@@ -11,7 +11,7 @@
 //     model — BM25 over literal tokens recovers the precision.
 //
 //  2. Project-relevance gating. Pure dense fan-out returns N nearest
-//     vectors from every project's chromem collection regardless of
+//     vectors from every project's vector collection regardless of
 //     semantic distance, so projects that share zero vocabulary with
 //     the query still show up at chunk_score ~0.2-0.3. BM25 returning
 //     zero hits is a strong "this project has nothing" signal that
@@ -33,7 +33,7 @@ import (
 
 // Chunk is the unit the indexer hands us. Mirrors vectorstore.Chunk
 // with only the fields BM25 indexing cares about — the embedding stays
-// in chromem.
+// in the vector store.
 type Chunk struct {
 	Content    string
 	FilePath   string

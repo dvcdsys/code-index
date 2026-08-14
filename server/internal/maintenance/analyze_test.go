@@ -17,10 +17,10 @@ import (
 )
 
 // fixture wires a Service over a real (temp-dir) vector store and an in-memory
-// database. Everything the scanners read is real: chromem writes actual files,
-// projects rows go through the actual schema. Faking any of it would defeat
-// the purpose — the bug this feature exists to clean up was a mismatch between
-// what the code believed was on disk and what actually was.
+// database. Everything the scanners read is real: the store writes an actual
+// SQLite database, projects rows go through the actual schema. Faking any of
+// it would defeat the purpose — the bug this feature exists to clean up was a
+// mismatch between what the code believed was on disk and what actually was.
 type fixture struct {
 	svc     *Service
 	db      *sql.DB
@@ -41,18 +41,27 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(func() { _ = database.Close() })
 
 	chromaDir := filepath.Join(dataDir, "chroma")
-	activeNS := filepath.Join(chromaDir, "ollama", "test-model")
-	if err := os.MkdirAll(activeNS, 0o755); err != nil {
-		t.Fatalf("mkdir namespace: %v", err)
+	vectorsDir := filepath.Join(dataDir, "vectors")
+	// The live namespace and the chromem directory it would have been
+	// imported from — the production pairing, so the scanners are exercised
+	// against both trees.
+	legacyNS := filepath.Join(chromaDir, "ollama", "test-model")
+	if err := os.MkdirAll(legacyNS, 0o755); err != nil {
+		t.Fatalf("mkdir legacy namespace: %v", err)
 	}
-	store, err := vectorstore.Open(activeNS)
+	store, err := vectorstore.OpenWith(vectorstore.Options{
+		Dir:             filepath.Join(vectorsDir, "ollama", "test-model"),
+		LegacyChromaDir: legacyNS,
+	})
 	if err != nil {
 		t.Fatalf("open vector store: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 
 	cfg := &config.Config{
 		SQLitePath:        filepath.Join(dataDir, "cix.db"),
 		ChromaPersistDir:  chromaDir,
+		VectorsDir:        vectorsDir,
 		WorkspacesDataDir: dataDir,
 		GGUFCacheDir:      filepath.Join(dataDir, "models"),
 	}
@@ -80,8 +89,7 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
-// index writes one chunk for a project path, which makes chromem create the
-// collection and its directory.
+// index writes one chunk for a project path, which creates the collection.
 func (f *fixture) index(t *testing.T, projectPath string) {
 	t.Helper()
 	err := f.store.UpsertChunks(context.Background(), projectPath,
@@ -137,7 +145,7 @@ func TestScanOrphanCollections_FindsOnlyDeadProjects(t *testing.T) {
 		t.Errorf("orphan key = %q, want %q", got, want)
 	}
 	if c.SizeBytes <= 0 {
-		t.Errorf("orphan size = %d, want > 0 — the collection directory should have been measured", c.SizeBytes)
+		t.Errorf("orphan size = %d, want > 0 — the collection's rows should have been measured", c.SizeBytes)
 	}
 	if !c.DefaultSelected {
 		t.Error("orphan collections should be pre-selected when no job is running")
@@ -173,14 +181,34 @@ func TestScanOrphanCollections_DisabledWhileJobActive(t *testing.T) {
 
 func TestScanOrphanCollections_IgnoresForeignCollections(t *testing.T) {
 	f := newFixture(t)
-	// A directory that is not a project_ collection must never be touched.
-	if err := os.MkdirAll(filepath.Join(f.store.BaseDir(), "deadbeef"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	// A collection this codebase did not create must never be touched, and
+	// must be called out rather than silently ignored. Nothing in the server
+	// can create one, so the store is stubbed for this single case.
+	f.svc.d.VectorStore = foreignCollections{
+		Maintainer: f.store,
+		extra: []vectorstore.CollectionInfo{
+			{Name: "someone_elses_data", Documents: 3, SizeBytes: 4096},
+		},
 	}
-	c := category(t, f.analyze(t), CatOrphanCollections)
+	a := f.analyze(t)
+	c := category(t, a, CatOrphanCollections)
 	if c.ItemCount != 0 {
-		t.Errorf("orphan collections = %d, want 0 — a bare directory is not a chromem collection", c.ItemCount)
+		t.Errorf("orphan collections = %d, want 0 — a foreign collection is not ours to delete", c.ItemCount)
 	}
+	if len(a.Warnings) == 0 {
+		t.Error("an unrecognised collection should surface a warning")
+	}
+}
+
+// foreignCollections decorates a real store with collections it could not
+// have created itself.
+type foreignCollections struct {
+	vectorstore.Maintainer
+	extra []vectorstore.CollectionInfo
+}
+
+func (f foreignCollections) ListCollections() []vectorstore.CollectionInfo {
+	return append(f.Maintainer.ListCollections(), f.extra...)
 }
 
 func TestScanOrphanRepos(t *testing.T) {
@@ -247,6 +275,47 @@ func TestScanStaleNamespaces_SkipsActiveAndItsAncestors(t *testing.T) {
 	}
 }
 
+// Both trees leak a namespace per abandoned model: the live SQLite databases
+// under VectorsDir and the pre-migration chromem directories. Both are
+// scanned, and the label says which tree an item came from.
+func TestScanStaleNamespaces_CoversBothTrees(t *testing.T) {
+	f := newFixture(t)
+	f.index(t, "/live/project")
+
+	staleChroma := filepath.Join(f.cfg.ChromaPersistDir, "ollama", "old-model", "aabbccdd")
+	if err := os.MkdirAll(staleChroma, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleChroma, "doc.gob"), []byte("0123456789"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	staleVectors := filepath.Join(f.cfg.VectorsDir, "voyage", "voyage-code-3")
+	if err := os.MkdirAll(staleVectors, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleVectors, "vectors.db"), make([]byte, 20), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	c := category(t, f.analyze(t), CatStaleNamespaces)
+	if c.ItemCount != 2 {
+		t.Fatalf("stale namespaces = %d, want 2 (items: %+v)", c.ItemCount, c.Items)
+	}
+	labels := map[string]bool{}
+	for _, it := range c.Items {
+		labels[it.Label] = true
+		if it.Key == f.store.BaseDir() || it.Key == f.store.LegacyChromaDir() {
+			t.Fatalf("the ACTIVE namespace %q was listed as stale", it.Key)
+		}
+	}
+	if !labels["chroma/ollama/old-model"] || !labels["vectors/voyage/voyage-code-3"] {
+		t.Errorf("labels = %v, want one from each tree", labels)
+	}
+	if c.SizeBytes != 30 {
+		t.Errorf("stale size = %d, want 30 (10 + 20)", c.SizeBytes)
+	}
+}
+
 // With no known active namespace every directory looks stale — including the
 // live one. Refusing to classify is the only safe answer.
 func TestScanStaleNamespaces_RefusesWhenActiveUnknown(t *testing.T) {
@@ -284,8 +353,10 @@ func TestScanStaleNamespaces_UsesTheStoreWhenProviderIsSilent(t *testing.T) {
 	if c.ItemCount != 1 {
 		t.Fatalf("stale namespaces = %d, want 1 (items: %+v)", c.ItemCount, c.Items)
 	}
-	if got := c.Items[0].Key; got == f.store.BaseDir() {
-		t.Fatalf("the ACTIVE namespace %q was listed as stale", got)
+	for _, it := range c.Items {
+		if it.Key == f.store.BaseDir() || it.Key == f.store.LegacyChromaDir() {
+			t.Fatalf("the ACTIVE namespace %q was listed as stale", it.Key)
+		}
 	}
 }
 

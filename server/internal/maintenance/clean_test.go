@@ -14,12 +14,11 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
 
-func TestClean_RemovesOrphanCollectionFromMemoryAndDisk(t *testing.T) {
+func TestClean_RemovesOrphanCollection(t *testing.T) {
 	f := newFixture(t)
 	f.index(t, "/live/project")
 	f.index(t, "/dead/project")
 	f.addProject(t, "/live/project")
-	deadDir := f.store.CollectionDir("/dead/project")
 
 	a := f.analyze(t)
 	res, err := f.svc.Clean(context.Background(), a.ID, []CategoryID{CatOrphanCollections})
@@ -32,8 +31,8 @@ func TestClean_RemovesOrphanCollectionFromMemoryAndDisk(t *testing.T) {
 	if res.ReclaimedBytes <= 0 {
 		t.Errorf("reclaimed = %d, want > 0", res.ReclaimedBytes)
 	}
-	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
-		t.Errorf("collection directory %s survived the clean (err=%v)", deadDir, err)
+	if _, ok := f.store.CollectionSizeBytes("/dead/project"); ok {
+		t.Error("the orphaned collection is still in the store after the clean")
 	}
 
 	// The live project must be untouched and still searchable.
@@ -121,6 +120,43 @@ func TestClean_NeverTouchesTheActiveNamespace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(stale)); !os.IsNotExist(err) {
 		t.Errorf("the stale namespace survived (err=%v)", err)
+	}
+}
+
+// The live SQLite database must survive a stale-namespace clean, and so must
+// the chromem directory it was imported from — that is the rollback path.
+func TestClean_KeepsTheActiveNamespaceInBothTrees(t *testing.T) {
+	f := newFixture(t)
+	f.index(t, "/live/project")
+	f.addProject(t, "/live/project")
+
+	staleVectors := filepath.Join(f.cfg.VectorsDir, "voyage", "voyage-code-3")
+	if err := os.MkdirAll(staleVectors, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleVectors, "vectors.db"), make([]byte, 8), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	a := f.analyze(t)
+	res, err := f.svc.Clean(context.Background(), a.ID, []CategoryID{CatStaleNamespaces})
+	if err != nil {
+		t.Fatalf("clean: %v", err)
+	}
+	if got := res.Categories[0]; got.DeletedCount != 1 {
+		t.Fatalf("clean result = %+v, want the abandoned vectors namespace deleted", got)
+	}
+	if _, err := os.Stat(staleVectors); !os.IsNotExist(err) {
+		t.Errorf("the abandoned vectors namespace survived (err=%v)", err)
+	}
+	if _, err := os.Stat(f.store.DBPath()); err != nil {
+		t.Fatalf("the ACTIVE vector database was deleted: %v", err)
+	}
+	if _, err := os.Stat(f.store.LegacyChromaDir()); err != nil {
+		t.Fatalf("the legacy chromem directory of the ACTIVE namespace was deleted: %v", err)
+	}
+	if n := f.store.Count("/live/project"); n != 1 {
+		t.Errorf("live project has %d documents, want 1", n)
 	}
 }
 

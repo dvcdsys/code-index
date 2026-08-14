@@ -45,7 +45,7 @@
 //   - otherwise → incremental with the computed ChangeSet
 //
 // Workspace-level search (when workspaces are in use) is served from
-// per-project chromem collections via a weighted fan-out, defined in
+// per-project vector collections via a weighted fan-out, defined in
 // internal/httpapi/workspacesearch.go — independent of this package.
 package repojobs
 
@@ -294,8 +294,8 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 		mode, reason = ModeReconcile, "no-changeset"
 	case d.Indexer != nil && d.Indexer.EmbeddingModel() != "" &&
 		d.Indexer.EmbeddingModel() != projectIndexedWithModel(ctx, d.DB, g.ProjectPath):
-		// Embedding model changed since the last index — vectors in
-		// chromem are no longer comparable to fresh queries. Force a
+		// Embedding model changed since the last index — the stored
+		// vectors are no longer comparable to fresh queries. Force a
 		// full wipe so the whole index uses the current model.
 		mode, reason = ModeFull, "model-change"
 	}
