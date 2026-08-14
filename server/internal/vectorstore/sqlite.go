@@ -1,0 +1,358 @@
+package vectorstore
+
+import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"time"
+
+	_ "modernc.org/sqlite" // registers the "sqlite" driver
+)
+
+// DBFileName is the SQLite file inside a vector-store namespace directory.
+//
+// One file per namespace (embedding provider + model), matching the directory
+// namespacing the chromem layout used: the caller passes the namespace
+// directory and the store owns everything inside it. A directory rather than a
+// bare "<model>.db" because a live SQLite database is three files (.db, -wal,
+// -shm); keeping them in their own directory means BaseDir() is still a
+// directory, which is what the maintenance surface (namespace scanning, size
+// accounting, "active namespace" protection) has always assumed.
+const DBFileName = "vectors.db"
+
+// pageSize is fixed at 8 KiB for every database this package creates.
+//
+// Two measured constraints meet here (see doc/VECTORSTORE.md):
+//
+//   - 4 KiB pages waste ~23% of every page: a 768-dim row is ~3.15 kB of
+//     payload, so exactly one row fits per page.
+//   - 16 KiB pages are one byte-class over modernc.org/memory's maxSlotSize
+//     (16384). Every page-cache buffer above that line is served by a
+//     dedicated mmap and released with munmap — measured at 24% of all CPU
+//     during a scan. 8 KiB buffers stay in the slab free lists.
+//
+// It MUST be applied before the first write to a fresh database: the first
+// statement that materialises page 1 freezes the page size for the life of the
+// file.
+const pageSize = 8192
+
+// schemaVersion is stamped into PRAGMA user_version and is what openDB uses to
+// decide whether an existing file needs rebuilding.
+//
+//	0  the original shipped schema — nothing stamped user_version at all.
+//	   Treated as v1: plain rowid collection ids, no foreign keys, auto_vacuum
+//	   off.
+//	1  reserved for the same shape, in case a build ever stamped it.
+//	2  AUTOINCREMENT collection ids, ON DELETE CASCADE foreign keys,
+//	   auto_vacuum=INCREMENTAL. See upgrade.go for how a v1 file gets here.
+const schemaVersion = 2
+
+// busyTimeoutMS bounds how long a writer waits for the WAL write lock before
+// giving up. Indexing commits in small transactions and the file watcher can
+// delete-by-file concurrently, so contention is short-lived; 10s is generous
+// enough that a legitimate queue never surfaces as SQLITE_BUSY.
+const busyTimeoutMS = 10000
+
+// journalSizeLimitBytes caps how large the -wal file is allowed to STAY.
+//
+// A checkpoint copies WAL frames into the database and then rewinds the WAL,
+// but by default it leaves the file at its high-water mark forever: one big
+// transaction (the legacy import commits a whole collection at once) leaves a
+// permanent WAL the size of that collection — measured 159 MB sitting beside a
+// 158 MB database. That is disk nobody ever gets back, and it is counted in the
+// "Vector store" row of the Resources screen, so it also makes the store look
+// twice its real size. With a limit set, the checkpoint truncates the file back
+// to the cap.
+//
+// 64 MB is well above what steady-state indexing produces (upsert commits every
+// upsertBatchSize chunks) so normal operation never pays for the truncation.
+const journalSizeLimitBytes = 64 << 20
+
+// idleConnTimeout is how long an idle pooled connection is kept.
+//
+// This is the mechanism that makes idle RSS collapse. SQLite's per-connection
+// page cache lives in modernc.org/memory arenas obtained by raw mmap — it is
+// invisible to the Go heap and runtime.GC() cannot return it. Closing the
+// connection is what frees it, so the pool is allowed to shrink back to
+// nothing shortly after a burst of queries.
+const idleConnTimeout = 30 * time.Second
+
+// schemaSQL is the whole schema. Two tables, deliberately.
+//
+// `vectors` holds only what a scan reads: the metadata columns the `where`
+// filter can constrain and the embedding itself. A row is ~3.2 kB, which fits
+// inside an 8 KiB table-leaf cell (the local-payload limit is usable-35), so
+// the scan reads two rows per page and never follows an overflow chain.
+//
+// `vector_contents` holds the chunk text. It is stored (duplicating chunks_fts
+// on disk) so SearchResult.Content behaves identically with no cross-database
+// wiring — disk is cheap, RAM was the problem. It lives in its own table
+// because putting a multi-kilobyte TEXT column in `vectors` would push every
+// row past the local-payload limit, and SQLite then keeps only ~1 kB of the
+// row local and spills the REST — including the embedding — into an overflow
+// chain. That would roughly double the pages a scan touches. Content is read
+// only for the K winners, so it costs one extra btree lookup per result.
+//
+// Two indexes, and the difference between them matters:
+//
+//   - idx_vec_coll is (collection_id, rowid) — SQLite appends the rowid to
+//     every index key — so walking it yields the collection's rows in TABLE
+//     order. That is the scan (see scanSQL): it visits only this collection's
+//     rows however fragmented the table is, and it touches the table pages
+//     sequentially.
+//   - idx_vec_coll_file serves delete-by-file. It also has a collection_id
+//     prefix, so it could drive the scan too — but its keys are ordered by
+//     file_path, which turns the row lookups into random access across the
+//     collection's whole rowid span. Measured on a real 312k-document index:
+//     244 ms versus 137 ms for idx_vec_coll on the same 74k-row collection.
+//
+// migration_state records which legacy chromem collections have been imported.
+// A row here means "this collection has been dealt with" — it is deliberately
+// NOT removed when a collection is deleted, or the next boot would re-import
+// the collection an admin just reclaimed.
+//
+// Two guards on collections.id carry the schema-v2 rebuild (see upgrade.go),
+// and both exist because a collection id is CACHED by callers (Store.collIDs,
+// and through it the indexer) across the window in which an admin can delete
+// the collection:
+//
+//   - AUTOINCREMENT. A plain INTEGER PRIMARY KEY is the rowid, and SQLite
+//     reuses the largest free rowid: deleting the highest-numbered collection
+//     hands its id to the NEXT collection created. Any row that outlived the
+//     delete is then silently adopted by an unrelated project, and search
+//     answers one project's query with another project's chunks. AUTOINCREMENT
+//     makes ids monotonic, so a stale id can only ever point at nothing.
+//   - The REFERENCES clauses, with PRAGMA foreign_keys=ON applied per
+//     connection. Without them an upsert holding a stale id commits rows whose
+//     collection_id has no collections row. ListCollections joins FROM
+//     collections, so those rows are invisible to every count, every size, and
+//     the orphan sweep — they simply occupy disk forever. With the constraint
+//     the upsert fails loudly instead (see UpsertChunks).
+//
+// ON DELETE CASCADE covers both child tables, so dropping the collections row
+// is by itself sufficient to leave nothing behind.
+const schemaSQL = `
+CREATE TABLE IF NOT EXISTS collections (
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS vectors (
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+  doc_id        TEXT NOT NULL,
+  file_path     TEXT NOT NULL,
+  start_line    INTEGER NOT NULL,
+  end_line      INTEGER NOT NULL,
+  chunk_type    TEXT NOT NULL DEFAULT '',
+  symbol_name   TEXT NOT NULL DEFAULT '',
+  language      TEXT NOT NULL DEFAULT '',
+  embedding     BLOB NOT NULL,
+  PRIMARY KEY (collection_id, doc_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vec_coll ON vectors(collection_id);
+CREATE INDEX IF NOT EXISTS idx_vec_coll_file ON vectors(collection_id, file_path);
+CREATE TABLE IF NOT EXISTS vector_contents (
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+  doc_id        TEXT NOT NULL,
+  content       TEXT NOT NULL,
+  PRIMARY KEY (collection_id, doc_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS migration_state (
+  collection_name TEXT PRIMARY KEY,
+  migrated_at     TEXT NOT NULL,
+  docs            INTEGER NOT NULL
+);
+`
+
+// pragmaConnector applies connection-scoped pragmas to every new connection.
+//
+// Why not `_pragma=` DSN parameters: modernc.org/sqlite sorts DSN pragmas
+// LEXICOGRAPHICALLY instead of applying them in the order written. On a fresh
+// database journal_mode(WAL) therefore always runs before page_size(8192), the
+// first WAL statement materialises the file, and the page size is silently
+// ignored. Applying them by hand — in an order we control, on a connection we
+// hold — is the only way to be sure.
+type pragmaConnector struct {
+	drv     driver.Driver
+	dsn     string
+	pragmas []string
+}
+
+func (c *pragmaConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.drv.Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	ex, ok := conn.(driver.ExecerContext)
+	if !ok {
+		conn.Close()
+		return nil, fmt.Errorf("vectorstore: sqlite driver connection does not implement ExecerContext")
+	}
+	for _, p := range c.pragmas {
+		if _, err := ex.ExecContext(ctx, p, nil); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("vectorstore: apply %q: %w", p, err)
+		}
+	}
+	return conn, nil
+}
+
+func (c *pragmaConnector) Driver() driver.Driver { return c.drv }
+
+// sqliteDriver returns the registered modernc driver. sql.Open is lazy — it
+// opens no connection — so this is just a handle to the driver singleton,
+// which the package exposes no other way.
+func sqliteDriver() (driver.Driver, error) {
+	probe, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, err
+	}
+	defer probe.Close()
+	return probe.Driver(), nil
+}
+
+// openDB opens (creating if needed) the database at path and returns a pool
+// with the pragmas applied on every connection. An existing file below
+// schemaVersion is rebuilt first — see upgradeSchema.
+func openDB(path string, mmapBytes int64, logger *slog.Logger) (*sql.DB, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("vectorstore: create %s: %w", filepath.Dir(path), err)
+	}
+	drv, err := sqliteDriver()
+	if err != nil {
+		return nil, err
+	}
+
+	// A schema-less file counts as fresh. A kill during first boot (OOM,
+	// docker stop, a full disk) can leave the file at any point before
+	// initDatabase writes the schema: zero bytes if nothing ran, or a single
+	// header page if PRAGMA journal_mode got far enough to materialise page 1.
+	// Judged by size, only the first case is visible — so the test is the
+	// CONTENT: an empty sqlite_master proves the file holds nothing, which
+	// both routes it away from the upgrader (ATTACH + SELECT on an empty
+	// database is a fatal boot error) and licenses recreating it. Recreation,
+	// not adoption, because page 1 of a header-only file has already frozen
+	// the DEFAULT page_size — adopting it would fail the page_size check in
+	// initDatabase with equal fatality.
+	fresh := false
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		fresh = true
+	} else if err == nil {
+		empty, ours, err := probeDatabase(drv, path)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case empty:
+			if err := removeDBFiles(path); err != nil {
+				return nil, err
+			}
+			fresh = true
+		case !ours:
+			// Refusing beats both alternatives: recreating would destroy a
+			// database this code does not understand, and upgrading would die
+			// on an error message about internal table names.
+			return nil, fmt.Errorf(
+				"vectorstore: %s has tables but no collections table — it is not a cix vector store; refusing to touch it (move the file away and restart)",
+				path)
+		}
+	}
+
+	// Before the pool exists: the rebuild replaces the file wholesale, so it
+	// must be the only thing holding it open.
+	if !fresh {
+		if err := upgradeSchema(drv, path, logger); err != nil {
+			return nil, err
+		}
+	}
+
+	// cache_size is left at the driver default (2 MB). Measured: raising it
+	// buys no latency for this workload — a collection's working set is far
+	// larger than any realistic cache, so every query streams it regardless —
+	// while it multiplies RSS by the number of open connections.
+	pragmas := []string{
+		fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS),
+		"PRAGMA synchronous=NORMAL",
+		fmt.Sprintf("PRAGMA journal_size_limit=%d", journalSizeLimitBytes),
+		// Off by default in SQLite, and per CONNECTION, so it has to be set
+		// here rather than once at open — a declared REFERENCES clause that is
+		// never enforced is just a comment. See schemaSQL for what it protects.
+		"PRAGMA foreign_keys=ON",
+	}
+	if mmapBytes > 0 {
+		pragmas = append(pragmas, fmt.Sprintf("PRAGMA mmap_size=%d", mmapBytes))
+	}
+
+	db := sql.OpenDB(&pragmaConnector{drv: drv, dsn: "file:" + path, pragmas: pragmas})
+
+	// One connection per core is plenty: a query runs a single scan and the
+	// cap that actually matters is the global scan semaphore. Idle
+	// connections are released so their page caches are returned to the OS.
+	maxConns := runtime.NumCPU() + 2
+	db.SetMaxOpenConns(maxConns)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxIdleTime(idleConnTimeout)
+
+	if err := initDatabase(db, fresh); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// initDatabase sets the file-scoped pragmas and creates the schema. page_size,
+// auto_vacuum and journal_mode are properties of the FILE, not of a connection,
+// so they are applied once, on one dedicated connection, before anything
+// writes.
+func initDatabase(db *sql.DB, fresh bool) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("vectorstore: connect: %w", err)
+	}
+	defer conn.Close()
+
+	if fresh {
+		// Both must precede the first statement that materialises page 1: the
+		// page size freezes there, and auto_vacuum can only be turned on for a
+		// database that has no tables yet (afterwards it costs a full VACUUM).
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA page_size=%d", pageSize)); err != nil {
+			return fmt.Errorf("vectorstore: set page_size: %w", err)
+		}
+		if _, err := conn.ExecContext(ctx, "PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
+			return fmt.Errorf("vectorstore: set auto_vacuum: %w", err)
+		}
+	}
+	var journal string
+	if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journal); err != nil {
+		return fmt.Errorf("vectorstore: set journal_mode: %w", err)
+	}
+	if fresh {
+		var got int
+		if err := conn.QueryRowContext(ctx, "PRAGMA page_size").Scan(&got); err != nil {
+			return fmt.Errorf("vectorstore: read page_size: %w", err)
+		}
+		if got != pageSize {
+			return fmt.Errorf("vectorstore: page_size is %d, wanted %d", got, pageSize)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, schemaSQL); err != nil {
+		return fmt.Errorf("vectorstore: create schema: %w", err)
+	}
+	// Stamped only on a file this process just created. The rebuild stamps the
+	// files it upgrades itself, and a file from a NEWER binary must keep its
+	// own version: upgradeSchema deliberately leaves version >= ours alone,
+	// and an unconditional restamp here would mark that newer file as ours —
+	// so the next newer binary would run its upgrade against a file that is
+	// already upgraded. One old-binary run must not defeat the downgrade guard.
+	if fresh {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
+			return fmt.Errorf("vectorstore: stamp schema version: %w", err)
+		}
+	}
+	return nil
+}

@@ -140,21 +140,21 @@ export function ResourcesSection() {
             <StatStrip
               items={[
                 {
-                  label: 'Heap in use',
-                  value: formatBytes(mem?.heap_alloc_bytes),
-                  title: 'Live Go heap. The vector store lives here in full.',
+                  label: mem?.rss_bytes ? 'Resident (RSS)' : 'Heap in use',
+                  value: formatBytes(mem?.rss_bytes ?? mem?.heap_alloc_bytes),
+                  title: mem?.rss_bytes
+                    ? `What the OS sees for this process. The vector store's page cache lives outside the Go heap (Go heap now: ${formatBytes(mem?.heap_alloc_bytes)}), so this is the honest figure.`
+                    : 'Live Go heap — shown because this platform did not report RSS. Note the vector store cache is not included.',
                 },
                 {
-                  label: mem?.rss_bytes ? 'Resident' : 'Peak resident',
-                  value: formatBytes(mem?.rss_bytes ?? mem?.peak_rss_bytes),
-                  title: mem?.rss_bytes
-                    ? 'Current resident set size.'
-                    : 'High-water mark — this platform does not expose current RSS cheaply, and a peak never falls. After a clean, watch the heap figure instead.',
+                  label: 'Peak resident',
+                  value: formatBytes(mem?.peak_rss_bytes),
+                  title: 'High-water mark since the process started. Only ever goes up; compare with Resident to see what a quiet period gives back.',
                 },
                 {
                   label: 'Vector documents',
                   value: vs ? vs.documents.toLocaleString() : '—',
-                  title: `${vs?.collections ?? 0} collections, all resident in memory`,
+                  title: `${vs?.collections ?? 0} collections in the vector database`,
                 },
                 { label: 'Disk used', value: formatBytes(diskTotal) },
               ]}

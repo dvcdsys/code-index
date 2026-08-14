@@ -48,13 +48,17 @@ func (f fakeProv) StorageComponents() []string {
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// nestedDirFor mirrors cfg.ChromaDirFor: join the identity components under
-// a chroma container dir.
-func nestedDirFor(base string) func([]string) string {
-	return func(comps []string) string {
-		return filepath.Join(append([]string{base}, comps...)...)
+// nestedOpener mirrors main.go's openVectorStore: derive the namespace
+// directory from the identity components and open the store there.
+func nestedOpener(base string) func([]string) (*vectorstore.Store, error) {
+	return func(comps []string) (*vectorstore.Store, error) {
+		return vectorstore.Open(filepath.Join(append([]string{base}, comps...)...))
 	}
 }
+
+// failingOpener stands in for a reopen that cannot happen (bad permissions,
+// a corrupt database).
+func failingOpener([]string) (*vectorstore.Store, error) { return nil, errors.New("boom") }
 
 // fakeFactory registers a test-only provider kind so SwitchProvider can be
 // driven end-to-end (it builds the new provider through the registry).
@@ -93,12 +97,7 @@ func TestSwitchProvider_RollbackOnReopenFailure(t *testing.T) {
 
 	oldProv := fakeProv{id: "ollama:m"}
 	s := &Service{logger: quiet(), queue: NewQueue(2, time.Second), current: oldProv}
-	s.AttachVectorStore(
-		holder,
-		nestedDirFor(base),
-		func(string) (*vectorstore.Store, error) { return nil, errors.New("boom") }, // reopen always fails
-		nil,
-	)
+	s.AttachVectorStore(holder, failingOpener, nil) // reopen always fails
 
 	if err := s.SwitchProvider(context.Background(), "fake-switch", []byte("newid")); err == nil {
 		t.Fatal("expected switch to fail on reopen error")
@@ -142,7 +141,7 @@ func TestSwitchProvider_SuccessSwapsProviderAndStore(t *testing.T) {
 	holder := vectorstore.NewHolder(initial)
 
 	s := &Service{logger: quiet(), queue: NewQueue(2, time.Second), current: fakeProv{id: "ollama:m"}}
-	s.AttachVectorStore(holder, nestedDirFor(base), vectorstore.Open, nil)
+	s.AttachVectorStore(holder, nestedOpener(base), nil)
 
 	if err := s.SwitchProvider(context.Background(), "fake-switch", []byte("newid")); err != nil {
 		t.Fatalf("switch: %v", err)
@@ -203,7 +202,7 @@ func TestReopenVectorStore_SwapsToNewNamespace(t *testing.T) {
 	}
 
 	s := &Service{logger: quiet()}
-	s.AttachVectorStore(holder, nestedDirFor(base), vectorstore.Open, nil)
+	s.AttachVectorStore(holder, nestedOpener(base), nil)
 
 	// Switch to a new identity → reopen into a fresh, empty namespace.
 	if err := s.reopenVectorStore(fakeProv{id: "voyage:voyage-code-3:2048:float"}); err != nil {
@@ -237,12 +236,7 @@ func TestReopenVectorStore_OpenerFailureKeepsOldStore(t *testing.T) {
 	holder := vectorstore.NewHolder(initial)
 
 	s := &Service{logger: quiet()}
-	s.AttachVectorStore(
-		holder,
-		nestedDirFor(base),
-		func(string) (*vectorstore.Store, error) { return nil, errors.New("boom") },
-		nil,
-	)
+	s.AttachVectorStore(holder, failingOpener, nil)
 
 	err = s.reopenVectorStore(fakeProv{id: "voyage:m:2048:float"})
 	if err == nil {

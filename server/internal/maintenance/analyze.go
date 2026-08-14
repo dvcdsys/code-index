@@ -150,11 +150,6 @@ func (s *Service) scan(ctx context.Context) (*Analysis, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Sample the heap BEFORE any walking. Measured after, it includes the
-	// scan's own churn — several hundred megabytes of directory entries — and
-	// the RAM attribution comes out visibly too high.
-	heapAtStart := readMemory().HeapAllocBytes
-
 	a := &Analysis{}
 	// Per-scanner timing. Each scanner walks a different tree and any of them
 	// can dominate on a given deployment; without this the only signal an
@@ -197,7 +192,7 @@ func (s *Service) scan(ctx context.Context) (*Analysis, error) {
 		a.Warnings = append(a.Warnings, warnings...)
 	}
 
-	add(timed(CatOrphanCollections, func() (Category, []string) { return s.scanOrphanCollections(ctx, st, heapAtStart) }))
+	add(timed(CatOrphanCollections, func() (Category, []string) { return s.scanOrphanCollections(ctx, st) }))
 	if ctxDone(ctx) {
 		return nil, ErrAnalysisTimeout
 	}
@@ -206,6 +201,10 @@ func (s *Service) scan(ctx context.Context) (*Analysis, error) {
 		return nil, ErrAnalysisTimeout
 	}
 	add(timed(CatStaleNamespaces, func() (Category, []string) { return s.scanStaleNamespaces(ctx) }))
+	if ctxDone(ctx) {
+		return nil, ErrAnalysisTimeout
+	}
+	add(timed(CatLegacyChromem, func() (Category, []string) { return s.scanLegacyChromem(ctx) }))
 	if ctxDone(ctx) {
 		return nil, ErrAnalysisTimeout
 	}
@@ -219,24 +218,30 @@ func (s *Service) scan(ctx context.Context) (*Analysis, error) {
 	return a, nil
 }
 
-// scanOrphanCollections is the headline category: chromem collections with no
-// row in `projects`. These are resident in the Go heap, so removing one frees
-// RAM as well as disk.
+// scanOrphanCollections is the headline category: vector collections with no
+// row in `projects`.
+//
+// It used to promise memory back as well as disk, because chromem held every
+// document of every collection in the Go heap for the life of the process.
+// The SQLite store does not: a collection costs disk and nothing else until it
+// is searched. The category is still worth having — an abandoned index is
+// hundreds of megabytes — but the RAM claim is gone and EstimatedRAMBytes
+// stays zero rather than reporting an attribution that is no longer real.
 //
 // The guard is category-wide rather than per item, and that is a real
 // limitation worth understanding. A queued job identifies its target by
-// dedupe_key, which carries a SHA-1 path_hash; a chromem collection identifies
-// its target by an MD5 of the same host_path. Neither hash is invertible, and
-// an orphan by definition has no `projects` row to join the two through — so
+// dedupe_key, which carries a SHA-1 path_hash; a collection identifies its
+// target by an MD5 of the same host_path. Neither hash is invertible, and an
+// orphan by definition has no `projects` row to join the two through — so
 // there is no way to ask "is THIS collection the one that job is about to
 // write to". Rather than guess, any active clone/index job turns the whole
 // category off, and the description says why so the admin is not left
 // wondering where their checkbox went.
-func (s *Service) scanOrphanCollections(ctx context.Context, st *scanState, heapBytes int64) (Category, []string) {
+func (s *Service) scanOrphanCollections(ctx context.Context, st *scanState) (Category, []string) {
 	c := Category{
 		ID:              CatOrphanCollections,
 		Label:           "Orphaned vector collections",
-		Description:     "Indexed vectors for projects that no longer exist. These stay loaded in RAM for the life of the process, so removing them frees memory as well as disk.",
+		Description:     "Indexed vectors for projects that no longer exist. They sit in the vector database taking up disk until they are removed.",
 		DefaultSelected: true,
 	}
 	var warnings []string
@@ -246,12 +251,10 @@ func (s *Service) scanOrphanCollections(ctx context.Context, st *scanState, heap
 		return c, []string{"vector store unavailable — orphaned collections were not scanned"}
 	}
 
-	var orphanDocs, totalDocs int64
 	for _, col := range vs.ListCollections() {
 		if ctxDone(ctx) {
 			break
 		}
-		totalDocs += int64(col.Documents)
 		if _, live := st.liveCollections[col.Name]; live {
 			continue
 		}
@@ -261,23 +264,18 @@ func (s *Service) scanOrphanCollections(ctx context.Context, st *scanState, heap
 			warnings = append(warnings, fmt.Sprintf("ignoring unrecognised collection %q", col.Name))
 			continue
 		}
-		orphanDocs += int64(col.Documents)
 		c.Items = append(c.Items, Item{
-			Key:        col.Name,
-			Label:      col.Name,
-			Detail:     fmt.Sprintf("%d documents", col.Documents),
-			SizeBytes:  dirSizeOrZero(ctx, col.Dir),
-			path:       col.Dir,
+			Key:    col.Name,
+			Label:  col.Name,
+			Detail: fmt.Sprintf("%d documents", col.Documents),
+			// The store reports the logical size of the rows. It excludes
+			// index entries and page slack, so it is a floor on what the
+			// delete gives back — which the clean does return to the
+			// filesystem: after the batch of deletes it runs one incremental
+			// vacuum (Maintainer.ReclaimFreePages, see cleanCategory).
+			SizeBytes:  col.SizeBytes,
 			collection: col.Name,
 		})
-	}
-
-	// Attribute a share of the live heap to the orphans, in proportion to
-	// their documents. This is an estimate, not a measurement — chromem gives
-	// no per-collection allocation figure — but it is the number that answers
-	// "how much RAM do I get back", so it is worth showing with that caveat.
-	if totalDocs > 0 && orphanDocs > 0 && heapBytes > 0 {
-		c.EstimatedRAMBytes = heapBytes * orphanDocs / totalDocs
 	}
 
 	if st.activeIndexJobs > 0 && len(c.Items) > 0 {
@@ -362,36 +360,46 @@ func (s *Service) scanStaleNamespaces(ctx context.Context) (Category, []string) 
 	c := Category{
 		ID:              CatStaleNamespaces,
 		Label:           "Abandoned provider namespaces",
-		Description:     "Vector directories for embedding providers or models that are no longer active. Not loaded in memory, but they stay on disk forever.",
+		Description:     "Vector stores for embedding providers or models that are no longer active. Nothing reads them; they stay on disk forever.",
 		DefaultSelected: true,
 	}
-	if s.d.Cfg == nil || s.d.Cfg.ChromaPersistDir == "" {
+	if s.d.Cfg == nil {
 		return c, nil
 	}
-	active := s.activeChromaDir()
-	if active == "" {
+	active := s.activeNamespaceDirs()
+	if len(active) == 0 {
 		// Refuse to classify anything. With no known active namespace every
 		// directory looks stale, and the first one we would delete is the live
 		// index.
 		return c, []string{"active embedding namespace is unknown — no namespace was classified as stale"}
 	}
 
-	base := filepath.Clean(s.d.Cfg.ChromaPersistDir)
+	// Two trees hold namespaces: the live SQLite databases under VectorsDir,
+	// and the legacy chromem gob directories under ChromaPersistDir. Both leak
+	// a namespace per abandoned model, so both are scanned — while the ACTIVE
+	// namespace in EITHER tree is protected, which is what keeps the
+	// pre-migration gob files (the rollback path) off the list.
 	var warnings []string
-	for _, dir := range namespaceLeaves(base) {
-		if ctxDone(ctx) {
-			break
+	// Labelled: a bare break here would only leave the inner loop and the scan
+	// would carry on into the next namespace tree — walking, and sizing, a
+	// whole second directory after the caller has already given up.
+scan:
+	for _, base := range s.namespaceBases() {
+		for _, dir := range base.leaves(base.root) {
+			if ctxDone(ctx) {
+				break scan
+			}
+			if isActiveNamespace(dir, active) {
+				continue
+			}
+			c.Items = append(c.Items, Item{
+				Key:       dir,
+				Label:     strings.TrimPrefix(dir, filepath.Dir(base.root)+string(os.PathSeparator)),
+				Detail:    base.detail,
+				SizeBytes: dirSizeOrZero(ctx, dir),
+				path:      dir,
+			})
 		}
-		if dir == active || isAncestor(dir, active) || isAncestor(active, dir) {
-			continue
-		}
-		c.Items = append(c.Items, Item{
-			Key:       dir,
-			Label:     strings.TrimPrefix(dir, base+string(os.PathSeparator)),
-			Detail:    "inactive namespace",
-			SizeBytes: dirSizeOrZero(ctx, dir),
-			path:      dir,
-		})
 	}
 
 	// A namespace bigger than the live one is a warning sign, not routine
@@ -404,7 +412,10 @@ func (s *Service) scanStaleNamespaces(ctx context.Context) (Category, []string) 
 	// Sizing the active namespace means walking every document in the index,
 	// so only pay for it when there is actually something to compare against.
 	if len(c.Items) > 0 {
-		activeSize := dirSizeOrZero(ctx, active)
+		var activeSize int64
+		for _, dir := range active {
+			activeSize += dirSizeOrZero(ctx, dir)
+		}
 		for _, it := range c.Items {
 			if it.SizeBytes > activeSize {
 				c.DefaultSelected = false
@@ -417,6 +428,242 @@ func (s *Service) scanStaleNamespaces(ctx context.Context) (Category, []string) 
 		}
 	}
 	return c, warnings
+}
+
+// legacyChromemDescription is the category blurb. The second half is a
+// deliberate, verbatim warning: everything else on this screen is garbage that
+// the server can rebuild or simply does not need, while this is the only copy
+// of the data an OLDER binary knows how to read.
+const legacyChromemDescription = "Pre-migration chromem gob files for the namespace this server is using. " +
+	"Every collection in them has been imported into the SQLite vector store, so nothing reads them any more; " +
+	"they are kept purely so a previous server version could still start on them. Disk only. " +
+	"Deleting this data is irreversible and removes the ability to roll back to a pre-SQLite-vector-store " +
+	"server version. Make sure the new version has been running fine before confirming."
+
+// scanLegacyChromem offers the chromem gob tree the ACTIVE namespace was
+// imported from, once every collection in it is provably in the SQLite store.
+//
+// This is the one category that reclaims something the rest of the screen
+// deliberately protects: scanStaleNamespaces refuses to touch the active
+// namespace in either tree, precisely because the gob files are the rollback
+// path. That protection is right by default and wrong forever — on the
+// reference install the tree is 2.5 GB that no process will ever open again —
+// so the way out is an explicit, opt-in category with the consequence spelled
+// out, not a rule change somewhere the admin cannot see it.
+//
+// Two properties are load-bearing:
+//
+//   - Only the ACTIVE namespace's legacy tree is listed. An abandoned
+//     namespace's gob files are already reclaimable under "Abandoned provider
+//     namespaces" — listing them here as well would show the same directory
+//     twice and count its bytes twice in the analysis total.
+//   - A namespace that is not FULLY imported is not offered at all, not
+//     offered-but-disabled. A disabled row still advertises "there is 2.5 GB
+//     here"; the honest state during a mid-flight migration is that this data
+//     is not garbage yet, and the warnings say why.
+//
+// NO active-job guard, unlike scanOrphanCollections, and the difference is not
+// an oversight. That guard exists because an orphaned collection cannot be
+// matched to the clone/index job that may be about to write it — the hashes do
+// not join and the `projects` row that would join them is gone. Nothing of the
+// sort applies here: this binary never writes to the gob tree. Indexing writes
+// vectors.db and only vectors.db; the legacy tree is read exactly once, by the
+// import that runs when a store is opened. So a running index job cannot make
+// these files matter again, and holding the category back until the queue is
+// idle would only make the one operation that needs a quiet server (a 2.5 GB
+// delete) harder to schedule. The real hazard — a fresh import of THIS
+// namespace being in flight, which a runtime model switch can start while the
+// server is serving — is caught precisely, by re-checking full-migration status
+// here and again immediately before the delete (see clean.go).
+func (s *Service) scanLegacyChromem(ctx context.Context) (Category, []string) {
+	c := Category{
+		ID:          CatLegacyChromem,
+		Label:       "Legacy chromem data",
+		Description: legacyChromemDescription,
+		// Opt-in. Orphans are garbage by construction; this is a rollback path
+		// the admin is choosing to give up.
+		DefaultSelected: false,
+		// NOT flagged destructive: that flag drives a confirmation callout
+		// written about re-downloading model weights, which would read as
+		// nonsense here. The warning that belongs to this category is in the
+		// description, which the dashboard renders verbatim.
+		Destructive: false,
+	}
+	dir, st, ok, warnings := s.legacyChromemState()
+	if !ok {
+		return c, warnings
+	}
+	c.Items = append(c.Items, Item{
+		Key:       dir,
+		Label:     s.legacyLabel(dir),
+		Detail:    fmt.Sprintf("%d collections, %d documents already imported", st.Collections, st.Documents),
+		SizeBytes: dirSizeOrZero(ctx, dir),
+		path:      dir,
+	})
+	return c, warnings
+}
+
+// legacyChromemState resolves the active namespace's legacy tree and decides
+// whether it may be offered. ok=false always means "say nothing about it",
+// never "offer it disabled".
+//
+// dir is returned whenever it is known, even when ok is false, so Clean can
+// tell "this is the tree you analysed, and it is no longer eligible" from
+// "this path is not the one I would ever delete".
+func (s *Service) legacyChromemState() (dir string, st vectorstore.LegacyStatus, ok bool, warnings []string) {
+	vs := s.d.VectorStore
+	if vs == nil {
+		return "", st, false, []string{"vector store unavailable — legacy chromem data was not scanned"}
+	}
+	dir = filepath.Clean(vs.LegacyChromaDir())
+	if dir == "" || dir == "." {
+		// No legacy namespace was ever paired with this store: nothing to say.
+		return "", st, false, nil
+	}
+	if _, err := os.Stat(dir); err != nil {
+		// The usual case on a fresh install (and the case after a successful
+		// clean): the path is configured, the directory never existed.
+		return dir, st, false, nil
+	}
+
+	// The database is what proves the gob files are redundant. If it is not
+	// there — a namespace directory that has lost its vectors.db, or a store
+	// wired to a directory it never opened — the legacy tree is the ONLY copy
+	// of that index and must not be offered.
+	base := vs.BaseDir()
+	if base == "" {
+		return dir, st, false, []string{fmt.Sprintf(
+			"legacy chromem data at %s was not offered: the active vector store directory is unknown", dir)}
+	}
+	if _, err := os.Stat(filepath.Join(base, vectorstore.DBFileName)); err != nil {
+		return dir, st, false, []string{fmt.Sprintf(
+			"legacy chromem data at %s was not offered: no %s in %s to prove it has been imported",
+			dir, vectorstore.DBFileName, base)}
+	}
+
+	migrated, known := vs.MigratedCollections()
+	if !known {
+		return dir, st, false, []string{fmt.Sprintf(
+			"legacy chromem data at %s was not offered: the migration record could not be read", dir)}
+	}
+	st, err := vectorstore.LegacyMigrationStatus(dir, migrated)
+	if err != nil {
+		return dir, st, false, []string{fmt.Sprintf("could not inspect legacy chromem data at %s: %v", dir, err)}
+	}
+	if st.Complete() {
+		return dir, st, true, nil
+	}
+	if st.Collections == 0 && len(st.Unreadable) == 0 {
+		// An empty legacy namespace directory. Nothing was ever migrated from
+		// it and there is nothing to reclaim, so stay quiet rather than warn
+		// about a state every fresh install is in.
+		return dir, st, false, nil
+	}
+	if len(st.Unreadable) > 0 {
+		return dir, st, false, []string{fmt.Sprintf(
+			"legacy chromem data at %s was not offered: %d directories there are not readable chromem collections, "+
+				"so they were never imported (first: %s)", dir, len(st.Unreadable), st.Unreadable[0])}
+	}
+	return dir, st, false, []string{fmt.Sprintf(
+		"legacy chromem data at %s was not offered: only %d of %d collections have been imported — "+
+			"a migration is incomplete or still running", dir, st.Migrated, st.Collections)}
+}
+
+// legacyLabel renders the namespace path the way the abandoned-namespace
+// category does: relative to the container that holds both trees, so the row
+// reads "chroma/ollama/<model>" instead of an absolute data-dir path.
+func (s *Service) legacyLabel(dir string) string {
+	if s.d.Cfg == nil || s.d.Cfg.ChromaPersistDir == "" {
+		return dir
+	}
+	root := filepath.Clean(s.d.Cfg.ChromaPersistDir)
+	if !isAncestor(root, dir) {
+		return dir
+	}
+	return strings.TrimPrefix(dir, filepath.Dir(root)+string(os.PathSeparator))
+}
+
+// namespaceBase is one tree that holds per-embedding-identity namespaces.
+type namespaceBase struct {
+	root   string
+	detail string
+	leaves func(root string) []string
+}
+
+// namespaceBases returns the trees to scan, skipping the ones this deployment
+// does not have.
+func (s *Service) namespaceBases() []namespaceBase {
+	var out []namespaceBase
+	if s.d.Cfg == nil {
+		return nil
+	}
+	if dir := s.d.Cfg.VectorsDir; dir != "" {
+		out = append(out, namespaceBase{
+			root:   filepath.Clean(dir),
+			detail: "inactive namespace",
+			leaves: vectorNamespaceLeaves,
+		})
+	}
+	if dir := s.d.Cfg.ChromaPersistDir; dir != "" {
+		out = append(out, namespaceBase{
+			root:   filepath.Clean(dir),
+			detail: "inactive namespace (pre-migration format)",
+			leaves: namespaceLeaves,
+		})
+	}
+	return out
+}
+
+// isActiveNamespace reports whether dir is, contains, or lives inside one of
+// the active namespace directories.
+func isActiveNamespace(dir string, active []string) bool {
+	for _, a := range active {
+		if dir == a || isAncestor(dir, a) || isAncestor(a, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// vectorNamespaceLeaves returns the directories holding a SQLite vector store.
+// A leaf is a directory containing the database file; an entirely empty
+// directory below the container is a leftover namespace whose database is
+// already gone (see namespaceLeaves for the same reasoning).
+func vectorNamespaceLeaves(base string) []string {
+	var out []string
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if depth > 4 {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		if len(entries) == 0 {
+			if depth >= 1 {
+				out = append(out, dir)
+			}
+			return
+		}
+		var subdirs []string
+		for _, e := range entries {
+			if e.IsDir() {
+				subdirs = append(subdirs, filepath.Join(dir, e.Name()))
+				continue
+			}
+			if e.Name() == vectorstore.DBFileName {
+				out = append(out, dir)
+				return
+			}
+		}
+		for _, sd := range subdirs {
+			walk(sd, depth+1)
+		}
+	}
+	walk(base, 0)
+	sort.Strings(out)
+	return out
 }
 
 // namespaceLeaves returns the directories that hold collections. A namespace

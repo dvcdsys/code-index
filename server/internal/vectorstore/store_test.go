@@ -40,6 +40,7 @@ func openStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { s.Close() })
 	return s
 }
 
@@ -340,4 +341,3 @@ func TestSearchLatencyGate(t *testing.T) {
 		t.Errorf("P95 latency %.1fms ≥ 200ms gate", p95)
 	}
 }
-

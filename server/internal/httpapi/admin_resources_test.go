@@ -191,23 +191,22 @@ func TestDeleteProject_RemovesCollectionAndCheckout(t *testing.T) {
 	if err := os.MkdirAll(clone, 0o755); err != nil {
 		t.Fatalf("mkdir clone: %v", err)
 	}
-	collectionDir := f.store.CollectionDir("/live/project")
-	if _, err := os.Stat(collectionDir); err != nil {
-		t.Fatalf("precondition: collection dir missing: %v", err)
+	if _, ok := f.store.CollectionSizeBytes("/live/project"); !ok {
+		t.Fatal("precondition: the project has no vector collection")
 	}
 
 	rr, body := doReq(t, f.authTestFixture, cookie, http.MethodDelete, "/api/v1/projects/"+hash, nil)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("delete = %d, want 204 (body: %s)", rr.Code, body)
 	}
-	if _, err := os.Stat(collectionDir); !os.IsNotExist(err) {
-		t.Errorf("vector collection survived the delete (err=%v)", err)
+	if _, ok := f.store.CollectionSizeBytes("/live/project"); ok {
+		t.Error("the vector collection survived the delete")
 	}
 	if _, err := os.Stat(clone); !os.IsNotExist(err) {
 		t.Errorf("cloned checkout survived the delete (err=%v)", err)
 	}
 	if n := f.store.Count("/live/project"); n != 0 {
-		t.Errorf("%d documents still resident after delete, want 0", n)
+		t.Errorf("%d documents still stored after delete, want 0", n)
 	}
 
 	// And the analysis should now find nothing — the delete cleaned up after

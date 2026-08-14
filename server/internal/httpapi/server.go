@@ -304,17 +304,18 @@ func (s *Server) enrichProjectStorage(ctx context.Context, out *openapi.Project,
 			out.SqliteSizeBytes = &sz
 		}
 	}
-	// Ask the store where the collection actually lives. Deriving the path by
-	// hand here is what broke this before: the code joined the logical
-	// collection name (project_<md5>) onto the namespace directory, but
-	// chromem stores collections under a hash of that name, so the path never
-	// existed and the size was silently omitted on every single project.
+	// Ask the store how big this project's vectors are. There is no
+	// per-collection file to stat any more — a namespace is one SQLite
+	// database shared by every project — so the store sums the rows itself.
+	// The reported figure is the logical size of the collection's rows;
+	// index entries and page slack are not attributable to a collection and
+	// the file does not shrink on delete, so it is a floor, not a file size.
 	if m, ok := s.Deps.VectorStore.(vectorstore.Maintainer); ok && m != nil {
-		if dir := m.CollectionDir(p.HostPath); dir != "" {
-			out.ChromaPath = ptrString(dir)
-			if sz, ok := maintenance.DirSizeBytes(ctx, dir); ok {
-				out.ChromaSizeBytes = &sz
-			}
+		if path := m.DBPath(); path != "" {
+			out.ChromaPath = ptrString(path)
+		}
+		if sz, ok := m.CollectionSizeBytes(p.HostPath); ok {
+			out.ChromaSizeBytes = &sz
 		}
 	}
 }
@@ -392,13 +393,25 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path open
 }
 
 // projectArtifacts wires the off-database cleanup for a project delete: the
-// vector collection (resident in RAM until dropped) and the cloned checkout.
+// vector collection and the cloned checkout.
 // Returns nil when neither is available, which keeps router-only tests working.
 func (s *Server) projectArtifacts() *projects.Artifacts {
 	art := &projects.Artifacts{}
 	if m, ok := s.Deps.VectorStore.(vectorstore.Maintainer); ok && m != nil {
 		art.DropCollection = func(hostPath string) error {
-			return m.DeleteCollectionByName(vectorstore.CollectionName(hostPath))
+			if err := m.DeleteCollectionByName(vectorstore.CollectionName(hostPath)); err != nil {
+				return err
+			}
+			// A deleted project's pages otherwise sit in the freelist for the
+			// life of the file, holding its high-water size and inflating the
+			// "Vector store" usage row. This is a single admin-initiated
+			// delete, not a batch, so the vacuum cost (~170 ms per 20k-doc
+			// collection) is fine here — the batched-reclaim reasoning in
+			// maintenance.Clean does not apply. The indexer's own
+			// DeleteCollection before a full reindex stays vacuum-free on
+			// purpose: the reindex reuses those pages immediately.
+			m.ReclaimFreePages(context.Background())
+			return nil
 		}
 	}
 	if s.Deps.DataDir != "" {

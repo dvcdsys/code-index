@@ -118,6 +118,43 @@ func TestLoadOverrides(t *testing.T) {
 	if got, want := c.ChromaDirFor(comps), filepath.Join(append([]string{c.ChromaPersistDir}, comps...)...); got != want {
 		t.Errorf("ChromaDirFor = %q, want %q", got, want)
 	}
+	// VectorDirFor mirrors it under the vectors container — same components,
+	// same nesting — which is what pairs a live database with the legacy
+	// chromem directory it was imported from.
+	if got, want := c.VectorDirFor(comps), filepath.Join(append([]string{c.VectorsDir}, comps...)...); got != want {
+		t.Errorf("VectorDirFor = %q, want %q", got, want)
+	}
+}
+
+// The vectors container defaults to a SIBLING of the chroma container. A
+// deployment that only overrides CIX_CHROMA_PERSIST_DIR (every container does)
+// must still land its vector databases on the same persistent volume.
+func TestVectorsDirDefaultsBesideChroma(t *testing.T) {
+	unsetAll(t)
+	t.Setenv("CIX_CHROMA_PERSIST_DIR", "/data/chroma")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := c.VectorsDir, "/data/vectors"; got != want {
+		t.Errorf("VectorsDir = %q, want %q", got, want)
+	}
+	if c.VectorMMapSize != 0 {
+		t.Errorf("VectorMMapSize = %d, want 0 (off by default)", c.VectorMMapSize)
+	}
+
+	t.Setenv("CIX_VECTORS_DIR", "/elsewhere/vec")
+	t.Setenv("CIX_VECTOR_MMAP_SIZE", "2147483648")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := c.VectorsDir, "/elsewhere/vec"; got != want {
+		t.Errorf("VectorsDir = %q, want %q", got, want)
+	}
+	if got, want := c.VectorMMapSize, int64(2147483648); got != want {
+		t.Errorf("VectorMMapSize = %d, want %d", got, want)
+	}
 }
 
 func TestLoadPhase3Defaults(t *testing.T) {
@@ -279,6 +316,8 @@ func unsetAll(t *testing.T) {
 		"CIX_BOOTSTRAP_ADMIN_EMAIL", "CIX_BOOTSTRAP_ADMIN_PASSWORD",
 		// Repo clone dir + its legacy alias.
 		"CIX_REPOS_DIR", "CIX_WORKSPACES_DATA_DIR",
+		// Vector store container + its mmap knob.
+		"CIX_VECTORS_DIR", "CIX_VECTOR_MMAP_SIZE",
 	} {
 		t.Setenv(k, "sentinel")
 		osUnsetenv(k)

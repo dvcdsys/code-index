@@ -1543,7 +1543,7 @@ paths:
       summary: Semantic (vector) search
       description: |
         Embeds the query and runs an approximate nearest-neighbour search
-        against the project's chromem-go collection. Results are
+        against the project's vector collection. Results are
         post-filtered by `min_score`, `paths` (whitelist, prefix-OR-substring
         match), `excludes` (blacklist, same matching), and `languages` —
         then merged into per-file groups and ranked by best match score.
@@ -2570,7 +2570,7 @@ paths:
       summary: Hybrid BM25+dense search across all repos in a workspace
       description: |
         Embeds the query, then fans out two parallel sub-queries per
-        project: dense (chromem cosine) and sparse (SQLite FTS5 BM25
+        project: dense (cosine over stored vectors) and sparse (SQLite FTS5 BM25
         over chunks_fts). Per-project the two ranked lists are fused
         via Reciprocal Rank Fusion (k=60).
 
@@ -4167,6 +4167,7 @@ components:
           orphan_collections,
           orphan_repos,
           stale_namespaces,
+          legacy_chromem,
           stale_jobs,
           unused_models,
         ]
@@ -4213,10 +4214,19 @@ components:
         estimated_ram_bytes:
           type: integer
           format: int64
+          deprecated: true
+          x-deprecated-reason: >-
+            Always absent since the vector store moved off the Go heap; kept
+            for wire compatibility with older dashboard builds and slated for
+            removal in the next breaking API revision.
           description: |
-            Heap attributable to these items, apportioned by document count.
-            Only set for orphan_collections, and an estimate rather than a
-            measurement — chromem exposes no per-collection allocation figure.
+            Deprecated, and always absent. It reported heap attributable to
+            these items back when the vector store held every document in
+            memory; nothing has set it since the store moved to SQLite, whose
+            footprint is not proportional to what it holds. Kept in the schema
+            only so an older dashboard build does not break on a missing field,
+            and a candidate for removal in the next breaking API revision.
+            Clients must not display it.
         default_selected:
           type: boolean
           description: Whether the dashboard should pre-tick this category.
@@ -4988,7 +4998,9 @@ components:
         chroma_path:
           type: string
           nullable: true
-          description: Resolved chromem-go collection directory for this project. NULL when not computed.
+          description: |
+            Path of the SQLite vector database holding this project's
+            collection. NULL when not computed.
         sqlite_size_bytes:
           type: integer
           format: int64

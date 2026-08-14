@@ -50,6 +50,10 @@ const (
 	// provider/model that is no longer active. Disk only — chromem opens the
 	// active namespace and nothing else, so these were never in RAM.
 	CatStaleNamespaces CategoryID = "stale_namespaces"
+	// CatLegacyChromem is the pre-migration chromem gob tree of a namespace
+	// whose collections are all in the SQLite store. Nothing reads it; it is
+	// kept as the rollback path, so reclaiming it is opt-in.
+	CatLegacyChromem CategoryID = "legacy_chromem"
 	// CatStaleJobs is finished rows in the `jobs` queue, which has neither a
 	// foreign key to projects nor any retention policy.
 	CatStaleJobs CategoryID = "stale_jobs"
@@ -63,6 +67,7 @@ var AllCategories = []CategoryID{
 	CatOrphanCollections,
 	CatOrphanRepos,
 	CatStaleNamespaces,
+	CatLegacyChromem,
 	CatStaleJobs,
 	CatUnusedModels,
 }
@@ -159,14 +164,23 @@ type Item struct {
 // renders. Labels and defaults live here rather than in React so the rules
 // (what is destructive, what is pre-selected) are decided once, on the server.
 type Category struct {
-	ID                CategoryID `json:"id"`
-	Label             string     `json:"label"`
-	Description       string     `json:"description"`
-	ItemCount         int        `json:"item_count"`
-	SizeBytes         int64      `json:"size_bytes"`
-	EstimatedRAMBytes int64      `json:"estimated_ram_bytes,omitempty"`
-	DefaultSelected   bool       `json:"default_selected"`
-	Destructive       bool       `json:"destructive"`
+	ID          CategoryID `json:"id"`
+	Label       string     `json:"label"`
+	Description string     `json:"description"`
+	ItemCount   int        `json:"item_count"`
+	SizeBytes   int64      `json:"size_bytes"`
+	// Deprecated: EstimatedRAMBytes is always zero and nothing sets it.
+	//
+	// It existed for orphaned collections back when the vector store held
+	// every document in the Go heap, so deleting one handed memory back.
+	// The SQLite store's footprint is not proportional to what it stores —
+	// there is no heap to attribute — and omitempty keeps the field off the
+	// wire entirely. It survives only so an older dashboard build does not
+	// break on a missing field, and it is a candidate for removal in the next
+	// breaking API revision. Do not add a producer; add a new field instead.
+	EstimatedRAMBytes int64 `json:"estimated_ram_bytes,omitempty"`
+	DefaultSelected   bool  `json:"default_selected"`
+	Destructive       bool  `json:"destructive"`
 	// Items is the sample shown in the UI — at most maxItemsPerCategory.
 	Items          []Item `json:"items"`
 	ItemsTruncated bool   `json:"items_truncated"`

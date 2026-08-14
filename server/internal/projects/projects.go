@@ -355,11 +355,10 @@ func SetStatus(ctx context.Context, db *sql.DB, hostPath, status string) error {
 // filesystem.
 //
 // It exists because FK CASCADE only reaches rows. A project also owns a
-// chromem collection — which is resident in RAM, not merely on disk, so
-// leaving it behind leaks memory for the life of the process — and a cloned
-// checkout. Before this hook, deleting a project left both; a server that had
-// been used for a while accumulated hundreds of thousands of orphaned vector
-// documents that nothing could reach and nothing would ever free.
+// vector collection and a cloned checkout. Before this hook, deleting a
+// project left both; a server that had been used for a while accumulated
+// hundreds of thousands of orphaned vector documents that nothing could reach
+// and nothing would ever free.
 //
 // Nil members are skipped, so a caller wires only what it has.
 type Artifacts struct {

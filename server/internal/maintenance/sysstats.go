@@ -4,11 +4,12 @@ import "runtime"
 
 // MemorySnapshot is the process memory picture.
 //
-// HeapAlloc is the number that matters for this server: the vector store is an
-// in-memory database, so live heap tracks the size of the loaded index almost
-// one-for-one. Sys and RSS run higher because the Go runtime holds freed spans
-// before returning them to the OS — which is exactly why Clean calls
-// debug.FreeOSMemory() after dropping collections.
+// RSS is the number that matters for this server: the SQLite-backed vector
+// store keeps its page cache in modernc's own mmap arenas, which
+// runtime.MemStats cannot see at all — a busy process can show a few MB of
+// Go heap next to hundreds of MB resident. The heap figures are still
+// reported for the Go side of the house (indexer batches, HTTP, chunker),
+// but the OS view is the headline.
 type MemorySnapshot struct {
 	HeapAllocBytes    int64 `json:"heap_alloc_bytes"`
 	HeapInuseBytes    int64 `json:"heap_inuse_bytes"`

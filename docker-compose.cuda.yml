@@ -17,7 +17,19 @@ services:
       # if a third-party fork or custom build sets a different default.
       - CIX_PORT=${CIX_PORT:-21847}
       - CIX_EMBEDDING_MODEL=${CIX_EMBEDDING_MODEL:-awhiteside/CodeRankEmbed-Q8_0-GGUF}
+      # Legacy chromem-go store: read once on startup for the one-time import
+      # into the SQLite vector store, then left untouched as the rollback path.
       - CIX_CHROMA_PERSIST_DIR=/data/chroma
+      # Optional. Vector store: one SQLite database per embedding namespace.
+      # Defaults to a sibling of CIX_CHROMA_PERSIST_DIR (/data/vectors), so it
+      # already lands on the volume below — set it only to move the vectors to
+      # a different mount.
+      # - CIX_VECTORS_DIR=/data/vectors
+      # Optional. PRAGMA mmap_size for the vector store, in bytes; 0 (default)
+      # is off. Roughly 40% lower search latency in exchange for resident
+      # memory — mapped database pages count in RSS, per connection. There is
+      # room for it under the 10G limit below on a GPU host.
+      # - CIX_VECTOR_MMAP_SIZE=2147483648
       - CIX_SQLITE_PATH=/data/sqlite/projects.db
       - CIX_MAX_FILE_SIZE=${CIX_MAX_FILE_SIZE:-524288}
       - CIX_EXCLUDED_DIRS=${CIX_EXCLUDED_DIRS:-node_modules,.git,.venv,__pycache__,dist,build,.next,.cache,.DS_Store}

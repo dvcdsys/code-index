@@ -39,9 +39,10 @@ var (
 // Every current holder of a raw *Store (indexer, httpapi Deps, repojobs)
 // holds a *Holder instead and calls the identical method set.
 //
-// Discarding the old *Store after Swap needs no Close: chromem-go persists
-// each write synchronously to disk and keeps no background goroutines or
-// open file handles, so the replaced store is simply reclaimed by GC.
+// Swap does NOT close the store it replaces: the caller owns that decision
+// (a *Store now holds an open SQLite pool, so production closes the old one
+// — Store.Close waits for in-flight work — while a test that swaps back and
+// forth between two stores keeps both alive).
 type Holder struct {
 	mu    sync.RWMutex
 	store *Store
@@ -119,4 +120,15 @@ func (h *Holder) Count(projectPath string) int {
 		return 0
 	}
 	return s.Count(projectPath)
+}
+
+// Close closes the active store. A nil store is not an error. Used on
+// shutdown; the Holder stays usable (every proxy then reports the store's own
+// ErrClosed) rather than being left holding a dangling pointer.
+func (h *Holder) Close() error {
+	s := h.current()
+	if s == nil {
+		return nil
+	}
+	return s.Close()
 }

@@ -60,32 +60,31 @@ type Service struct {
 	// When set, SwitchProvider reopens the vector store under the new
 	// provider's identity slug and atomically swaps it into vsHolder, so
 	// a runtime provider switch moves to a dimension-isolated namespace
-	// without a process restart. All four are nil in tests that don't
+	// without a process restart. All three are nil in tests that don't
 	// exercise the reopen path (SwitchProvider then only swaps the
 	// provider, matching the pre-unification behaviour).
 	vsHolder  *vectorstore.Holder
-	vsDirFor  func(components []string) string             // cfg.ChromaDirFor
-	vsOpener  func(dir string) (*vectorstore.Store, error) // vectorstore.Open
-	vsMigrate func() error                                 // legacy flat-chroma → nested migration (idempotent)
+	vsOpener  func(components []string) (*vectorstore.Store, error)
+	vsMigrate func() error // legacy flat-chroma → nested migration (idempotent)
 }
 
 // AttachVectorStore wires the live vector-store reopen path used by
 // SwitchProvider. main.go calls it once after constructing the Service
 // and the shared Holder:
 //
-//	dirFor  — cfg.ChromaDirFor (maps identity path components to a dir)
-//	opener  — vectorstore.Open
+//	opener  — opens the store for an identity's path components (main.go
+//	          derives both the live database directory and the legacy
+//	          chromem directory from them)
 //	migrate — optional idempotent legacy-dir migration run before each
 //	          reopen (lets a switch back to ollama on a pre-unification
 //	          box adopt its migrated dir without a restart); may be nil
 //
-// Passing the formula (dirFor) and opener as funcs keeps embeddings free
-// of a hard dependency on config path layout and avoids an
+// Taking the opener as a func of the identity components keeps embeddings
+// free of any dependency on config path layout and avoids an
 // embeddings→storage import for the migration hook.
 func (s *Service) AttachVectorStore(
 	holder *vectorstore.Holder,
-	dirFor func(components []string) string,
-	opener func(dir string) (*vectorstore.Store, error),
+	opener func(components []string) (*vectorstore.Store, error),
 	migrate func() error,
 ) {
 	if s == nil {
@@ -93,7 +92,6 @@ func (s *Service) AttachVectorStore(
 	}
 	s.mu.Lock()
 	s.vsHolder = holder
-	s.vsDirFor = dirFor
 	s.vsOpener = opener
 	s.vsMigrate = migrate
 	s.mu.Unlock()
@@ -327,9 +325,9 @@ func stopProviderAsync(logger *slog.Logger, p provider.Provider) {
 // (tests).
 func (s *Service) reopenVectorStore(prov provider.Provider) error {
 	s.mu.RLock()
-	holder, dirFor, opener, migrate := s.vsHolder, s.vsDirFor, s.vsOpener, s.vsMigrate
+	holder, opener, migrate := s.vsHolder, s.vsOpener, s.vsMigrate
 	s.mu.RUnlock()
-	if holder == nil || dirFor == nil || opener == nil {
+	if holder == nil || opener == nil {
 		return nil // reopen path not wired (e.g. unit tests)
 	}
 	if migrate != nil {
@@ -340,15 +338,25 @@ func (s *Service) reopenVectorStore(prov provider.Provider) error {
 			s.logger.Warn("embeddings: chroma legacy-dir migration failed during switch (continuing)", "err", err)
 		}
 	}
-	dir := dirFor(prov.StorageComponents())
-	newStore, err := opener(dir)
+	comps := prov.StorageComponents()
+	newStore, err := opener(comps)
 	if err != nil {
 		s.logger.Error("embeddings: provider switched but vector store reopen failed; keeping previous store until restart",
-			"dir", dir, "err", err)
-		return fmt.Errorf("reopen vector store at %s: %w", dir, err)
+			"components", comps, "err", err)
+		return fmt.Errorf("reopen vector store for %v: %w", comps, err)
 	}
-	holder.Swap(newStore)
-	s.logger.Info("embeddings: vector store reopened under new provider namespace", "dir", dir)
+	old := holder.Swap(newStore)
+	// The replaced store owns an open SQLite pool. Close waits for in-flight
+	// searches, so it runs in the background: a switch must not block behind
+	// somebody's fan-out query.
+	if old != nil && old != newStore {
+		go func() {
+			if err := old.Close(); err != nil {
+				s.logger.Warn("embeddings: closing the replaced vector store", "err", err)
+			}
+		}()
+	}
+	s.logger.Info("embeddings: vector store reopened under new provider namespace", "dir", newStore.BaseDir())
 	return nil
 }
 
