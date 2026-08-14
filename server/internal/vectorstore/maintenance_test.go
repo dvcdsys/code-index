@@ -83,6 +83,16 @@ func TestFreshDatabaseUsesTunedPageSize(t *testing.T) {
 	if journal != "wal" {
 		t.Errorf("journal_mode = %q, want wal", journal)
 	}
+	// Without a limit the -wal file keeps whatever size its largest transaction
+	// gave it, forever — measured 159 MB beside a 158 MB database after the
+	// legacy import — and the Resources screen counts it as vector-store disk.
+	var limit int64
+	if err := s.db.QueryRow("PRAGMA journal_size_limit").Scan(&limit); err != nil {
+		t.Fatalf("read journal_size_limit: %v", err)
+	}
+	if limit != journalSizeLimitBytes {
+		t.Errorf("journal_size_limit = %d, want %d", limit, journalSizeLimitBytes)
+	}
 }
 
 func TestListCollections_ReportsNameCountAndSize(t *testing.T) {

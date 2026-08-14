@@ -159,6 +159,7 @@ statement materialises the file, and the page size is silently ignored.
 | `journal_mode` | WAL | Readers do not block the indexer. |
 | `synchronous` | NORMAL | |
 | `busy_timeout` | 10 s | |
+| `journal_size_limit` | 64 MB | A checkpoint rewinds the WAL but by default leaves the FILE at its high-water mark forever. The legacy import commits a whole collection at once — measured a permanent 159 MB `-wal` beside a 158 MB database — and that sidecar is counted in the "Vector store" row of the Resources screen. With a limit the checkpoint truncates it back. Steady-state indexing commits every 500 chunks and never reaches the cap. |
 | `cache_size` | driver default (2 MB) | Measured: raising it buys no latency (the working set dwarfs any realistic cache) and it is **per connection**, so it multiplies resident memory. |
 | `mmap_size` | off | Opt-in, see below. |
 | `auto_vacuum` | off | Measured: 100 delete+reinsert cycles over 72k rows grew the file by 3.8 MB and ended with an empty freelist. Pages are recycled by the next insert. |
@@ -186,13 +187,27 @@ of the matching chromem directory that is not already recorded in
 - **Existing install** — one transaction per collection, which also writes the
   collection's `migration_state` row. An interrupted import therefore redoes
   exactly the collection it was in the middle of and never duplicates a
-  finished one. Progress is logged at `info` (the default level) every 10
-  collections: `migrating vector store collections=12/47 docs=…`.
+  finished one. Progress is logged at `warn` every 10 collections:
+  `migrating vector store collections=12/47 docs=…`. Warn, not info, because
+  production runs at warn level and the HTTP listener only comes up once the
+  store is open — at info the operator watches a server that answers nothing
+  and says nothing for the whole import, which has repeatedly been read as
+  "it is down" and answered with a restart.
+- **Streamed, not buffered** — decode workers feed a channel and the writer
+  drains it into the transaction 2000 documents at a time. Decoding a whole
+  collection first cost ~9 kB of live heap per document (268 MB peak for a 30k
+  document collection, ~1.8 GB for a 200k monorepo): the first boot after the
+  upgrade demanded exactly the memory this store exists to give back. Peak heap
+  now scales with the batch, not with the collection.
 - **Reference figures** — 312,334 documents across 47 collections imported in
   17 s, producing a 1.86 GB database from a 2.5 GB gob tree.
-- **Before starting**, free space is checked (the database comes out at roughly
-  half the size of the gob tree); an obviously impossible import fails the boot
-  with a clear message rather than half-writing.
+- **Before starting**, free space is checked at 0.9x the gob tree: 0.74x is the
+  measured database (1.86 GB from 2.5 GB) and the rest is the WAL. Every page a
+  transaction touches sits in the WAL until it commits, so a per-collection
+  transaction still means a WAL of roughly one collection whatever the write
+  batch is — `journal_size_limit` truncates it afterwards, but the import has to
+  fit through the peak. An obviously impossible import fails the boot with a
+  clear message rather than half-writing.
 - **Nothing under the chromem directory is ever modified or removed.** It is
   the rollback path: downgrading to a build that uses chromem finds its data
   exactly as it left it.

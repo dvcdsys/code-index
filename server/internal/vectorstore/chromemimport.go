@@ -45,12 +45,36 @@ type chromemCollectionMeta struct {
 const chromemMetadataFile = "00000000.gob"
 
 // importSpaceFactor is how much free space the import is assumed to need,
-// relative to the gob tree it reads. The SQLite file came out at roughly 45%
-// of the gob tree on real data (1121 MB from 2.5 GB); half is the guard.
-const importSpaceFactor = 0.5
+// relative to the gob tree it reads.
+//
+// Measured on the same real 2.5 GB gob tree: the finished SQLite file is
+// 1.86 GB, i.e. 0.74x. (An earlier 0.45x figure came from a prototype that did
+// not store chunk content; the shipping schema does — see vector_contents in
+// schemaSQL — so it is not the number to size a disk guard with.)
+//
+// The remaining 0.16 is for the WAL. The import commits one transaction per
+// collection so that an interruption redoes exactly one collection, and every
+// page a transaction touches sits in the WAL until it commits — so the WAL
+// still reaches roughly one collection's worth of pages, whatever the write
+// batch size is. PRAGMA journal_size_limit (see sqlite.go) truncates the file
+// back to its cap at the next checkpoint, so this is a transient peak rather
+// than a permanent high-water mark, but the import has to fit through it.
+const importSpaceFactor = 0.9
 
 // importLogEvery throttles progress logging to one line per N collections.
 const importLogEvery = 10
+
+// importBatchSize is how many decoded documents the writer holds in memory at
+// once. It is the whole point of the streaming pipeline: decoding a collection
+// into one big slice before opening the transaction cost ~9 kB of live heap per
+// document (measured 268 MB peak HeapAlloc for a 30k-document collection, so
+// ~650 MB for 74k and ~1.8 GB for a 200k-document monorepo) — the first boot
+// after the upgrade demanded exactly the memory this store exists to give back,
+// and OOM-killed containers sized for the new ~28 MB idle footprint. Peak heap
+// now scales with this constant instead of with the collection.
+//
+// A var, not a const, so tests can exercise batch boundaries cheaply.
+var importBatchSize = 2000
 
 // importLegacyChromem imports every collection of s.legacyDir that is not yet
 // recorded in migration_state. Each collection is one transaction that also
@@ -112,7 +136,13 @@ func (s *Store) importLegacyChromem(ctx context.Context) error {
 	}
 
 	started := time.Now()
-	s.logger.Info("migrating vector store: importing legacy chromem collections",
+	// WARN, not INFO, for all three migration lines. Production runs at warn
+	// level and the HTTP listener only comes up after the store opens, so at
+	// info the operator watches a server that answers nothing and says nothing
+	// for the whole import. That exact silence has repeatedly been read as
+	// "the server is down" and answered with a restart — which throws away the
+	// collection in flight and starts the wait again.
+	s.logger.Warn("migrating vector store: importing legacy chromem collections",
 		"collections", len(todo), "source", s.legacyDir, "target", s.dbPath)
 
 	var totalDocs int64
@@ -126,13 +156,13 @@ func (s *Store) importLegacyChromem(ctx context.Context) error {
 		}
 		totalDocs += int64(n)
 		if (i+1)%importLogEvery == 0 || i == len(todo)-1 {
-			s.logger.Info("migrating vector store",
+			s.logger.Warn("migrating vector store",
 				"collections", fmt.Sprintf("%d/%d", i+1, len(todo)),
 				"docs", totalDocs,
 				"elapsed", time.Since(started).Round(time.Second).String())
 		}
 	}
-	s.logger.Info("vector store migration complete",
+	s.logger.Warn("vector store migration complete",
 		"collections", len(todo), "docs", totalDocs,
 		"elapsed", time.Since(started).Round(time.Millisecond).String(),
 		"legacy_store_kept_at", s.legacyDir)
@@ -225,6 +255,17 @@ func (s *Store) migratedCollections(ctx context.Context) (map[string]struct{}, e
 
 // importCollection imports one chromem collection directory in a single
 // transaction and returns the number of documents written.
+//
+// Decoding and writing are pipelined: NumCPU workers decode gob files into a
+// channel and this goroutine drains it into the transaction importBatchSize
+// documents at a time, dropping each batch's references before pulling the
+// next. Live heap is therefore bounded by the batch and the channel buffer, not
+// by the collection — see importBatchSize for the numbers that motivate it.
+//
+// It is still ONE transaction per collection, which is what makes an
+// interrupted import resumable: either the collection and its migration_state
+// row are both there, or neither is, so the next boot redoes exactly the
+// collection that was in flight and never duplicates a finished one.
 func (s *Store) importCollection(ctx context.Context, dir, name string) (int, error) {
 	files, err := os.ReadDir(dir)
 	if err != nil {
@@ -239,10 +280,11 @@ func (s *Store) importCollection(ctx context.Context, dir, name string) (int, er
 	}
 	sort.Strings(paths)
 
-	docs, err := decodeDocs(ctx, paths, s.logger)
-	if err != nil {
-		return 0, err
-	}
+	// Producers are cancelled on every exit path, so a writer error or a
+	// cancelled import never leaves decode workers blocked on a send.
+	decodeCtx, stopDecoding := context.WithCancel(ctx)
+	defer stopDecoding()
+	docs := decodeDocs(decodeCtx, paths, s.logger)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -269,26 +311,53 @@ func (s *Store) importCollection(ctx context.Context, dir, name string) (int, er
 	defer contentStmt.Close()
 
 	written := 0
-	for _, d := range docs {
-		if len(d.Embedding) == 0 {
+	batch := make([]*chromemDoc, 0, importBatchSize)
+	flush := func() error {
+		for _, d := range batch {
+			if len(d.Embedding) == 0 {
+				continue
+			}
+			emb := d.Embedding
+			if !isNormalized(emb) {
+				emb = normalizeVector(emb)
+			}
+			if _, err := vecStmt.ExecContext(ctx, collID, d.ID,
+				d.Metadata["file_path"],
+				atoiOrZero(d.Metadata["start_line"]),
+				atoiOrZero(d.Metadata["end_line"]),
+				d.Metadata["chunk_type"], d.Metadata["symbol_name"], d.Metadata["language"],
+				floatsBlob(emb)); err != nil {
+				return err
+			}
+			if _, err := contentStmt.ExecContext(ctx, collID, d.ID, d.Content); err != nil {
+				return err
+			}
+			written++
+		}
+		// clear() before reslicing: the backing array outlives the batch, and
+		// leaving stale pointers in it would pin a whole batch of documents
+		// (embedding plus chunk text) for the lifetime of the collection.
+		clear(batch)
+		batch = batch[:0]
+		return nil
+	}
+
+	for d := range docs {
+		batch = append(batch, d)
+		if len(batch) < importBatchSize {
 			continue
 		}
-		emb := d.Embedding
-		if !isNormalized(emb) {
-			emb = normalizeVector(emb)
-		}
-		if _, err := vecStmt.ExecContext(ctx, collID, d.ID,
-			d.Metadata["file_path"],
-			atoiOrZero(d.Metadata["start_line"]),
-			atoiOrZero(d.Metadata["end_line"]),
-			d.Metadata["chunk_type"], d.Metadata["symbol_name"], d.Metadata["language"],
-			floatsBlob(emb)); err != nil {
+		if err := flush(); err != nil {
 			return 0, err
 		}
-		if _, err := contentStmt.ExecContext(ctx, collID, d.ID, d.Content); err != nil {
-			return 0, err
-		}
-		written++
+	}
+	if err := flush(); err != nil {
+		return 0, err
+	}
+	// The producers stop early on cancellation, which looks exactly like a
+	// finished collection from here — so ask the context, not the channel.
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
 
 	if _, err := tx.ExecContext(ctx,
@@ -303,54 +372,62 @@ func (s *Store) importCollection(ctx context.Context, dir, name string) (int, er
 	return written, nil
 }
 
-// decodeDocs decodes gob files in parallel. Decoding is the expensive half of
-// the import (the writer is a single transaction either way), so it runs on
-// NumCPU workers.
-func decodeDocs(ctx context.Context, paths []string, logger *slog.Logger) ([]*chromemDoc, error) {
-	out := make([]*chromemDoc, len(paths))
+// decodeDocs decodes gob files in parallel and streams the results. Decoding is
+// the expensive half of the import, so it runs on NumCPU workers; the channel
+// is what keeps the decoded documents from piling up ahead of the writer.
+//
+// The returned channel is closed when every worker has finished — on success,
+// on cancellation, or after a file that could not be decoded. Documents arrive
+// in completion order, not in `paths` order: nothing downstream depends on the
+// order (rows are keyed by doc_id), and imposing one would mean buffering.
+func decodeDocs(ctx context.Context, paths []string, logger *slog.Logger) <-chan *chromemDoc {
+	out := make(chan *chromemDoc, importBatchSize)
 	workers := min(runtime.NumCPU(), len(paths))
 	if workers < 1 {
-		return nil, nil
+		close(out)
+		return out
 	}
-	idx := make(chan int, workers*4)
+
+	idx := make(chan string, workers*4)
+	go func() {
+		defer close(idx)
+		for _, p := range paths {
+			select {
+			case idx <- p:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := range idx {
-				d, err := readChromemDoc(paths[i])
+			for p := range idx {
+				d, err := readChromemDoc(p)
 				if err != nil {
 					// A file that is not a Document is either the collection
 					// metadata under an unexpected name or something foreign.
 					// Neither is worth failing a whole namespace over.
 					logger.Warn("vectorstore: skipping undecodable legacy document",
-						"file", paths[i], "err", err)
+						"file", p, "err", err)
 					continue
 				}
-				out[i] = d
+				select {
+				case out <- d:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
-	for i := range paths {
-		if ctx.Err() != nil {
-			break
-		}
-		idx <- i
-	}
-	close(idx)
-	wg.Wait()
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	docs := out[:0]
-	for _, d := range out {
-		if d != nil {
-			docs = append(docs, d)
-		}
-	}
-	return docs, nil
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
 }
 
 func readChromemDoc(path string) (*chromemDoc, error) {

@@ -46,6 +46,21 @@ const pageSize = 8192
 // enough that a legitimate queue never surfaces as SQLITE_BUSY.
 const busyTimeoutMS = 10000
 
+// journalSizeLimitBytes caps how large the -wal file is allowed to STAY.
+//
+// A checkpoint copies WAL frames into the database and then rewinds the WAL,
+// but by default it leaves the file at its high-water mark forever: one big
+// transaction (the legacy import commits a whole collection at once) leaves a
+// permanent WAL the size of that collection — measured 159 MB sitting beside a
+// 158 MB database. That is disk nobody ever gets back, and it is counted in the
+// "Vector store" row of the Resources screen, so it also makes the store look
+// twice its real size. With a limit set, the checkpoint truncates the file back
+// to the cap.
+//
+// 64 MB is well above what steady-state indexing produces (upsert commits every
+// upsertBatchSize chunks) so normal operation never pays for the truncation.
+const journalSizeLimitBytes = 64 << 20
+
 // idleConnTimeout is how long an idle pooled connection is kept.
 //
 // This is the mechanism that makes idle RSS collapse. SQLite's per-connection
@@ -190,6 +205,7 @@ func openDB(path string, mmapBytes int64) (*sql.DB, error) {
 	pragmas := []string{
 		fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS),
 		"PRAGMA synchronous=NORMAL",
+		fmt.Sprintf("PRAGMA journal_size_limit=%d", journalSizeLimitBytes),
 	}
 	if mmapBytes > 0 {
 		pragmas = append(pragmas, fmt.Sprintf("PRAGMA mmap_size=%d", mmapBytes))

@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	chromem "github.com/philippgille/chromem-go"
 )
@@ -122,41 +124,7 @@ func TestImportLegacyChromem(t *testing.T) {
 	// byte-for-byte (chromem stored these already normalised, so nothing may
 	// have been rewritten on the way in).
 	for name, docs := range want {
-		collID, ok, err := s.collectionID(context.Background(), name)
-		if err != nil || !ok {
-			t.Fatalf("collection %s missing after import (err=%v)", name, err)
-		}
-		for _, d := range docs {
-			var (
-				filePath, chunkType, symbolName, language, content string
-				startLine, endLine                                 int
-				blob                                               []byte
-			)
-			err := s.db.QueryRow(`
-				SELECT v.file_path, v.start_line, v.end_line, v.chunk_type, v.symbol_name,
-				       v.language, v.embedding, c.content
-				  FROM vectors v JOIN vector_contents c
-				    ON c.collection_id = v.collection_id AND c.doc_id = v.doc_id
-				 WHERE v.collection_id = ? AND v.doc_id = ?`, collID, d.ID).
-				Scan(&filePath, &startLine, &endLine, &chunkType, &symbolName, &language, &blob, &content)
-			if err != nil {
-				t.Fatalf("document %s of %s: %v", d.ID, name, err)
-			}
-			if filePath != d.Metadata["file_path"] || chunkType != d.Metadata["chunk_type"] ||
-				symbolName != d.Metadata["symbol_name"] || language != d.Metadata["language"] {
-				t.Fatalf("document %s metadata mismatch: %q/%q/%q/%q", d.ID, filePath, chunkType, symbolName, language)
-			}
-			if strconv.Itoa(startLine) != d.Metadata["start_line"] || strconv.Itoa(endLine) != d.Metadata["end_line"] {
-				t.Fatalf("document %s lines = %d-%d, want %s-%s", d.ID,
-					startLine, endLine, d.Metadata["start_line"], d.Metadata["end_line"])
-			}
-			if content != d.Content {
-				t.Fatalf("document %s content = %q, want %q", d.ID, content, d.Content)
-			}
-			if wantBlob := floatsBlob(d.Embedding); string(blob) != string(wantBlob) {
-				t.Fatalf("document %s embedding is not byte-exact", d.ID)
-			}
-		}
+		assertDocsImportedExactly(t, s, name, docs)
 	}
 
 	if diff := treeSnapshot(t, legacy); !equalStrings(before, diff) {
@@ -272,6 +240,160 @@ func TestImportLegacyChromem_ResumesAfterInterruption(t *testing.T) {
 		if !contains(stateAfter, line) {
 			t.Errorf("migration state for an already-imported collection changed: %q not in %v", line, stateAfter)
 		}
+	}
+}
+
+// The import decodes into a channel and writes in batches inside one
+// transaction (see importBatchSize). A collection spanning several batches must
+// come out identical to one that fits in a single batch — nothing dropped at a
+// flush, nothing written twice.
+func TestImportLegacyChromem_StreamsAcrossBatches(t *testing.T) {
+	withImportBatchSize(t, 5)
+	// 23 documents = four full batches and a partial one.
+	legacy, want := legacyFixture(t, 2, 23, 8)
+
+	s, err := OpenWith(Options{Dir: t.TempDir(), LegacyChromaDir: legacy})
+	if err != nil {
+		t.Fatalf("OpenWith: %v", err)
+	}
+	defer s.Close()
+
+	for name, docs := range want {
+		assertDocsImportedExactly(t, s, name, docs)
+	}
+	for _, line := range migrationState(t, s) {
+		if !strings.HasSuffix(line, " 23") {
+			t.Errorf("migration_state records %q, want 23 documents", line)
+		}
+	}
+}
+
+// The flush at the end of the loop and the flush after it must not both write
+// the final batch. A collection whose size is an exact multiple of the batch is
+// where that double-write would show up.
+func TestImportLegacyChromem_ExactBatchMultiple(t *testing.T) {
+	for _, tc := range []struct{ batch, docs int }{
+		{batch: 5, docs: 15}, // three full batches, nothing left over
+		{batch: 6, docs: 6},  // exactly one batch
+		{batch: 9, docs: 4},  // one partial batch, never reaches a flush point
+	} {
+		t.Run(fmt.Sprintf("batch%d_docs%d", tc.batch, tc.docs), func(t *testing.T) {
+			withImportBatchSize(t, tc.batch)
+			legacy, want := legacyFixture(t, 1, tc.docs, 8)
+
+			s, err := OpenWith(Options{Dir: t.TempDir(), LegacyChromaDir: legacy})
+			if err != nil {
+				t.Fatalf("OpenWith: %v", err)
+			}
+			defer s.Close()
+
+			for name, docs := range want {
+				assertDocsImportedExactly(t, s, name, docs)
+			}
+			state := migrationState(t, s)
+			if len(state) != 1 || !strings.HasSuffix(state[0], fmt.Sprintf(" %d", tc.docs)) {
+				t.Errorf("migration_state = %v, want one row recording %d documents", state, tc.docs)
+			}
+		})
+	}
+}
+
+// The resume path with a collection that spans several batches: the batched
+// writer must not turn a partially written collection into a duplicated one.
+// The rows it already wrote are inside the transaction that never committed, so
+// what a real crash leaves behind is the stale-row state built here by hand.
+func TestImportLegacyChromem_ResumesMidCollectionAcrossBatches(t *testing.T) {
+	withImportBatchSize(t, 4)
+	const docsPer = 18 // four full batches and a partial one
+	legacy, want := legacyFixture(t, 2, docsPer, 8)
+	dir := t.TempDir()
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	names := make([]string, 0, len(want))
+	for n := range want {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	// Two batches' worth of rows for the first collection, under a file_path
+	// that does not exist in the fixture, and NO migration_state row.
+	interrupted := names[0]
+	ctx := context.Background()
+	collID, err := s.ensureCollection(ctx, interrupted)
+	if err != nil {
+		t.Fatalf("ensure %s: %v", interrupted, err)
+	}
+	for _, d := range want[interrupted][:8] {
+		if _, err := s.db.Exec(upsertVectorSQL, collID, d.ID, "stale.go", 0, 0, "", "", "",
+			floatsBlob(d.Embedding)); err != nil {
+			t.Fatalf("partial write: %v", err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	s2, err := OpenWith(Options{Dir: dir, LegacyChromaDir: legacy})
+	if err != nil {
+		t.Fatalf("resume open: %v", err)
+	}
+	defer s2.Close()
+
+	for name, docs := range want {
+		assertDocsImportedExactly(t, s2, name, docs)
+	}
+	var stale int
+	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM vectors WHERE file_path = 'stale.go'`).Scan(&stale); err != nil {
+		t.Fatalf("count stale: %v", err)
+	}
+	if stale != 0 {
+		t.Errorf("%d rows from the interrupted attempt survived the resume", stale)
+	}
+}
+
+// Cancelling the import must unwind rather than deadlock: the decode workers
+// block on a channel send, and nothing may be left waiting on a writer that has
+// gone away. A cancelled collection also commits nothing, so the next boot
+// redoes it.
+func TestImportCollection_CancelUnwinds(t *testing.T) {
+	withImportBatchSize(t, 1000) // no flush before the cancellation lands
+	legacy, want := legacyFixture(t, 1, 200, 8)
+	dirs := collectionDirsByName(t, legacy)
+
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	var name string
+	for n := range want {
+		name = n
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.importCollection(ctx, dirs[name], name)
+		done <- err
+	}()
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			// It beat the cancellation — legitimate, and then it committed a
+			// complete collection.
+			return
+		}
+		if state := migrationState(t, s); len(state) != 0 {
+			t.Errorf("a cancelled import left migration_state %v, want nothing committed", state)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("importCollection did not return after its context was cancelled — the decode pipeline deadlocked")
 	}
 }
 
@@ -458,6 +580,66 @@ func TestLegacyMigrationStatus(t *testing.T) {
 // --------------------------------------------------------------------------
 // helpers
 // --------------------------------------------------------------------------
+
+// assertDocsImportedExactly checks that every document of a chromem collection
+// survived the import verbatim: metadata, chunk text, and the embedding
+// byte-for-byte. It also pins the document COUNT, so a streaming import that
+// dropped or duplicated a batch fails here rather than silently.
+func assertDocsImportedExactly(t *testing.T, s *Store, name string, docs []chromem.Document) {
+	t.Helper()
+	collID, ok, err := s.collectionID(context.Background(), name)
+	if err != nil || !ok {
+		t.Fatalf("collection %s missing after import (err=%v)", name, err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM vectors WHERE collection_id = ?`, collID).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", name, err)
+	}
+	if n != len(docs) {
+		t.Fatalf("collection %s holds %d rows, want %d", name, n, len(docs))
+	}
+	for _, d := range docs {
+		var (
+			filePath, chunkType, symbolName, language, content string
+			startLine, endLine                                 int
+			blob                                               []byte
+		)
+		err := s.db.QueryRow(`
+			SELECT v.file_path, v.start_line, v.end_line, v.chunk_type, v.symbol_name,
+			       v.language, v.embedding, c.content
+			  FROM vectors v JOIN vector_contents c
+			    ON c.collection_id = v.collection_id AND c.doc_id = v.doc_id
+			 WHERE v.collection_id = ? AND v.doc_id = ?`, collID, d.ID).
+			Scan(&filePath, &startLine, &endLine, &chunkType, &symbolName, &language, &blob, &content)
+		if err != nil {
+			t.Fatalf("document %s of %s: %v", d.ID, name, err)
+		}
+		if filePath != d.Metadata["file_path"] || chunkType != d.Metadata["chunk_type"] ||
+			symbolName != d.Metadata["symbol_name"] || language != d.Metadata["language"] {
+			t.Fatalf("document %s metadata mismatch: %q/%q/%q/%q", d.ID, filePath, chunkType, symbolName, language)
+		}
+		if strconv.Itoa(startLine) != d.Metadata["start_line"] || strconv.Itoa(endLine) != d.Metadata["end_line"] {
+			t.Fatalf("document %s lines = %d-%d, want %s-%s", d.ID,
+				startLine, endLine, d.Metadata["start_line"], d.Metadata["end_line"])
+		}
+		if content != d.Content {
+			t.Fatalf("document %s content = %q, want %q", d.ID, content, d.Content)
+		}
+		if wantBlob := floatsBlob(d.Embedding); string(blob) != string(wantBlob) {
+			t.Fatalf("document %s embedding is not byte-exact", d.ID)
+		}
+	}
+}
+
+// withImportBatchSize shrinks the import write batch for one test. Exercising
+// batch boundaries at the production size would mean fixtures of thousands of
+// gob files per case; the boundary logic is the same at any size.
+func withImportBatchSize(t *testing.T, n int) {
+	t.Helper()
+	prev := importBatchSize
+	importBatchSize = n
+	t.Cleanup(func() { importBatchSize = prev })
+}
 
 // writeCollectionMeta creates a collection directory holding nothing but the
 // metadata gob — enough for the tree to name it, which is all the migration
