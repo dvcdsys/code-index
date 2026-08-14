@@ -107,11 +107,19 @@ services:
           cpus: "${CPUS:-2.0}"
         reservations:
           memory: 1G
+    # /health only answers once the whole boot is done — llama model load
+    # (minutes from cold) and, on the first start after an upgrade, the
+    # one-time chromem -> SQLite vector-store import. Failures inside
+    # start_period do not count, so this window is simply "how long before a
+    # slow boot may be called broken". Nothing acts on `unhealthy` here
+    # (restart: unless-stopped reacts to exits, not health), so an over-long
+    # window costs nothing, while a short one paints the container red mid-boot
+    # and invites a restart that throws the boot away.
     healthcheck:
       test: ["CMD", "/cix-server", "-healthcheck"]
       interval: 30s
       timeout: 10s
-      start_period: 120s
+      start_period: 600s
       retries: 3
 
 volumes:

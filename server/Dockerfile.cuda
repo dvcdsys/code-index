@@ -193,7 +193,15 @@ ENV CIX_LLAMA_TRANSPORT=unix
 EXPOSE 21847
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+# The image default, used when nobody overrides it in compose. /health only
+# answers once the whole boot is done — llama model load (minutes from cold)
+# and, on the first start after an upgrade, the one-time chromem -> SQLite
+# vector-store import — so the start period is generous on purpose. Failures
+# inside it do not count toward --retries, and marking a container unhealthy
+# triggers nothing by itself, so the only cost of a long window is a later
+# label; the cost of a short one is a red container mid-boot and an operator
+# restarting a server that was merely still starting.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD ["/cix-server", "-healthcheck"]
 
 # Run as numeric uid/gid 1001 to match the previous Ubuntu-based image's
