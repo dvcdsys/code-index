@@ -101,22 +101,30 @@ func upgradeSchema(drv driver.Driver, path string, logger *slog.Logger) error {
 
 // readUserVersion opens path just long enough to read PRAGMA user_version.
 // A database written before the stamp existed reports 0.
-// databaseHasNoTables reports whether the database at path has an empty
-// sqlite_master. A fully created store always has tables, so an empty master
-// is proof the file was abandoned before its schema was written — and proof
-// that deleting it loses nothing. SQLite reads a zero-byte file and a
-// header-only one (page 1 materialised, no tables) identically here, which is
-// what lets one check cover the whole undersized-file class.
-func databaseHasNoTables(drv driver.Driver, path string) (bool, error) {
+// probeDatabase classifies the file at path before the pool opens.
+//
+// empty: sqlite_master has no tables at all. A fully created store always has
+// tables, so an empty master is proof the file was abandoned before its schema
+// was written (the crash-on-first-boot class: zero-byte, header-only, or a
+// created-then-dropped page 1) — and proof that recreating it loses nothing.
+//
+// ours: the schema's anchor table (collections — present in every version
+// since v1) exists. A file that is neither empty nor ours belongs to something
+// else entirely; the caller must refuse to touch it rather than let the
+// upgrader die on `no such table: old.collections`, which tells the operator
+// nothing about the actual mistake (usually a wrong CIX_VECTORS_DIR).
+func probeDatabase(drv driver.Driver, path string) (empty, ours bool, err error) {
 	db := sql.OpenDB(&pragmaConnector{drv: drv, dsn: "file:" + path, pragmas: []string{
 		fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS),
 	}})
 	defer db.Close()
-	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&n); err != nil {
-		return false, fmt.Errorf("vectorstore: inspect %s: %w", path, err)
+	var tables, anchor int
+	if err := db.QueryRow(
+		`SELECT count(*), coalesce(sum(name = 'collections'), 0) FROM sqlite_master WHERE type = 'table'`,
+	).Scan(&tables, &anchor); err != nil {
+		return false, false, fmt.Errorf("vectorstore: inspect %s: %w", path, err)
 	}
-	return n == 0, nil
+	return tables == 0, anchor > 0, nil
 }
 
 func readUserVersion(drv driver.Driver, path string) (int, error) {

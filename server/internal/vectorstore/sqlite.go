@@ -242,15 +242,23 @@ func openDB(path string, mmapBytes int64, logger *slog.Logger) (*sql.DB, error) 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		fresh = true
 	} else if err == nil {
-		empty, err := databaseHasNoTables(drv, path)
+		empty, ours, err := probeDatabase(drv, path)
 		if err != nil {
 			return nil, err
 		}
-		if empty {
+		switch {
+		case empty:
 			if err := removeDBFiles(path); err != nil {
 				return nil, err
 			}
 			fresh = true
+		case !ours:
+			// Refusing beats both alternatives: recreating would destroy a
+			// database this code does not understand, and upgrading would die
+			// on an error message about internal table names.
+			return nil, fmt.Errorf(
+				"vectorstore: %s has tables but no collections table — it is not a cix vector store; refusing to touch it (move the file away and restart)",
+				path)
 		}
 	}
 
