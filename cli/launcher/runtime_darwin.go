@@ -536,7 +536,7 @@ func ensureRuntime(u *updater, progress func(string)) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	rel, err := u.runtime.Latest(ctx)
+	rel, err := u.latestRuntime(ctx)
 	if err != nil {
 		return fmt.Errorf("could not find a cix server to install: %w", err)
 	}
