@@ -500,6 +500,48 @@ func TestOpen_TreatsAZeroByteDatabaseAsFresh(t *testing.T) {
 	}
 }
 
+// The other shape of the same crash window: PRAGMA journal_mode ran (page 1
+// exists, with the DEFAULT page size frozen into it) but schemaSQL never did.
+// Size-based emptiness checks miss this file, and it cannot be adopted either
+// — its frozen 4096 page_size would fail initDatabase's verification. The only
+// correct move is to detect "no tables" by content and recreate the file,
+// which an empty sqlite_master proves is lossless.
+func TestOpen_RecreatesAHeaderOnlyDatabase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DBFileName)
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journal string
+	if err := raw.QueryRow("PRAGMA journal_mode=WAL").Scan(&journal); err != nil {
+		t.Fatalf("materialise page 1: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+		t.Fatalf("fixture is not header-only (size=%v err=%v) — the test would not exercise the content check", fi, err)
+	}
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open over a header-only database: %v", err)
+	}
+	defer s.Close()
+	if err := s.UpsertChunks(context.Background(), "/p",
+		[]Chunk{{Content: "c", FilePath: "a.go", StartLine: 1, EndLine: 2}},
+		[][]float32{{1, 0}}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if got := pragmaInt(t, s.db, "page_size"); got != pageSize {
+		t.Errorf("page_size = %d, want %d — the header-only file was adopted instead of recreated", got, pageSize)
+	}
+	if got := pragmaInt(t, s.db, "user_version"); got != schemaVersion {
+		t.Errorf("user_version = %d, want %d", got, schemaVersion)
+	}
+}
+
 // A file stamped by a NEWER binary must keep its stamp. upgradeSchema already
 // leaves version >= ours alone; the trap was initDatabase restamping OUR
 // version unconditionally afterwards — one old-binary run against a new data

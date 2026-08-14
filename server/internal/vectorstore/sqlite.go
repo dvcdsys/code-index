@@ -222,20 +222,36 @@ func openDB(path string, mmapBytes int64, logger *slog.Logger) (*sql.DB, error) 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("vectorstore: create %s: %w", filepath.Dir(path), err)
 	}
-	// A zero-byte file counts as fresh: the driver creates the file on connect
-	// but the schema is written later, so any kill between the two (OOM,
-	// docker stop during first boot, a full disk) leaves an empty file behind.
-	// It holds no data and no version stamp; treating it as existing would
-	// send the upgrader to ATTACH an empty database and die on its first
-	// SELECT, turning a self-healing state into a fatal boot error.
-	fresh := false
-	if fi, err := os.Stat(path); os.IsNotExist(err) || (err == nil && fi.Size() == 0) {
-		fresh = true
-	}
-
 	drv, err := sqliteDriver()
 	if err != nil {
 		return nil, err
+	}
+
+	// A schema-less file counts as fresh. A kill during first boot (OOM,
+	// docker stop, a full disk) can leave the file at any point before
+	// initDatabase writes the schema: zero bytes if nothing ran, or a single
+	// header page if PRAGMA journal_mode got far enough to materialise page 1.
+	// Judged by size, only the first case is visible — so the test is the
+	// CONTENT: an empty sqlite_master proves the file holds nothing, which
+	// both routes it away from the upgrader (ATTACH + SELECT on an empty
+	// database is a fatal boot error) and licenses recreating it. Recreation,
+	// not adoption, because page 1 of a header-only file has already frozen
+	// the DEFAULT page_size — adopting it would fail the page_size check in
+	// initDatabase with equal fatality.
+	fresh := false
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		fresh = true
+	} else if err == nil {
+		empty, err := databaseHasNoTables(drv, path)
+		if err != nil {
+			return nil, err
+		}
+		if empty {
+			if err := removeDBFiles(path); err != nil {
+				return nil, err
+			}
+			fresh = true
+		}
 	}
 
 	// Before the pool exists: the rebuild replaces the file wholesale, so it
