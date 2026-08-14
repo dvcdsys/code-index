@@ -301,7 +301,9 @@ The rules of the second one:
   irreversible and gives up the ability to roll back to a pre-SQLite server
   version.
 - Disk only. Nothing about the legacy tree is in memory — the new store loads
-  nothing at open — so `estimated_ram_bytes` stays zero.
+  nothing at open — so `estimated_ram_bytes` stays zero. Nothing sets that field
+  any more at all; it is deprecated and omitted from the wire, kept only so an
+  older dashboard build does not break on it.
 - The full-migration check is repeated immediately before the delete. Between
   the analysis and the confirm, an embedding-model switch can reopen this
   namespace and start a fresh import; the item is then skipped rather than

@@ -269,8 +269,9 @@ func (s *Service) scanOrphanCollections(ctx context.Context, st *scanState) (Cat
 			Label:  col.Name,
 			Detail: fmt.Sprintf("%d documents", col.Documents),
 			// The store reports the logical size of the rows. It excludes
-			// index entries and page slack, and the file does not shrink
-			// until a VACUUM — the pages are recycled by the next index.
+			// index entries and page slack, so it is a floor on what the
+			// delete gives back — which the store does return to the
+			// filesystem: DeleteCollectionByName runs an incremental vacuum.
 			SizeBytes:  col.SizeBytes,
 			collection: col.Name,
 		})
@@ -378,10 +379,14 @@ func (s *Service) scanStaleNamespaces(ctx context.Context) (Category, []string) 
 	// namespace in EITHER tree is protected, which is what keeps the
 	// pre-migration gob files (the rollback path) off the list.
 	var warnings []string
+	// Labelled: a bare break here would only leave the inner loop and the scan
+	// would carry on into the next namespace tree — walking, and sizing, a
+	// whole second directory after the caller has already given up.
+scan:
 	for _, base := range s.namespaceBases() {
 		for _, dir := range base.leaves(base.root) {
 			if ctxDone(ctx) {
-				break
+				break scan
 			}
 			if isActiveNamespace(dir, active) {
 				continue

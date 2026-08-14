@@ -169,12 +169,15 @@ type Category struct {
 	Description string     `json:"description"`
 	ItemCount   int        `json:"item_count"`
 	SizeBytes   int64      `json:"size_bytes"`
-	// EstimatedRAMBytes is legacy: it existed for orphaned collections back
-	// when the vector store held every document in the Go heap and deleting
-	// one handed memory back. Nothing populates it now (the SQLite store's
-	// footprint is not proportional to what it stores), and omitempty keeps it
-	// off the wire. Kept in the schema so an older dashboard build does not
-	// break on a missing field.
+	// Deprecated: EstimatedRAMBytes is always zero and nothing sets it.
+	//
+	// It existed for orphaned collections back when the vector store held
+	// every document in the Go heap, so deleting one handed memory back.
+	// The SQLite store's footprint is not proportional to what it stores —
+	// there is no heap to attribute — and omitempty keeps the field off the
+	// wire entirely. It survives only so an older dashboard build does not
+	// break on a missing field, and it is a candidate for removal in the next
+	// breaking API revision. Do not add a producer; add a new field instead.
 	EstimatedRAMBytes int64 `json:"estimated_ram_bytes,omitempty"`
 	DefaultSelected   bool  `json:"default_selected"`
 	Destructive       bool  `json:"destructive"`

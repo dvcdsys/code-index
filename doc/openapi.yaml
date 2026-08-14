@@ -4214,10 +4214,19 @@ components:
         estimated_ram_bytes:
           type: integer
           format: int64
+          deprecated: true
+          x-deprecated-reason: >-
+            Always absent since the vector store moved off the Go heap; kept
+            for wire compatibility with older dashboard builds and slated for
+            removal in the next breaking API revision.
           description: |
-            Legacy. It reported heap attributable to these items back when the
-            vector store held every document in memory. Nothing sets it now —
-            the SQLite store's footprint is not proportional to what it holds.
+            Deprecated, and always absent. It reported heap attributable to
+            these items back when the vector store held every document in
+            memory; nothing has set it since the store moved to SQLite, whose
+            footprint is not proportional to what it holds. Kept in the schema
+            only so an older dashboard build does not break on a missing field,
+            and a candidate for removal in the next breaking API revision.
+            Clients must not display it.
         default_selected:
           type: boolean
           description: Whether the dashboard should pre-tick this category.
