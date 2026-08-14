@@ -1,125 +1,133 @@
-import { NavLink } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/auth/useAuth';
 import { useServerStatus } from '@/lib/useServerStatus';
-import { Card, CardDescription, CardHeader, CardTitle } from '@/ui/card';
-import { cn } from '@/lib/cn';
 import { formatVersion } from '@/lib/version';
-import { MODULES } from '../registry';
-import { ConnectClaudeCodeCard } from './ConnectClaudeCodeCard';
+import { Page, SectionLabel } from '@/ui/page';
+import { Button } from '@/ui/button';
+import { Card, StatStrip } from '@/ui/card';
+import { Callout } from '@/ui/alert';
+import { visibleModules } from '../registry';
+import { useProjects } from '../projects/hooks';
+import { isDrifted, projectLabel } from '../projects/lib/projectList';
+import { ConnectClaudeCode } from './ConnectClaudeCode';
 
-// One-line pitch per module — kept here (not on the Module type) so the
-// sidebar stays terse and only the landing page carries the prose.
-const DESCRIPTIONS: Record<string, string> = {
-  projects:
-    'Browse indexed repositories, inspect stats, copy reindex commands, and watch for stale-model drift.',
-  search:
-    'Five modes — semantic, symbols, references, definitions, files — across every project from one bar.',
-  'api-keys':
-    'Mint long-lived API keys for CLI / CI use, scope them to a role, revoke at any time.',
-  users: 'Invite teammates, set roles, reset passwords, and audit access.',
-  settings: 'Personal preferences — theme, default editor, change password.',
-  server:
-    'Tune the embedding model and llama-server runtime, restart the sidecar without dropping into SSH.',
-};
-
+// Home answers three questions in order: is the server healthy, how do I
+// wire my editor to it, and where is everything else.
+//
+// The four server facts are one divided strip — not a floating card — so the
+// page opens on hard values rather than on decoration.
 export default function HomePage() {
   const { user } = useAuth();
-  const role = user?.role ?? 'user';
+  const navigate = useNavigate();
   const { data: status } = useServerStatus();
+  const { data: projectList } = useProjects();
 
-  const cards = MODULES.filter((m) => m.id !== 'home').filter((m) => {
-    if (!m.requiredRole) return true;
-    if (m.requiredRole === 'user') return true;
-    return role === 'admin';
-  });
+  const modules = visibleModules(user?.role).filter((m) => m.id !== 'home');
+  const runtimeModel = status?.embedding_model ?? '';
+  const projects = projectList?.projects ?? [];
+
+  // A project whose vectors were written by a different embedding model
+  // returns nonsense for semantic queries until it is reindexed — that is the
+  // one alert worth interrupting the landing page for.
+  const stale = projects.filter((p) => isDrifted(p, runtimeModel || null));
+
+  const indexed = projectList?.total ?? projects.length;
 
   return (
-    <div className="space-y-8">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Welcome back{user?.email ? `, ${user.email}` : ''}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          The cix dashboard — semantic code search, project management, and runtime control.
-        </p>
-      </header>
+    <Page
+      title={`Welcome back${user?.email ? `, ${user.email.split('@')[0]}` : ''}`}
+      subtitle="Semantic code search, project management and runtime control for this cix server."
+      action={
+        <Button variant="primary" onClick={() => navigate('/projects')}>
+          Index a project
+        </Button>
+      }
+    >
+      <StatStrip
+        items={[
+          { label: 'Server', value: formatVersion(status?.server_version ?? 'dev') },
+          {
+            label: 'Provider',
+            value: (
+              <span className="flex items-center gap-2">
+                <span
+                  className={`cix-dot ${status?.model_loaded ? 'is-ok' : 'is-warn'}`}
+                  aria-hidden
+                />
+                <span className={status?.model_loaded ? 'text-ok' : 'text-warn-ink'}>
+                  {status?.model_loaded ? 'ready' : 'loading'}
+                </span>
+              </span>
+            ),
+          },
+          {
+            label: 'Model',
+            value: <span className="text-[15px]">{runtimeModel || '—'}</span>,
+            title: runtimeModel,
+          },
+          {
+            label: 'Indexed',
+            value: (
+              <span className="text-[17px]">
+                {indexed} project{indexed === 1 ? '' : 's'}
+              </span>
+            ),
+          },
+        ]}
+        className="mb-6"
+      />
 
-      {status && (
-        <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-3">
-          <StatusStat label="Server" value={formatVersion(status.server_version)} />
-          <StatusStat label="Embedding model" value={status.embedding_model || '—'} mono />
-          <StatusStat
-            label="Provider"
-            value={status.model_loaded ? 'Ready' : 'Loading…'}
-            tone={status.model_loaded ? 'ok' : 'warn'}
-          />
+      {/* One column. The page is a sequence — check the server, wire the
+          editor, then go somewhere — and a side rail turned that sequence
+          into two things to read at once, with the setup steps squeezed into
+          a narrow measure for no gain. Only the module tiles fan out. */}
+      {/* min-w-0 on the children is load-bearing: a flex item defaults to
+          min-width:auto, so the long install command inside ConnectClaudeCode
+          would size the column to itself and push the whole page into a
+          horizontal scroll. The old two-column grid hid this behind an
+          explicit minmax(0,1fr). */}
+      <div className="flex flex-col gap-6">
+        <div className="min-w-0">
+          <ConnectClaudeCode />
         </div>
-      )}
 
-      <ConnectClaudeCodeCard />
-
-      <div>
-        <h2 className="mb-3 text-sm font-medium text-muted-foreground">Modules</h2>
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {cards.map((m) => {
-            const Icon = m.icon;
-            return (
-              <NavLink key={m.id} to={m.path} className="group focus:outline-none">
-                <Card
-                  className={cn(
-                    'h-full transition-colors',
-                    'group-hover:border-foreground/30 group-hover:bg-accent/40',
-                    'group-focus-visible:ring-2 group-focus-visible:ring-ring'
-                  )}
-                >
-                  <CardHeader>
-                    <div className="flex items-center gap-2">
-                      <Icon className="h-4 w-4 text-muted-foreground" />
-                      <CardTitle className="text-base">{m.label}</CardTitle>
-                    </div>
-                    <CardDescription>{DESCRIPTIONS[m.id] ?? ''}</CardDescription>
-                  </CardHeader>
+        <div className="min-w-0">
+          <SectionLabel>Modules</SectionLabel>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {modules.map((m) => (
+              <Link key={m.id} to={m.path} className="min-w-0 focus-visible:outline-offset-4">
+                <Card clickable className="h-full">
+                  <div className="p-3.5">
+                    <span className="block text-[14.5px] font-bold">{m.label}</span>
+                    <span className="mt-1 block font-mono text-[11.5px] leading-snug text-muted">
+                      {m.blurb}
+                    </span>
+                  </div>
                 </Card>
-              </NavLink>
-            );
-          })}
+              </Link>
+            ))}
+          </div>
+
+          {stale.length > 0 && (
+            <Callout variant="warn" className="mt-3">
+              <b>
+                {stale.length} project{stale.length === 1 ? '' : 's'} on a stale model
+              </b>
+              <p>
+                {stale
+                  .slice(0, 3)
+                  .map(projectLabel)
+                  .join(', ')}
+                {stale.length > 3 ? ` +${stale.length - 3} more` : ''} — indexed with a different
+                embedding model. A full reindex is needed before semantic search is trustworthy.
+              </p>
+              <Link to="/projects" className="cix-link-btn mt-1 self-start">
+                Open Projects
+              </Link>
+            </Callout>
+          )}
         </div>
       </div>
-
-      <p className="text-xs text-muted-foreground">
-        Prefer the terminal? <code className="rounded bg-muted px-1 py-0.5">cix</code> does code
-        search and navigation from your shell, and manages local project indexing (init, reindex,
-        watch). Administration — users, API keys, and runtime config — lives here in the dashboard.
-      </p>
-    </div>
-  );
-}
-
-function StatusStat({
-  label,
-  value,
-  mono,
-  tone,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-  tone?: 'ok' | 'warn';
-}) {
-  return (
-    <div className="min-w-0">
-      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
-      <div
-        className={cn(
-          'mt-1 truncate text-sm font-medium',
-          mono && 'font-mono text-xs',
-          tone === 'ok' && 'text-emerald-600 dark:text-emerald-400',
-          tone === 'warn' && 'text-amber-600 dark:text-amber-400'
-        )}
-        title={value}
-      >
-        {value}
-      </div>
-    </div>
+    </Page>
   );
 }

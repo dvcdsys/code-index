@@ -1,89 +1,109 @@
 import type { Config } from 'tailwindcss';
 import animate from 'tailwindcss-animate';
 
-// Notion-like palette — muted neutrals, a single accent. Light theme is the
-// default; dark variants are wired but the toggle lands in PR-D.
+// cix design system — cream & ink. The palette lives in src/index.css as
+// space-separated RGB channel vars so the `.dark` class can swap the whole
+// theme and Tailwind can still apply opacity modifiers (`bg-ink/40`).
+//
+// Two deliberate overrides enforce the system's geometry globally:
+//   borderWidth.DEFAULT = 1.5px  — every outline in the UI is the same weight.
+//   borderRadius.*      = 0      — controls are square; only `rounded-card`
+//                                  (12px) rounds, and it is for cards only.
+// A stray `rounded-md` copied in from somewhere therefore renders square
+// instead of quietly breaking the look.
+const c = (v: string) => `rgb(var(${v}) / <alpha-value>)`;
+
 export default {
   darkMode: 'class',
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
-    container: {
-      center: true,
-      padding: '1.5rem',
-      screens: { '2xl': '1280px' },
+    borderRadius: {
+      none: '0px',
+      DEFAULT: '0px',
+      sm: '0px',
+      md: '0px',
+      lg: '0px',
+      xl: '0px',
+      '2xl': '0px',
+      '3xl': '0px',
+      card: '12px',
+      full: '9999px', // radio only — the single circle in the system
     },
     extend: {
       colors: {
-        border: 'hsl(var(--border))',
-        input: 'hsl(var(--input))',
-        ring: 'hsl(var(--ring))',
-        background: 'hsl(var(--background))',
-        foreground: 'hsl(var(--foreground))',
-        primary: {
-          DEFAULT: 'hsl(var(--primary))',
-          foreground: 'hsl(var(--primary-foreground))',
+        canvas: c('--c-canvas'),
+        surface: {
+          DEFAULT: c('--c-surface'),
+          alt: c('--c-surface-alt'),
+          head: c('--c-surface-head'),
+          hover: c('--c-surface-hover'),
         },
-        secondary: {
-          DEFAULT: 'hsl(var(--secondary))',
-          foreground: 'hsl(var(--secondary-foreground))',
+        // The one surface a user types into. Kept a separate role rather than
+        // an alias of `surface` so a control never silently inherits whatever
+        // layer it happens to be dropped on.
+        field: c('--c-field'),
+        track: c('--c-track'),
+        warm: {
+          DEFAULT: c('--c-warm'),
+          deep: c('--c-warm-deep'),
         },
-        muted: {
-          DEFAULT: 'hsl(var(--muted))',
-          foreground: 'hsl(var(--muted-foreground))',
+        ink: {
+          DEFAULT: c('--c-ink'),
+          soft: c('--c-ink-soft'),
+        },
+        dim: c('--c-dim'),
+        muted: c('--c-muted'),
+        faint: c('--c-faint'),
+        line: {
+          soft: c('--c-line-soft'),
+          quiet: c('--c-line-quiet'),
         },
         accent: {
-          DEFAULT: 'hsl(var(--accent))',
-          foreground: 'hsl(var(--accent-foreground))',
+          DEFAULT: c('--c-accent'),
+          press: c('--c-accent-press'),
+          deep: c('--c-accent-deep'),
         },
-        destructive: {
-          DEFAULT: 'hsl(var(--destructive))',
-          foreground: 'hsl(var(--destructive-foreground))',
+        ok: c('--c-ok'),
+        warn: {
+          DEFAULT: c('--c-warn'),
+          ink: c('--c-warn-ink'),
+          bg: c('--c-warn-bg'),
         },
-        card: {
-          DEFAULT: 'hsl(var(--card))',
-          foreground: 'hsl(var(--card-foreground))',
+        danger: {
+          bg: c('--c-danger-bg'),
+          ink: c('--c-danger-ink'),
         },
-        popover: {
-          DEFAULT: 'hsl(var(--popover))',
-          foreground: 'hsl(var(--popover-foreground))',
+        well: {
+          DEFAULT: c('--c-well'),
+          text: c('--c-well-text'),
         },
       },
-      borderRadius: {
-        lg: 'var(--radius)',
-        md: 'calc(var(--radius) - 2px)',
-        sm: 'calc(var(--radius) - 4px)',
+      borderWidth: {
+        DEFAULT: '1.5px',
+        0: '0px',
+        2: '2px',
+        3: '3px',
+        6: '6px',
+      },
+      boxShadow: {
+        hard: '4px 4px 0 var(--cix-shadow-color)',
+        'hard-sm': '2px 2px 0 var(--cix-shadow-color)',
+        'hard-lg': '8px 8px 0 var(--cix-shadow-color)',
+        'hard-accent': '4px 4px 0 rgb(var(--c-accent))',
+        none: 'none',
       },
       fontFamily: {
-        sans: [
-          'ui-sans-serif',
-          '-apple-system',
-          'BlinkMacSystemFont',
-          'Segoe UI',
-          'Inter',
-          'system-ui',
-          'sans-serif',
-        ],
-        mono: [
-          'ui-monospace',
-          'SFMono-Regular',
-          'JetBrains Mono',
-          'Menlo',
-          'monospace',
-        ],
+        sans: ['Helvetica Neue', 'Helvetica', 'Inter', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'SF Mono', 'Menlo', 'monospace'],
       },
       keyframes: {
-        'accordion-down': {
-          from: { height: '0' },
-          to: { height: 'var(--radix-accordion-content-height)' },
-        },
-        'accordion-up': {
-          from: { height: 'var(--radix-accordion-content-height)' },
-          to: { height: '0' },
+        'cix-in': {
+          from: { opacity: '0' },
+          to: { opacity: '1' },
         },
       },
       animation: {
-        'accordion-down': 'accordion-down 0.2s ease-out',
-        'accordion-up': 'accordion-up 0.2s ease-out',
+        'cix-in': 'cix-in 90ms ease-out',
       },
     },
   },

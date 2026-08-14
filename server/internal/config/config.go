@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dvcdsys/code-index/server/internal/schedule"
 )
 
 // Config holds all runtime settings. Port defaults to 21847 — the same
@@ -35,9 +37,24 @@ type Config struct {
 	// Set it to 127.0.0.1 to make the server reachable only from the machine it
 	// runs on. That is the useful setting for a desktop install, where "the
 	// whole LAN can reach my code index" is rarely what was intended.
-	BindAddr                string
-	EmbeddingModel          string
-	ChromaPersistDir        string
+	BindAddr         string
+	EmbeddingModel   string
+	ChromaPersistDir string
+	// VectorsDir is the container for the SQLite vector stores, one database
+	// per embedding namespace. Defaults to a SIBLING of ChromaPersistDir
+	// ("<...>/vectors" next to "<...>/chroma") so a deployment that only
+	// overrides CIX_CHROMA_PERSIST_DIR — every container does — still lands
+	// its vectors on the same persistent volume. Env: CIX_VECTORS_DIR.
+	//
+	// The two trees are deliberately separate: the legacy chromem gob files
+	// stay exactly where they are as the rollback path, and reclaiming them
+	// later is one directory removal that cannot touch a live database.
+	VectorsDir string
+	// VectorMMapSize maps PRAGMA mmap_size for the vector store, in bytes.
+	// 0 (the default) leaves it off. Env: CIX_VECTOR_MMAP_SIZE. It buys
+	// roughly 40% lower search latency and costs resident memory: every
+	// connection maps the database file and mapped pages count in RSS.
+	VectorMMapSize          int64
 	SQLitePath              string
 	MaxFileSize             int
 	ExcludedDirs            []string
@@ -195,6 +212,17 @@ type Config struct {
 	// PollSchedulerTick is how often the shared poll scheduler scans for
 	// due repos. Source: CIX_POLL_SCHEDULER_TICK (default 30s).
 	PollSchedulerTick time.Duration
+
+	// Automatic database maintenance, CIX_DB_MAINTENANCE_*. All nil unless the
+	// variable is set. They exist for deployments driven by a compose file,
+	// where nobody is going to open the dashboard to switch anything on.
+	//
+	// DBMaintenanceCron is a crontab expression and supplies the default
+	// timing for the database tasks; a schedule saved in the dashboard still
+	// wins over it. The thresholds decide whether a due run is worth doing.
+	DBMaintenanceCron           *string
+	DBMaintenanceMinFreePercent *int
+	DBMaintenanceMinFreeBytes   *int64
 }
 
 // ModelSafeName returns the embedding model name normalised for use inside
@@ -237,6 +265,27 @@ func (c *Config) ChromaDirFor(components []string) string {
 	return filepath.Join(append([]string{c.ChromaPersistDir}, components...)...)
 }
 
+// VectorDirFor returns the on-disk vector-store namespace directory for an
+// embedding identity expressed as nested path components (see
+// provider.Provider.StorageComponents): {kind, model-slug[, variant]}.
+//
+// It mirrors ChromaDirFor's namespacing exactly — same components, same
+// nesting, different container — so the legacy chromem directory of a given
+// namespace is always ChromaDirFor(comps) for the same comps that produced
+// VectorDirFor(comps). That is what lets the store find the gob files it has
+// to import.
+func (c *Config) VectorDirFor(components []string) string {
+	return filepath.Join(append([]string{c.VectorsDir}, components...)...)
+}
+
+// defaultVectorsDir puts the vector databases next to the chroma container.
+func defaultVectorsDir(chromaPersistDir string) string {
+	if chromaPersistDir == "" {
+		return filepath.Join(defaultDataDir(), "vectors")
+	}
+	return filepath.Join(filepath.Dir(filepath.Clean(chromaPersistDir)), "vectors")
+}
+
 // Load reads CIX_* environment variables and returns a populated Config.
 // Returns an error if a numeric variable is present but unparseable.
 //
@@ -251,6 +300,14 @@ func Load() (*Config, error) {
 		ChromaPersistDir: getenv("CIX_CHROMA_PERSIST_DIR", defaultChromaPersistDir()),
 		SQLitePath:       getenv("CIX_SQLITE_PATH", defaultSQLitePath()),
 	}
+
+	c.VectorsDir = getenv("CIX_VECTORS_DIR", defaultVectorsDir(c.ChromaPersistDir))
+
+	vecMMap, err := getenvInt("CIX_VECTOR_MMAP_SIZE", 0)
+	if err != nil {
+		return nil, err
+	}
+	c.VectorMMapSize = int64(vecMMap)
 
 	authOff, err := getenvBool("CIX_AUTH_DISABLED", false)
 	if err != nil {
@@ -466,6 +523,34 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.PollSchedulerTick = pollTick
+
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_CRON"); ok {
+		expr := strings.TrimSpace(v)
+		if err := schedule.Validate(expr); err != nil {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_CRON: %w", err)
+		}
+		c.DBMaintenanceCron = &expr
+	}
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_MIN_FREE_PERCENT"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_PERCENT: %w", err)
+		}
+		if n < 0 || n > 100 {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_PERCENT must be between 0 and 100, got %d", n)
+		}
+		c.DBMaintenanceMinFreePercent = &n
+	}
+	if v, ok := os.LookupEnv("CIX_DB_MAINTENANCE_MIN_FREE_BYTES"); ok {
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_BYTES: %w", err)
+		}
+		if n < 0 {
+			return nil, fmt.Errorf("CIX_DB_MAINTENANCE_MIN_FREE_BYTES must not be negative, got %d", n)
+		}
+		c.DBMaintenanceMinFreeBytes = &n
+	}
 
 	return c, nil
 }

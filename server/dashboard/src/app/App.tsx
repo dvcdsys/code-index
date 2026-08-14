@@ -1,29 +1,30 @@
-import { Loader2 } from 'lucide-react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from '@/auth/useAuth';
 import BootstrapNeededPage from '@/auth/BootstrapNeededPage';
 import ChangePasswordPage from '@/auth/ChangePasswordPage';
 import LoginPage from '@/auth/LoginPage';
-import { MODULES } from '@/modules/registry';
+import { visibleModules } from '@/modules/registry';
+import { Dots } from '@/ui/button';
 import { Shell } from './Shell';
+import { StatusFactProvider } from './StatusBar';
 
-// Top-level auth + route gate. Three states branch off here:
-//   - bootstrap not done       → BootstrapNeededPage (no other route works)
-//   - logged out               → LoginPage          (no Shell, no nav)
-//   - must change password     → ChangePasswordPage (no Shell, no nav)
-//   - logged in & happy        → Shell + module routes
+// Top-level auth + route gate. Four states branch off here:
+//   - bootstrap not done    → BootstrapNeededPage (no other route works)
+//   - logged out            → LoginPage           (no Shell, no nav)
+//   - must change password  → ChangePasswordPage  (no Shell, no nav)
+//   - logged in & happy     → Shell + module routes
 //
-// Module routes are derived from the registry — no manual <Route> entries
-// per feature. Each module owns its `path` (relative to /dashboard) and
-// renders whatever it likes inside.
+// Module routes come from the registry — no manual <Route> per feature. A
+// module whose role gate excludes the current user has no <Route> mounted at
+// all, so a deep link to it falls through to "/".
 export default function App() {
   const { loading, needsBootstrap, user, mustChangePassword } = useAuth();
 
   if (loading) {
     return (
-      <div className="flex min-h-dvh items-center justify-center text-muted-foreground">
-        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        Loading…
+      <div className="flex min-h-dvh items-center justify-center gap-3 font-mono text-[13px] text-muted">
+        <Dots />
+        loading
       </div>
     );
   }
@@ -48,28 +49,20 @@ export default function App() {
     );
   }
 
-  // Authenticated + ready — render every registered module under the Shell.
-  // A module whose role gate excludes the current user simply has no <Route>
-  // mounted, so a deep link to it 404s back to /.
-  const visible = MODULES.filter((m) => {
-    if (!m.requiredRole) return true;
-    if (m.requiredRole === 'user') return true;
-    return user.role === 'admin';
-  });
-
   return (
-    <Shell>
-      <Routes>
-        {visible.map((m) => {
-          // Modules can own a sub-tree by defining their own routes inside
-          // their element; we mount with a trailing wildcard so they get
-          // them on `/<path>/*`.
-          const mountPath = m.path === '/' ? '/*' : `${m.path}/*`;
-          const Element = m.element;
-          return <Route key={m.id} path={mountPath} element={<Element />} />;
-        })}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </Shell>
+    <StatusFactProvider>
+      <Shell>
+        <Routes>
+          {visibleModules(user.role).map((m) => {
+            // Modules can own a sub-tree, so each mounts with a trailing
+            // wildcard and routes `/<path>/*` internally.
+            const mountPath = m.path === '/' ? '/*' : `${m.path}/*`;
+            const Element = m.element;
+            return <Route key={m.id} path={mountPath} element={<Element />} />;
+          })}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Shell>
+    </StatusFactProvider>
   );
 }

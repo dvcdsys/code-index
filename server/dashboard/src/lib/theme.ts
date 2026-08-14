@@ -38,9 +38,13 @@ export function resolveTheme(mode: ThemeMode): ResolvedTheme {
   return mode === 'system' ? resolveSystemTheme() : mode;
 }
 
+// Both signals are set: `.dark` is what Tailwind's darkMode:'class' keys off,
+// `data-theme` is the attribute the design system's reference CSS uses and it
+// keeps devtools inspection honest about which theme is live.
 export function applyResolvedTheme(resolved: ResolvedTheme): void {
   if (typeof document === 'undefined') return;
   const root = document.documentElement;
   if (resolved === 'dark') root.classList.add('dark');
   else root.classList.remove('dark');
+  root.dataset.theme = resolved;
 }

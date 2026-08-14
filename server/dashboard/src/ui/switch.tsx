@@ -1,29 +1,65 @@
-"use client"
+import * as SwitchPrimitives from '@radix-ui/react-switch';
+import { forwardRef, type ComponentPropsWithoutRef, type ElementRef } from 'react';
+import { cn } from '@/lib/cn';
 
-import * as React from "react"
-import * as SwitchPrimitives from "@radix-ui/react-switch"
-
-import { cn } from "@/lib/cn"
-
-const Switch = React.forwardRef<
-  React.ElementRef<typeof SwitchPrimitives.Root>,
-  React.ComponentPropsWithoutRef<typeof SwitchPrimitives.Root>
+// 34×18 square track, 14×12 knob, green when on. Square, like every other
+// control — the pill toggle is the one shape this system refuses.
+export const Switch = forwardRef<
+  ElementRef<typeof SwitchPrimitives.Root>,
+  ComponentPropsWithoutRef<typeof SwitchPrimitives.Root>
 >(({ className, ...props }, ref) => (
   <SwitchPrimitives.Root
+    ref={ref}
     className={cn(
-      "peer inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input",
+      'relative inline-flex h-[18px] w-[34px] flex-none cursor-pointer items-center border bg-track',
+      'transition-colors data-[state=checked]:bg-ok',
+      'disabled:cursor-default disabled:border-line-quiet disabled:bg-track',
       className
     )}
     {...props}
-    ref={ref}
   >
     <SwitchPrimitives.Thumb
       className={cn(
-        "pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0"
+        'pointer-events-none block h-3 w-3.5 bg-surface transition-transform',
+        'translate-x-[1px] data-[state=checked]:translate-x-[17px]'
       )}
     />
   </SwitchPrimitives.Root>
-))
-Switch.displayName = SwitchPrimitives.Root.displayName
+));
+Switch.displayName = SwitchPrimitives.Root.displayName;
 
-export { Switch }
+// Toggle + word, the pairing the system always uses: a colour alone never
+// carries state.
+export function SwitchRow({
+  checked,
+  onCheckedChange,
+  label,
+  hint,
+  disabled,
+  id,
+  className,
+}: {
+  checked: boolean;
+  onCheckedChange: (v: boolean) => void;
+  label: string;
+  hint?: string;
+  disabled?: boolean;
+  id?: string;
+  className?: string;
+}) {
+  return (
+    <div className={cn('flex items-start gap-2.5', className)}>
+      <Switch
+        id={id}
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        disabled={disabled}
+        className="mt-0.5"
+      />
+      <label htmlFor={id} className="min-w-0 cursor-pointer select-none">
+        <span className={cn('block text-sm', disabled && 'text-faint')}>{label}</span>
+        {hint ? <span className="cix-hint mt-0.5 block">{hint}</span> : null}
+      </label>
+    </div>
+  );
+}

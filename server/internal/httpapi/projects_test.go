@@ -3,7 +3,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/db"
 	"github.com/dvcdsys/code-index/server/internal/projects"
+	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
 
 func newTestDeps(t *testing.T) Deps {
@@ -184,6 +187,77 @@ func TestDeleteProject(t *testing.T) {
 	w = doRequest(t, router, http.MethodGet, "/api/v1/projects/"+hash, nil)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404 after delete, got %d", w.Code)
+	}
+}
+
+// DELETE /projects/{path} must not only drop the collection but hand its pages
+// back to the filesystem. The reclaim lives in the HTTP wiring
+// (projectArtifacts), not inside DeleteCollectionByName — it moved out of the
+// store when maintenance.Clean went batched, and this path silently lost it in
+// that refactor once already. Behavioural pin: the logical database size must
+// shrink and the freelist must end empty, not merely grow.
+func TestDeleteProject_ReclaimsVectorStorePages(t *testing.T) {
+	d := newTestDeps(t)
+	vs, err := vectorstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open vector store: %v", err)
+	}
+	t.Cleanup(func() { _ = vs.Close() })
+	d.VectorStore = vs
+	router := NewRouter(d)
+
+	doRequest(t, router, http.MethodPost, "/api/v1/projects", map[string]any{"host_path": "/keeper"})
+	doRequest(t, router, http.MethodPost, "/api/v1/projects", map[string]any{"host_path": "/doomed"})
+
+	seed := func(project string, n int) {
+		t.Helper()
+		chunks := make([]vectorstore.Chunk, n)
+		embs := make([][]float32, n)
+		for i := range chunks {
+			chunks[i] = vectorstore.Chunk{
+				Content:  strings.Repeat("x", 512),
+				FilePath: fmt.Sprintf("f%d.go", i), StartLine: 1, EndLine: 2,
+			}
+			embs[i] = []float32{1, 0, 0, 0}
+		}
+		if err := vs.UpsertChunks(context.Background(), project, chunks, embs); err != nil {
+			t.Fatalf("seed %s: %v", project, err)
+		}
+	}
+	seed("/keeper", 50)
+	seed("/doomed", 2000) // inserted last, so its pages sit at the file's tail
+
+	stat := func() (pages, free int64) {
+		t.Helper()
+		raw, err := sql.Open("sqlite", "file:"+vs.DBPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		if err := raw.QueryRow("PRAGMA page_count").Scan(&pages); err != nil {
+			t.Fatal(err)
+		}
+		if err := raw.QueryRow("PRAGMA freelist_count").Scan(&free); err != nil {
+			t.Fatal(err)
+		}
+		return pages, free
+	}
+	pagesBefore, _ := stat()
+
+	w := doRequest(t, router, http.MethodDelete, "/api/v1/projects/"+projects.HashPath("/doomed"), nil)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, body: %s", w.Code, w.Body.String())
+	}
+
+	pagesAfter, free := stat()
+	if free != 0 {
+		t.Errorf("freelist_count = %d after a project delete, want 0 — ReclaimFreePages is not wired into the delete path", free)
+	}
+	if pagesAfter >= pagesBefore {
+		t.Errorf("page_count %d -> %d: the deleted project's pages were not returned", pagesBefore, pagesAfter)
+	}
+	if got := vs.Count("/keeper"); got != 50 {
+		t.Errorf("Count(/keeper) = %d after deleting the other project, want 50", got)
 	}
 }
 

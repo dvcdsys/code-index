@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Plus } from 'lucide-react';
 import { api } from '@/api/client';
-import { Button } from '@/ui/button';
-import { Alert, AlertDescription } from '@/ui/alert';
+import { Button, Dots } from '@/ui/button';
+import { Callout } from '@/ui/alert';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -12,8 +12,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/ui/dialog';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
+import { Field, Input } from '@/ui/input';
 
 export function CreateWorkspaceDialog({ onCreated }: { onCreated: () => void }) {
   const [open, setOpen] = useState(false);
@@ -41,23 +40,18 @@ export function CreateWorkspaceDialog({ onCreated }: { onCreated: () => void }) 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button>
-          <Plus className="mr-1 size-4" />
-          New workspace
-        </Button>
+        <Button variant="primary">New workspace</Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Create workspace</DialogTitle>
-          <DialogDescription>
-            A workspace groups GitHub repositories for cross-project
-            semantic search. After creating it, open the workspace to
-            attach repositories.
-          </DialogDescription>
+          <DialogTitle>Create a workspace</DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <Label htmlFor="ws-name">Name</Label>
+        <DialogBody>
+          <DialogDescription>
+            A workspace groups repositories so one query searches all of them. Attach the
+            repositories after it exists.
+          </DialogDescription>
+          <Field label="Name" htmlFor="ws-name">
             <Input
               id="ws-name"
               autoFocus
@@ -65,27 +59,27 @@ export function CreateWorkspaceDialog({ onCreated }: { onCreated: () => void }) 
               onChange={(e) => setName(e.target.value)}
               placeholder="platform"
             />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="ws-desc">Description (optional)</Label>
+          </Field>
+          <Field label="Description" htmlFor="ws-desc" hint="Optional.">
             <Input
               id="ws-desc"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="microservices cluster"
             />
-          </div>
-          {err && (
-            <Alert variant="destructive">
-              <AlertDescription>{err}</AlertDescription>
-            </Alert>
-          )}
-        </div>
+          </Field>
+          {err ? (
+            <Callout variant="danger">
+              <p>{err}</p>
+            </Callout>
+          ) : null}
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={busy || name.trim() === ''}>
+          <Button variant="primary" onClick={submit} disabled={busy || name.trim() === ''}>
+            {busy ? <Dots /> : null}
             Create
           </Button>
         </DialogFooter>

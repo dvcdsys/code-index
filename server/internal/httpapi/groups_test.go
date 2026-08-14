@@ -68,7 +68,9 @@ func TestGroupCRUD_AdminOnly(t *testing.T) {
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create group = %d (%s)", rr.Code, body)
 	}
-	var g struct{ ID string `json:"id"` }
+	var g struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(body, &g)
 	if g.ID == "" {
 		t.Fatal("group id empty")
@@ -108,7 +110,9 @@ func TestGroupCRUD_AdminOnly(t *testing.T) {
 	}
 
 	rr, body = doReq(t, f, adminCookie, http.MethodGet, "/api/v1/groups/"+g.ID+"/members", nil)
-	var ml struct{ Total int `json:"total"` }
+	var ml struct {
+		Total int `json:"total"`
+	}
 	_ = json.Unmarshal(body, &ml)
 	if rr.Code != http.StatusOK || ml.Total != 1 {
 		t.Errorf("list members = %d total=%d", rr.Code, ml.Total)
@@ -117,7 +121,9 @@ func TestGroupCRUD_AdminOnly(t *testing.T) {
 	// bob now sees the group via /auth/me and GET /groups (member-scoped).
 	rr, body = doReq(t, f, userCookie, http.MethodGet, "/api/v1/auth/me", nil)
 	var me struct {
-		Groups []struct{ ID string `json:"id"` } `json:"groups"`
+		Groups []struct {
+			ID string `json:"id"`
+		} `json:"groups"`
 	}
 	_ = json.Unmarshal(body, &me)
 	if rr.Code != http.StatusOK || len(me.Groups) != 1 || me.Groups[0].ID != g.ID {
@@ -168,7 +174,9 @@ func TestProjectShareAndOwnerReassign(t *testing.T) {
 
 	// Group with alice as member.
 	_, gbody := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups", map[string]string{"name": "Product"})
-	var g struct{ ID string `json:"id"` }
+	var g struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(gbody, &g)
 	doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups/"+g.ID+"/members", map[string]string{"user_id": aliceID})
 
@@ -213,7 +221,9 @@ func aliceSeesProject(t *testing.T, f *authTestFixture, cookie, hash string) boo
 	t.Helper()
 	_, body := doReq(t, f, cookie, http.MethodGet, "/api/v1/projects", nil)
 	var pl struct {
-		Projects []struct{ PathHash string `json:"path_hash"` } `json:"projects"`
+		Projects []struct {
+			PathHash string `json:"path_hash"`
+		} `json:"projects"`
 	}
 	_ = json.Unmarshal(body, &pl)
 	for _, p := range pl.Projects {
@@ -247,7 +257,9 @@ func TestWorkspaceShare_OwnerInGroupOnly(t *testing.T) {
 	// Two groups: gIn (alice is a member), gOut (she is not).
 	_, b1 := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups", map[string]string{"name": "in"})
 	_, b2 := doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups", map[string]string{"name": "out"})
-	var gIn, gOut struct{ ID string `json:"id"` }
+	var gIn, gOut struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(b1, &gIn)
 	_ = json.Unmarshal(b2, &gOut)
 	doReq(t, f, adminCookie, http.MethodPost, "/api/v1/groups/"+gIn.ID+"/members", map[string]string{"user_id": aliceID})
@@ -257,7 +269,9 @@ func TestWorkspaceShare_OwnerInGroupOnly(t *testing.T) {
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create workspace = %d (%s)", rr.Code, wbody)
 	}
-	var ws struct{ ID string `json:"id"` }
+	var ws struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(wbody, &ws)
 
 	// Share to a group she belongs to → 204.

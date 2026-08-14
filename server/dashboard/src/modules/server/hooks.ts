@@ -1,9 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
+import { isActivePhase } from '@/api/types';
 import type {
   ActiveEmbeddingProvider,
+  AutoVacuumRequest,
+  DatabaseState,
+  MaintenanceOperation,
+  ScheduledTask,
+  ScheduleUpdate,
+  ReclaimRequest,
+  ReclaimResult,
+  CleanRequest,
+  CleanResult,
   EmbeddingProviderList,
   ModelList,
+  ReclaimAnalysis,
+  ResourceUsage,
   RestartAccepted,
   RuntimeConfig,
   RuntimeConfigUpdate,
@@ -18,6 +30,9 @@ export const serverKeys = {
   models: ['server', 'models'] as const,
   embeddingProviders: ['server', 'embedding-providers'] as const,
   activeProvider: ['server', 'embedding-provider', 'active'] as const,
+  resources: ['server', 'resources'] as const,
+  database: ['server', 'database'] as const,
+  schedules: ['server', 'schedules'] as const,
 };
 
 export function useRuntimeConfig() {
@@ -107,6 +122,41 @@ export function useActiveProvider() {
   });
 }
 
+// useResourceUsage reports memory and disk. The disk figures come from real
+// directory walks — several seconds on a large index — so this is deliberately
+// NOT polled: it refetches when the section mounts and after a clean.
+export function useResourceUsage() {
+  return useQuery({
+    queryKey: serverKeys.resources,
+    queryFn: ({ signal }) => api.get<ResourceUsage>('/admin/resources', { signal }),
+    staleTime: 30_000,
+  });
+}
+
+// useAnalyzeReclaimable is a mutation, not a query, on purpose: it is
+// admin-triggered, expensive, and has a server-side side effect (it caches the
+// analysis the clean call redeems). As a query it would fire on mount and on
+// every cache invalidation. Its `data` is the rendered analysis, and
+// `reset()` is how the section clears it.
+export function useAnalyzeReclaimable() {
+  return useMutation({
+    mutationFn: () => api.post<ReclaimAnalysis>('/admin/resources/analyze'),
+  });
+}
+
+export function useCleanResources() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CleanRequest) => api.post<CleanResult>('/admin/resources/clean', body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: serverKeys.resources });
+      // A clean can drop vector collections and cloned checkouts, so the
+      // per-project storage numbers on Projects are stale afterwards.
+      qc.invalidateQueries({ queryKey: ['projects'] });
+    },
+  });
+}
+
 // useTestProvider calls /test for a given kind+config. Doesn't
 // touch the active state on the server.
 export function useTestProvider(kind: string) {
@@ -133,5 +183,95 @@ export function useSwitchProvider() {
       qc.invalidateQueries({ queryKey: serverKeys.sidecarStatus });
       qc.invalidateQueries({ queryKey: ['runtime-model'] });
     },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Database compaction
+// ---------------------------------------------------------------------------
+
+export function useDatabaseState() {
+  return useQuery({
+    queryKey: serverKeys.database,
+    queryFn: ({ signal }) => api.get<DatabaseState>('/admin/database', { signal }),
+    // Poll quickly while an operation is in flight so the numbers and the
+    // button state track it; otherwise leave it alone — page geometry only
+    // changes when something is done to it.
+    //
+    // Except on failure, where leaving it alone is exactly wrong. This is the
+    // one card that can take its own backend away: a compaction restarts the
+    // server, every request from here fails for about a minute, and with no
+    // interval and no cached data there is nothing left to trigger a refetch.
+    // Observed live — the sibling queries came back on their own intervals
+    // while this card sat on "Failed to fetch" until the page was reloaded.
+    refetchInterval: (q) => {
+      if (q.state.status === 'error') {
+        // Back off. A tab left open against a server that is not coming back
+        // would otherwise knock on its door every three seconds until the
+        // laptop lid closes.
+        const tries = q.state.fetchFailureCount;
+        return Math.min(3_000 * 2 ** Math.max(0, tries - 1), 60_000);
+      }
+      const data = q.state.data as DatabaseState | undefined;
+      return isActivePhase(data?.operation?.phase) ? 2_000 : false;
+    },
+    refetchIntervalInBackground: false,
+  });
+}
+
+// Every recurring task the server knows how to run, not just the database's.
+// The registry is generic, so this hook is the one place the dashboard will
+// read from as more tasks are hung off it.
+export function useSchedules() {
+  return useQuery({
+    queryKey: serverKeys.schedules,
+    queryFn: ({ signal }) =>
+      api.get<{ tasks: ScheduledTask[] }>('/admin/schedules', { signal }).then((r) => r.tasks),
+  });
+}
+
+export function useUpdateSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, ...patch }: ScheduleUpdate & { name: string }) =>
+      api.put<ScheduledTask>(`/admin/schedules/${encodeURIComponent(name)}`, patch),
+    // The server re-arms on save and returns the task as it now resolves —
+    // including the next runs it will actually keep — so the response replaces
+    // the cached entry rather than triggering a refetch that could race it.
+    onSuccess: (task) =>
+      qc.setQueryData(serverKeys.schedules, (prev: ScheduledTask[] | undefined) =>
+        prev ? prev.map((t) => (t.name === task.name ? task : t)) : [task]),
+  });
+}
+
+export function useReclaimFreePages() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ReclaimRequest) => api.post<ReclaimResult>('/admin/database/reclaim', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: serverKeys.database }),
+  });
+}
+
+// Compaction is a mutation rather than a query for the same reason analyze is:
+// it has a side effect that must never fire on a mount or a refetch. It
+// answers 202 and the server then restarts itself, so the banner — not this
+// hook — is what reports the outcome.
+export function useCompactDatabase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post<MaintenanceOperation>('/admin/database/compact'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: serverKeys.database }),
+  });
+}
+
+// The reclaim mode is a setting, not an operation. Changing it happens to cost
+// a rebuild, which is why this looks like compaction — but asking for the mode
+// the database is already in does nothing at all.
+export function useSetAutoVacuum() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AutoVacuumRequest) =>
+      api.put<MaintenanceOperation>('/admin/database/auto-vacuum', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: serverKeys.database }),
   });
 }

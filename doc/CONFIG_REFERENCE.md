@@ -33,7 +33,9 @@ the DB.
 | `CIX_PORT` | `21847` | Listen port (both Docker images bake this in). |
 | `CIX_BIND_ADDR` | — | Interface to listen on, as a bare address with no port. Empty means every interface, which is what a container needs; set `127.0.0.1` to make the server reachable only from the machine it runs on. The macOS app writes `127.0.0.1` at first run and exposes a menu toggle. |
 | `CIX_SQLITE_PATH` | `/data/sqlite/projects.db` | SQLite path. Suffixed with the model-safe name on open. |
-| `CIX_CHROMA_PERSIST_DIR` | `/data/chroma` | Vector store directory. |
+| `CIX_CHROMA_PERSIST_DIR` | `/data/chroma` | Legacy chromem-go store. Read on startup for the one-time import into the SQLite vector store, then left untouched as the rollback path. See [VECTORSTORE.md](VECTORSTORE.md). |
+| `CIX_VECTORS_DIR` | sibling of `CIX_CHROMA_PERSIST_DIR` (`/data/vectors`) | Vector store directory: one SQLite database per embedding namespace. |
+| `CIX_VECTOR_MMAP_SIZE` | `0` (off) | `PRAGMA mmap_size` for the vector store, in bytes. Roughly 40% lower search latency in exchange for resident memory — mapped database pages count in RSS. |
 | `CIX_GGUF_CACHE_DIR` | `/data/models` | Where downloaded GGUF files live. |
 | `CIX_PUBLIC_URL` | — | Externally-reachable URL used to build GitHub webhook delivery URLs. Empty disables webhook URL display. |
 

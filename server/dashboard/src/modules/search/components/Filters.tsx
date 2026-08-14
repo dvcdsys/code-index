@@ -1,16 +1,18 @@
-import { Loader2 } from 'lucide-react';
 import { useProjects } from '@/modules/projects/hooks';
-import { Label } from '@/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/ui/select';
-import { Slider } from '@/ui/slider';
-import { Input } from '@/ui/input';
+import { projectPath } from '@/modules/projects/lib/projectList';
+import { Field, Input } from '@/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/ui/select';
+import { SliderField } from '@/ui/slider';
+import { cn } from '@/lib/cn';
 import type { SearchMode } from '../hooks';
+
+// The filter rail. A bordered column on the left of the results, not a
+// floating card — the rule between rail and results is the page's spine.
+export function FilterRail({ children }: { children: React.ReactNode }) {
+  return (
+    <aside className="flex flex-col gap-5 border-r p-[18px] lg:min-h-full">{children}</aside>
+  );
+}
 
 export function ProjectPicker({
   value,
@@ -23,32 +25,24 @@ export function ProjectPicker({
   const projects = data?.projects ?? [];
 
   return (
-    <div className="space-y-1">
-      <Label className="text-xs uppercase tracking-wide text-muted-foreground">Project</Label>
+    <Field label="Project">
       <Select value={value ?? ''} onValueChange={onChange} disabled={isLoading}>
-        <SelectTrigger className="h-9">
-          {isLoading ? (
-            <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Loading…
-            </span>
-          ) : (
-            <SelectValue placeholder="Select a project" />
-          )}
+        <SelectTrigger aria-label="Project to search in">
+          <SelectValue placeholder={isLoading ? 'Loading…' : 'Select a project'} />
         </SelectTrigger>
         <SelectContent>
           {projects.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">No projects yet.</div>
+            <div className="px-3 py-2 font-mono text-[11px] text-muted">No projects yet.</div>
           ) : (
             projects.map((p) => (
               <SelectItem key={p.path_hash} value={p.path_hash}>
-                {p.display_path ?? p.host_path}
+                {projectPath(p)}
               </SelectItem>
             ))
           )}
         </SelectContent>
       </Select>
-    </div>
+    </Field>
   );
 }
 
@@ -60,19 +54,15 @@ export function MinScoreSlider({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="space-y-2">
-      <div className="flex items-baseline justify-between">
-        <Label className="text-xs uppercase tracking-wide text-muted-foreground">Min score</Label>
-        <span className="font-mono text-xs tabular-nums">{value.toFixed(2)}</span>
-      </div>
-      <Slider
-        value={[value]}
-        min={0}
-        max={1}
-        step={0.05}
-        onValueChange={([v]) => onChange(v)}
-      />
-    </div>
+    <SliderField
+      label="Min score"
+      value={value}
+      display={value.toFixed(2)}
+      onChange={onChange}
+      min={0}
+      max={1}
+      step={0.05}
+    />
   );
 }
 
@@ -86,10 +76,7 @@ export function LimitInput({
   max?: number;
 }) {
   return (
-    <div className="space-y-1">
-      <Label htmlFor="limit" className="text-xs uppercase tracking-wide text-muted-foreground">
-        Limit
-      </Label>
+    <Field label="Limit" htmlFor="limit">
       <Input
         id="limit"
         type="number"
@@ -100,43 +87,80 @@ export function LimitInput({
           const n = Number(e.target.value);
           if (Number.isFinite(n)) onChange(Math.max(1, Math.min(max, Math.round(n))));
         }}
-        className="h-9"
       />
-    </div>
+    </Field>
   );
 }
 
-export function LanguagesInput({
+// Languages as removable tags rather than a comma-string the user has to get
+// right. The underlying URL param stays comma-separated so links keep working.
+export function LanguageTags({
   value,
   onChange,
 }: {
   value: string;
   onChange: (v: string) => void;
 }) {
+  const tags = value
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  function add(raw: string) {
+    const next = raw.trim().toLowerCase();
+    if (!next || tags.includes(next)) return;
+    onChange([...tags, next].join(','));
+  }
+
+  function remove(tag: string) {
+    onChange(tags.filter((t) => t !== tag).join(','));
+  }
+
   return (
-    <div className="space-y-1">
-      <Label htmlFor="langs" className="text-xs uppercase tracking-wide text-muted-foreground">
-        Languages
-      </Label>
-      <Input
-        id="langs"
-        placeholder="go, python, ts"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="h-9"
-      />
-      <p className="text-[10px] text-muted-foreground">Comma-separated. Leave empty for all.</p>
-    </div>
+    <Field label="Languages" hint={tags.length === 0 ? 'All languages.' : undefined}>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {tags.map((t) => (
+          <span key={t} className="cix-badge is-ink gap-1.5">
+            {t}
+            <button
+              type="button"
+              onClick={() => remove(t)}
+              aria-label={`Remove ${t}`}
+              className="text-surface/70 hover:text-surface"
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+        <input
+          type="text"
+          placeholder="+ add"
+          aria-label="Add a language filter"
+          className={cn(
+            'w-[72px] border border-dashed border-line-quiet bg-transparent px-2 py-[3px]',
+            'font-mono text-[11px] text-ink placeholder:text-faint focus:border-solid focus:border-ink'
+          )}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ',') {
+              e.preventDefault();
+              add(e.currentTarget.value);
+              e.currentTarget.value = '';
+            }
+          }}
+          onBlur={(e) => {
+            add(e.currentTarget.value);
+            e.currentTarget.value = '';
+          }}
+        />
+      </div>
+    </Field>
   );
 }
 
-export function ModeSpecificHelp({ mode }: { mode: SearchMode }) {
-  const messages: Record<SearchMode, string> = {
-    semantic: 'Ask in natural language ("JWT validation", "retry with exponential backoff").',
-    symbols: 'Substring match against symbol names.',
-    definitions: 'Exact symbol name. Optional kind/file filters.',
-    references: 'Exact symbol name. Returns every callsite.',
-    files: 'Substring match against file paths.',
-  };
-  return <p className="text-xs text-muted-foreground">{messages[mode]}</p>;
-}
+export const MODE_HELP: Record<SearchMode, string> = {
+  semantic: 'Natural language — "JWT validation", "retry with exponential backoff".',
+  symbols: 'Substring match against symbol names.',
+  definitions: 'Exact symbol name — where it is defined.',
+  references: 'Exact symbol name — every call site.',
+  files: 'Substring match against file paths.',
+};

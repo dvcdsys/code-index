@@ -1,76 +1,85 @@
-import { LogOut } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '@/auth/useAuth';
-import { Button } from '@/ui/button';
 import { cn } from '@/lib/cn';
-import { MODULES } from '@/modules/registry';
+import { visibleModules } from '@/modules/registry';
+import { BrandMark } from './BrandMark';
 
-// Sidebar is rendered from the module registry, filtered by the current
-// user's role. A module without `requiredRole` is always visible; a module
-// requiring `admin` is hidden from viewers.
+// Rendered straight from the module registry, filtered by role, split into
+// two blocks: the day-to-day tools and an ADMIN group under a mono rule.
 //
-// New features show up in the sidebar automatically once registered — no
-// edits to this component are needed when a module is added.
+// Rows carry a 7×7 square marker instead of an icon — accent on the active
+// row, quiet otherwise. The label carries the meaning; the marker only says
+// "you are here".
 export function Sidebar() {
   const { user, logout } = useAuth();
-  const role = user?.role ?? 'user';
+  const modules = visibleModules(user?.role);
+  const workspace = modules.filter((m) => m.group !== 'admin');
+  const admin = modules.filter((m) => m.group === 'admin');
 
-  const visible = MODULES.filter((m) => {
-    if (!m.requiredRole) return true;
-    if (m.requiredRole === 'user') return true;
-    return role === 'admin';
-  });
+  const initials = (user?.email ?? '??').slice(0, 2).toUpperCase();
 
   return (
-    <aside className="flex h-full w-64 flex-col border-r bg-muted/20">
-      <div className="px-5 py-5">
-        <span className="text-base font-semibold tracking-tight">cix</span>
-        <span className="ml-2 text-xs uppercase tracking-wider text-muted-foreground">
-          dashboard
-        </span>
+    <aside className="cix-sidebar">
+      <div className="flex flex-none items-center gap-2.5 border-b p-4 font-mono font-bold tracking-[0.08em]">
+        <BrandMark />
+        <span>cix</span>
+        <span className="text-[11px] font-normal tracking-[0.16em] text-muted">DASHBOARD</span>
       </div>
 
-      <nav className="flex-1 space-y-1 px-3">
-        {visible.map((m) => {
-          const Icon = m.icon;
-          return (
-            <NavLink
-              key={m.id}
-              to={m.path}
-              end={m.path === '/'}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                  isActive
-                    ? 'bg-accent text-accent-foreground'
-                    : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground'
-                )
-              }
-            >
-              <Icon className="h-4 w-4" />
-              {m.label}
-            </NavLink>
-          );
-        })}
+      <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-2.5">
+        {workspace.map((m) => (
+          <NavLink
+            key={m.id}
+            to={m.path}
+            end={m.path === '/'}
+            className={({ isActive }) => cn('cix-nav-item', isActive && 'is-active')}
+          >
+            {m.label}
+          </NavLink>
+        ))}
+
+        {admin.length > 0 && (
+          <>
+            <div className="mx-2.5 mb-1 mt-3.5 border-t border-line-quiet" />
+            <span className="cix-nav-group">ADMIN</span>
+            {admin.map((m) => (
+              <NavLink
+                key={m.id}
+                to={m.path}
+                className={({ isActive }) => cn('cix-nav-item', isActive && 'is-active')}
+              >
+                {m.label}
+              </NavLink>
+            ))}
+          </>
+        )}
       </nav>
 
-      <div className="border-t p-3">
-        {user && (
-          <div className="mb-3 px-2 text-xs">
-            <div className="truncate font-medium text-foreground">{user.email}</div>
-            <div className="text-muted-foreground capitalize">{user.role}</div>
-          </div>
-        )}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start"
-          onClick={() => void logout()}
-        >
-          <LogOut className="h-4 w-4" />
-          Sign out
-        </Button>
-      </div>
+      {user && (
+        <div className="flex flex-none items-center gap-2.5 border-t px-3.5 py-3">
+          <span
+            aria-hidden
+            className="flex h-7 w-7 flex-none items-center justify-center bg-ink font-mono text-[11px] font-bold text-surface"
+          >
+            {initials}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[13px] font-semibold" title={user.email}>
+              {user.email}
+            </span>
+            <span className="block font-mono text-[11px] text-muted">{user.role}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => void logout()}
+            title="Sign out"
+            aria-label="Sign out"
+            className="flex h-7 w-7 flex-none items-center justify-center font-mono text-sm text-muted hover:bg-warm-deep hover:text-ink"
+          >
+            ⇥
+          </button>
+        </div>
+      )}
     </aside>
   );
 }

@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, Loader2, Save } from 'lucide-react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
 import type { RuntimeConfig, RuntimeConfigUpdate } from '@/api/types';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Button } from '@/ui/button';
-import { Skeleton } from '@/ui/skeleton';
+import { useStatusFact } from '@/app/StatusBar';
 import { useServerStatus } from '@/lib/useServerStatus';
+import { Callout } from '@/ui/alert';
+import { Button, Dots } from '@/ui/button';
+import { Chip } from '@/ui/code';
+import { Page } from '@/ui/page';
+import { Skeleton } from '@/ui/skeleton';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/ui/tabs';
 import {
   useRestartSidecar,
   useRuntimeConfig,
@@ -15,10 +18,14 @@ import {
 } from './hooks';
 import { EmbeddingModelSection } from './sections/EmbeddingModelSection';
 import { RuntimeParamsSection } from './sections/RuntimeParamsSection';
-import { SidecarSection } from './sections/SidecarSection';
+import { SidecarRail } from './sections/SidecarRail';
 import { AdvancedSection } from './sections/AdvancedSection';
 import { EmbeddingProviderSection } from './sections/EmbeddingProviderSection';
+import { DatabaseSection } from './sections/DatabaseSection';
+import { ResourcesSection } from './sections/ResourcesSection';
 import { SaveAndRestartDialog } from './components/SaveAndRestartDialog';
+
+type Tab = 'runtime' | 'resources';
 
 interface Draft {
   embedding_model: string;
@@ -31,6 +38,17 @@ interface Draft {
   chunk_max_concurrent: number;
   llama_cache_ram_mib: number;
 }
+
+const NUMERIC_FIELDS = [
+  'llama_ctx_size',
+  'llama_n_gpu_layers',
+  'llama_n_threads',
+  'max_embedding_concurrency',
+  'llama_batch_size',
+  'index_embed_batch_chunks',
+  'chunk_max_concurrent',
+  'llama_cache_ram_mib',
+] as const;
 
 function configToDraft(c: RuntimeConfig): Draft {
   return {
@@ -46,25 +64,19 @@ function configToDraft(c: RuntimeConfig): Draft {
   };
 }
 
-// diffPatch produces (a) the partial PUT body containing only changed
-// fields and (b) the human-readable changes list the confirm dialog renders.
-function diffPatch(c: RuntimeConfig, d: Draft): { patch: RuntimeConfigUpdate; changes: Array<{ field: string; from: string; to: string }> } {
+// Produces the partial PUT body (changed fields only) and the human-readable
+// diff the confirm dialog renders.
+function diffPatch(
+  c: RuntimeConfig,
+  d: Draft
+): { patch: RuntimeConfigUpdate; changes: Array<{ field: string; from: string; to: string }> } {
   const patch: RuntimeConfigUpdate = {};
   const changes: Array<{ field: string; from: string; to: string }> = [];
   if (d.embedding_model !== c.embedding_model) {
     patch.embedding_model = d.embedding_model;
     changes.push({ field: 'embedding_model', from: c.embedding_model, to: d.embedding_model });
   }
-  for (const k of [
-    'llama_ctx_size',
-    'llama_n_gpu_layers',
-    'llama_n_threads',
-    'max_embedding_concurrency',
-    'llama_batch_size',
-    'index_embed_batch_chunks',
-    'chunk_max_concurrent',
-    'llama_cache_ram_mib',
-  ] as const) {
+  for (const k of NUMERIC_FIELDS) {
     if (d[k] !== c[k]) {
       patch[k] = d[k];
       changes.push({ field: k, from: String(c[k]), to: String(d[k]) });
@@ -73,172 +85,196 @@ function diffPatch(c: RuntimeConfig, d: Draft): { patch: RuntimeConfigUpdate; ch
   return { patch, changes };
 }
 
+// Two columns: config cards on the left, live runtime on the right. The
+// sidecar's state has to stay visible while the fields that will restart it
+// are being edited, which is exactly what a right rail is for.
+//
+// One primary action lives in the page header ("Save & restart"). The
+// provider card keeps its own inline "Save & switch" because switching
+// provider is a different, heavier operation than tuning flags.
 export default function ServerPage() {
   const cfg = useRuntimeConfig();
   const status = useSidecarStatus();
   const update = useUpdateRuntimeConfig();
   const restart = useRestartSidecar();
-  // /status is shared with the footer (already polled every 30s) and
-  // its embedding_provider field reflects the LIVE active provider —
-  // the right signal for "should we show ollama sections?". We default
-  // to true while it loads so the page doesn't flash empty between
-  // mount and the first /status response.
-  const serverStatus = useServerStatus();
-  const activeKind = serverStatus.data?.embedding_provider ?? 'ollama';
-  const showOllamaSections = activeKind === 'ollama';
 
+  // /status is already polled for the status bar, and its embedding_provider
+  // field is the LIVE active provider — the right signal for "show the ollama
+  // cards?". Defaulting to ollama while it loads avoids a flash of empty page.
+  //
+  // The catch: "live" means Service.CurrentKind(), which returns "" whenever
+  // the provider is nil — precisely the window in which the sidecar is being
+  // torn down and rebuilt. So every Save & restart made /status report an
+  // empty kind, and `?? 'ollama'` does not catch "": the page decided it was
+  // talking to a remote provider and unmounted the model card, the runtime
+  // params card and the sidecar rail. Worse, useRestartSidecar invalidates
+  // this very query on settle, so the refetch lands at the emptiest possible
+  // moment and the answer then sits in cache until the 30s poll — which is
+  // why the cards only came back on a reload.
+  //
+  // "" is *unknown*, not *remote*. Hold the last kind we actually saw and
+  // only ever switch layout on a positively-reported one.
+  const serverStatus = useServerStatus();
+  const reportedKind = serverStatus.data?.embedding_provider;
+  const [lastKnownKind, setLastKnownKind] = useState<string | null>(null);
+  useEffect(() => {
+    if (reportedKind) setLastKnownKind(reportedKind);
+  }, [reportedKind]);
+  const activeKind = reportedKind || lastKnownKind || 'ollama';
+  const isOllama = activeKind === 'ollama';
+
+  const [tab, setTab] = useState<Tab>('runtime');
   const [draft, setDraft] = useState<Draft | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Initialise / reset draft whenever the server-side config changes from
-  // under us (initial fetch, optimistic refresh after save).
+  // Initialise / reset the draft whenever the server-side config changes
+  // under us (first fetch, refresh after save).
   useEffect(() => {
     if (cfg.data) setDraft(configToDraft(cfg.data));
   }, [cfg.data]);
 
-  const dirty = useMemo(() => {
-    if (!cfg.data || !draft) return false;
-    return diffPatch(cfg.data, draft).changes.length > 0;
-  }, [cfg.data, draft]);
+  const changes = useMemo(
+    () => (cfg.data && draft ? diffPatch(cfg.data, draft).changes : []),
+    [cfg.data, draft]
+  );
+  const dirty = changes.length > 0;
 
-  if (cfg.isLoading || !draft) {
-    return (
-      <div className="space-y-6">
-        <header>
-          <h1 className="text-2xl font-semibold tracking-tight">Server</h1>
-          <p className="text-sm text-muted-foreground">Embedding model, indexing parameters, sidecar lifecycle.</p>
-        </header>
-        <Skeleton className="h-40 w-full" />
-        <Skeleton className="h-64 w-full" />
-      </div>
-    );
-  }
+  useStatusFact(dirty ? 'unsaved changes' : null);
 
-  if (cfg.error || !cfg.data) {
-    return (
-      <Alert variant="destructive">
-        <AlertCircle className="h-4 w-4" />
-        <AlertTitle>Could not load runtime config</AlertTitle>
-        <AlertDescription>{cfg.error instanceof ApiError ? cfg.error.detail : String(cfg.error)}</AlertDescription>
-      </Alert>
-    );
-  }
-
+  const isPending = update.isPending || restart.isPending;
   const disabled = status.data?.state === 'disabled';
-  const { changes } = diffPatch(cfg.data, draft);
+
+  // Why the save button is greyed out, in the order the reasons apply. A
+  // disabled control with no explanation reads as a broken one — which is
+  // exactly how the embeddings-disabled case came across, since that state
+  // blocks saving no matter how many fields you have edited.
+  //
+  // Note this covers THIS button only. Switching provider is a separate
+  // control inside the provider card and stays enabled — though with the
+  // service disabled the server refuses that too (embeddings.ErrDisabled),
+  // because there is no service to switch. Both roads lead back to the env
+  // var, so the message says so rather than leaving the reader hunting.
+  const saveBlockedReason = disabled
+    ? 'Embeddings are off, so there is nothing to apply this to — set CIX_EMBEDDINGS_ENABLED=true and restart the server'
+    : isPending
+      ? 'Applying the configuration…'
+      : null;
 
   async function onConfirm() {
     if (!cfg.data || !draft) return;
     const { patch } = diffPatch(cfg.data, draft);
     try {
-      // Step 1 — write overrides to DB. The mutation also refreshes the
-      // cache so the form's "DB" pills appear before the restart fires.
-      if (Object.keys(patch).length > 0) {
-        await update.mutateAsync(patch);
-      }
-      // Step 2 — kick a sidecar restart so the new model / flags load.
+      // 1. Write overrides. The mutation refreshes the cache so the DB pills
+      //    flip before the restart fires.
+      if (Object.keys(patch).length > 0) await update.mutateAsync(patch);
+      // 2. Restart so the new model / flags actually load.
       await restart.mutateAsync();
       setConfirmOpen(false);
       toast.success('Configuration saved', {
-        description: 'Sidecar is restarting — watch the Sidecar card for status.',
+        description: 'The sidecar is restarting — watch the rail on the right.',
       });
     } catch (e) {
-      const detail = e instanceof ApiError ? e.detail : String(e);
-      toast.error('Save & Restart failed', { description: detail });
+      toast.error('Save & restart failed', {
+        description: e instanceof ApiError ? e.detail : String(e),
+      });
     }
   }
 
-  const isPending = update.isPending || restart.isPending;
+  // Error is checked BEFORE the loading branch. The draft is only ever built
+  // from a successful fetch, so `!draft` is also true on failure — testing it
+  // first meant a failed config load rendered skeletons forever and the error
+  // callout below was unreachable.
+  let runtimeBody: ReactNode;
+  if (cfg.error || (!cfg.isLoading && !cfg.data)) {
+    runtimeBody = (
+      <Callout variant="danger">
+        <b>Could not load the runtime config</b>
+        <p>{cfg.error instanceof ApiError ? cfg.error.detail : String(cfg.error)}</p>
+      </Callout>
+    );
+  } else if (cfg.isLoading || !draft || !cfg.data) {
+    runtimeBody = (
+      <div className="flex flex-col gap-4">
+        <Skeleton className="h-40" />
+        <Skeleton className="h-64" />
+      </div>
+    );
+  } else {
+    runtimeBody = (
+      <>
+        {disabled ? (
+          <Callout variant="warn" className="mb-5">
+            <b>Embeddings were disabled at boot</b>
+            <p>
+              The server started with <Chip>CIX_EMBEDDINGS_ENABLED=false</Chip>. Restart it with
+              the variable set to <Chip>true</Chip> to enable runtime config and the sidecar.
+            </p>
+          </Callout>
+        ) : null}
+
+        {runtimeGrid(cfg.data, draft)}
+
+        {/* Closes the form, in normal flow. It was sticky for a while so it
+            could not be scrolled away, but a bar pinned over cards that slide
+            under it just looks like a rendering fault — and the form is short
+            enough that the end of it is where you arrive anyway.
+            Stays mounted while disabled rather than disappearing: "greyed out,
+            and here is why" answers "why can't I save?"; an absent button
+            leaves the reader looking for it. */}
+        <div className="mt-5 flex items-center gap-3 border-t py-3.5">
+          <span className="cix-hint">
+            {saveBlockedReason ??
+              (dirty
+                ? `${changes.length} unsaved change${changes.length === 1 ? '' : 's'}`
+                : 'no changes')}
+          </span>
+          <Button
+            variant="primary"
+            className="ml-auto"
+            onClick={() => setConfirmOpen(true)}
+            disabled={!dirty || isPending || disabled}
+            title={saveBlockedReason ?? 'Write the overrides and restart the sidecar'}
+          >
+            {isPending ? <Dots /> : null}
+            {isOllama ? 'Save & restart' : 'Save'}
+          </Button>
+        </div>
+      </>
+    );
+  }
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Server</h1>
-          <p className="text-sm text-muted-foreground">
-            {showOllamaSections
-              ? 'Embedding provider + model, indexing parameters, sidecar lifecycle, throughput. Saved overrides land in the database and are reapplied on the next sidecar restart — env vars stay as bootstrap defaults.'
-              : 'Embedding provider + concurrency. For remote providers (OpenAI-compatible, Voyage) the per-provider form above is the main edit surface; this page also exposes the server-wide concurrency cap that all providers honour.'}
-          </p>
-        </div>
-        <Button
-          onClick={() => setConfirmOpen(true)}
-          disabled={!dirty || isPending || disabled}
-        >
-          {isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
-          {showOllamaSections ? 'Save & Restart' : 'Save'}
-        </Button>
-      </header>
+    <Page
+      title="Server"
+      subtitle="Embedding provider, indexing parameters and sidecar lifecycle, plus what the process is using on disk and in memory."
+      // No header action: the only one this page has belongs to the Runtime
+      // settings form and now lives with it, inside that tab.
+    >
+      <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)}>
+        <TabsList>
+          <TabsTrigger value="runtime">
+            Runtime settings
+            {/* Unsaved edits survive a tab switch, but the Save button does
+                not follow — so the tab that owns them has to say so. */}
+            {dirty ? <span className="cix-dot is-busy ml-1.5" aria-label="unsaved changes" /> : null}
+          </TabsTrigger>
+          <TabsTrigger value="resources">Resources</TabsTrigger>
+        </TabsList>
 
-      {disabled ? (
-        <Alert>
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Embeddings disabled at boot</AlertTitle>
-          <AlertDescription>
-            The server was started with <code>CIX_EMBEDDINGS_ENABLED=false</code>.
-            Restart the server with the env var set to <code>true</code> to
-            enable runtime config + the sidecar.
-          </AlertDescription>
-        </Alert>
-      ) : null}
+        <TabsContent value="runtime">{runtimeBody}</TabsContent>
 
-      <EmbeddingProviderSection />
-
-      {/*
-        Ollama-specific cards — rendered only when the active provider
-        is ollama. For openai/voyage these sections do not apply:
-        there's no GGUF, no llama-server child to restart, no GPU
-        layers / threads, no batch size knob. The provider form above
-        is the only edit surface in that case.
-
-        Concurrency lives inside AdvancedSection together with the
-        ollama-only batch size — for v1 we hide the whole card on
-        remote providers. A follow-up may split concurrency into a
-        provider-agnostic card if operators ask for it.
-      */}
-      {showOllamaSections ? (
-        <>
-          <EmbeddingModelSection
-            config={cfg.data}
-            draftModel={draft.embedding_model}
-            onDraftChange={(v) => setDraft({ ...draft, embedding_model: v })}
-          />
-
-          <RuntimeParamsSection
-            config={cfg.data}
-            draftCtx={draft.llama_ctx_size}
-            draftGpuLayers={draft.llama_n_gpu_layers}
-            draftThreads={draft.llama_n_threads}
-            draftCacheRAM={draft.llama_cache_ram_mib}
-            onDraftCtx={(n) => setDraft({ ...draft, llama_ctx_size: n })}
-            onDraftGpuLayers={(n) => setDraft({ ...draft, llama_n_gpu_layers: n })}
-            onDraftThreads={(n) => setDraft({ ...draft, llama_n_threads: n })}
-            onDraftCacheRAM={(n) => setDraft({ ...draft, llama_cache_ram_mib: n })}
-          />
-
-          <SidecarSection />
-        </>
-      ) : null}
-
-      {/*
-        Throughput / concurrency — always visible. The queue concurrency
-        is the Service-level cap on parallel /v1/embeddings POSTs and
-        applies to every provider (ollama, openai, voyage all accept
-        concurrent requests). The llama batch field inside the card
-        is gated on isOllama.
-      */}
-      <AdvancedSection
-        config={cfg.data}
-        draftConcurrency={draft.max_embedding_concurrency}
-        draftBatch={draft.llama_batch_size}
-        draftIndexBatch={draft.index_embed_batch_chunks}
-        draftChunkConc={draft.chunk_max_concurrent}
-        onDraftConcurrency={(n) => setDraft({ ...draft, max_embedding_concurrency: n })}
-        onDraftBatch={(n) => setDraft({ ...draft, llama_batch_size: n })}
-        onDraftIndexBatch={(n) => setDraft({ ...draft, index_embed_batch_chunks: n })}
-        onDraftChunkConc={(n) => setDraft({ ...draft, chunk_max_concurrent: n })}
-        isOllama={showOllamaSections}
-      />
+        {/* Provider-independent, and independent of the runtime-config query:
+            memory and disk are worth reading precisely when the rest of this
+            page is failing to load. */}
+        <TabsContent value="resources">
+          {/* Stacked like every other multi-card view on the page. Dropped in
+              bare, the two cards butt against each other and read as one. */}
+          <div className="flex flex-col gap-5">
+            <ResourcesSection />
+            <DatabaseSection />
+          </div>
+        </TabsContent>
+      </Tabs>
 
       <SaveAndRestartDialog
         open={confirmOpen}
@@ -247,6 +283,64 @@ export default function ServerPage() {
         isPending={isPending}
         changes={changes}
       />
-    </div>
+    </Page>
   );
+
+  // Declared as a closure rather than a component so the draft handlers stay
+  // where the draft lives, without threading a dozen props through a wrapper.
+  function runtimeGrid(config: RuntimeConfig, d: Draft) {
+    return (
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="flex min-w-0 flex-col gap-5">
+          <EmbeddingProviderSection />
+
+          {/* Ollama-only cards. For openai/voyage there is no GGUF, no child
+              process to restart, no GPU layers or threads — the provider form
+              above is the whole edit surface. */}
+          {isOllama ? (
+            <>
+              <EmbeddingModelSection
+                config={config}
+                draftModel={d.embedding_model}
+                onDraftChange={(v) => setDraft({ ...d, embedding_model: v })}
+              />
+              <RuntimeParamsSection
+                config={config}
+                draftCtx={d.llama_ctx_size}
+                draftGpuLayers={d.llama_n_gpu_layers}
+                draftThreads={d.llama_n_threads}
+                draftCacheRAM={d.llama_cache_ram_mib}
+                onDraftCtx={(n) => setDraft({ ...d, llama_ctx_size: n })}
+                onDraftGpuLayers={(n) => setDraft({ ...d, llama_n_gpu_layers: n })}
+                onDraftThreads={(n) => setDraft({ ...d, llama_n_threads: n })}
+                onDraftCacheRAM={(n) => setDraft({ ...d, llama_cache_ram_mib: n })}
+              />
+            </>
+          ) : null}
+
+          {/* Throughput is always shown: the queue cap is a Service-level
+              limit on parallel /v1/embeddings POSTs and every provider
+              honours it. Only the llama batch field inside is ollama-gated. */}
+          <AdvancedSection
+            config={config}
+            draftConcurrency={d.max_embedding_concurrency}
+            draftBatch={d.llama_batch_size}
+            draftIndexBatch={d.index_embed_batch_chunks}
+            draftChunkConc={d.chunk_max_concurrent}
+            onDraftConcurrency={(n) => setDraft({ ...d, max_embedding_concurrency: n })}
+            onDraftBatch={(n) => setDraft({ ...d, llama_batch_size: n })}
+            onDraftIndexBatch={(n) => setDraft({ ...d, index_embed_batch_chunks: n })}
+            onDraftChunkConc={(n) => setDraft({ ...d, chunk_max_concurrent: n })}
+            isOllama={isOllama}
+          />
+        </div>
+
+        {isOllama ? (
+          <div className="flex flex-col gap-5 xl:sticky xl:top-0">
+            <SidecarRail />
+          </div>
+        ) : null}
+      </div>
+    );
+  }
 }

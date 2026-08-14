@@ -76,6 +76,11 @@ var publicPaths = map[string]struct{}{
 	"/dashboard":                    {},
 	"/api/v1/auth/bootstrap-status": {},
 	"/api/v1/auth/login":            {},
+	// Public because it has to answer while sessions are unwritable: it reads
+	// a file beside the database and touches neither the database nor the
+	// session table. An authenticated progress endpoint would 401 at exactly
+	// the moment somebody needs to see progress.
+	"/maintenance/status": {},
 }
 
 // authContextKey is the context key under which the authenticated user
@@ -128,7 +133,17 @@ func requireAuth(d Deps) func(http.Handler) http.Handler {
 			if c, err := r.Cookie(sessions.CookieName); err == nil {
 				sess, u, sErr := d.Sessions.Get(r.Context(), c.Value)
 				if sErr == nil {
-					_ = d.Sessions.Touch(r.Context(), sess.ID, ip, ua)
+					// Skipped while the database is frozen for compaction.
+					// This is load-bearing, not tidiness: Touch runs on every
+					// authenticated request, and a doomed write sits in
+					// SQLite's busy handler for the full timeout holding a
+					// connection out of a pool of eight. Eight of them and
+					// reads stall too. Sessions simply stop being extended for
+					// a couple of minutes, which is invisible against a
+					// 14-day lifetime.
+					if !d.DBMaint.Gate.Frozen() {
+						_ = d.Sessions.Touch(r.Context(), sess.ID, ip, ua)
+					}
 					ac := &authContext{User: u, Method: "session", Session: &sess}
 					next.ServeHTTP(w, r.WithContext(withAuth(r.Context(), ac)))
 					return
@@ -145,7 +160,9 @@ func requireAuth(d Deps) func(http.Handler) http.Handler {
 				if key != "" {
 					u, ak, aErr := d.APIKeys.Authenticate(r.Context(), key)
 					if aErr == nil {
-						_ = d.APIKeys.Touch(r.Context(), ak.ID, ip, ua)
+						if !d.DBMaint.Gate.Frozen() {
+							_ = d.APIKeys.Touch(r.Context(), ak.ID, ip, ua)
+						}
 						ac := &authContext{User: u, Method: "api_key", APIKey: &ak}
 						next.ServeHTTP(w, r.WithContext(withAuth(r.Context(), ac)))
 						return

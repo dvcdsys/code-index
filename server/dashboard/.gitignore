@@ -9,3 +9,11 @@ node_modules/
 
 # Type-gen output is reproducible — never commit
 src/api/generated.ts
+
+# Digest of the last successful build's inputs — lets `make dashboard-build`
+# skip a no-op rebuild. Machine-local state, meaningless in another checkout.
+.build-stamp
+
+# Local-only visual harness (see devmock/main.tsx) — never shipped.
+devmock/
+devmock.html

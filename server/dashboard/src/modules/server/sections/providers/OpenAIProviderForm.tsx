@@ -1,11 +1,10 @@
-import { AlertTriangle } from 'lucide-react';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
+import { Callout } from '@/ui/alert';
+import { Chip } from '@/ui/code';
+import { Field, Input } from '@/ui/input';
 import type { EmbeddingProviderSecretEnv } from '@/api/types';
 
-// OpenAIConfig mirrors the openai provider's persisted config blob
-// shape (see server/internal/embeddings/provider/openai/openai.go).
+// Mirrors the openai provider's persisted config blob
+// (server/internal/embeddings/provider/openai/openai.go).
 export interface OpenAIConfig {
   base_url: string;
   model: string;
@@ -25,9 +24,8 @@ interface Props {
   secretEnvs: EmbeddingProviderSecretEnv[];
 }
 
-// Common OpenAI-compatible model picker entries. Free-text input
-// stays the source of truth (any string is valid for self-hosted
-// servers); these are just suggestions.
+// Suggestions only — free text stays the source of truth because any string
+// is valid against a self-hosted server.
 const SUGGESTED_MODELS = [
   'text-embedding-3-small',
   'text-embedding-3-large',
@@ -39,94 +37,92 @@ export function OpenAIProviderForm({ value, onChange, secretEnvs }: Props) {
   const apiKeyMissing = apiKeyEnv != null && !apiKeyEnv.set;
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <Label htmlFor="openai-base-url">Base URL</Label>
+    <div className="flex flex-col gap-4">
+      <Field
+        label="Base URL"
+        htmlFor="openai-base-url"
+        hint="Origin without the trailing /v1. Works for OpenAI proper, vLLM, TEI, LocalAI and anything else speaking /v1/embeddings."
+      >
         <Input
           id="openai-base-url"
           value={value.base_url}
           onChange={(e) => onChange({ ...value, base_url: e.target.value })}
           placeholder="https://api.openai.com"
         />
-        <p className="text-xs text-muted-foreground">
-          Server origin without the trailing <code>/v1</code>. Works for OpenAI
-          proper, vLLM, TEI, LocalAI, Ollama's openai endpoint, and any other
-          OpenAI-compatible /v1/embeddings server.
-        </p>
+      </Field>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field
+          label="Model"
+          htmlFor="openai-model"
+          hint="Self-hosted servers: whichever name that server expects."
+        >
+          <Input
+            id="openai-model"
+            list="openai-model-suggestions"
+            value={value.model}
+            onChange={(e) => onChange({ ...value, model: e.target.value })}
+          />
+          <datalist id="openai-model-suggestions">
+            {SUGGESTED_MODELS.map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+        </Field>
+
+        <Field
+          label="Dimensions"
+          htmlFor="openai-dim"
+          hint="Matryoshka shrink for text-embedding-3-*. Empty uses the native dimension."
+        >
+          <Input
+            id="openai-dim"
+            type="number"
+            min={0}
+            value={value.dimensions ?? ''}
+            onChange={(e) =>
+              onChange({
+                ...value,
+                dimensions: e.target.value === '' ? undefined : Number(e.target.value),
+              })
+            }
+            placeholder="server default"
+          />
+        </Field>
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="openai-model">Model</Label>
-        <Input
-          id="openai-model"
-          list="openai-model-suggestions"
-          value={value.model}
-          onChange={(e) => onChange({ ...value, model: e.target.value })}
-        />
-        <datalist id="openai-model-suggestions">
-          {SUGGESTED_MODELS.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-        <p className="text-xs text-muted-foreground">
-          For self-hosted servers use whichever model name the server expects.
-        </p>
-      </div>
-
-      <div className="space-y-1.5">
-        <Label htmlFor="openai-dim">Dimensions (optional)</Label>
-        <Input
-          id="openai-dim"
-          type="number"
-          min={0}
-          value={value.dimensions ?? ''}
-          onChange={(e) =>
-            onChange({
-              ...value,
-              dimensions: e.target.value === '' ? undefined : Number(e.target.value),
-            })
-          }
-          placeholder="(server default)"
-        />
-        <p className="text-xs text-muted-foreground">
-          Matryoshka shrink for <code>text-embedding-3-*</code>. Leave empty
-          to use the model's native dimension.
-        </p>
-      </div>
-
-      <div className="space-y-1.5">
-        <Label htmlFor="openai-key-env">API key env var</Label>
+      <Field
+        label="API key env var"
+        htmlFor="openai-key-env"
+        hint="The dashboard never stores the key. The server reads this variable live on every embed call."
+      >
         <Input
           id="openai-key-env"
           value={value.api_key_env}
           onChange={(e) => onChange({ ...value, api_key_env: e.target.value })}
           placeholder="CIX_OPENAI_API_KEY"
+          invalid={apiKeyMissing}
         />
-        <p className="text-xs text-muted-foreground">
-          The dashboard never stores the key itself. The server reads this
-          env var live on every embed call.
-        </p>
-      </div>
+      </Field>
 
       {apiKeyMissing ? (
-        <Alert variant="destructive">
-          <AlertTriangle className="h-4 w-4" />
-          <AlertTitle>API key env var is not set</AlertTitle>
-          <AlertDescription>
-            Export <code>{value.api_key_env}</code> on the server (compose,
-            portainer, systemd, …) and restart the container before saving.
-            Calls would fail until the key becomes available.
-          </AlertDescription>
-        </Alert>
+        <Callout variant="danger">
+          <b>That env var is not set on the server</b>
+          <p>
+            Export <Chip>{value.api_key_env}</Chip> (compose, Portainer, systemd…) and restart the
+            container before saving — every call would fail until the key exists.
+          </p>
+        </Callout>
       ) : null}
 
-      <p className="text-xs text-muted-foreground">
-        Rate-limit handling: the server forwards the upstream HTTP status
-        as-is — there is no retry-with-backoff yet. If you hit 429s, lower
-        the concurrency in the Throughput card below or pick an account
-        tier with higher RPM. Self-hosted servers (vLLM, TEI, LocalAI)
-        typically don't rate-limit at all.
-      </p>
+      <Callout variant="warn">
+        <b>No retry-with-backoff yet</b>
+        <p>
+          The upstream HTTP status is forwarded as-is. On 429s, lower the queue concurrency in
+          Throughput or move to an account tier with a higher RPM. Self-hosted servers (vLLM, TEI,
+          LocalAI) usually don't rate-limit at all.
+        </p>
+      </Callout>
     </div>
   );
 }

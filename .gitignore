@@ -1,6 +1,9 @@
 # Environment
 .env
 .env.local
+# Timestamped backups made before editing .env — same secrets, one rename away
+# from being staged by a `git add -A`.
+.env.bak*
 
 # Python
 __pycache__/

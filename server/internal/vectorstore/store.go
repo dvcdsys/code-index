@@ -1,21 +1,42 @@
-// Package vectorstore wraps chromem-go to provide a persistent vector store
-// with the same semantics as the Python VectorStoreService (api/app/services/vector_store.py).
+// Package vectorstore is the persistent vector store: chunk embeddings on
+// disk in SQLite, searched by a streamed brute-force scan.
 //
-// Collection naming and document ID schemes are kept identical to Python so
-// that a future migration script can read the chromem-go data without mapping.
+// # Why SQLite and not an in-memory index
+//
+// The store used to be chromem-go, which eagerly loads every document of every
+// collection into the Go heap at open and never evicts. On a real 312k-document
+// index that cost 2.2 GB of resident memory and a 47-second cold boot before
+// the first query could be answered — the memory was proportional to the index,
+// not to the work. Here the embeddings live as BLOBs in one SQLite file per
+// embedding namespace and a query streams the collection past a dot product
+// with a top-K heap. Opening is one file open (sub-millisecond), resident
+// memory is a couple of page-cache buffers per active query, and the cost is
+// search latency: roughly 3x chromem's on the same data.
+//
+// # Frozen contracts
+//
+// Collection naming (project_<md5hex(projectPath)>) and the document ID format
+// are compatibility contracts shared with the archived Python backend and with
+// every index already on disk. They are unchanged, which is what lets the
+// legacy chromem gob files be imported verbatim (see chromemimport.go).
 package vectorstore
 
 import (
 	"context"
 	"crypto/md5"
+	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
+	"os"
+	"path/filepath"
 	"strconv"
-
-	chromem "github.com/philippgille/chromem-go"
+	"strings"
+	"sync"
 )
 
+// upsertBatchSize is how many documents share one write transaction.
 const upsertBatchSize = 500
 
 // Chunk is the input unit for UpsertChunks.
@@ -42,20 +63,119 @@ type SearchResult struct {
 	Language   string
 }
 
-// Store wraps a persistent chromem-go DB.
-type Store struct {
-	db *chromem.DB
+// Options configures Open.
+type Options struct {
+	// Dir is the namespace directory. The database is Dir/vectors.db.
+	Dir string
+	// LegacyChromaDir is the chromem-go persist directory for the SAME
+	// embedding namespace. When it exists, its collections are imported on
+	// open (once, recorded in migration_state). Nothing under it is ever
+	// modified or removed — it is the rollback path.
+	LegacyChromaDir string
+	// MMapBytes maps PRAGMA mmap_size. 0 (the default) leaves it off.
+	// Enabling it trades resident memory for roughly 40% lower latency:
+	// mapped database pages are clean and reclaimable, but they count in RSS
+	// and every connection maps the file.
+	MMapBytes int64
+	// Logger receives migration progress. Defaults to a discarding logger.
+	Logger *slog.Logger
 }
 
-// Open returns a Store backed by a persistent chromem-go DB at path.
-// The directory is created by chromem-go if it does not exist.
-func Open(path string) (*Store, error) {
-	db, err := chromem.NewPersistentDB(path, false)
-	if err != nil {
-		return nil, fmt.Errorf("vectorstore open %q: %w", path, err)
-	}
-	return &Store{db: db}, nil
+// Store is a vector store backed by one SQLite file.
+type Store struct {
+	db     *sql.DB
+	dir    string // namespace directory
+	dbPath string // dir/vectors.db
+	// legacyDir is the chromem namespace this store was migrated from. Kept
+	// so maintenance can recognise it as belonging to the ACTIVE namespace
+	// and never offer it for deletion.
+	legacyDir string
+	logger    *slog.Logger
+
+	// closeMu guards closed. Every operation holds it for reading, Close
+	// takes it for writing, so Close waits for in-flight work to finish
+	// before the pool goes away. That is what makes it safe to close a store
+	// that has just been swapped out from under concurrent searches.
+	closeMu sync.RWMutex
+	closed  bool
+
+	// collMu guards collIDs, a cache of collection name -> rowid. Names are
+	// never reused for a different collection and ids never change, so the
+	// only invalidation needed is on delete.
+	collMu  sync.Mutex
+	collIDs map[string]int64
 }
+
+// ErrClosed is returned by every method once Close has run.
+var ErrClosed = errors.New("vectorstore: store is closed")
+
+// Open opens (creating if needed) a vector store in the namespace directory
+// dir, with no legacy import. Kept as the simple form used by tests and tools.
+func Open(dir string) (*Store, error) {
+	return OpenWith(Options{Dir: dir})
+}
+
+// OpenWith opens a vector store and, when o.LegacyChromaDir holds a chromem-go
+// layout, imports any collection that has not been imported yet.
+func OpenWith(o Options) (*Store, error) {
+	if o.Dir == "" {
+		return nil, errors.New("vectorstore: empty namespace directory")
+	}
+	dir := filepath.Clean(o.Dir)
+	logger := o.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	dbPath := filepath.Join(dir, DBFileName)
+	db, err := openDB(dbPath, o.MMapBytes, logger)
+	if err != nil {
+		return nil, fmt.Errorf("vectorstore open %q: %w", dbPath, err)
+	}
+	s := &Store{
+		db:        db,
+		dir:       dir,
+		dbPath:    dbPath,
+		legacyDir: strings.TrimSuffix(filepath.Clean(o.LegacyChromaDir), string(os.PathSeparator)),
+		logger:    logger,
+		collIDs:   map[string]int64{},
+	}
+	if o.LegacyChromaDir == "" {
+		s.legacyDir = ""
+	}
+	if err := s.importLegacyChromem(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// Close releases the database handle. It waits for in-flight operations, so a
+// store swapped out of a Holder can be closed straight away. Idempotent.
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.db.Close()
+}
+
+// acquire blocks new work while Close is running and reports whether the store
+// is still usable. Callers must release() on every path they acquire.
+func (s *Store) acquire() bool {
+	s.closeMu.RLock()
+	if s.closed {
+		s.closeMu.RUnlock()
+		return false
+	}
+	return true
+}
+
+func (s *Store) release() { s.closeMu.RUnlock() }
 
 // collectionName mirrors Python: f"project_{md5hex(project_path)}"
 func collectionName(projectPath string) string {
@@ -63,150 +183,266 @@ func collectionName(projectPath string) string {
 	return fmt.Sprintf("project_%x", h)
 }
 
-// CollectionName is the exported alias for the per-project chromem-go
-// collection identifier. The dashboard's project-detail card uses it to
-// resolve the on-disk directory under cfg.ChromaDirFor(activeComponents).
+// CollectionName is the exported alias for the per-project collection
+// identifier. FROZEN: existing indexes on disk (including those imported from
+// the prior Python backend and from chromem-go) are keyed by it.
 func CollectionName(projectPath string) string { return collectionName(projectPath) }
 
 // docID format: "{md5hex(filePath)[:12]}:{startLine}-{endLine}:{idx}"
 //
 // The positional `idx` is required because overlapping-window or repeated
 // chunkers can emit two chunks with identical (filePath, startLine, endLine);
-// without idx the second silently overwrites the first in chromem-go.
+// without idx the second silently overwrites the first.
 //
 // `h[:6]` gives 12 hex characters. Format is frozen — existing prod indexes
-// (including those imported from the prior Python backend) reference these
-// ids on disk; changing the shape requires a full reindex.
+// reference these ids on disk; changing the shape requires a full reindex.
 func docID(filePath string, startLine, endLine, idx int) string {
 	h := md5.Sum([]byte(filePath))
 	return fmt.Sprintf("%x:%d-%d:%d", h[:6], startLine, endLine, idx)
 }
 
-// embedNotUsed is a stub embedding func. chromem-go requires one, but we always
-// supply pre-computed embeddings via Document.Embedding, so this is never called.
-func embedNotUsed(_ context.Context, _ string) ([]float32, error) {
-	return nil, errors.New("vectorstore: embed func must not be called when embeddings are pre-computed")
+// collectionID resolves a collection name to its rowid without creating it.
+// ok is false when the collection does not exist.
+func (s *Store) collectionID(ctx context.Context, name string) (id int64, ok bool, err error) {
+	s.collMu.Lock()
+	id, cached := s.collIDs[name]
+	s.collMu.Unlock()
+	if cached {
+		return id, true, nil
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT id FROM collections WHERE name = ?`, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("vectorstore: look up collection %q: %w", name, err)
+	}
+	s.collMu.Lock()
+	s.collIDs[name] = id
+	s.collMu.Unlock()
+	return id, true, nil
 }
 
-func (s *Store) getOrCreateCollection(projectPath string) (*chromem.Collection, error) {
-	return s.db.GetOrCreateCollection(
-		collectionName(projectPath),
-		map[string]string{"hnsw:space": "cosine"},
-		embedNotUsed,
-	)
+// ensureCollection resolves a collection name to its rowid, creating the row
+// when it is missing.
+func (s *Store) ensureCollection(ctx context.Context, name string) (int64, error) {
+	if id, ok, err := s.collectionID(ctx, name); err != nil || ok {
+		return id, err
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO collections(name) VALUES(?)`, name); err != nil {
+		return 0, fmt.Errorf("vectorstore: create collection %q: %w", name, err)
+	}
+	id, ok, err := s.collectionID(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("vectorstore: collection %q vanished after insert", name)
+	}
+	return id, nil
+}
+
+// forgetCollection drops a name from the id cache (after a delete).
+func (s *Store) forgetCollection(name string) {
+	s.collMu.Lock()
+	delete(s.collIDs, name)
+	s.collMu.Unlock()
+}
+
+const upsertVectorSQL = `INSERT INTO vectors
+  (collection_id, doc_id, file_path, start_line, end_line, chunk_type, symbol_name, language, embedding)
+  VALUES (?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(collection_id, doc_id) DO UPDATE SET
+    file_path=excluded.file_path, start_line=excluded.start_line, end_line=excluded.end_line,
+    chunk_type=excluded.chunk_type, symbol_name=excluded.symbol_name, language=excluded.language,
+    embedding=excluded.embedding`
+
+const upsertContentSQL = `INSERT INTO vector_contents (collection_id, doc_id, content)
+  VALUES (?,?,?)
+  ON CONFLICT(collection_id, doc_id) DO UPDATE SET content=excluded.content`
+
+// ErrCollectionDeleted reports that the collection an upsert was writing into
+// was deleted while the write was in flight — see UpsertChunks.
+var ErrCollectionDeleted = errors.New("vectorstore: collection was deleted while the upsert was in flight")
+
+// foreignKeyViolationMsg is what SQLite puts in the error for a failed
+// REFERENCES check. modernc.org/sqlite surfaces the message rather than a typed
+// constraint code, so this is the seam; TestUpsertChunks_StaleCollectionID pins
+// that it still matches.
+const foreignKeyViolationMsg = "FOREIGN KEY constraint failed"
+
+// isCollectionGone reports whether err is the foreign-key failure that a stale
+// collection id produces.
+func isCollectionGone(err error) bool {
+	return err != nil && strings.Contains(err.Error(), foreignKeyViolationMsg)
 }
 
 // UpsertChunks stores or overwrites chunks with their pre-computed embeddings.
 // chunks and embeddings must be the same length.
-// Mirrors Python VectorStoreService.upsert_chunks.
+//
+// Embeddings are stored L2-normalised (search is a plain dot product), using
+// the same tolerance chromem-go used, so an already-normalised vector is
+// written byte-for-byte as the caller supplied it.
+//
+// # When the collection is deleted mid-flight
+//
+// The collection id is resolved once and then cached (see collIDs), so an
+// indexing run that overlaps an admin deleting the project — the Resources
+// screen, or a project delete — writes with an id whose collections row is
+// gone. The schema's foreign key turns that into a failed write, and this
+// returns ErrCollectionDeleted (wrapping the driver error) rather than
+// pretending it succeeded. The alternative the constraint replaced was worse:
+// the rows committed, no collections row joined to them, so ListCollections,
+// every size figure and the orphan sweep were all blind to them and they held
+// disk forever.
+//
+// Nothing is retried here. The stale id is dropped from the cache so a later
+// call resolves it again — recreating the collection if the caller genuinely
+// still wants to index that project — but deciding that is the caller's job,
+// not a silent side effect of a failed batch. Whatever rows earlier batches of
+// the same call committed are already gone: they were cascaded away with the
+// collections row.
 func (s *Store) UpsertChunks(ctx context.Context, projectPath string, chunks []Chunk, embeddings [][]float32) error {
 	if len(chunks) != len(embeddings) {
 		return fmt.Errorf("vectorstore: chunks(%d) and embeddings(%d) length mismatch", len(chunks), len(embeddings))
 	}
-	col, err := s.getOrCreateCollection(projectPath)
+	if !s.acquire() {
+		return ErrClosed
+	}
+	defer s.release()
+	if len(chunks) == 0 {
+		// Still create the collection, matching the previous behaviour where
+		// an upsert of nothing left an (empty) collection behind.
+		_, err := s.ensureCollection(ctx, collectionName(projectPath))
+		return err
+	}
+
+	name := collectionName(projectPath)
+	collID, err := s.ensureCollection(ctx, name)
 	if err != nil {
 		return err
 	}
 
-	docs := make([]chromem.Document, len(chunks))
-	for i, c := range chunks {
-		docs[i] = chromem.Document{
-			ID:      docID(c.FilePath, c.StartLine, c.EndLine, i),
-			Content: c.Content,
-			Metadata: map[string]string{
-				"file_path":   c.FilePath,
-				"start_line":  strconv.Itoa(c.StartLine),
-				"end_line":    strconv.Itoa(c.EndLine),
-				"chunk_type":  c.ChunkType,
-				"symbol_name": c.SymbolName,
-				"language":    c.Language,
-			},
-			Embedding: embeddings[i],
-		}
-	}
-
-	for i := 0; i < len(docs); i += upsertBatchSize {
-		end := i + upsertBatchSize
-			end = min(end, len(docs))
-		if err := col.AddDocuments(ctx, docs[i:end], 1); err != nil {
-			return fmt.Errorf("vectorstore upsert batch [%d:%d]: %w", i, end, err)
+	for start := 0; start < len(chunks); start += upsertBatchSize {
+		end := min(start+upsertBatchSize, len(chunks))
+		if err := s.upsertBatch(ctx, collID, chunks[start:end], embeddings[start:end], start); err != nil {
+			if isCollectionGone(err) {
+				s.forgetCollection(name)
+				return fmt.Errorf("vectorstore upsert batch [%d:%d] into %q: %w: %v",
+					start, end, name, ErrCollectionDeleted, err)
+			}
+			return fmt.Errorf("vectorstore upsert batch [%d:%d]: %w", start, end, err)
 		}
 	}
 	return nil
 }
 
-// Search performs a nearest-neighbor search using a pre-computed query embedding.
-// where is an optional metadata filter (e.g. {"language": "go"}).
-// Mirrors Python VectorStoreService.search.
-func (s *Store) Search(ctx context.Context, projectPath string, queryEmbedding []float32, limit int, where map[string]string) ([]SearchResult, error) {
-	col, err := s.getOrCreateCollection(projectPath)
+// upsertBatch writes one transaction. offset is the index of chunks[0] in the
+// caller's slice — the docID carries the position, so batching must not
+// renumber it.
+func (s *Store) upsertBatch(ctx context.Context, collID int64, chunks []Chunk, embeddings [][]float32, offset int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	count := col.Count()
-	if count == 0 {
-		return nil, nil
-	}
-	if limit <= 0 {
-		limit = 10
-	}
-	limit = min(limit, count)
-	results, err := col.QueryEmbedding(ctx, queryEmbedding, limit, where, nil)
-	if err != nil {
-		return nil, fmt.Errorf("vectorstore search: %w", err)
-	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
-	out := make([]SearchResult, len(results))
-	for i, r := range results {
-		startLine, _ := strconv.Atoi(r.Metadata["start_line"])
-		endLine, _ := strconv.Atoi(r.Metadata["end_line"])
-		out[i] = SearchResult{
-			FilePath:   r.Metadata["file_path"],
-			StartLine:  startLine,
-			EndLine:    endLine,
-			Content:    r.Content,
-			Score:      round4(r.Similarity),
-			ChunkType:  r.Metadata["chunk_type"],
-			SymbolName: r.Metadata["symbol_name"],
-			Language:   r.Metadata["language"],
+	vecStmt, err := tx.PrepareContext(ctx, upsertVectorSQL)
+	if err != nil {
+		return err
+	}
+	defer vecStmt.Close()
+	contentStmt, err := tx.PrepareContext(ctx, upsertContentSQL)
+	if err != nil {
+		return err
+	}
+	defer contentStmt.Close()
+
+	for i, c := range chunks {
+		emb := embeddings[i]
+		if !isNormalized(emb) {
+			emb = normalizeVector(emb)
+		}
+		id := docID(c.FilePath, c.StartLine, c.EndLine, offset+i)
+		if _, err := vecStmt.ExecContext(ctx, collID, id, c.FilePath, c.StartLine, c.EndLine,
+			c.ChunkType, c.SymbolName, c.Language, floatsBlob(emb)); err != nil {
+			return err
+		}
+		if _, err := contentStmt.ExecContext(ctx, collID, id, c.Content); err != nil {
+			return err
 		}
 	}
-	return out, nil
+	return tx.Commit()
 }
 
 // DeleteByFile removes all chunks for a given file within a project.
-// Mirrors Python VectorStoreService.delete_by_file.
 func (s *Store) DeleteByFile(ctx context.Context, projectPath, filePath string) error {
-	col, err := s.getOrCreateCollection(projectPath)
+	if !s.acquire() {
+		return ErrClosed
+	}
+	defer s.release()
+
+	collID, ok, err := s.collectionID(ctx, collectionName(projectPath))
 	if err != nil {
 		return err
 	}
-	if err := col.Delete(ctx, map[string]string{"file_path": filePath}, nil); err != nil {
+	if !ok {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vector_contents
+		WHERE collection_id = ? AND doc_id IN (
+			SELECT doc_id FROM vectors WHERE collection_id = ? AND file_path = ?)`,
+		collID, collID, filePath); err != nil {
+		return fmt.Errorf("vectorstore delete contents for %q: %w", filePath, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM vectors WHERE collection_id = ? AND file_path = ?`, collID, filePath); err != nil {
 		return fmt.Errorf("vectorstore delete by file %q: %w", filePath, err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // DeleteCollection removes the entire vector collection for a project.
-// Mirrors Python VectorStoreService.delete_collection.
 func (s *Store) DeleteCollection(projectPath string) error {
-	if err := s.db.DeleteCollection(collectionName(projectPath)); err != nil {
-		return fmt.Errorf("vectorstore delete collection: %w", err)
-	}
-	return nil
+	return s.DeleteCollectionByName(collectionName(projectPath))
 }
 
 // Count returns the number of chunks stored for a project.
 func (s *Store) Count(projectPath string) int {
-	col := s.db.GetCollection(collectionName(projectPath), nil)
-	if col == nil {
+	if !s.acquire() {
 		return 0
 	}
-	return col.Count()
+	defer s.release()
+
+	ctx := context.Background()
+	collID, ok, err := s.collectionID(ctx, collectionName(projectPath))
+	if err != nil || !ok {
+		return 0
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM vectors WHERE collection_id = ?`, collID).Scan(&n); err != nil {
+		return 0
+	}
+	return n
 }
+
+// DBPath is the SQLite file backing this store.
+func (s *Store) DBPath() string { return s.dbPath }
 
 // round4 rounds f to 4 decimal places, matching Python's round(score, 4).
 func round4(f float32) float32 {
 	return float32(math.Round(float64(f)*10000) / 10000)
 }
 
+// atoiOrZero parses a decimal metadata value, tolerating junk.
+func atoiOrZero(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
+}

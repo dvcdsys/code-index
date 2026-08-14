@@ -83,7 +83,7 @@ export function DocsApp() {
           </div>
 
           <Section id="overview" title="Overview" eyebrow="Concepts">
-            <p>cix is a single Go binary that exposes an HTTP API and a web dashboard at <code>http://host:21847</code>. It chunks your code with tree-sitter (31 grammars, run in a WASM sandbox), embeds chunks via a local <code>llama-server</code> sidecar, stores vectors in chromem-go, mirrors chunk text into a SQLite FTS5 table for BM25 scoring, and keeps symbols + project metadata in SQLite. Five search modes run on top: semantic, symbols, definitions, references, and files — plus hybrid cross-repo search over <a href="#workspaces">workspaces</a>.</p>
+            <p>cix is a single Go binary that exposes an HTTP API and a web dashboard at <code>http://host:21847</code>. It chunks your code with tree-sitter (31 grammars, run in a WASM sandbox), embeds chunks via a local <code>llama-server</code> sidecar, stores vectors as BLOBs in SQLite, mirrors chunk text into a SQLite FTS5 table for BM25 scoring, and keeps symbols + project metadata in SQLite. Five search modes run on top: semantic, symbols, definitions, references, and files — plus hybrid cross-repo search over <a href="#workspaces">workspaces</a>.</p>
             <h3>The three components</h3>
             <ul className="bullets">
               <li><b>cix-server</b> — the Go binary. Embedded React dashboard. Embedded Swagger UI at <code>/docs</code>. Ships as a distroless container.</li>
@@ -681,7 +681,7 @@ function Diagram() {
    │  HTTP/REST · sessions + Bearer keys · /dashboard   │
    │  ├── tree-sitter chunker   (31 languages, WASM)    │
    │  ├── llama-server sidecar  (Unix socket)           │
-   │  ├── chromem-go            (cosine vector store)   │
+   │  ├── SQLite BLOB vectors   (streamed cosine scan)  │
    │  ├── SQLite FTS5 mirror    (BM25 → hybrid rank)    │
    │  └── modernc/sqlite        (symbols + metadata)    │
    └─────┬─────────────────────────────────────┬────────┘

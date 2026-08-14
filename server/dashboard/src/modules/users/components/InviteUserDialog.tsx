@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { Loader2, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Alert, AlertDescription } from '@/ui/alert';
-import { Button } from '@/ui/button';
+import { Callout } from '@/ui/alert';
+import { Button, Dots } from '@/ui/button';
+import { Chip } from '@/ui/code';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -13,21 +14,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/ui/dialog';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/ui/select';
+import { Field, Input } from '@/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/ui/select';
 import type { Role } from '@/api/types';
 import { useCreateUser } from '../hooks';
 
-// Invite-only flow: admin sets the initial password and shares it out-of-band.
-// The new user is forced to change it on first login (server sets
-// must_change_password=true). Field minimums (≥8 chars) mirror the server.
+// Invite-only: the admin sets an initial password and shares it out of band.
+// The server flags must_change_password, so the user has to replace it on
+// first login. The ≥8 characters minimum mirrors the server.
 export function InviteUserDialog() {
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState('');
@@ -43,22 +37,19 @@ export function InviteUserDialog() {
   }
 
   async function onSubmit() {
-    const trimmedEmail = email.trim();
-    if (!trimmedEmail || pw.length < 8) return;
+    const trimmed = email.trim();
+    if (!trimmed || pw.length < 8) return;
     try {
-      await create.mutateAsync({
-        email: trimmedEmail,
-        role,
-        initial_password: pw,
-      });
+      await create.mutateAsync({ email: trimmed, role, initial_password: pw });
       toast.success('User created', {
-        description: `Share the initial password with ${trimmedEmail}. They will be required to change it on first login.`,
+        description: `Share the initial password with ${trimmed} — they must change it on first login.`,
       });
       setOpen(false);
       reset();
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : String(err);
-      toast.error('Failed to invite user', { description: detail });
+      toast.error('Could not invite the user', {
+        description: err instanceof ApiError ? err.detail : String(err),
+      });
     }
   }
 
@@ -71,23 +62,19 @@ export function InviteUserDialog() {
       }}
     >
       <DialogTrigger asChild>
-        <Button>
-          <UserPlus className="mr-1 h-4 w-4" />
-          Invite user
-        </Button>
+        <Button variant="primary">Invite user</Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Invite user</DialogTitle>
-          <DialogDescription>
-            Creates a user with an initial password you set. The user is forced
-            to change it on first login.
-          </DialogDescription>
+          <DialogTitle>Invite a user</DialogTitle>
         </DialogHeader>
+        <DialogBody>
+          <DialogDescription>
+            Creates the account with an initial password you choose. The user is forced to change
+            it on first login.
+          </DialogDescription>
 
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="invite-email">Email</Label>
+          <Field label="Email" htmlFor="invite-email">
             <Input
               id="invite-email"
               type="email"
@@ -97,51 +84,51 @@ export function InviteUserDialog() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="user@example.com"
             />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="invite-role">Role</Label>
+          </Field>
+
+          <Field label="Role" htmlFor="invite-role">
             <Select value={role} onValueChange={(v) => setRole(v as Role)}>
               <SelectTrigger id="invite-role">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="user">User</SelectItem>
-                <SelectItem value="admin">Admin (full access)</SelectItem>
+                <SelectItem value="user">user</SelectItem>
+                <SelectItem value="admin">admin — full access</SelectItem>
               </SelectContent>
             </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="invite-pw">Initial password</Label>
+          </Field>
+
+          <Field
+            label="Initial password"
+            htmlFor="invite-pw"
+            hint="At least 8 characters. Shown once — share it over your team's secure channel."
+          >
             <Input
               id="invite-pw"
               type="text"
               autoComplete="new-password"
               value={pw}
               onChange={(e) => setPw(e.target.value)}
-              placeholder="At least 8 characters"
             />
-            <p className="text-xs text-muted-foreground">
-              Shown once. Share via your team&rsquo;s preferred secure channel.
-            </p>
-          </div>
-          <Alert>
-            <AlertDescription className="text-xs">
-              The user&rsquo;s account will be flagged{' '}
-              <code className="rounded bg-muted px-1">must_change_password</code>;
-              they cannot use the system until they pick a new password.
-            </AlertDescription>
-          </Alert>
-        </div>
+          </Field>
 
+          <Callout>
+            <p>
+              The account is flagged <Chip>must_change_password</Chip> and cannot be used until
+              they pick a new one.
+            </p>
+          </Callout>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={create.isPending}>
             Cancel
           </Button>
           <Button
+            variant="primary"
             onClick={onSubmit}
             disabled={create.isPending || !email.trim() || pw.length < 8}
           >
-            {create.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            {create.isPending ? <Dots /> : null}
             Create user
           </Button>
         </DialogFooter>

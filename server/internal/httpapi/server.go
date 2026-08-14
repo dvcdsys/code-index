@@ -6,18 +6,20 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/access"
+	"github.com/dvcdsys/code-index/server/internal/dbmaint"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/httpapi/openapi"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
 	"github.com/dvcdsys/code-index/server/internal/langdetect"
+	"github.com/dvcdsys/code-index/server/internal/maintenance"
 	"github.com/dvcdsys/code-index/server/internal/projects"
+	"github.com/dvcdsys/code-index/server/internal/repocloner"
 	"github.com/dvcdsys/code-index/server/internal/symbolindex"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
@@ -37,6 +39,17 @@ type Server struct {
 	// so each test fixture (and each running server) gets its own
 	// in-memory state.
 	loginLimiter *loginLimiter
+
+	// maintenance backs the admin resource endpoints. Built once by
+	// NewRouter because it owns the analysis cache — the id returned by
+	// analyze has to still resolve when clean comes back holding it.
+	maintenance *maintenance.Service
+
+	// dbmaint backs the database compaction endpoints. Built once by
+	// NewRouter because it caches the copy throughput measured by the last
+	// compaction, which is what turns the duration estimate from a guess
+	// into a measurement.
+	dbmaint *dbmaint.Service
 }
 
 // Compile-time assertion that Server implements the generated interface.
@@ -48,6 +61,24 @@ var _ openapi.ServerInterface = (*Server)(nil)
 
 // GetHealth — GET /health (public).
 func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
+	// While the database is frozen for compaction, report healthy without
+	// touching it.
+	//
+	// This is not cosmetic. The probe below needs a connection from a pool of
+	// eight, and during a freeze it may not get one within its one-second
+	// budget — so the container healthcheck (30 s interval, 3 retries) would
+	// mark the server unhealthy and any restart policy would kill it in the
+	// middle of the compaction. The server is deliberately read-only here,
+	// not unwell, and the reason is carried in the payload so a caller that
+	// cares can tell the difference.
+	if s.Deps.DBMaint.Gate.Frozen() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "ok",
+			"maintenance": true,
+			"reason":      "the database is being compacted; reads are served, changes are refused",
+		})
+		return
+	}
 	if s.Deps.DB != nil {
 		pingCtx, cancel := context.WithTimeout(r.Context(), time.Second)
 		defer cancel()
@@ -238,67 +269,55 @@ func (s *Server) GetProject(w http.ResponseWriter, r *http.Request, path openapi
 		return
 	}
 	out := projectToOpenAPI(p)
-	s.enrichProjectStorage(&out, p)
+	s.enrichProjectStorage(r.Context(), &out, p)
 	writeJSON(w, http.StatusOK, out)
 }
 
-// enrichProjectStorage fills the storage-related Project fields. Skipped
-// when embeddings are disabled / unavailable — callers see those as nil and
-// the dashboard hides the section. Per-call os.Stat is cheap enough for the
-// single-project endpoint; we deliberately do NOT enrich the list endpoint
-// (would multiply stat calls × N projects on every page load).
-func (s *Server) enrichProjectStorage(out *openapi.Project, p *projects.Project) {
-	es, ok := s.Deps.EmbeddingSvc.(*embeddings.Service)
-	if !ok || es == nil {
-		return
+// enrichProjectStorage fills the storage-related Project fields. Per-call
+// os.Stat is cheap enough for the single-project endpoint; we deliberately do
+// NOT enrich the list endpoint (would multiply stat calls × N projects on
+// every page load).
+//
+// Prefers Deps.Cfg and falls back to the embedding service's copy, so the
+// fields still populate when embeddings are disabled.
+func (s *Server) enrichProjectStorage(ctx context.Context, out *openapi.Project, p *projects.Project) {
+	cfg := s.Deps.Cfg
+	if cfg == nil {
+		if es, ok := s.Deps.EmbeddingSvc.(*embeddings.Service); ok && es != nil {
+			cfg = es.Config()
+		}
 	}
-	cfg := es.Config()
 	if cfg == nil {
 		return
 	}
-	sqlitePath := cfg.SQLitePath
-	if sqlitePath != "" {
+	// The write-ahead log routinely runs to tens of megabytes on a busy
+	// index, so the main file alone understates the footprint.
+	if sqlitePath := cfg.SQLitePath; sqlitePath != "" {
 		out.SqlitePath = ptrString(sqlitePath)
 		if info, err := os.Stat(sqlitePath); err == nil {
 			sz := info.Size()
+			for _, sidecar := range []string{"-wal", "-shm"} {
+				if si, err := os.Stat(sqlitePath + sidecar); err == nil {
+					sz += si.Size()
+				}
+			}
 			out.SqliteSizeBytes = &sz
 		}
 	}
-	// Chroma dir is namespaced by the ACTIVE provider's identity path, so
-	// the displayed path tracks whatever provider is live now.
-	if comps := es.StoragePath(); cfg.ChromaPersistDir != "" && len(comps) > 0 {
-		col := vectorstore.CollectionName(p.HostPath)
-		dir := filepath.Join(cfg.ChromaDirFor(comps), col)
-		out.ChromaPath = ptrString(dir)
-		if sz, ok := dirSizeBytes(dir); ok {
+	// Ask the store how big this project's vectors are. There is no
+	// per-collection file to stat any more — a namespace is one SQLite
+	// database shared by every project — so the store sums the rows itself.
+	// The reported figure is the logical size of the collection's rows;
+	// index entries and page slack are not attributable to a collection and
+	// the file does not shrink on delete, so it is a floor, not a file size.
+	if m, ok := s.Deps.VectorStore.(vectorstore.Maintainer); ok && m != nil {
+		if path := m.DBPath(); path != "" {
+			out.ChromaPath = ptrString(path)
+		}
+		if sz, ok := m.CollectionSizeBytes(p.HostPath); ok {
 			out.ChromaSizeBytes = &sz
 		}
 	}
-}
-
-// dirSizeBytes walks dir and sums regular-file sizes. Returns (0,false) on
-// any error (missing dir, permission, etc.) so callers can decide to omit
-// the field rather than report a misleading 0.
-func dirSizeBytes(dir string) (int64, bool) {
-	var total int64
-	walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		total += info.Size()
-		return nil
-	})
-	if walkErr != nil {
-		return 0, false
-	}
-	return total, true
 }
 
 // UpdateProject — PATCH /api/v1/projects/{path}. Admin-only: settings
@@ -338,11 +357,83 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path open
 	if p == nil {
 		return
 	}
-	if err := projects.Delete(r.Context(), s.Deps.DB, p.HostPath); err != nil {
+	// Stop the pipeline before removing anything, the same two steps
+	// ForceStopIndex takes. Dequeuing alone is not enough: deleting a
+	// `running` row does not stop the goroutine behind it (see the note on
+	// jobs.DeleteByDedupeKeys), so an index already in flight would keep
+	// writing chunks and vectors and re-create the collection and checkout
+	// moments after the artifact cleanup removed them.
+	if s.Deps.Jobs != nil {
+		hash := projects.HashPath(p.HostPath)
+		if _, err := s.Deps.Jobs.DeleteByDedupeKeys(r.Context(), "clone:"+hash, "index:"+hash); err != nil {
+			s.Deps.Logger.Warn("delete project: clear queued jobs", "project", p.HostPath, "err", err)
+		}
+	}
+	if s.Deps.Indexer != nil {
+		if _, err := s.Deps.Indexer.CancelIndexing(r.Context(), p.HostPath); err != nil {
+			// Best effort: a live session that refuses to cancel leaves an
+			// orphan the Resources screen can reclaim, which is a better
+			// outcome than refusing to delete the project.
+			s.Deps.Logger.Warn("delete project: cancel active index session", "project", p.HostPath, "err", err)
+		}
+	}
+	if err := projects.Delete(r.Context(), s.Deps.DB, p.HostPath, s.projectArtifacts()); err != nil {
+		// A cleanup failure means the project itself is gone and only residue
+		// is left, which the Resources screen can reclaim. Reporting a 500
+		// there would tell the operator the delete failed when it did not.
+		if errors.Is(err, projects.ErrArtifactCleanup) {
+			s.Deps.Logger.Warn("delete project: cleanup left residue", "project", p.HostPath, "err", err)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// projectArtifacts wires the off-database cleanup for a project delete: the
+// vector collection and the cloned checkout.
+// Returns nil when neither is available, which keeps router-only tests working.
+func (s *Server) projectArtifacts() *projects.Artifacts {
+	art := &projects.Artifacts{}
+	if m, ok := s.Deps.VectorStore.(vectorstore.Maintainer); ok && m != nil {
+		art.DropCollection = func(hostPath string) error {
+			if err := m.DeleteCollectionByName(vectorstore.CollectionName(hostPath)); err != nil {
+				return err
+			}
+			// A deleted project's pages otherwise sit in the freelist for the
+			// life of the file, holding its high-water size and inflating the
+			// "Vector store" usage row. This is a single admin-initiated
+			// delete, not a batch, so the vacuum cost (~170 ms per 20k-doc
+			// collection) is fine here — the batched-reclaim reasoning in
+			// maintenance.Clean does not apply. The indexer's own
+			// DeleteCollection before a full reindex stays vacuum-free on
+			// purpose: the reindex reuses those pages immediately.
+			m.ReclaimFreePages(context.Background())
+			return nil
+		}
+	}
+	if s.Deps.DataDir != "" {
+		art.RemoveCloneDir = func(hostPath string) error {
+			hash := projects.HashPath(hostPath)
+			dir := repocloner.LocalDirFor(s.Deps.DataDir, hash)
+			if s.Deps.RepoLocks == nil {
+				return os.RemoveAll(dir)
+			}
+			// Same write lock the clone worker takes to rewrite a worktree,
+			// and the counterpart of the read lock the file/tree handlers
+			// take. Removing the tree out from under either is exactly what
+			// the registry exists to prevent.
+			return s.Deps.RepoLocks.WithWrite(hash, func() error {
+				return os.RemoveAll(dir)
+			})
+		}
+	}
+	if art.DropCollection == nil && art.RemoveCloneDir == nil {
+		return nil
+	}
+	return art
 }
 
 // ---------------------------------------------------------------------------

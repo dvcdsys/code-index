@@ -1,20 +1,26 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Cable, Copy, RefreshCw, Wifi } from 'lucide-react';
+import { toast } from 'sonner';
 import { api } from '@/api/client';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert';
-import { Button } from '@/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/ui/card';
-import { Input } from '@/ui/input';
-import { Label } from '@/ui/label';
+import { useStatusFact } from '@/app/StatusBar';
+import { Callout } from '@/ui/alert';
+import { Status } from '@/ui/badge';
+import { Button, Dots } from '@/ui/button';
+import { Card, CardBody, CardHead, KV } from '@/ui/card';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/ui/select';
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/ui/dialog';
+import { Field, Input } from '@/ui/input';
+import { Page } from '@/ui/page';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/ui/select';
 import { Skeleton } from '@/ui/skeleton';
-import { Switch } from '@/ui/switch';
+import { SwitchRow } from '@/ui/switch';
+import { useCopy } from '@/lib/useCopy';
 import { BinarySection } from './BinarySection';
 import { TunnelStateBadge } from './TunnelStateBadge';
 import type {
@@ -28,11 +34,9 @@ import type {
   TunnelTestResult,
 } from './types';
 
-// ManagedTunnelsPage manages the server-orchestrated outbound tunnel that
-// gives the server a public URL behind NAT. The feature has no env flag —
-// everything (provider, enable, mode, hostname, token) is configured here
-// and stored in the DB. One tunnel runs at a time; the provider is
-// selectable (Cloudflare or ngrok).
+// The server-orchestrated outbound tunnel that gives this server a public URL
+// from behind NAT. There is no env flag — provider, enable, mode, hostname and
+// token all live in the DB and are configured here. One tunnel at a time.
 export default function ManagedTunnelsPage() {
   const [config, setConfig] = useState<TunnelConfig | null>(null);
   const [status, setStatus] = useState<TunnelStatus | null>(null);
@@ -59,27 +63,22 @@ export default function ManagedTunnelsPage() {
     void reload();
   }, []);
 
-  return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Managed Tunnels</h1>
-        <p className="text-sm text-muted-foreground">
-          A built-in outbound tunnel that gives this server a public URL while
-          it sits behind NAT — no inbound ports required. Its first consumer is
-          GitHub webhook delivery.
-        </p>
-      </header>
+  useStatusFact(status ? `tunnel ${status.state}` : null);
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="size-4" />
-          <AlertTitle>Could not load tunnel status</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
+  return (
+    <Page
+      title="Managed tunnels"
+      subtitle="A built-in outbound tunnel that gives this server a public URL from behind NAT — no inbound ports. Its first consumer is GitHub webhook delivery."
+    >
+      {error ? (
+        <Callout variant="danger" className="mb-5">
+          <b>Could not load the tunnel status</b>
+          <p>{error}</p>
+        </Callout>
+      ) : null}
 
       {config === null ? (
-        <Skeleton className="h-96 w-full" />
+        <Skeleton className="h-96" />
       ) : (
         <TunnelConfigCard
           config={config}
@@ -92,7 +91,7 @@ export default function ManagedTunnelsPage() {
           onChanged={reload}
         />
       )}
-    </div>
+    </Page>
   );
 }
 
@@ -128,7 +127,7 @@ function TunnelConfigCard({
   onChanged: () => void;
 }) {
   const [provider, setProvider] = useState<TunnelProvider>(
-    (config.provider as TunnelProvider) || 'cloudflare',
+    (config.provider as TunnelProvider) || 'cloudflare'
   );
   const [enabled, setEnabled] = useState(config.enabled);
   const [mode, setMode] = useState<TunnelMode>(config.mode);
@@ -146,6 +145,7 @@ function TunnelConfigCard({
       const st = await api.put<TunnelStatus>('/tunnels/config', body);
       setToken('');
       onApplied(st);
+      toast.success('Tunnel configuration applied');
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -162,139 +162,122 @@ function TunnelConfigCard({
   const tokenLabel = provider === 'ngrok' ? 'Authtoken' : 'Connector token';
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between gap-3">
-          <CardTitle className="flex items-center gap-2">
-            <Cable className="size-4" />
-            Tunnel
-            {status && <TunnelStateBadge state={status.state} />}
-          </CardTitle>
-          {live && <TunnelActions onChanged={onChanged} />}
+    <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <Card>
+        <CardHead
+          title="Tunnel"
+          aside={
+            <Button variant="primary" onClick={save} disabled={saving}>
+              {saving ? <Dots /> : null}
+              Save &amp; apply
+            </Button>
+          }
+        >
+          {status ? <TunnelStateBadge state={status.state} /> : null}
+        </CardHead>
+        <CardBody className="flex flex-col gap-4">
+          <p className="m-0 text-[13.5px] text-dim">
+            One outbound tunnel, managed by this server. Pick a provider, choose an ephemeral (dev)
+            or stable (prod) URL, then save to apply.
+          </p>
+
+          <Field label="Provider">
+            <Select value={provider} onValueChange={(v) => setProvider(v as TunnelProvider)}>
+              <SelectTrigger aria-label="Tunnel provider">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="cloudflare">{PROVIDER_LABEL.cloudflare}</SelectItem>
+                <SelectItem value="ngrok">{PROVIDER_LABEL.ngrok}</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+
+          <BinarySection
+            provider={provider}
+            binary={binaries.find((b) => b.provider === provider)}
+            onChanged={onChanged}
+          />
+
+          <SwitchRow
+            id="tun-enabled"
+            checked={enabled}
+            onCheckedChange={setEnabled}
+            label="Enabled"
+            hint="Start the tunnel on this server."
+          />
+
+          <Field label="Mode">
+            <Select value={mode} onValueChange={(v) => setMode(v as TunnelMode)}>
+              <SelectTrigger aria-label="Tunnel mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {modeOptions(provider).map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+
+          {showHostname ? (
+            <Field label={hostnameLabel} htmlFor="tun-host">
+              <Input
+                id="tun-host"
+                value={hostname}
+                onChange={(e) => setHostname(e.target.value)}
+                placeholder={hostnamePlaceholder}
+              />
+            </Field>
+          ) : null}
+
+          {showToken ? (
+            <Field
+              label={tokenLabel}
+              htmlFor="tun-token"
+              hint={
+                provider === 'ngrok'
+                  ? 'Stored encrypted at rest. From your ngrok dashboard (Your Authtoken).'
+                  : 'Stored encrypted at rest. From `cloudflared tunnel token <name>`.'
+              }
+            >
+              <Input
+                id="tun-token"
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder={config.token_set ? '•••••• leave blank to keep' : tokenLabel}
+              />
+            </Field>
+          ) : null}
+
+          {err ? (
+            <Callout variant="danger">
+              <p>{err}</p>
+            </Callout>
+          ) : null}
+        </CardBody>
+      </Card>
+
+      {live && status ? (
+        <div className="flex flex-col gap-5">
+          <StatusCard status={status} onChanged={onChanged} />
         </div>
-        <CardDescription>
-          One outbound tunnel managed by this server. Pick a provider, choose an
-          ephemeral (dev) or stable (prod) URL, and save to apply.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="space-y-1">
-          <Label>Provider</Label>
-          <Select value={provider} onValueChange={(v) => setProvider(v as TunnelProvider)}>
-            <SelectTrigger className="h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="cloudflare">{PROVIDER_LABEL.cloudflare}</SelectItem>
-              <SelectItem value="ngrok">{PROVIDER_LABEL.ngrok}</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        <BinarySection
-          provider={provider}
-          binary={binaries.find((b) => b.provider === provider)}
-          onChanged={onChanged}
-        />
-
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <Label htmlFor="tun-enabled">Enabled</Label>
-            <p className="text-xs text-muted-foreground">Start the tunnel on this server.</p>
-          </div>
-          <Switch id="tun-enabled" checked={enabled} onCheckedChange={setEnabled} />
-        </div>
-
-        <div className="space-y-1">
-          <Label>Mode</Label>
-          <Select value={mode} onValueChange={(v) => setMode(v as TunnelMode)}>
-            <SelectTrigger className="h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {modeOptions(provider).map((o) => (
-                <SelectItem key={o.value} value={o.value}>
-                  {o.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        {showHostname && (
-          <div className="space-y-1">
-            <Label htmlFor="tun-host">{hostnameLabel}</Label>
-            <Input
-              id="tun-host"
-              value={hostname}
-              onChange={(e) => setHostname(e.target.value)}
-              placeholder={hostnamePlaceholder}
-            />
-          </div>
-        )}
-
-        {showToken && (
-          <div className="space-y-1">
-            <Label htmlFor="tun-token">{tokenLabel}</Label>
-            <Input
-              id="tun-token"
-              type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder={config.token_set ? '•••••• (leave blank to keep)' : tokenLabel}
-              className="font-mono"
-            />
-            <p className="text-xs text-muted-foreground">
-              Stored encrypted-at-rest.
-              {provider === 'ngrok'
-                ? ' From your ngrok dashboard (Your Authtoken).'
-                : ' From cloudflared tunnel token <name>.'}
-            </p>
-          </div>
-        )}
-
-        {err && (
-          <Alert variant="destructive">
-            <AlertCircle className="size-4" />
-            <AlertDescription>{err}</AlertDescription>
-          </Alert>
-        )}
-
-        <div className="flex justify-end">
-          <Button onClick={save} disabled={saving}>
-            {saving ? 'Applying…' : 'Save & apply'}
-          </Button>
-        </div>
-
-        {live && status && <StatusDetails status={status} />}
-      </CardContent>
-    </Card>
-  );
-}
-
-function StatusDetails({ status }: { status: TunnelStatus }) {
-  return (
-    <div className="space-y-2 border-t pt-4">
-      <Field label="Active provider" value={status.provider} />
-      <Field label="Mode" value={status.mode ?? '—'} />
-      <PublicUrlField url={status.public_url} />
-      <Field label="PID" value={status.pid ? String(status.pid) : '—'} />
-      <Field label="Uptime" value={formatUptime(status.uptime_sec)} />
-      {status.last_error && (
-        <Alert variant="destructive">
-          <AlertCircle className="size-4" />
-          <AlertTitle>Last error</AlertTitle>
-          <AlertDescription className="font-mono text-xs">{status.last_error}</AlertDescription>
-        </Alert>
-      )}
+      ) : null}
     </div>
   );
 }
 
-function TunnelActions({ onChanged }: { onChanged: () => void }) {
+// Live runtime state in the right rail — visible while the form on the left is
+// being edited, same as the sidecar rail on the Server page.
+function StatusCard({ status, onChanged }: { status: TunnelStatus; onChanged: () => void }) {
   const [busy, setBusy] = useState<'test' | 'restart' | null>(null);
   const [result, setResult] = useState<TunnelTestResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [confirmRestart, setConfirmRestart] = useState(false);
+  const url = useCopy();
 
   async function runTest() {
     setBusy('test');
@@ -310,11 +293,11 @@ function TunnelActions({ onChanged }: { onChanged: () => void }) {
   }
 
   async function restart() {
-    if (!confirm('Restart the tunnel? Webhooks re-register automatically if the URL changes.')) return;
     setBusy('restart');
     setErr(null);
     try {
       await api.post('/tunnels/restart');
+      setConfirmRestart(false);
       onChanged();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -324,64 +307,99 @@ function TunnelActions({ onChanged }: { onChanged: () => void }) {
   }
 
   return (
-    <div className="flex flex-col items-end gap-2">
-      <div className="flex gap-2">
-        <Button variant="outline" size="sm" disabled={busy !== null} onClick={runTest}>
-          <Wifi className="mr-1 size-4" />
-          {busy === 'test' ? 'Testing…' : 'Test connection'}
-        </Button>
-        <Button variant="outline" size="sm" disabled={busy !== null} onClick={restart}>
-          <RefreshCw className="mr-1 size-4" />
-          {busy === 'restart' ? 'Restarting…' : 'Restart'}
-        </Button>
-      </div>
-      {result && (
-        <span className={`text-xs ${result.ok ? 'text-green-600' : 'text-destructive'}`}>
-          {result.ok ? '✓' : '✗'} {result.detail}
-          {result.latency_ms != null && ` (${result.latency_ms} ms)`}
-        </span>
-      )}
-      {err && <span className="text-xs text-destructive">{err}</span>}
-    </div>
-  );
-}
+    <Card>
+      <CardHead>
+        <TunnelStateBadge state={status.state} />
+      </CardHead>
+      <CardBody className="flex flex-col gap-3.5">
+        <KV
+          rows={[
+            { label: 'provider', value: status.provider },
+            { label: 'mode', value: status.mode ?? '—' },
+            { label: 'pid', value: status.pid ? String(status.pid) : '—' },
+            { label: 'uptime', value: formatUptime(status.uptime_sec) },
+          ]}
+        />
 
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-mono capitalize">{value}</span>
-    </div>
-  );
-}
+        <div>
+          <span className="cix-label">Public URL</span>
+          {status.public_url ? (
+            <div className="mt-1.5 flex items-center gap-2">
+              <a
+                href={status.public_url}
+                target="_blank"
+                rel="noreferrer"
+                className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-accent hover:underline"
+              >
+                {status.public_url}
+              </a>
+              <Button size="sm" onClick={() => void url.copy(status.public_url!)}>
+                {url.copied ? 'Copied' : 'Copy'}
+              </Button>
+            </div>
+          ) : (
+            <p className="cix-hint mt-1.5">not assigned yet</p>
+          )}
+        </div>
 
-function PublicUrlField({ url }: { url?: string }) {
-  if (!url) {
-    return <Field label="Public URL" value="(not assigned yet)" />;
-  }
-  return (
-    <div className="flex items-center justify-between gap-3 text-sm">
-      <span className="text-muted-foreground">Public URL</span>
-      <span className="flex items-center gap-1">
-        <a
-          href={url}
-          target="_blank"
-          rel="noreferrer"
-          className="truncate font-mono text-primary underline-offset-2 hover:underline"
-        >
-          {url}
-        </a>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="size-7 p-0"
-          onClick={() => void navigator.clipboard?.writeText(url)}
-          title="Copy URL"
-        >
-          <Copy className="size-3.5" />
-        </Button>
-      </span>
-    </div>
+        <div className="flex gap-2">
+          <Button size="sm" className="flex-1" disabled={busy !== null} onClick={runTest}>
+            {busy === 'test' ? <Dots /> : null}
+            Test
+          </Button>
+          <Button
+            size="sm"
+            className="flex-1"
+            disabled={busy !== null}
+            onClick={() => setConfirmRestart(true)}
+          >
+            Restart
+          </Button>
+        </div>
+
+        {result ? (
+          <Status tone={result.ok ? 'ok' : 'busy'} className="font-mono text-[11.5px]">
+            {result.detail}
+            {result.latency_ms != null ? ` · ${result.latency_ms} ms` : ''}
+          </Status>
+        ) : null}
+
+        {err ? <span className="cix-error">{err}</span> : null}
+
+        {status.last_error ? (
+          <Callout variant="danger">
+            <b>Last error</b>
+            <p className="font-mono text-[11.5px]">{status.last_error}</p>
+          </Callout>
+        ) : null}
+      </CardBody>
+
+      <Dialog
+        open={confirmRestart}
+        onOpenChange={(next) => (busy === null ? setConfirmRestart(next) : null)}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Restart the tunnel?</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <DialogDescription>
+              Delivery pauses for a few seconds. If the public URL changes, webhooks re-register
+              themselves against the new one.
+            </DialogDescription>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirmRestart(false)} disabled={busy !== null}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={restart} disabled={busy !== null}>
+              {busy === 'restart' ? <Dots /> : null}
+              Restart
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
   );
 }
 

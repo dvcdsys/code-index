@@ -1,10 +1,9 @@
-import { Loader2, ShieldOff, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import { Button } from '@/ui/button';
+import { Button, Dots } from '@/ui/button';
 import { useUpdateUser } from '../hooks';
 
-// One-click toggle. Server's last-admin guard kicks in for the disable path.
+// One click each way. The server's last-admin guard covers the disable path.
 export function DisableUserButton({
   userId,
   disabled,
@@ -20,9 +19,8 @@ export function DisableUserButton({
       await update.mutateAsync({ id: userId, body: { disabled: !disabled } });
       toast.success(disabled ? 'User re-enabled' : 'User disabled');
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : String(err);
-      toast.error(disabled ? 'Could not enable user' : 'Could not disable user', {
-        description: detail,
+      toast.error(disabled ? 'Could not enable the user' : 'Could not disable the user', {
+        description: err instanceof ApiError ? err.detail : String(err),
       });
     }
   }
@@ -33,15 +31,9 @@ export function DisableUserButton({
       size="sm"
       onClick={onToggle}
       disabled={update.isPending}
-      title={disabled ? 'Re-enable account' : 'Disable account (cannot log in)'}
+      title={disabled ? 'Re-enable this account' : 'Disable this account — no sign-in'}
     >
-      {update.isPending ? (
-        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-      ) : disabled ? (
-        <ShieldCheck className="mr-1 h-4 w-4" />
-      ) : (
-        <ShieldOff className="mr-1 h-4 w-4" />
-      )}
+      {update.isPending ? <Dots /> : null}
       {disabled ? 'Enable' : 'Disable'}
     </Button>
   );

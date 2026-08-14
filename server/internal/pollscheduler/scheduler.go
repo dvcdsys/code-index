@@ -22,6 +22,7 @@ package pollscheduler
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
@@ -37,6 +38,14 @@ type Service struct {
 	defaultSecs int
 	minSecs     int
 	logger      *slog.Logger
+
+	// stop/done give Stop a drain it can actually wait on. Both are created
+	// in New and closed at most once, so Stop is safe to call repeatedly and
+	// safe on a Service that was never started.
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+	doneOnce sync.Once
 }
 
 // New builds a Service. tick defaults to 30s, defaultSecs to 300 (5m), and
@@ -62,17 +71,43 @@ func New(gr *gitrepos.Service, j *jobs.Service, tick time.Duration, defaultSecs,
 		defaultSecs: defaultSecs,
 		minSecs:     minSecs,
 		logger:      logger,
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 }
 
 // Run loops on a ticker, draining due polls, until ctx is cancelled.
+// Stop asks Run to exit and waits for the current tick to finish, or for ctx
+// to expire.
+//
+// Added for database compaction, which needs every writer *drained*, not
+// merely told to stop: this scheduler enqueues jobs and reschedules polls, so
+// a tick still in flight when the snapshot is taken would write into a
+// database that is about to be replaced. Cancelling the context alone cannot
+// answer "has it finished?".
+//
+// Safe to call more than once, and safe on a Service whose Run was never
+// started, in which case it returns as soon as ctx allows.
+func (s *Service) Stop(ctx context.Context) error {
+	s.stopOnce.Do(func() { close(s.stop) })
+	select {
+	case <-s.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *Service) Run(ctx context.Context) {
+	defer s.doneOnce.Do(func() { close(s.done) })
 	ticker := time.NewTicker(s.tick)
 	defer ticker.Stop()
 	s.logger.Info("poll scheduler started", "tick", s.tick, "default_interval_s", s.defaultSecs)
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-s.stop:
 			return
 		case <-ticker.C:
 			s.tickOnce(ctx)

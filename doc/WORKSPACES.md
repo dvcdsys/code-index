@@ -239,7 +239,7 @@ The original `PR4–PR7` placeholders have all landed on `develop`:
 - **PR4** (`f244643`) — Intra-project call-graph extraction
   (`call_edges` table) + eval harness.
 - **PR5** (`ec32744`) — Louvain community detection per workspace +
-  workspace centroid embeddings in a dedicated chromem collection.
+  workspace centroid embeddings in a dedicated vector collection.
 - **PR6** (`207bfaf`) — Two-stage workspace search endpoint
   (`POST /api/v1/workspaces/{id}/search`). Hybrid BM25 + dense ranking
   with project-level gating — see [`SEARCH_ALGORITHM.md`](SEARCH_ALGORITHM.md#3-workspace-hybrid-search).

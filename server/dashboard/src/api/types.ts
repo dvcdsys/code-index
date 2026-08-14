@@ -88,3 +88,48 @@ export type TestEmbeddingProviderResponse = components['schemas']['TestEmbedding
 
 // Provider kind union — the dashboard uses this in form-state discriminants.
 export type EmbeddingProviderKind = 'ollama' | 'openai' | 'voyage';
+
+// Admin resource accounting: what the server is using, what of that is
+// reclaimable, and the result of reclaiming it.
+export type ResourceUsage = components['schemas']['ResourceUsage'];
+export type MemoryUsage = components['schemas']['MemoryUsage'];
+export type DiskUsage = components['schemas']['DiskUsage'];
+export type VectorStoreUsage = components['schemas']['VectorStoreUsage'];
+export type ReclaimAnalysis = components['schemas']['ReclaimAnalysis'];
+export type ReclaimCategory = components['schemas']['ReclaimCategory'];
+export type ReclaimCategoryId = components['schemas']['ReclaimCategoryId'];
+export type ReclaimItem = components['schemas']['ReclaimItem'];
+export type CleanRequest = components['schemas']['CleanRequest'];
+export type CleanResult = components['schemas']['CleanResult'];
+export type CleanCategoryResult = components['schemas']['CleanCategoryResult'];
+
+// Database compaction: how much of the SQLite file is wasted, what an
+// operation on it is doing, and when one runs automatically.
+export type DatabaseState = components['schemas']['DatabaseState'];
+export type AutoVacuumRequest = components['schemas']['AutoVacuumRequest'];
+export type MaintenanceOperation = components['schemas']['MaintenanceOperation'];
+export type MaintenanceEvent = components['schemas']['MaintenanceEvent'];
+export type ReclaimRequest = components['schemas']['ReclaimRequest'];
+export type ReclaimResult = components['schemas']['ReclaimResult'];
+// Recurring tasks. Not database-specific — the registry is generic and the
+// database's reclaim and compaction are simply its first two entries.
+export type ScheduledTask = components['schemas']['ScheduledTask'];
+export type ScheduleUpdate = components['schemas']['ScheduleUpdate'];
+
+// Phases in which something is actually happening to the database, as opposed
+// to the terminal ones that only report what happened.
+//
+// One definition, because three components need the answer — the banner, the
+// polling interval and the disabled state of the controls — and three copies
+// had already started to disagree about which phases count.
+const ACTIVE_PHASES: ReadonlySet<string> = new Set([
+  'preparing',
+  'copying',
+  'ready_to_swap',
+  'swapping',
+  'restarting',
+]);
+
+export function isActivePhase(phase: string | null | undefined): boolean {
+  return !!phase && ACTIVE_PHASES.has(phase);
+}

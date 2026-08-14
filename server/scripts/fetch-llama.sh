@@ -10,6 +10,23 @@
 #   DEST_DIR        — target directory for the slimmed binary set
 #   CHECKSUMS_FILE  — path to scripts/llama-checksums.txt
 #   LLAMA_STRICT    — "1" to require a pre-recorded checksum (default "0")
+#   LLAMA_FORCE     — "1" to refetch even when DEST_DIR is already at the pin
+#   LLAMA_CACHE_DIR — where verified archives are kept (default
+#                     ${XDG_CACHE_HOME:-~/.cache}/cix/llama)
+#
+# Idempotence
+# -----------
+# DEST_DIR carries a `.llama-version` stamp naming the version it was built
+# from. When the stamp matches LLAMA_VERSION and llama-server is still there,
+# the script exits immediately — no network, no re-extract, no re-sign. This
+# matters because `make run` depends on `bundle` depends on `fetch-llama`, so
+# without it every single server restart re-downloaded ~52 MB from GitHub.
+# The stamp is removed before extraction and only rewritten once every sanity
+# check has passed, so a half-finished fetch can never be mistaken for a good
+# one.
+#
+# Verified archives are also kept in LLAMA_CACHE_DIR, which is what makes a
+# forced refetch (or a bump back to a version used before) cost nothing.
 #
 # First-run bootstrap flow
 # ------------------------
@@ -41,6 +58,10 @@ set -euo pipefail
 : "${DEST_DIR:?DEST_DIR is required}"
 : "${CHECKSUMS_FILE:?CHECKSUMS_FILE is required}"
 : "${LLAMA_STRICT:=0}"
+: "${LLAMA_FORCE:=0}"
+: "${LLAMA_CACHE_DIR:=${XDG_CACHE_HOME:-$HOME/.cache}/cix/llama}"
+
+STAMP_FILE="$DEST_DIR/.llama-version"
 
 if [[ "$LLAMA_OS" != "darwin" || "$LLAMA_ARCH" != "arm64" ]]; then
     echo "fetch-llama.sh: only darwin-arm64 is supported in Phase 3 (got $LLAMA_OS-$LLAMA_ARCH)" >&2
@@ -76,12 +97,38 @@ EOF
     exit 1
 fi
 
+# Already at the pin? Nothing to do. Checked after the strict gate so that a
+# release build with an unpinned version still fails, cache or no cache.
+if [[ "$LLAMA_FORCE" != "1" && -x "$DEST_DIR/llama-server" && -f "$STAMP_FILE" ]] \
+    && [[ "$(cat "$STAMP_FILE" 2>/dev/null)" == "$LLAMA_VERSION" ]]; then
+    echo "fetch-llama: $DEST_DIR already at $LLAMA_VERSION — nothing to do (LLAMA_FORCE=1 to refetch)"
+    exit 0
+fi
+
 TMP_DIR="$(mktemp -d -t cix-fetch-llama-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 ARCHIVE="$TMP_DIR/$ASSET"
 
-echo "fetch-llama: downloading $URL"
-curl --fail --location --show-error --silent --output "$ARCHIVE" "$URL"
+# A previously verified copy of this exact asset skips the transfer. Only
+# trusted when we have a recorded checksum to re-verify it against — an
+# unpinned version has nothing to compare the cached bytes to.
+CACHED_ARCHIVE="$LLAMA_CACHE_DIR/$ASSET"
+FROM_CACHE=0
+if [[ -n "$EXPECTED_SHA" && -f "$CACHED_ARCHIVE" ]]; then
+    if [[ "$(shasum -a 256 "$CACHED_ARCHIVE" | awk '{print $1}')" == "$EXPECTED_SHA" ]]; then
+        echo "fetch-llama: using cached $CACHED_ARCHIVE"
+        cp -p "$CACHED_ARCHIVE" "$ARCHIVE"
+        FROM_CACHE=1
+    else
+        echo "fetch-llama: cached $ASSET failed checksum — discarding and refetching" >&2
+        rm -f "$CACHED_ARCHIVE"
+    fi
+fi
+
+if [[ "$FROM_CACHE" != "1" ]]; then
+    echo "fetch-llama: downloading $URL"
+    curl --fail --location --show-error --silent --output "$ARCHIVE" "$URL"
+fi
 
 # SHA256 verify, or record-on-first-run (non-strict only — strict mode already
 # bailed above when EXPECTED_SHA was empty).
@@ -102,6 +149,17 @@ else
     echo "fetch-llama: SHA256 ok ($OBSERVED_SHA)"
 fi
 
+# Keep the verified archive so a refetch of this version costs no network.
+# Written via a temp file + rename: two parallel builds must never see a
+# half-copied archive and trust it on the strength of its filename.
+if [[ "$FROM_CACHE" != "1" ]]; then
+    if mkdir -p "$LLAMA_CACHE_DIR" 2>/dev/null; then
+        if cp -p "$ARCHIVE" "$CACHED_ARCHIVE.$$" 2>/dev/null; then
+            mv -f "$CACHED_ARCHIVE.$$" "$CACHED_ARCHIVE" 2>/dev/null || rm -f "$CACHED_ARCHIVE.$$"
+        fi
+    fi
+fi
+
 # Extract into a scratch dir, then pull only the files we ship.
 EXTRACT_DIR="$TMP_DIR/extract"
 mkdir -p "$EXTRACT_DIR"
@@ -117,6 +175,10 @@ fi
 
 mkdir -p "$DEST_DIR"
 # Clean out any previous fetch — stale dylibs could get picked up by DYLD.
+# The stamp goes first and explicitly: the glob above does not match dotfiles,
+# and from here until the final write DEST_DIR is a half-built directory that
+# must not be mistaken for a complete one if this run dies.
+rm -f "$STAMP_FILE"
 rm -f "$DEST_DIR"/* 2>/dev/null || true
 
 # Files we ship: llama-server plus the WHOLE dylib set, not a hand-maintained
@@ -184,5 +246,10 @@ fi
 if command -v xattr >/dev/null 2>&1; then
     xattr -dr com.apple.quarantine "$DEST_DIR" 2>/dev/null || true
 fi
+
+# Last thing written, once every check above has passed: the stamp is the
+# signal to the next run (and to `make bundle`) that this directory is a
+# complete, verified build of $LLAMA_VERSION.
+printf '%s\n' "$LLAMA_VERSION" > "$STAMP_FILE"
 
 echo "fetch-llama: wrote $(ls -1 "$DEST_DIR" | wc -l | tr -d ' ') files to $DEST_DIR"

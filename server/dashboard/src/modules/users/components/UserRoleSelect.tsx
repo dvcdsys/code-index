@@ -1,17 +1,11 @@
 import { toast } from 'sonner';
 import { ApiError } from '@/api/client';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/ui/select';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/ui/select';
 import type { Role } from '@/api/types';
 import { useUpdateUser } from '../hooks';
 
-// Inline role-edit. The server enforces the last-admin guard — if it returns
-// 409 we just surface the toast and the next refetch resets the value.
+// Inline role edit. The server enforces the last-admin guard — on a 409 we
+// surface the toast and the next refetch snaps the value back.
 export function UserRoleSelect({
   userId,
   role,
@@ -27,10 +21,11 @@ export function UserRoleSelect({
     if (next === role) return;
     try {
       await update.mutateAsync({ id: userId, body: { role: next } });
-      toast.success('Role updated', { description: `Now ${next}` });
+      toast.success('Role updated', { description: `now ${next}` });
     } catch (err) {
-      const detail = err instanceof ApiError ? err.detail : String(err);
-      toast.error('Could not update role', { description: detail });
+      toast.error('Could not update the role', {
+        description: err instanceof ApiError ? err.detail : String(err),
+      });
     }
   }
 
@@ -40,12 +35,12 @@ export function UserRoleSelect({
       onValueChange={(v) => void onChange(v as Role)}
       disabled={disabled || update.isPending}
     >
-      <SelectTrigger className="h-8 w-[110px]">
+      <SelectTrigger className="is-sm h-[30px]" aria-label="Role">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value="user">User</SelectItem>
-        <SelectItem value="admin">Admin</SelectItem>
+        <SelectItem value="user">user</SelectItem>
+        <SelectItem value="admin">admin</SelectItem>
       </SelectContent>
     </Select>
   );

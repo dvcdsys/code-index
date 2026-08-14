@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/chunker/tswasm"
 	"github.com/dvcdsys/code-index/server/internal/config"
 	"github.com/dvcdsys/code-index/server/internal/db"
+	"github.com/dvcdsys/code-index/server/internal/dbmaint"
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
@@ -38,6 +40,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/repojobs"
 	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
+	"github.com/dvcdsys/code-index/server/internal/schedule"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/storage"
@@ -87,8 +90,45 @@ func main() {
 		}
 		return
 	}
-	if err := run(); err != nil {
+	restart, err := run()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "cix-server:", err)
+		os.Exit(1)
+	}
+	if restart {
+		reexec()
+	}
+}
+
+// reexec replaces this process image with a fresh one, which is how a
+// compacted database is adopted: the swap happens at boot, before anything
+// opens the file, and the only way to get there is to start over.
+//
+// It must run from main(), after run() has returned and every deferred
+// cleanup has unwound. That ordering is not stylistic. The listener has to be
+// closed or the new image fails to bind; the embeddings sidecar has to be
+// reaped or the new image collides with it on its port and leaves a zombie it
+// has no handle for; the tunnel binary is the same. syscall.Exec replaces the
+// image outright, so no deferred function runs after it — everything that
+// needs to happen must already have happened.
+//
+// Exec rather than exit: the process keeps its pid, so a container keeps its
+// PID 1 and no restart policy or supervisor is involved.
+func reexec() {
+	bin, err := os.Executable()
+	if err != nil {
+		bin = os.Args[0]
+	}
+	// The one-shot flags (-v, -healthcheck, -reset-password) all return from
+	// main before run() is reached, so a process that got here provably was
+	// not started with one and re-running this argv cannot land in one.
+	if err := syscall.Exec(bin, os.Args, os.Environ()); err != nil {
+		// Exec only returns on failure, and by now the listener, the database
+		// and both sidecars are gone. There is nothing left to continue with.
+		// The compacted copy and its journal are on disk, so whatever starts
+		// this server next completes the swap.
+		fmt.Fprintln(os.Stderr, "cix-server: could not restart to adopt the compacted database:", err)
+		fmt.Fprintln(os.Stderr, "cix-server: start the server again to finish the operation")
 		os.Exit(1)
 	}
 }
@@ -119,16 +159,19 @@ func parseLogLevel(s string) slog.Level {
 	}
 }
 
-func run() error {
+// run boots the server and blocks until it is asked to stop. The bool reports
+// whether the process should re-execute itself rather than exit — the way a
+// compacted database is adopted.
+func run() (restart bool, err error) {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(os.Getenv("CIX_LOG_LEVEL"))}))
 	slog.SetDefault(logger)
 
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return false, fmt.Errorf("load config: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("validate config: %w", err)
+		return false, fmt.Errorf("validate config: %w", err)
 	}
 
 	// CIX_AUTH_DISABLED=true skips ALL auth — log loudly so the warning
@@ -164,16 +207,26 @@ func run() error {
 	// LEGACY-MIGRATION (remove next release): drop this adoption call once
 	// all deployments have booted on the unified layout.
 	if err := storage.AdoptLegacyModelDB(cfg.SQLitePath, cfg.LegacyDynamicSQLitePath(), logger); err != nil {
-		return fmt.Errorf("adopt legacy system db: %w", err)
+		return false, fmt.Errorf("adopt legacy system db: %w", err)
 	}
 	dbPath := cfg.SQLitePath
+
+	// Adopt a compacted copy left by a previous run, or undo a swap that was
+	// interrupted. This has to happen here — after the legacy adoption above,
+	// before anything opens the file — because it renames the database, and a
+	// rename under an open handle is exactly the corruption this feature
+	// exists to avoid.
+	if err := dbmaint.Reconcile(context.Background(), dbPath, logger); err != nil {
+		return false, fmt.Errorf("reconcile database maintenance state: %w", err)
+	}
+
 	logger.Info("opening database", "path", dbPath)
 	database, err := db.OpenWith(db.OpenOptions{
 		Path:    dbPath,
 		DataDir: cfg.WorkspacesDataDir,
 	})
 	if err != nil {
-		return fmt.Errorf("open db: %w", err)
+		return false, fmt.Errorf("open db: %w", err)
 	}
 	defer func() {
 		if err := database.Close(); err != nil {
@@ -194,7 +247,7 @@ func run() error {
 	rcfg := runtimecfg.New(database, cfg)
 	snap, err := rcfg.Get(context.Background())
 	if err != nil {
-		return fmt.Errorf("load runtime_settings: %w", err)
+		return false, fmt.Errorf("load runtime_settings: %w", err)
 	}
 	snap.ApplyTo(cfg)
 	// Apply the chunker instance-concurrency cap from the resolved snapshot
@@ -232,13 +285,13 @@ func run() error {
 	persistedProv, hasProv, err := embedCfgStore.Get(context.Background())
 	if err != nil {
 		startupCancel()
-		return fmt.Errorf("load embedding provider config: %w", err)
+		return false, fmt.Errorf("load embedding provider config: %w", err)
 	}
 	if !hasProv && cfg.EmbeddingsEnabled {
 		seed, serr := embeddings.BuildOllamaConfigFromEnv(cfg)
 		if serr != nil {
 			startupCancel()
-			return fmt.Errorf("seed embedding provider config: %w", serr)
+			return false, fmt.Errorf("seed embedding provider config: %w", serr)
 		}
 		if serr := embedCfgStore.Save(context.Background(),
 			embeddingscfg.Snapshot{Kind: "ollama", Config: seed}, ""); serr != nil {
@@ -296,7 +349,7 @@ func run() error {
 	}
 	startupCancel()
 	if err != nil {
-		return fmt.Errorf("embeddings: %w", err)
+		return false, fmt.Errorf("embeddings: %w", err)
 	}
 	// Shared shutdown context — see M7 below. We build it lazily (in the
 	// signal handler) so startup doesn't carry a dangling deadline.
@@ -318,7 +371,7 @@ func run() error {
 	// Relocate a legacy Python ChromaDB store occupying the container path
 	// itself, so chromaBase is free to become the nested container below.
 	if backed, bErr := vectorstore.DetectLegacyAndBackup(cfg.ChromaPersistDir); bErr != nil {
-		return fmt.Errorf("back up legacy python chroma store: %w", bErr)
+		return false, fmt.Errorf("back up legacy python chroma store: %w", bErr)
 	} else if backed {
 		logger.Warn("legacy python chroma layout detected at container path — backed up; re-run cix init to reindex")
 	}
@@ -336,7 +389,7 @@ func run() error {
 		// un-migrated legacy dir — search would silently return nothing on
 		// a "healthy" server. Surface it so the operator fixes the cause
 		// (e.g. dir perms under prod uid 1001) rather than losing the index.
-		return fmt.Errorf("migrate legacy chroma dirs: %w", err)
+		return false, fmt.Errorf("migrate legacy chroma dirs: %w", err)
 	}
 
 	// The vector store is namespaced by the ACTIVE provider's identity path
@@ -348,11 +401,23 @@ func run() error {
 		// shaped fallback so toggling embeddings on/off doesn't move dirs.
 		components = []string{provider.KindOllama, provider.StorageSlug(cfg.EmbeddingModel)}
 	}
-	chromaDir := cfg.ChromaDirFor(components)
+	// openVectorStore opens the SQLite vector store for an embedding identity,
+	// pointing it at the chromem directory of the SAME identity. Opening is
+	// where a one-time import of the legacy gob files happens (once per
+	// namespace, recorded in the database, resumable); on a fresh install
+	// there is nothing to import and it is a file open.
+	openVectorStore := func(comps []string) (*vectorstore.Store, error) {
+		return vectorstore.OpenWith(vectorstore.Options{
+			Dir:             cfg.VectorDirFor(comps),
+			LegacyChromaDir: cfg.ChromaDirFor(comps),
+			MMapBytes:       cfg.VectorMMapSize,
+			Logger:          logger,
+		})
+	}
 
-	vs, err := vectorstore.Open(chromaDir)
+	vs, err := openVectorStore(components)
 	if err != nil {
-		return fmt.Errorf("open vectorstore: %w", err)
+		return false, fmt.Errorf("open vectorstore: %w", err)
 	}
 	// Wrap in a swappable Holder shared by indexer / repojobs / httpapi so
 	// a runtime provider switch can reopen the store under a new namespace.
@@ -360,10 +425,15 @@ func run() error {
 	// Wire the live-reopen path used by SwitchProvider.
 	embedSvc.AttachVectorStore(
 		vsHolder,
-		cfg.ChromaDirFor,
-		vectorstore.Open,
+		openVectorStore,
 		func() error { return storage.MigrateFlatChromaToNested(cfg.ChromaPersistDir, logger) },
 	)
+	// The store owns an open SQLite pool now, so it is closed on the way out.
+	defer func() {
+		if err := vsHolder.Close(); err != nil {
+			logger.Error("vector store close", "err", err)
+		}
+	}()
 
 	idx := indexer.New(database, vsHolder, embedSvc, logger)
 	idx.SetEmbedIncludePath(cfg.EmbedIncludePath)
@@ -402,7 +472,7 @@ func run() error {
 
 	if !cfg.AuthDisabled {
 		if err := bootstrapAuth(context.Background(), cfg, logger, usrSvc, akSvc); err != nil {
-			return fmt.Errorf("bootstrap auth: %w", err)
+			return false, fmt.Errorf("bootstrap auth: %w", err)
 		}
 	}
 
@@ -417,7 +487,7 @@ func run() error {
 		AllowGenerate: true,
 	})
 	if err != nil {
-		return fmt.Errorf("secrets: %w", err)
+		return false, fmt.Errorf("secrets: %w", err)
 	}
 	ghSvc := githubtokens.New(database, secSvc)
 
@@ -427,13 +497,13 @@ func run() error {
 	// on a wrong key.
 	n, err := ghSvc.CountWithEncryption(context.Background())
 	if err != nil {
-		return fmt.Errorf("secrets sanity: %w", err)
+		return false, fmt.Errorf("secrets sanity: %w", err)
 	}
 	if n > 0 {
 		toks, _ := ghSvc.List(context.Background())
 		if len(toks) > 0 {
 			if _, err := ghSvc.Reveal(context.Background(), toks[0].ID); err != nil {
-				return fmt.Errorf("encryption key does not match existing github_tokens — refusing to start (recover the prior CIX_SECRET_KEY or wipe github_tokens manually): %w", err)
+				return false, fmt.Errorf("encryption key does not match existing github_tokens — refusing to start (recover the prior CIX_SECRET_KEY or wipe github_tokens manually): %w", err)
 			}
 		}
 	}
@@ -602,8 +672,71 @@ func run() error {
 	)
 	go pollSvc.Run(bgCtx)
 
+	// Database compaction plumbing. The gate is the write freeze the router
+	// consults; restartCh is how the compactor asks run() to unwind and
+	// re-execute, which is the only way a compacted copy gets adopted.
+	dbGate := &dbmaint.Gate{}
+	restartCh := make(chan struct{})
+	var restartOnce sync.Once
+
+	// Quiesce drains every background writer, in dependency order: the
+	// producers first (they enqueue work), then the queue itself. Cancelling
+	// is not enough for any of them — the compactor needs to know they have
+	// *finished*, because a tick still in flight would write into a database
+	// that is about to be replaced.
+	var (
+		dbMaintSvc *dbmaint.Service
+		schedReg   = schedule.New(database, logger)
+	)
+	quiesce := func(ctx context.Context) error {
+		bgCancel()
+		if err := pollSvc.Stop(ctx); err != nil {
+			return fmt.Errorf("poll scheduler did not stop: %w", err)
+		}
+		if err := schedReg.Stop(ctx); err != nil {
+			return fmt.Errorf("the recurring-task scheduler did not stop: %w", err)
+		}
+		jobsCancel()
+		if err := jobsSvc.Stop(ctx); err != nil {
+			return fmt.Errorf("job queue did not drain: %w", err)
+		}
+		return nil
+	}
+
+	dbMaintSvc = dbmaint.New(dbmaint.Deps{
+		DB:             database,
+		DBPath:         cfg.SQLitePath,
+		Logger:         logger,
+		Quiesce:        quiesce,
+		Freeze:         dbGate.Freeze,
+		Thaw:           dbGate.Thaw,
+		RequestRestart: func() { restartOnce.Do(func() { close(restartCh) }) },
+		ActiveJobs:     dbmaint.ActiveWorkCounter(database, idx.ActiveSessions),
+		MinFreePercent: cfg.DBMaintenanceMinFreePercent,
+		MinFreeBytes:   cfg.DBMaintenanceMinFreeBytes,
+	})
+	for _, t := range dbMaintSvc.Tasks() {
+		// The environment supplies a default for the *reclaim* schedule only.
+		// One variable feeding both would mean an operator who set a nightly
+		// reclaim time gets a full rebuild — freeze plus restart — at that same
+		// hour the moment anybody switches compaction on.
+		var envCron *string
+		if t.Name == dbmaint.TaskReclaim {
+			envCron = cfg.DBMaintenanceCron
+		}
+		schedReg.Register(t, envCron)
+	}
+	go schedReg.Run(bgCtx)
+
 	handler := httpapi.NewRouter(httpapi.Deps{
+		DBMaint: httpapi.DBMaintHooks{
+			Service:        dbMaintSvc,
+			Gate:           dbGate,
+			RequestRestart: func() { restartOnce.Do(func() { close(restartCh) }) },
+			Quiesce:        quiesce,
+		},
 		DB:                database,
+		Schedules:         schedReg,
 		ServerVersion:     version,
 		APIVersion:        apiVersion,
 		Backend:           backend,
@@ -626,6 +759,7 @@ func run() error {
 		WorkspaceProjects: wpSvc,
 		Jobs:              jobsSvc,
 		DataDir:           cfg.WorkspacesDataDir,
+		Cfg:               cfg,
 		RepoLocks:         repoLocks,
 		PublicBaseURL:     cfg.PublicBaseURL,
 		Tunnel:            tunnelMgr,
@@ -680,11 +814,14 @@ func run() error {
 	select {
 	case sig := <-stop:
 		logger.Info("shutdown signal received", "signal", sig.String())
+	case <-restartCh:
+		restart = true
+		logger.Info("restarting to adopt the compacted database")
 	case err := <-serverErr:
 		if err != nil {
-			return fmt.Errorf("server: %w", err)
+			return false, fmt.Errorf("server: %w", err)
 		}
-		return nil
+		return false, nil
 	}
 
 	// M7 — single shared shutdown budget for HTTP drain + embeddings supervisor.
@@ -694,8 +831,22 @@ func run() error {
 	shutdownCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("graceful shutdown: %w", err)
+		if restart {
+			// A compacted copy is verified and journalled, and nothing brings
+			// this process back if it exits here — re-executing *is* the
+			// restart mechanism, there is no supervisor behind it. So one slow
+			// in-flight request outliving the drain budget must not be allowed
+			// to take the server down with the swap left undone. Force the
+			// listener closed instead, or the new image cannot bind.
+			logger.Error("graceful shutdown timed out; restarting anyway to adopt the compacted database",
+				"err", err)
+			if cerr := srv.Close(); cerr != nil {
+				logger.Warn("could not force the listener closed", "err", cerr)
+			}
+			return true, nil
+		}
+		return false, fmt.Errorf("graceful shutdown: %w", err)
 	}
 	logger.Info("server stopped")
-	return nil
+	return restart, nil
 }

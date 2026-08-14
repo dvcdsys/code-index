@@ -22,6 +22,12 @@ var ErrNotFound = errors.New("project not found")
 // ErrConflict is returned when a project with the same path already exists.
 var ErrConflict = errors.New("project already exists")
 
+// ErrArtifactCleanup wraps failures from Delete's Artifacts hooks. The project
+// row is already gone when this is returned — only off-database residue was
+// left behind, which the admin Resources screen can reclaim later. Callers
+// should log it rather than reporting the delete as failed.
+var ErrArtifactCleanup = errors.New("project deleted but cleanup left residue")
+
 // ErrOverlap is returned when the new project path is nested inside an
 // existing project (or vice versa). Overlapping projects double-index the
 // same files, blow up storage, and make search results ambiguous —
@@ -344,7 +350,26 @@ func SetStatus(ctx context.Context, db *sql.DB, hostPath, status string) error {
 	return err
 }
 
-// Delete removes a project and its cascading records. Returns ErrNotFound if absent.
+// Artifacts is the off-database residue a delete has to clean up, supplied by
+// the caller because this package must not reach into the vector store or the
+// filesystem.
+//
+// It exists because FK CASCADE only reaches rows. A project also owns a
+// vector collection and a cloned checkout. Before this hook, deleting a
+// project left both; a server that had been used for a while accumulated
+// hundreds of thousands of orphaned vector documents that nothing could reach
+// and nothing would ever free.
+//
+// Nil members are skipped, so a caller wires only what it has.
+type Artifacts struct {
+	// DropCollection removes the project's vector collection.
+	DropCollection func(hostPath string) error
+	// RemoveCloneDir removes the project's on-disk checkout, if any.
+	RemoveCloneDir func(hostPath string) error
+}
+
+// Delete removes a project and its cascading records, then its artifacts.
+// Returns ErrNotFound if absent. art may be nil.
 //
 // chunks_meta and chunks_fts are not bound to projects via FK because
 // chunks_fts is a virtual table and cannot participate in foreign keys.
@@ -353,7 +378,13 @@ func SetStatus(ctx context.Context, db *sql.DB, hostPath, status string) error {
 // single writer — one monolithic tx here starved every concurrent writer (see
 // chunksfts.DeleteByProject). Failure midway leaves the projects row intact, so
 // a retried Delete resumes the wipe; FTS rows never outlive the project row.
-func Delete(ctx context.Context, db *sql.DB, hostPath string) error {
+//
+// Artifacts run LAST, after the row is gone, and their errors are joined and
+// returned without undoing the delete. That ordering is deliberate: a failed
+// os.RemoveAll then leaves a reclaimable orphan that the admin Resources
+// screen will find and offer to clean, whereas failing the whole delete would
+// leave a project the operator asked to remove and cannot.
+func Delete(ctx context.Context, db *sql.DB, hostPath string, art *Artifacts) error {
 	if _, err := Get(ctx, db, hostPath); err != nil {
 		return err
 	}
@@ -363,7 +394,27 @@ func Delete(ctx context.Context, db *sql.DB, hostPath string) error {
 	if _, err := db.ExecContext(ctx, `DELETE FROM projects WHERE host_path = ?`, hostPath); err != nil {
 		return fmt.Errorf("delete project: %w", err)
 	}
-	return nil
+	if art == nil {
+		return nil
+	}
+	var errs []error
+	if art.DropCollection != nil {
+		if err := art.DropCollection(hostPath); err != nil {
+			errs = append(errs, fmt.Errorf("drop vector collection: %w", err))
+		}
+	}
+	if art.RemoveCloneDir != nil {
+		if err := art.RemoveCloneDir(hostPath); err != nil {
+			errs = append(errs, fmt.Errorf("remove clone directory: %w", err))
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	// Wrapped in a sentinel so callers can tell "the project is still there"
+	// from "the project is gone but left residue" — the two need opposite
+	// HTTP responses.
+	return fmt.Errorf("%w: %w", ErrArtifactCleanup, errors.Join(errs...))
 }
 
 // ---------------------------------------------------------------------------

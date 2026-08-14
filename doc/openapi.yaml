@@ -602,6 +602,468 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /api/v1/admin/resources:
+    get:
+      operationId: getResourceUsage
+      tags: [admin]
+      summary: Report memory and disk usage (admin only)
+      description: |
+        What the server is using right now: Go heap figures, resident set size
+        where the platform exposes it cheaply, the four storage locations with
+        their sizes and free space, and the resident vector-store totals.
+
+        The vector store is an in-memory database — every document of every
+        collection is decoded into the heap at startup and never evicted — so
+        `memory.heap_alloc_bytes` tracks the size of the loaded index almost
+        one-for-one, and `vector_store.documents` is the number that explains
+        it. Document counts are read from memory and free; the directory sizes
+        are real filesystem walks and can take several seconds on a large
+        index, so render this behind a loading state rather than polling it.
+      responses:
+        "200":
+          description: Current usage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceUsage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/resources/analyze:
+    post:
+      operationId: analyzeReclaimable
+      tags: [admin]
+      summary: Find reclaimable garbage (admin only)
+      description: |
+        Reconciles what is on disk and in memory against what the database
+        still knows about, and returns the reclaimable garbage grouped into
+        categories the admin can select individually.
+
+        Synchronous and expensive — it walks the vector store and the clone
+        directory. Concurrent calls collapse into a single scan.
+
+        The returned `analysis_id` is passed back to
+        `POST /api/v1/admin/resources/clean`. It is an identity for "the
+        picture the admin was shown", not a safety mechanism: every item is
+        re-validated against live state immediately before it is deleted, so a
+        project that comes back between analyze and clean is skipped rather
+        than wiped.
+      responses:
+        "200":
+          description: Analysis complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReclaimAnalysis"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/resources/clean:
+    post:
+      operationId: cleanResources
+      tags: [admin]
+      summary: Delete the selected reclaimable categories (admin only)
+      description: |
+        Deletes the selected categories from a previous analysis.
+
+        Returns `200` even when individual items failed or were skipped — the
+        per-category counts carry that detail, and failing the whole call would
+        hide the items that were successfully reclaimed. `409` means the
+        analysis expired or was already spent; re-run analyze.
+
+        Deleting orphaned collections releases heap immediately — the server
+        forces a GC afterwards, so `heap_alloc_bytes` drops right away. How far
+        `rss_bytes` follows is platform-dependent: on Linux the pages go back to
+        the OS and resident memory drops with the heap; on macOS they are marked
+        reclaimable and stay resident until something else needs them.
+        Everything else is disk only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CleanRequest"
+      responses:
+        "200":
+          description: Clean finished (possibly with per-item failures)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CleanResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/database:
+    get:
+      operationId: getDatabaseState
+      tags: [admin]
+      summary: Report SQLite size, wasted space and compaction advice (admin only)
+      description: |
+        Deleting rows does not shrink a SQLite file. The pages go on the
+        freelist and are reused by later writes, so a database that has lost
+        more data than it has since gained stays large and mostly empty. This
+        endpoint reports how much of the file is waste and whether it is worth
+        doing anything about it.
+
+        Cheap: `page_count` and `freelist_pages` are header reads, not scans,
+        so this is safe to poll.
+
+        `auto_vacuum` is a property of the database file itself, not a stored
+        setting — it is read live, so it always reflects reality even on a
+        server that was upgraded into this feature. `none` means the file can
+        only be shrunk by a full rebuild; `incremental` means free pages can
+        additionally be returned to the filesystem in small bounded chunks
+        (see `POST /api/v1/admin/database/reclaim`).
+
+        `blocked_reason` is non-null when compaction cannot start right now —
+        an indexing or clone job is in flight, or the filesystem does not have
+        room for the copy. Render it instead of enabling the button.
+      responses:
+        "200":
+          description: Current database state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatabaseState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/database/compact:
+    post:
+      operationId: compactDatabase
+      tags: [admin]
+      summary: Rebuild the database to reclaim free pages (admin only)
+      description: |
+        Starts a background rebuild and returns immediately with `202`. Poll
+        `GET /maintenance/status` for progress.
+
+        What the admin is agreeing to, and what the confirmation dialog must
+        say before this is called:
+
+        * For the long part the server is **read-only**, not down. Search,
+          browsing and every read keep working. New logins and every write are
+          rejected with `503` and a `Retry-After`; indexing and scheduled
+          polling pause. Existing sessions and API keys keep working — their
+          last-seen timestamps simply stop being refreshed for the duration,
+          which is invisible against a 14-day session lifetime.
+        * Then the server **restarts itself** to adopt the new file, and is
+          fully unavailable while it comes back up.
+        * Expect roughly a minute per 8 GB on a warm SSD for the copy, plus
+          the usual startup time; `estimated_seconds` on `DatabaseState`
+          carries the current estimate.
+
+        The restart is not a fallback, it is the mechanism. Swapping the file
+        under a live server would leave every service holding an open handle
+        to the old one, so the swap is performed at boot, before anything
+        opens the database — no pool, no services, no concurrency. The process
+        re-executes itself rather than exiting, so a container keeps its PID 1
+        and no restart policy or supervisor is involved.
+
+        The read-only window matters because the rebuild copies a *snapshot*:
+        anything committed after the copy begins is absent from the new file,
+        and swapping it in would silently discard those writes. It is enforced
+        in three layers rather than one, because the obvious single mechanism
+        is wrong in both available forms.
+
+        A route gate refuses the endpoints that write, and is what keeps
+        latency sane — it is classified per route, never by HTTP method, since
+        search is a POST and is one of the things that must keep working.
+        Background work is stopped and drained before the copy starts. Finally
+        the compactor holds a write transaction on a connection of its own, so
+        anything that slips past the first two layers is refused by SQLite
+        itself rather than landing outside the snapshot.
+
+        Compaction does not change the database's reclaim mode. It reclaims
+        space and leaves the mode exactly as it found it — that is a separate
+        setting, changed through
+        `PUT /api/v1/admin/database/auto-vacuum`.
+
+        Crash safety: progress is journalled to a state file beside the
+        database, written atomically, and every combination of that state and
+        the files actually present on disk maps to exactly one recovery
+        action. An interrupted copy is discarded; an interrupted swap is
+        carried forward or rolled back. The original is deleted last, so no
+        interruption leaves the server without a database. Nothing is resumed
+        — the operation is all-or-nothing and is simply re-run.
+
+        The state lives in a file rather than a table precisely because the
+        database is the thing being replaced: a row describing the operation
+        could not survive the swap, could not be written during the read-only
+        window, and could not be read back during the restart.
+      responses:
+        "202":
+          description: Compaction started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            Already running, or held back because clone/index jobs are in
+            flight. `DatabaseState.blocked_reason` carries the same detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/database/reclaim:
+    post:
+      operationId: reclaimFreePages
+      tags: [admin]
+      summary: Return free pages to the filesystem in bounded chunks (admin only)
+      description: |
+        Runs `PRAGMA incremental_vacuum`, which moves free pages to the end of
+        the file, followed by a WAL checkpoint. Synchronous, bounded and
+        cheap: it holds an ordinary write lock for the pages it moves, not an
+        exclusive lock on the whole database, so it does not need a
+        maintenance window.
+
+        The checkpoint is part of the operation, not an extra. In WAL mode the
+        page moves and the truncation both land in the log, so the database
+        file does not shrink until the log is folded back in — without it a
+        small reclaim reports bytes freed while the file on disk is unchanged.
+
+        Requires the file to be in incremental auto-vacuum mode; `409`
+        otherwise, with compaction as the remedy.
+
+        This reclaims space but does not defragment — a full compaction still
+        rebuilds the file and improves read locality. The point of incremental
+        reclaim is to make that rare rather than routine.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReclaimRequest"
+      responses:
+        "200":
+          description: Reclaim finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReclaimResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The database is not in incremental auto-vacuum mode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/database/auto-vacuum:
+    put:
+      operationId: setAutoVacuumMode
+      tags: [admin]
+      summary: Change the database's reclaim mode (admin only)
+      description: |
+        Incremental mode lets free pages be returned to the filesystem without
+        a rebuild — it is what makes
+        `POST /api/v1/admin/database/reclaim` possible. It is not free: it
+        maintains pointer-map pages, so every page allocated or freed carries
+        an extra write, measured at +1.5% on an indexing-shaped workload.
+
+        **Asking for the mode the database is already in does nothing** and
+        answers `200`. Only an actual change costs anything.
+
+        A change costs a full rebuild, in either direction, because that is
+        the only way SQLite can change the mode of a populated database. So a
+        `202` here means the same interruption as
+        `POST /api/v1/admin/database/compact`: a read-only window, then a
+        restart. The space that rebuild happens to reclaim is a side effect,
+        not the point.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutoVacuumRequest"
+      responses:
+        "200":
+          description: |
+            The database is already in the requested mode. Nothing was done and
+            the returned operation is `idle`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceOperation"
+        "202":
+          description: A rebuild has started to apply the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            Already running, or held back because clone/index jobs are in
+            flight.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/schedules:
+    get:
+      operationId: listSchedules
+      tags: [admin]
+      summary: List every recurring task and when it next runs (admin only)
+      description: |
+        One entry per task the server knows how to run on a schedule. The
+        timing is a crontab expression, and `next_runs` is computed by the
+        same parser that will actually fire it — a client must not evaluate
+        the expression itself, or its preview and the server's behaviour can
+        disagree.
+
+        `configured` is false while a task is still on its built-in or
+        environment default, which is how an upgraded server reports
+        automation nobody has opted into.
+      responses:
+        "200":
+          description: Registered tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tasks]
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ScheduledTask"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+  /api/v1/admin/schedules/{name}:
+    put:
+      operationId: updateSchedule
+      tags: [admin]
+      summary: Change when a recurring task runs (admin only)
+      description: |
+        Absent fields are left unchanged.
+
+        An expression that parses but can never match — 30 February is the
+        honest example — is refused with `422` rather than accepted as a
+        schedule that silently never fires. Saving re-arms the task
+        immediately, so the next run returned here is the one the server will
+        actually keep.
+
+        Timing is interpreted in the server's local timezone. Crontab
+        semantics apply: a slot that passes while the process is not running
+        is not queued up and fired late, except for tasks that declare
+        `catch_up` — those are cheap enough that running one late is better
+        than a laptop asleep at 00:00 never running them at all.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+          description: Task identifier, e.g. `db.reclaim`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleUpdate"
+      responses:
+        "200":
+          description: The task as it now resolves
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduledTask"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/ResourcesUnavailable"
+
+
+  /maintenance/status:
+    get:
+      operationId: getMaintenanceStatus
+      tags: [system]
+      summary: Progress of a running maintenance operation (public)
+      description: |
+        Public and deliberately so. It reads a state file next to the database
+        and touches neither the database nor the session table, so it answers
+        throughout the read-only window and again the moment the restarted
+        server is listening. Anything authenticated would `401` while sessions
+        are unwritable, and anything DB-backed would block behind the freeze.
+
+        It cannot answer *during* the restart itself: the router is built
+        after the database is opened and the listener binds at the end of
+        startup, so a client sees a connection failure until the server is
+        back. A poller is expected to render that as "reconnecting" rather
+        than as an error — the journal it reads is durable, so the first
+        successful poll after the gap reports what happened.
+
+        This is also how the result of a compaction reaches the dashboard at
+        all: the outcome is only known after the snapshot the new database was
+        built from, so it exists in the state file and nowhere else.
+
+        `phase` is `idle` when nothing is happening. `interrupted` means a
+        previous run did not finish and the next boot brought the database
+        back to a consistent state; it is informational, not an error to
+        clear.
+      responses:
+        "200":
+          description: Current maintenance state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceOperation"
+
   /api/v1/admin/embedding-providers:
     get:
       operationId: listEmbeddingProviders
@@ -1081,7 +1543,7 @@ paths:
       summary: Semantic (vector) search
       description: |
         Embeds the query and runs an approximate nearest-neighbour search
-        against the project's chromem-go collection. Results are
+        against the project's vector collection. Results are
         post-filtered by `min_score`, `paths` (whitelist, prefix-OR-substring
         match), `excludes` (blacklist, same matching), and `languages` —
         then merged into per-file groups and ranked by best match score.
@@ -2108,7 +2570,7 @@ paths:
       summary: Hybrid BM25+dense search across all repos in a workspace
       description: |
         Embeds the query, then fans out two parallel sub-queries per
-        project: dense (chromem cosine) and sparse (SQLite FTS5 BM25
+        project: dense (cosine over stored vectors) and sparse (SQLite FTS5 BM25
         over chunks_fts). Per-project the two ranked lists are fused
         via Reciprocal Rank Fusion (k=60).
 
@@ -3159,6 +3621,23 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    InsufficientStorage:
+      description: |
+        Not enough free space to hold the compacted copy alongside the
+        original. `DatabaseState.required_disk_bytes` and `free_disk_bytes`
+        carry the numbers.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ResourcesUnavailable:
+      description: |
+        Resource accounting is not wired on this server (no config in the
+        handler dependencies — happens in partial-test contexts).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     WorkspacesDisabled:
       description: |
         Required service is not configured on this server (commonly an
@@ -3601,6 +4080,497 @@ components:
           type: string
           description: The CIX_GGUF_CACHE_DIR that was scanned. Empty list with non-empty cache_dir = no .gguf files found.
 
+    MemoryUsage:
+      type: object
+      required:
+        [
+          heap_alloc_bytes,
+          heap_inuse_bytes,
+          heap_idle_bytes,
+          heap_released_bytes,
+          sys_bytes,
+          num_gc,
+          num_goroutine,
+        ]
+      description: |
+        Go runtime memory. heap_alloc_bytes is the meaningful figure for this
+        server: the vector store lives entirely in the heap, so it tracks the
+        size of the loaded index. sys_bytes and rss_bytes run higher because
+        the runtime holds freed spans before returning them to the OS.
+      properties:
+        heap_alloc_bytes: { type: integer, format: int64, minimum: 0 }
+        heap_inuse_bytes: { type: integer, format: int64, minimum: 0 }
+        heap_idle_bytes: { type: integer, format: int64, minimum: 0 }
+        heap_released_bytes: { type: integer, format: int64, minimum: 0 }
+        sys_bytes: { type: integer, format: int64, minimum: 0 }
+        num_gc: { type: integer, format: int64, minimum: 0 }
+        num_goroutine: { type: integer, minimum: 0 }
+        rss_bytes:
+          type: integer
+          format: int64
+          description: |
+            Current resident set size. Absent where it cannot be read without
+            cgo (macOS keeps it behind mach's task_info) — render "n/a", never
+            treat a missing field as zero.
+        peak_rss_bytes:
+          type: integer
+          format: int64
+          description: |
+            High-water resident set size from getrusage. Available on Linux and
+            macOS. It only ever rises, so it must be labelled as a peak and
+            never substituted for rss_bytes.
+
+    DiskUsage:
+      type: object
+      required: [id, label, path, exists]
+      properties:
+        id:
+          type: string
+          enum: [sqlite, chroma, repos, gguf]
+        label: { type: string }
+        path: { type: string }
+        exists: { type: boolean }
+        used_bytes:
+          type: integer
+          format: int64
+          description: |
+            Size of the tree. Absent when it could not be walked, which keeps
+            "unreadable" distinguishable from "empty". The SQLite entry
+            includes the -wal and -shm sidecars.
+        fs_total_bytes: { type: integer, format: int64 }
+        fs_free_bytes: { type: integer, format: int64 }
+
+    VectorStoreUsage:
+      type: object
+      required: [collections, documents, active_namespace_path]
+      description: Resident vector-store totals, read from memory — no I/O.
+      properties:
+        collections: { type: integer, minimum: 0 }
+        documents: { type: integer, format: int64, minimum: 0 }
+        active_namespace_path: { type: string }
+
+    ResourceUsage:
+      type: object
+      required: [generated_at, memory, disks, vector_store]
+      properties:
+        generated_at: { type: string, format: date-time }
+        memory: { $ref: "#/components/schemas/MemoryUsage" }
+        disks:
+          type: array
+          items: { $ref: "#/components/schemas/DiskUsage" }
+        vector_store: { $ref: "#/components/schemas/VectorStoreUsage" }
+
+    ReclaimCategoryId:
+      type: string
+      enum:
+        [
+          orphan_collections,
+          orphan_repos,
+          stale_namespaces,
+          legacy_chromem,
+          stale_jobs,
+          unused_models,
+        ]
+
+    ReclaimItem:
+      type: object
+      required: [key, label, size_bytes]
+      properties:
+        key:
+          type: string
+          description: Server-side identity — collection name, path_hash, directory or model file.
+        label: { type: string }
+        detail: { type: string }
+        size_bytes: { type: integer, format: int64, minimum: 0 }
+
+    ReclaimCategory:
+      type: object
+      required:
+        [
+          id,
+          label,
+          description,
+          item_count,
+          size_bytes,
+          default_selected,
+          destructive,
+          items,
+          items_truncated,
+        ]
+      properties:
+        id: { $ref: "#/components/schemas/ReclaimCategoryId" }
+        label: { type: string }
+        description:
+          type: string
+          description: |
+            Server-authored explanation, including why a category is disabled
+            when it is. Render it as-is; the reasoning lives on the server so
+            the rules are decided in one place.
+        item_count:
+          type: integer
+          minimum: 0
+          description: Total items found — may exceed the length of `items`.
+        size_bytes: { type: integer, format: int64, minimum: 0 }
+        estimated_ram_bytes:
+          type: integer
+          format: int64
+          deprecated: true
+          x-deprecated-reason: >-
+            Always absent since the vector store moved off the Go heap; kept
+            for wire compatibility with older dashboard builds and slated for
+            removal in the next breaking API revision.
+          description: |
+            Deprecated, and always absent. It reported heap attributable to
+            these items back when the vector store held every document in
+            memory; nothing has set it since the store moved to SQLite, whose
+            footprint is not proportional to what it holds. Kept in the schema
+            only so an older dashboard build does not break on a missing field,
+            and a candidate for removal in the next breaking API revision.
+            Clients must not display it.
+        default_selected:
+          type: boolean
+          description: Whether the dashboard should pre-tick this category.
+        destructive:
+          type: boolean
+          description: Expensive or impossible to regenerate; the confirm dialog warns extra.
+        items:
+          type: array
+          description: A sample for display, capped server-side. Cleaning always acts on the full set.
+          items: { $ref: "#/components/schemas/ReclaimItem" }
+        items_truncated: { type: boolean }
+
+    ReclaimAnalysis:
+      type: object
+      required:
+        [
+          analysis_id,
+          generated_at,
+          expires_at,
+          duration_ms,
+          total_reclaimable_bytes,
+          categories,
+        ]
+      properties:
+        analysis_id: { type: string }
+        generated_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        duration_ms: { type: integer, minimum: 0 }
+        total_reclaimable_bytes: { type: integer, format: int64, minimum: 0 }
+        categories:
+          type: array
+          items: { $ref: "#/components/schemas/ReclaimCategory" }
+        warnings:
+          type: array
+          description: Non-fatal problems, e.g. a directory that could not be read.
+          items: { type: string }
+
+    CleanRequest:
+      type: object
+      required: [analysis_id, categories]
+      properties:
+        analysis_id: { type: string }
+        categories:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ReclaimCategoryId" }
+
+    CleanOutcome:
+      type: object
+      required: [key, reason]
+      properties:
+        key: { type: string }
+        reason: { type: string }
+
+    CleanCategoryResult:
+      type: object
+      required:
+        [id, deleted_count, skipped_count, failed_count, reclaimed_bytes]
+      properties:
+        id: { $ref: "#/components/schemas/ReclaimCategoryId" }
+        deleted_count: { type: integer, minimum: 0 }
+        skipped_count:
+          type: integer
+          minimum: 0
+          description: Re-validation at delete time said it was no longer safe.
+        failed_count: { type: integer, minimum: 0 }
+        reclaimed_bytes: { type: integer, format: int64, minimum: 0 }
+        skipped:
+          type: array
+          items: { $ref: "#/components/schemas/CleanOutcome" }
+        failures:
+          type: array
+          items: { $ref: "#/components/schemas/CleanOutcome" }
+
+    CleanResult:
+      type: object
+      required:
+        [started_at, finished_at, duration_ms, reclaimed_bytes, categories]
+      properties:
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        duration_ms: { type: integer, minimum: 0 }
+        reclaimed_bytes: { type: integer, format: int64, minimum: 0 }
+        categories:
+          type: array
+          items: { $ref: "#/components/schemas/CleanCategoryResult" }
+
+    DatabaseState:
+      type: object
+      required:
+        [
+          path,
+          file_bytes,
+          wal_bytes,
+          page_size,
+          page_count,
+          freelist_pages,
+          reclaimable_bytes,
+          reclaimable_percent,
+          auto_vacuum,
+          verdict,
+          verdict_reason,
+          free_disk_bytes,
+          required_disk_bytes,
+          estimated_seconds,
+        ]
+      properties:
+        path: { type: string }
+        file_bytes: { type: integer, format: int64, minimum: 0 }
+        wal_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Size of the `-wal` sidecar. Large on its own is not a problem —
+            it is checkpointed automatically — but it is the cheapest thing
+            to reclaim when it is not.
+        page_size: { type: integer, minimum: 0 }
+        page_count: { type: integer, format: int64, minimum: 0 }
+        freelist_pages:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Pages that are allocated but hold no data.
+        reclaimable_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "`freelist_pages` × `page_size` — waste, not a projection of the final size."
+        reclaimable_percent: { type: number, minimum: 0, maximum: 100 }
+        auto_vacuum:
+          type: string
+          enum: [none, incremental, full]
+          description: |
+            Read live from the database file, never from stored settings, so
+            it is correct on any server regardless of how it got here.
+        verdict:
+          type: string
+          enum: [ok, recommended, urgent]
+        verdict_reason:
+          type: string
+          description: One sentence explaining the verdict, safe to render as-is.
+        free_disk_bytes: { type: integer, format: int64, minimum: 0 }
+        required_disk_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Room a compaction needs: the copy is written alongside the
+            original, so both exist at once.
+        estimated_seconds:
+          type: integer
+          minimum: 0
+          description: |
+            Estimated copy time, excluding the restart. Derived from the
+            database size and a measured throughput figure, so it is an
+            order-of-magnitude guide rather than a promise.
+        blocked_reason:
+          type: string
+          nullable: true
+          description: |
+            Why compaction cannot start right now — an in-flight clone or
+            index job, insufficient disk, or an operation already running.
+            Null when it can start.
+        operation:
+          allOf: [{ $ref: "#/components/schemas/MaintenanceOperation" }]
+          nullable: true
+          description: The running or most recent operation, if any.
+
+    AutoVacuumRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [none, incremental]
+
+    MaintenanceOperation:
+      type: object
+      required: [run_id, kind, phase]
+      properties:
+        run_id:
+          type: string
+          description: |
+            Identifies one attempt. It changes on every run, so a client can
+            tell a fresh operation from a stale state file left by a process
+            that did not survive.
+        kind:
+          type: string
+          enum: [compact, reclaim, checkpoint]
+        phase:
+          type: string
+          enum:
+            [
+              idle,
+              preparing,
+              copying,
+              ready_to_swap,
+              swapping,
+              restarting,
+              done,
+              failed,
+              interrupted,
+            ]
+          description: |
+            `preparing` is draining background work; `copying` is the
+            read-only window; `ready_to_swap` onwards happens around and
+            during the restart. `interrupted` is a previous run that did not
+            finish — the database was brought back to a consistent state and
+            the operation can simply be re-run.
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Absent when nothing has run. A zero date would read as a bug
+            rather than as "nothing has happened".
+        finished_at: { type: string, format: date-time, nullable: true }
+        bytes_total:
+          type: integer
+          format: int64
+          nullable: true
+          description: Expected size of the copy, for a progress bar.
+        bytes_done: { type: integer, format: int64, nullable: true }
+        percent: { type: number, minimum: 0, maximum: 100, nullable: true }
+        freed_bytes: { type: integer, format: int64, nullable: true }
+        auto_vacuum:
+          type: string
+          enum: [none, incremental, full]
+          nullable: true
+          description: |
+            The reclaim mode this run leaves the database in. `full` never
+            appears on a request — it cannot be set through this API — but a
+            compaction of a database already in that mode preserves it, and
+            says so here.
+        message:
+          type: string
+          nullable: true
+          description: Human-readable description of the current step.
+        error: { type: string, nullable: true }
+        events:
+          type: array
+          description: |
+            Ordered trail of what happened, most recent last. Appended to a
+            file beside the database, so it spans the restart that the
+            operation performs — the server log alone is split across two
+            process lifetimes, and the interesting half is usually the one
+            that did not come back. Truncated to the most recent entries;
+            the full trail stays on disk.
+          items:
+            $ref: "#/components/schemas/MaintenanceEvent"
+
+    MaintenanceEvent:
+      type: object
+      required: [at, level, phase, message]
+      properties:
+        at: { type: string, format: date-time }
+        level: { type: string, enum: [info, warn, error] }
+        phase: { type: string }
+        message: { type: string }
+
+    ReclaimRequest:
+      type: object
+      properties:
+        max_pages:
+          type: integer
+          minimum: 1
+          description: |
+            Upper bound on pages returned to the filesystem in this call.
+            Omit to drain the whole freelist. Bounding it keeps the write
+            lock short on a database with a very large freelist.
+
+    ReclaimResult:
+      type: object
+      required: [pages_freed, bytes_freed, file_bytes, freelist_pages]
+      properties:
+        pages_freed: { type: integer, format: int64, minimum: 0 }
+        bytes_freed: { type: integer, format: int64, minimum: 0 }
+        file_bytes: { type: integer, format: int64, minimum: 0 }
+        freelist_pages:
+          type: integer
+          format: int64
+          minimum: 0
+          description: What is left on the freelist after this call.
+
+    ScheduledTask:
+      type: object
+      required: [name, title, cron, enabled, configured, catch_up, next_runs, last_run_at]
+      properties:
+        name:
+          type: string
+          description: |
+            Stable identifier, used as the path parameter. It outlives renames
+            of whatever implements the task.
+        title: { type: string }
+        description: { type: string }
+        cron:
+          type: string
+          description: |
+            Standard five-field crontab expression, in the server's local
+            timezone. `@daily` and friends are accepted.
+        enabled: { type: boolean }
+        configured:
+          type: boolean
+          description: |
+            False while the task is still on its built-in or environment
+            default, i.e. nobody has chosen this schedule.
+        catch_up:
+          type: boolean
+          description: |
+            Whether a slot missed while the server was down runs late. False
+            follows crontab exactly; true is reserved for tasks cheap enough
+            that skipping them entirely would be worse.
+        next_runs:
+          type: array
+          description: |
+            The next few runs, computed server-side by the parser that fires
+            them. Empty when the task is disabled.
+          items: { type: string, format: date-time }
+        last_run_at: { type: string, format: date-time, nullable: true }
+        last_status:
+          type: string
+          enum: [running, ok, failed, interrupted]
+          description: |
+            `interrupted` is a run the server did not survive — the status is
+            written before the handler and cleared after it, so anything still
+            marked running at startup belongs to a process that did not return.
+        last_error: { type: string }
+        last_millis: { type: integer, format: int64 }
+        updated_by:
+          type: string
+          description: Who last saved this schedule. Absent while it is still on a default.
+        running:
+          type: boolean
+          description: True while the task's handler is executing.
+
+    ScheduleUpdate:
+      type: object
+      description: Absent fields are left unchanged.
+      properties:
+        cron: { type: string }
+        enabled: { type: boolean }
+
+
     EmbeddingProviderList:
       type: object
       required: [providers]
@@ -4028,7 +4998,9 @@ components:
         chroma_path:
           type: string
           nullable: true
-          description: Resolved chromem-go collection directory for this project. NULL when not computed.
+          description: |
+            Path of the SQLite vector database holding this project's
+            collection. NULL when not computed.
         sqlite_size_bytes:
           type: integer
           format: int64

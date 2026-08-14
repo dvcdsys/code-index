@@ -1,18 +1,19 @@
-import { Badge } from '@/ui/badge';
+import { Status } from '@/ui/badge';
 
-const VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  running: 'default',
-  starting: 'secondary',
-  restarting: 'secondary',
-  failed: 'destructive',
-  disabled: 'outline',
+const TONE: Record<string, 'ok' | 'busy' | 'warn' | 'idle'> = {
+  running: 'ok',
+  starting: 'warn',
+  restarting: 'warn',
+  failed: 'busy',
+  disabled: 'idle',
 };
 
+// A square plus the state word — the state is never carried by colour alone.
 export function SidecarStateBadge({ state }: { state?: string }) {
   if (!state) return null;
   return (
-    <Badge variant={VARIANT[state] ?? 'outline'} className="capitalize">
+    <Status tone={TONE[state] ?? 'idle'} className="font-mono text-[11.5px] uppercase tracking-[0.14em]">
       {state}
-    </Badge>
+    </Status>
   );
 }

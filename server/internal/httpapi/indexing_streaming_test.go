@@ -109,7 +109,6 @@ func (b *blockingEmbedder) EmbedTexts(ctx context.Context, texts []string) ([][]
 	return b.fakeEmbedder.EmbedTexts(ctx, texts)
 }
 
-
 // readNDJSONLines reads NDJSON until either io.EOF or until limit lines have
 // been collected. Returns the parsed events.
 func readNDJSONLines(t *testing.T, body io.Reader, limit int) []indexer.ProgressEvent {
