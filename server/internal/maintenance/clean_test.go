@@ -2,6 +2,7 @@ package maintenance
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/dvcdsys/code-index/server/internal/projects"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
+	_ "modernc.org/sqlite" // the driver the vector store registers, for direct fixture writes
 )
 
 func TestClean_RemovesOrphanCollection(t *testing.T) {
@@ -157,6 +159,102 @@ func TestClean_KeepsTheActiveNamespaceInBothTrees(t *testing.T) {
 	}
 	if n := f.store.Count("/live/project"); n != 1 {
 		t.Errorf("live project has %d documents, want 1", n)
+	}
+}
+
+// The point of the whole category: the ACTIVE namespace's gob tree — which
+// every other category protects — is removed, disk is reported back, the
+// imported vectors keep working, and a second analysis has nothing left to say.
+func TestClean_LegacyChromemRemovesTheRollbackTree(t *testing.T) {
+	f := newFixture(t)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/one", 3)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/two", 2)
+	f.reopenStore(t)
+
+	a := f.analyze(t)
+	before := category(t, a, CatLegacyChromem)
+	if before.ItemCount != 1 {
+		t.Fatalf("expected the legacy tree to be offered, got %d items", before.ItemCount)
+	}
+
+	res, err := f.svc.Clean(context.Background(), a.ID, []CategoryID{CatLegacyChromem})
+	if err != nil {
+		t.Fatalf("clean: %v", err)
+	}
+	got := res.Categories[0]
+	if got.DeletedCount != 1 || got.FailedCount != 0 || got.SkippedCount != 0 {
+		t.Fatalf("clean result = %+v, want 1 deleted", got)
+	}
+	if got.ReclaimedBytes != before.SizeBytes || got.ReclaimedBytes <= 0 {
+		t.Errorf("reclaimed = %d, want the analysed size %d", got.ReclaimedBytes, before.SizeBytes)
+	}
+	if _, err := os.Stat(f.legacyNS); !os.IsNotExist(err) {
+		t.Errorf("the legacy tree survived the clean (err=%v)", err)
+	}
+
+	// The live database must be untouched: the imported documents are the
+	// reason the gob files were expendable in the first place.
+	if _, err := os.Stat(f.store.DBPath()); err != nil {
+		t.Fatalf("the vector database was deleted: %v", err)
+	}
+	if n := f.store.Count("/legacy/one"); n != 3 {
+		t.Errorf("imported collection has %d documents after the clean, want 3", n)
+	}
+	if after := category(t, f.analyze(t), CatLegacyChromem); after.ItemCount != 0 {
+		t.Errorf("legacy chromem items after the clean = %d, want 0", after.ItemCount)
+	}
+}
+
+// Re-validation, the same guard the orphan categories have. Here the realistic
+// trigger is a runtime embedding-model switch that reopens this namespace and
+// starts a fresh import: part of the tree stops being redundant between the
+// analysis and the confirm, and the delete must be held back.
+func TestClean_LegacyChromemSkipsWhenTheMigrationRecordChanges(t *testing.T) {
+	f := newFixture(t)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/one", 3)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/two", 2)
+	f.reopenStore(t)
+
+	a := f.analyze(t)
+	if got := category(t, a, CatLegacyChromem).ItemCount; got != 1 {
+		t.Fatalf("expected the legacy tree to be offered, got %d items", got)
+	}
+
+	// …and now one collection is no longer recorded as imported.
+	dropMigrationRow(t, f.store.DBPath(), vectorstore.CollectionName("/legacy/two"))
+
+	res, err := f.svc.Clean(context.Background(), a.ID, []CategoryID{CatLegacyChromem})
+	if err != nil {
+		t.Fatalf("clean: %v", err)
+	}
+	got := res.Categories[0]
+	if got.DeletedCount != 0 || got.SkippedCount != 1 {
+		t.Fatalf("clean result = %+v, want 0 deleted / 1 skipped", got)
+	}
+	if res.ReclaimedBytes != 0 {
+		t.Errorf("reclaimed = %d, want 0 — nothing was deleted", res.ReclaimedBytes)
+	}
+	if _, err := os.Stat(f.legacyNS); err != nil {
+		t.Errorf("the legacy tree was deleted despite the incomplete migration: %v", err)
+	}
+}
+
+// dropMigrationRow deletes one migration_state row from the live vector
+// database, through a second connection — the store keeps its own pool open,
+// which is exactly the concurrency an in-flight re-import would have.
+func dropMigrationRow(t *testing.T, dbPath, collection string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
+	}
+	defer db.Close()
+	res, err := db.Exec(`DELETE FROM migration_state WHERE collection_name = ?`, collection)
+	if err != nil {
+		t.Fatalf("delete migration row: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("deleted %d migration_state rows for %s, want 1", n, collection)
 	}
 }
 

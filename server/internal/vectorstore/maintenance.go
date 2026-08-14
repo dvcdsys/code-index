@@ -47,6 +47,15 @@ type Maintainer interface {
 	// they are the rollback path and must never be classified as garbage
 	// while this namespace is the active one.
 	LegacyChromaDir() string
+	// MigratedCollections returns the legacy chromem collections already
+	// imported into this store, keyed by collection name, valued by the
+	// document count the import recorded.
+	//
+	// ok is false when the store cannot answer — no store, closed, or the
+	// query failed. Callers MUST read that as "unknown", never as "nothing has
+	// been migrated": the difference decides whether a legacy gob tree may be
+	// deleted, and an empty map would say "yes, all zero of them".
+	MigratedCollections() (map[string]int, bool)
 }
 
 var (
@@ -201,6 +210,38 @@ func (s *Store) BaseDir() string { return s.dir }
 // LegacyChromaDir implements Maintainer.
 func (s *Store) LegacyChromaDir() string { return s.legacyDir }
 
+// MigratedCollections implements Maintainer.
+func (s *Store) MigratedCollections() (map[string]int, bool) {
+	if !s.acquire() {
+		return nil, false
+	}
+	defer s.release()
+
+	rows, err := s.db.QueryContext(context.Background(),
+		`SELECT collection_name, docs FROM migration_state`)
+	if err != nil {
+		s.logger.Error("vectorstore: read migration state", "err", err)
+		return nil, false
+	}
+	defer rows.Close()
+
+	out := map[string]int{}
+	for rows.Next() {
+		var name string
+		var docs int
+		if err := rows.Scan(&name, &docs); err != nil {
+			s.logger.Error("vectorstore: read migration state", "err", err)
+			return nil, false
+		}
+		out[name] = docs
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Error("vectorstore: read migration state", "err", err)
+		return nil, false
+	}
+	return out, true
+}
+
 // ---------------------------------------------------------------------------
 // Holder proxies
 // ---------------------------------------------------------------------------
@@ -257,4 +298,13 @@ func (h *Holder) LegacyChromaDir() string {
 		return ""
 	}
 	return s.LegacyChromaDir()
+}
+
+// MigratedCollections proxies to the active store; nil store yields "unknown".
+func (h *Holder) MigratedCollections() (map[string]int, bool) {
+	s := h.current()
+	if s == nil {
+		return nil, false
+	}
+	return s.MigratedCollections()
 }

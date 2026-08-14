@@ -4167,6 +4167,7 @@ components:
           orphan_collections,
           orphan_repos,
           stale_namespaces,
+          legacy_chromem,
           stale_jobs,
           unused_models,
         ]

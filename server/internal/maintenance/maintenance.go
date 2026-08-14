@@ -50,6 +50,10 @@ const (
 	// provider/model that is no longer active. Disk only — chromem opens the
 	// active namespace and nothing else, so these were never in RAM.
 	CatStaleNamespaces CategoryID = "stale_namespaces"
+	// CatLegacyChromem is the pre-migration chromem gob tree of a namespace
+	// whose collections are all in the SQLite store. Nothing reads it; it is
+	// kept as the rollback path, so reclaiming it is opt-in.
+	CatLegacyChromem CategoryID = "legacy_chromem"
 	// CatStaleJobs is finished rows in the `jobs` queue, which has neither a
 	// foreign key to projects nor any retention policy.
 	CatStaleJobs CategoryID = "stale_jobs"
@@ -63,6 +67,7 @@ var AllCategories = []CategoryID{
 	CatOrphanCollections,
 	CatOrphanRepos,
 	CatStaleNamespaces,
+	CatLegacyChromem,
 	CatStaleJobs,
 	CatUnusedModels,
 }

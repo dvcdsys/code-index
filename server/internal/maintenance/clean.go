@@ -213,6 +213,45 @@ func (s *Service) cleanCategory(ctx context.Context, cat Category, st *scanState
 			deleted(it)
 		}
 
+	case CatLegacyChromem:
+		// Re-validate from scratch, exactly as the orphan categories do. The
+		// scenario this is here for: the admin analysed, then switched the
+		// embedding model, and the store reopened on this same namespace with
+		// a fresh import in flight — half the collections are back to
+		// unmigrated and the gob files are load-bearing again. Note this check
+		// is what stands in for an active-job guard (see scanLegacyChromem):
+		// index jobs cannot make legacy data matter, an in-flight import can,
+		// and this asks about the import directly.
+		dir, _, ok, _ := s.legacyChromemState()
+		root := ""
+		if s.d.Cfg != nil {
+			root = filepath.Clean(s.d.Cfg.ChromaPersistDir)
+		}
+		for _, it := range cat.all {
+			p := filepath.Clean(it.path)
+			// This is an os.RemoveAll of a directory holding gigabytes; the
+			// containment check is the only thing between it and an arbitrary
+			// path, so it is re-derived from config rather than trusted from
+			// the analysis.
+			if root == "" || !isAncestor(root, p) {
+				fail(it.Key, "path is outside the legacy chroma directory")
+				continue
+			}
+			if !ok || p != dir {
+				skip(it.Key, "this legacy store is no longer provably imported into the vector database")
+				continue
+			}
+			if _, err := os.Stat(p); os.IsNotExist(err) {
+				skip(it.Key, "already gone")
+				continue
+			}
+			if err := os.RemoveAll(p); err != nil {
+				fail(it.Key, err.Error())
+				continue
+			}
+			deleted(it)
+		}
+
 	case CatStaleJobs:
 		if s.d.Jobs == nil || s.d.DB == nil {
 			for _, it := range cat.all {

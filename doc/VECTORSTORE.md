@@ -209,8 +209,42 @@ match what is on disk.
 
 ### Reclaiming the legacy files
 
-Not automated yet. Abandoned namespaces of both trees show up under **Abandoned
-provider namespaces** on the Resources screen, but the ACTIVE namespace's gob
-files are deliberately protected there — they are the rollback path. Removing
-them is a manual `rm -rf <data>/chroma/<kind>/<model-slug>` once the new store
-has proven itself.
+Two categories on the admin **Resources** screen cover the gob tree, and the
+split matters:
+
+- **Abandoned provider namespaces** (`stale_namespaces`) takes the namespaces
+  of models that are no longer in use, in either tree. The ACTIVE namespace is
+  deliberately protected there, in both trees — its gob files are the rollback
+  path.
+- **Legacy chromem data** (`legacy_chromem`) is how that protection is
+  released, on purpose. It offers the active namespace's chromem directory —
+  2.5 GB on the reference install — once every collection in it is provably in
+  `vectors.db`.
+
+The rules of the second one:
+
+- A namespace is listed only when it is **fully imported**: every collection
+  directory in the tree has a `migration_state` row in that namespace's
+  database. Anything less — a migration still running, a directory the importer
+  could not read, a missing or unreadable `vectors.db` — and the namespace is
+  not offered at all (not offered-and-disabled: a disabled row would still
+  advertise gigabytes that are not garbage yet). The analysis warnings say
+  which case it was.
+- It is **never pre-selected**, and the description states plainly that this is
+  irreversible and gives up the ability to roll back to a pre-SQLite server
+  version.
+- Disk only. Nothing about the legacy tree is in memory — the new store loads
+  nothing at open — so `estimated_ram_bytes` stays zero.
+- The full-migration check is repeated immediately before the delete. Between
+  the analysis and the confirm, an embedding-model switch can reopen this
+  namespace and start a fresh import; the item is then skipped rather than
+  deleted.
+- A running index or clone job does **not** hold the category back, unlike
+  orphaned collections. This binary never writes the gob tree — indexing writes
+  `vectors.db` and nothing else — so a job cannot make these files matter
+  again. The only thing that can is an in-flight import, which the re-check
+  asks about directly.
+
+Deleting the tree is one recursive directory removal and changes nothing else:
+`migration_state` rows are kept, so the next boot finds no legacy directory,
+imports nothing, and starts normally.

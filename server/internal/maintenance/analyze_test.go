@@ -2,10 +2,15 @@ package maintenance
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/gob"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +32,11 @@ type fixture struct {
 	store   *vectorstore.Store
 	cfg     *config.Config
 	dataDir string
-	now     time.Time
+	// legacyNS / vectorsNS are the two directories of the ACTIVE namespace:
+	// the chromem tree it was imported from and the SQLite database.
+	legacyNS  string
+	vectorsNS string
+	now       time.Time
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -49,8 +58,9 @@ func newFixture(t *testing.T) *fixture {
 	if err := os.MkdirAll(legacyNS, 0o755); err != nil {
 		t.Fatalf("mkdir legacy namespace: %v", err)
 	}
+	vectorsNS := filepath.Join(vectorsDir, "ollama", "test-model")
 	store, err := vectorstore.OpenWith(vectorstore.Options{
-		Dir:             filepath.Join(vectorsDir, "ollama", "test-model"),
+		Dir:             vectorsNS,
 		LegacyChromaDir: legacyNS,
 	})
 	if err != nil {
@@ -67,11 +77,13 @@ func newFixture(t *testing.T) *fixture {
 	}
 
 	f := &fixture{
-		db:      database,
-		store:   store,
-		cfg:     cfg,
-		dataDir: dataDir,
-		now:     time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
+		db:        database,
+		store:     store,
+		cfg:       cfg,
+		dataDir:   dataDir,
+		legacyNS:  legacyNS,
+		vectorsNS: vectorsNS,
+		now:       time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
 	}
 	f.svc = New(Deps{
 		DB:  database,
@@ -108,6 +120,83 @@ func (f *fixture) addProject(t *testing.T, hostPath string) {
 		HostPath: hostPath,
 	}); err != nil {
 		t.Fatalf("create project %s: %v", hostPath, err)
+	}
+}
+
+// reopenStore closes and reopens the vector store at the same two directories.
+// That is the only way to trigger the legacy import, because production
+// imports at open — so a test seeds the chromem tree first and reopens.
+func (f *fixture) reopenStore(t *testing.T) {
+	t.Helper()
+	if err := f.store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	store, err := vectorstore.OpenWith(vectorstore.Options{
+		Dir:             f.vectorsNS,
+		LegacyChromaDir: f.legacyNS,
+	})
+	if err != nil {
+		t.Fatalf("reopen vector store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	f.store = store
+	f.svc.d.VectorStore = store
+}
+
+// legacyChromemDoc / legacyChromemMeta mirror what chromem-go wrote, which is
+// what the importer decodes. gob matches by field name, so writing them from
+// here produces a tree the real importer accepts — the same trick the
+// production decoder uses in reverse.
+type legacyChromemMeta struct {
+	Name     string
+	Metadata map[string]string
+}
+
+type legacyChromemDoc struct {
+	ID        string
+	Metadata  map[string]string
+	Embedding []float32
+	Content   string
+}
+
+// writeLegacyCollection writes one chromem collection directory for a project
+// under the namespace dir, named the way chromem named them (the first 4 bytes
+// of the collection name's SHA-256, hex).
+func writeLegacyCollection(t *testing.T, nsDir, projectPath string, docs int) string {
+	t.Helper()
+	name := vectorstore.CollectionName(projectPath)
+	sum := sha256.Sum256([]byte(name))
+	dir := filepath.Join(nsDir, hex.EncodeToString(sum[:4]))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	writeGob(t, filepath.Join(dir, "00000000.gob"), legacyChromemMeta{
+		Name:     name,
+		Metadata: map[string]string{"hnsw:space": "cosine"},
+	})
+	for i := range docs {
+		writeGob(t, filepath.Join(dir, fmt.Sprintf("%08d.gob", i+1)), legacyChromemDoc{
+			ID:      fmt.Sprintf("doc%d", i),
+			Content: fmt.Sprintf("chunk %d of %s", i, projectPath),
+			Metadata: map[string]string{
+				"file_path": "main.go", "start_line": "1", "end_line": "2",
+				"chunk_type": "function", "symbol_name": "Main", "language": "go",
+			},
+			Embedding: []float32{1, 0, 0},
+		})
+	}
+	return dir
+}
+
+func writeGob(t *testing.T, path string, v any) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	defer f.Close()
+	if err := gob.NewEncoder(f).Encode(v); err != nil {
+		t.Fatalf("encode %s: %v", path, err)
 	}
 }
 
@@ -386,6 +475,178 @@ func TestScanStaleNamespaces_NotPreSelectedWhenBiggerThanActive(t *testing.T) {
 	if len(a.Warnings) == 0 {
 		t.Error("expected a warning about the oversized inactive namespace")
 	}
+}
+
+// --------------------------------------------------------------------------
+// legacy chromem data
+// --------------------------------------------------------------------------
+
+// rollbackWarning is the sentence the category must carry verbatim. It is the
+// only thing standing between an admin and an irreversible decision, so the
+// test asserts on the text rather than on "the description is non-empty".
+const rollbackWarning = "Deleting this data is irreversible and removes the ability to roll back to a " +
+	"pre-SQLite-vector-store server version. Make sure the new version has been running fine before confirming."
+
+func TestScanLegacyChromem_OffersAFullyMigratedNamespace(t *testing.T) {
+	f := newFixture(t)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/one", 3)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/two", 2)
+	f.reopenStore(t)
+
+	c := category(t, f.analyze(t), CatLegacyChromem)
+	if c.ItemCount != 1 {
+		t.Fatalf("legacy chromem items = %d, want 1 (items: %+v)", c.ItemCount, c.Items)
+	}
+	it := c.Items[0]
+	if it.Key != f.legacyNS {
+		t.Errorf("item key = %q, want the legacy namespace directory %q", it.Key, f.legacyNS)
+	}
+	if it.Label != filepath.Join("chroma", "ollama", "test-model") {
+		t.Errorf("item label = %q, want it relative to the data directory", it.Label)
+	}
+	if !strings.Contains(it.Detail, "2 collections") || !strings.Contains(it.Detail, "5 documents") {
+		t.Errorf("item detail = %q, want the collection and document counts", it.Detail)
+	}
+	if it.SizeBytes <= 0 {
+		t.Errorf("item size = %d, want the size of the gob tree", it.SizeBytes)
+	}
+	if c.DefaultSelected {
+		t.Error("legacy chromem data must be opt-in — giving up the rollback path is not a default")
+	}
+	if c.EstimatedRAMBytes != 0 {
+		t.Errorf("estimated RAM = %d, want 0 — the gob files are not in memory", c.EstimatedRAMBytes)
+	}
+	if !strings.Contains(c.Description, rollbackWarning) {
+		t.Errorf("description does not carry the rollback warning:\n%s", c.Description)
+	}
+}
+
+// The dangerous state: a migration is still running (or was interrupted), so
+// part of the tree is the only copy of that data. Not offered at all — a
+// disabled row would still advertise gigabytes that are not garbage yet.
+func TestScanLegacyChromem_NotOfferedWhenACollectionIsUnmigrated(t *testing.T) {
+	f := newFixture(t)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/one", 3)
+	f.reopenStore(t)
+	// A collection that appeared after the import — nothing recorded it.
+	writeLegacyCollection(t, f.legacyNS, "/legacy/mid-flight", 2)
+
+	a := f.analyze(t)
+	c := category(t, a, CatLegacyChromem)
+	if c.ItemCount != 0 {
+		t.Fatalf("legacy chromem items = %d, want 0 while a collection is unmigrated", c.ItemCount)
+	}
+	if !warned(a, "1 of 2 collections") {
+		t.Errorf("expected a warning naming the incomplete migration, got %v", a.Warnings)
+	}
+}
+
+// A directory the importer could not read was never imported, so the tree
+// still holds data that exists nowhere else.
+func TestScanLegacyChromem_NotOfferedWithUnreadableCollections(t *testing.T) {
+	f := newFixture(t)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/one", 3)
+	f.reopenStore(t)
+	if err := os.MkdirAll(filepath.Join(f.legacyNS, "junk"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	a := f.analyze(t)
+	if got := category(t, a, CatLegacyChromem).ItemCount; got != 0 {
+		t.Fatalf("legacy chromem items = %d, want 0 when part of the tree is unreadable", got)
+	}
+	if !warned(a, "not readable chromem collections") {
+		t.Errorf("expected a warning about the unreadable directory, got %v", a.Warnings)
+	}
+}
+
+// Without the database there is no proof the gob files are redundant — they
+// may be the whole index.
+func TestScanLegacyChromem_NotOfferedWhenTheVectorDatabaseIsMissing(t *testing.T) {
+	f := newFixture(t)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/one", 3)
+	f.reopenStore(t)
+	f.svc.d.VectorStore = storeAtBase{Maintainer: f.store, base: t.TempDir()}
+
+	a := f.analyze(t)
+	if got := category(t, a, CatLegacyChromem).ItemCount; got != 0 {
+		t.Fatalf("legacy chromem items = %d, want 0 without a vectors.db to prove the import", got)
+	}
+	if !warned(a, "to prove it has been imported") {
+		t.Errorf("expected a warning about the missing database, got %v", a.Warnings)
+	}
+}
+
+// The migration record is the whole proof; "cannot read it" must never be read
+// as "nothing to preserve".
+func TestScanLegacyChromem_NotOfferedWhenTheMigrationRecordIsUnknown(t *testing.T) {
+	f := newFixture(t)
+	writeLegacyCollection(t, f.legacyNS, "/legacy/one", 3)
+	f.reopenStore(t)
+	f.svc.d.VectorStore = unknownMigrationRecord{Maintainer: f.store}
+
+	a := f.analyze(t)
+	if got := category(t, a, CatLegacyChromem).ItemCount; got != 0 {
+		t.Fatalf("legacy chromem items = %d, want 0 when the migration record is unreadable", got)
+	}
+	if !warned(a, "migration record could not be read") {
+		t.Errorf("expected a warning about the unreadable migration record, got %v", a.Warnings)
+	}
+}
+
+// A server that never had chromem data says nothing at all: an empty category
+// and, crucially, no warning — "no legacy tree" is the normal state of every
+// install made after the migration.
+func TestScanLegacyChromem_SilentOnAFreshInstall(t *testing.T) {
+	f := newFixture(t)
+	a := f.analyze(t)
+	if got := category(t, a, CatLegacyChromem).ItemCount; got != 0 {
+		t.Fatalf("legacy chromem items = %d on a fresh install, want 0", got)
+	}
+	for _, w := range a.Warnings {
+		if strings.Contains(w, "legacy chromem") {
+			t.Errorf("fresh install warned about legacy data: %q", w)
+		}
+	}
+
+	// …and the same once the directory is gone entirely (post-clean).
+	if err := os.RemoveAll(f.legacyNS); err != nil {
+		t.Fatal(err)
+	}
+	a = f.analyze(t)
+	if got := category(t, a, CatLegacyChromem).ItemCount; got != 0 {
+		t.Fatalf("legacy chromem items = %d with no directory at all, want 0", got)
+	}
+	for _, w := range a.Warnings {
+		if strings.Contains(w, "legacy chromem") {
+			t.Errorf("missing legacy directory warned: %q", w)
+		}
+	}
+}
+
+// storeAtBase reports a different namespace directory than the store actually
+// opened — the shape of a vectors.db that has gone missing.
+type storeAtBase struct {
+	vectorstore.Maintainer
+	base string
+}
+
+func (s storeAtBase) BaseDir() string { return s.base }
+
+// unknownMigrationRecord is a store whose migration_state cannot be read.
+type unknownMigrationRecord struct {
+	vectorstore.Maintainer
+}
+
+func (unknownMigrationRecord) MigratedCollections() (map[string]int, bool) { return nil, false }
+
+func warned(a *Analysis, substr string) bool {
+	for _, w := range a.Warnings {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestScanStaleJobs_OnlyOldTerminalRows(t *testing.T) {

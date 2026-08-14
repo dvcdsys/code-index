@@ -2,6 +2,7 @@ package vectorstore
 
 import (
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -306,9 +307,175 @@ func TestImportLegacyChromem_SkipsUnreadableCollectionDir(t *testing.T) {
 	}
 }
 
+// Once the legacy tree has been reclaimed (the "Legacy chromem data" category
+// on the Resources screen), the next boot must be a normal boot: the gob files
+// are gone, migration_state still says every collection was dealt with, and
+// nothing is re-imported or reported as an error.
+func TestOpenWith_ToleratesADeletedLegacyDir(t *testing.T) {
+	legacy, _ := legacyFixture(t, 3, 4, 8)
+	dir := t.TempDir()
+
+	s, err := OpenWith(Options{Dir: dir, LegacyChromaDir: legacy})
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	before := migrationState(t, s)
+	if len(before) != 3 {
+		t.Fatalf("migration_state has %d rows after the import, want 3", len(before))
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// …the admin reclaims the gob tree.
+	if err := os.RemoveAll(legacy); err != nil {
+		t.Fatalf("remove legacy tree: %v", err)
+	}
+
+	s2, err := OpenWith(Options{Dir: dir, LegacyChromaDir: legacy})
+	if err != nil {
+		t.Fatalf("open after the legacy tree was reclaimed: %v", err)
+	}
+	defer s2.Close()
+
+	if after := migrationState(t, s2); !equalStrings(before, after) {
+		t.Errorf("migration state changed:\nbefore=%v\nafter=%v", before, after)
+	}
+	cols := s2.ListCollections()
+	if len(cols) != 3 {
+		t.Fatalf("%d collections after reopen, want 3 — the imported data must be untouched", len(cols))
+	}
+	for _, ci := range cols {
+		if ci.Documents != 4 {
+			t.Errorf("collection %s has %d documents, want 4", ci.Name, ci.Documents)
+		}
+	}
+	if migrated, ok := s2.MigratedCollections(); !ok || len(migrated) != 3 {
+		t.Errorf("MigratedCollections = %v, %v; want 3 entries and ok", migrated, ok)
+	}
+}
+
+func TestMigratedCollections(t *testing.T) {
+	legacy, want := legacyFixture(t, 2, 5, 8)
+	s, err := OpenWith(Options{Dir: t.TempDir(), LegacyChromaDir: legacy})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	got, ok := s.MigratedCollections()
+	if !ok {
+		t.Fatal("MigratedCollections reported unknown on a healthy store")
+	}
+	if len(got) != len(want) {
+		t.Fatalf("MigratedCollections = %v, want %d entries", got, len(want))
+	}
+	for name := range want {
+		if got[name] != 5 {
+			t.Errorf("collection %s recorded %d documents, want 5", name, got[name])
+		}
+	}
+
+	// A closed store must answer "unknown", not "nothing was migrated" — the
+	// caller deciding whether to delete 2.5 GB of gob files reads an empty map
+	// as "everything is imported".
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, ok := s.MigratedCollections(); ok {
+		t.Error("a closed store reported a usable migration record")
+	}
+}
+
+func TestLegacyMigrationStatus(t *testing.T) {
+	legacy, _ := legacyFixture(t, 3, 4, 8)
+	s, err := OpenWith(Options{Dir: t.TempDir(), LegacyChromaDir: legacy})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	migrated, ok := s.MigratedCollections()
+	if !ok {
+		t.Fatal("migration record unavailable")
+	}
+
+	st, err := LegacyMigrationStatus(legacy, migrated)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !st.Complete() {
+		t.Fatalf("status = %+v, want complete after a full import", st)
+	}
+	if st.Collections != 3 || st.Migrated != 3 || st.Documents != 12 {
+		t.Errorf("status = %+v, want 3/3 collections and 12 documents", st)
+	}
+
+	// A collection that appeared after the import — the shape a mid-flight
+	// migration has — makes the whole namespace ineligible.
+	writeCollectionMeta(t, filepath.Join(legacy, "aabbccdd"), "project_notyet")
+	st, err = LegacyMigrationStatus(legacy, migrated)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if st.Complete() || st.Collections != 4 || st.Migrated != 3 {
+		t.Errorf("status = %+v, want 3 of 4 collections migrated and not complete", st)
+	}
+
+	// A directory the importer could not read is not a collection it took, so
+	// it holds data that exists nowhere else.
+	fresh, _ := legacyFixture(t, 1, 2, 8)
+	freshStore, err := OpenWith(Options{Dir: t.TempDir(), LegacyChromaDir: fresh})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer freshStore.Close()
+	freshMigrated, _ := freshStore.MigratedCollections()
+	if err := os.MkdirAll(filepath.Join(fresh, "junk"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, err = LegacyMigrationStatus(fresh, freshMigrated)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if st.Complete() || len(st.Unreadable) != 1 {
+		t.Errorf("status = %+v, want an unreadable directory and not complete", st)
+	}
+
+	// An empty namespace directory is not "complete": nothing was migrated
+	// from it, so there is nothing there whose deletion is safe by that proof.
+	empty := t.TempDir()
+	st, err = LegacyMigrationStatus(empty, migrated)
+	if err != nil {
+		t.Fatalf("status on an empty dir: %v", err)
+	}
+	if st.Complete() || st.Collections != 0 {
+		t.Errorf("status = %+v, want empty and not complete", st)
+	}
+
+	if _, err := LegacyMigrationStatus(filepath.Join(t.TempDir(), "gone"), migrated); err == nil {
+		t.Error("a missing legacy directory should be an error, not a silent complete")
+	}
+}
+
 // --------------------------------------------------------------------------
 // helpers
 // --------------------------------------------------------------------------
+
+// writeCollectionMeta creates a collection directory holding nothing but the
+// metadata gob — enough for the tree to name it, which is all the migration
+// check reads.
+func writeCollectionMeta(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	f, err := os.Create(filepath.Join(dir, chromemMetadataFile))
+	if err != nil {
+		t.Fatalf("create metadata gob: %v", err)
+	}
+	defer f.Close()
+	if err := gob.NewEncoder(f).Encode(chromemCollectionMeta{Name: name}); err != nil {
+		t.Fatalf("encode metadata gob: %v", err)
+	}
+}
 
 func migrationState(t *testing.T, s *Store) []string {
 	t.Helper()

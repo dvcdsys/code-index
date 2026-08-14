@@ -139,6 +139,72 @@ func (s *Store) importLegacyChromem(ctx context.Context) error {
 	return nil
 }
 
+// LegacyStatus describes how much of one legacy chromem namespace directory
+// has been imported into the SQLite store that shadows it. It is the evidence
+// the maintenance surface needs before it may offer the gob tree for deletion:
+// the tree is only garbage once every collection in it is also in the database.
+type LegacyStatus struct {
+	// Collections is how many directories under the namespace are readable
+	// chromem collections.
+	Collections int
+	// Migrated is how many of those have a migration_state row.
+	Migrated int
+	// Documents is the total the import recorded for the migrated ones.
+	Documents int64
+	// Unreadable names the directories that are NOT readable chromem
+	// collections. The import skipped them (it cannot name a collection whose
+	// metadata gob it cannot decode), so whatever they hold exists nowhere
+	// else, and their presence is what stops the tree being called migrated.
+	Unreadable []string
+}
+
+// Complete reports whether the whole namespace has been imported: at least one
+// collection, every one of them recorded, and nothing in the tree the import
+// could not read. Deliberately false for an empty directory — "there was never
+// anything here" is not the same claim as "everything here is safely in SQLite".
+func (st LegacyStatus) Complete() bool {
+	return st.Collections > 0 && st.Migrated == st.Collections && len(st.Unreadable) == 0
+}
+
+// LegacyMigrationStatus inspects the chromem namespace directory legacyDir
+// against the migration record of the store that imported it (the map returned
+// by Maintainer.MigratedCollections).
+//
+// It reads only the per-collection metadata gobs — one small file per
+// collection — so it is cheap enough to run on every analysis. Loose FILES at
+// the namespace level are ignored: chromem kept everything in per-collection
+// directories, so a stray .DS_Store is not data the import could have taken
+// and must not veto reclaiming 2 GB of gob files.
+func LegacyMigrationStatus(legacyDir string, migrated map[string]int) (LegacyStatus, error) {
+	var st LegacyStatus
+	if legacyDir == "" {
+		return st, errors.New("vectorstore: empty legacy chroma directory")
+	}
+	entries, err := os.ReadDir(legacyDir)
+	if err != nil {
+		return st, fmt.Errorf("vectorstore: read legacy chroma dir %q: %w", legacyDir, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(legacyDir, e.Name())
+		name, err := readCollectionName(dir)
+		if err != nil {
+			st.Unreadable = append(st.Unreadable, dir)
+			continue
+		}
+		st.Collections++
+		docs, ok := migrated[name]
+		if !ok {
+			continue
+		}
+		st.Migrated++
+		st.Documents += int64(docs)
+	}
+	return st, nil
+}
+
 // migratedCollections reads the set of collection names already imported.
 func (s *Store) migratedCollections(ctx context.Context) (map[string]struct{}, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT collection_name FROM migration_state`)
