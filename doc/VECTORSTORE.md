@@ -57,10 +57,13 @@ works in terms of directories.
 ## Schema
 
 ```sql
-CREATE TABLE collections (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+CREATE TABLE collections (
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE
+);
 
 CREATE TABLE vectors (
-  collection_id INTEGER NOT NULL,
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
   doc_id        TEXT NOT NULL,
   file_path     TEXT NOT NULL,
   start_line    INTEGER NOT NULL,
@@ -75,7 +78,7 @@ CREATE INDEX idx_vec_coll      ON vectors(collection_id);
 CREATE INDEX idx_vec_coll_file ON vectors(collection_id, file_path);
 
 CREATE TABLE vector_contents (
-  collection_id INTEGER NOT NULL,
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
   doc_id        TEXT NOT NULL,
   content       TEXT NOT NULL,
   PRIMARY KEY (collection_id, doc_id)
@@ -92,6 +95,54 @@ Collection names (`project_<md5hex(project_path)>`) and document IDs
 (`<md5hex(file_path)[:12]>:<start>-<end>:<idx>`) are **frozen compatibility
 contracts** shared with the archived Python backend and with every index
 already on disk. That is what lets the gob files be imported verbatim.
+
+**Why the id guards.** A collection id is *cached* by callers — `Store.collIDs`,
+and through it the indexer — across a window in which an admin can delete the
+collection. Both guards close a hole that window opens:
+
+- Without `AUTOINCREMENT`, `collections.id` is the rowid and SQLite reuses the
+  largest free one. Deleting the highest-numbered collection hands its id to the
+  *next* collection created, so any row that outlived the delete is silently
+  adopted by an unrelated project and search answers one project's query with
+  another project's chunks.
+- Without the foreign keys, a late upsert commits rows whose `collection_id` has
+  no `collections` row. `ListCollections` joins **from** `collections`, so those
+  rows are invisible to every count, every size figure and the orphan sweep —
+  they simply hold disk forever. With the constraint the upsert fails loudly
+  instead; see [Schema versions](#schema-versions).
+
+## Schema versions
+
+`PRAGMA user_version` carries the schema version, and `openDB` upgrades an older
+file before the connection pool is created.
+
+| version | shape |
+|---|---|
+| 0 | The original schema. Nothing stamped `user_version`, so a v1 file reports 0. Plain rowid collection ids, no foreign keys, `auto_vacuum` off. |
+| 2 | `AUTOINCREMENT` ids, `ON DELETE CASCADE` foreign keys, `auto_vacuum=INCREMENTAL`. |
+
+None of those three can be reached with `ALTER TABLE`: `AUTOINCREMENT` and
+`REFERENCES` live in the table's declared SQL, and `auto_vacuum` is only
+honoured on a database with no tables yet or after a full `VACUUM`. So the
+upgrade is a **rebuild**: a sibling temp file gets the v2 schema and the v2 file
+pragmas, the data is copied in (`ATTACH` + `INSERT … SELECT`), the file is
+fsynced and renamed over the original, and the stale `-wal`/`-shm` are removed.
+One pass delivers all three — a rebuild *is* the vacuum. Free space is checked
+first; the peak requirement is one extra copy of the file. Measured: a 152 MB
+database rebuilds in **0.32 s**, so the 1.86 GB reference index is a few
+seconds of one-time boot delay, logged at `warn`.
+
+A v1 file may already hold orphan rows — that is the leak v2 exists to stop. They
+cannot be copied into a database that enforces the constraint, so the rebuild
+filters them out and logs how many it dropped. Nothing loses visible data: those
+rows were already unreachable through `collections`.
+
+**When a collection is deleted mid-upsert**, `UpsertChunks` now returns an error
+wrapping `ErrCollectionDeleted` instead of leaking rows. It does not retry: the
+stale id is dropped from the cache so a later call resolves it afresh, but
+whether to re-create the collection is the caller's decision. Rows committed by
+earlier batches of the same call are already gone — cascaded away with the
+`collections` row.
 
 **Why chunk text lives in its own table.** Storing it duplicates `chunks_fts`
 on disk, deliberately: it keeps the package self-contained and
@@ -162,7 +213,8 @@ statement materialises the file, and the page size is silently ignored.
 | `journal_size_limit` | 64 MB | A checkpoint rewinds the WAL but by default leaves the FILE at its high-water mark forever. The legacy import commits a whole collection at once — measured a permanent 159 MB `-wal` beside a 158 MB database — and that sidecar is counted in the "Vector store" row of the Resources screen. With a limit the checkpoint truncates it back. Steady-state indexing commits every 500 chunks and never reaches the cap. |
 | `cache_size` | driver default (2 MB) | Measured: raising it buys no latency (the working set dwarfs any realistic cache) and it is **per connection**, so it multiplies resident memory. |
 | `mmap_size` | off | Opt-in, see below. |
-| `auto_vacuum` | off | Measured: 100 delete+reinsert cycles over 72k rows grew the file by 3.8 MB and ended with an empty freelist. Pages are recycled by the next insert. |
+| `foreign_keys` | ON | Per **connection**, and off by default in SQLite — a declared `REFERENCES` clause that is never enabled is just a comment. It is what stops an upsert holding a stale collection id from committing rows no `collections` row joins to. |
+| `auto_vacuum` | INCREMENTAL (set at creation) | The Resources screen reports bytes reclaimed when a collection is deleted; without this the pages only reach the freelist, the file never shrinks, and `df` never confirms the claim. INCREMENTAL rather than FULL because the reclaim is driven explicitly (`PRAGMA incremental_vacuum` after a collection delete) and never on the watcher's delete-and-reinsert path — measured there: 100 delete+reinsert cycles over 72k rows grew the file by 3.8 MB and ended with an empty freelist, i.e. free page recycling already handles it. |
 
 Idle pooled connections are closed after 30 seconds. This is the mechanism that
 makes idle memory collapse: SQLite's page cache lives in `modernc.org/memory`

@@ -127,7 +127,7 @@ func OpenWith(o Options) (*Store, error) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	dbPath := filepath.Join(dir, DBFileName)
-	db, err := openDB(dbPath, o.MMapBytes)
+	db, err := openDB(dbPath, o.MMapBytes, logger)
 	if err != nil {
 		return nil, fmt.Errorf("vectorstore open %q: %w", dbPath, err)
 	}
@@ -261,12 +261,47 @@ const upsertContentSQL = `INSERT INTO vector_contents (collection_id, doc_id, co
   VALUES (?,?,?)
   ON CONFLICT(collection_id, doc_id) DO UPDATE SET content=excluded.content`
 
+// ErrCollectionDeleted reports that the collection an upsert was writing into
+// was deleted while the write was in flight — see UpsertChunks.
+var ErrCollectionDeleted = errors.New("vectorstore: collection was deleted while the upsert was in flight")
+
+// foreignKeyViolationMsg is what SQLite puts in the error for a failed
+// REFERENCES check. modernc.org/sqlite surfaces the message rather than a typed
+// constraint code, so this is the seam; TestUpsertChunks_StaleCollectionID pins
+// that it still matches.
+const foreignKeyViolationMsg = "FOREIGN KEY constraint failed"
+
+// isCollectionGone reports whether err is the foreign-key failure that a stale
+// collection id produces.
+func isCollectionGone(err error) bool {
+	return err != nil && strings.Contains(err.Error(), foreignKeyViolationMsg)
+}
+
 // UpsertChunks stores or overwrites chunks with their pre-computed embeddings.
 // chunks and embeddings must be the same length.
 //
 // Embeddings are stored L2-normalised (search is a plain dot product), using
 // the same tolerance chromem-go used, so an already-normalised vector is
 // written byte-for-byte as the caller supplied it.
+//
+// # When the collection is deleted mid-flight
+//
+// The collection id is resolved once and then cached (see collIDs), so an
+// indexing run that overlaps an admin deleting the project — the Resources
+// screen, or a project delete — writes with an id whose collections row is
+// gone. The schema's foreign key turns that into a failed write, and this
+// returns ErrCollectionDeleted (wrapping the driver error) rather than
+// pretending it succeeded. The alternative the constraint replaced was worse:
+// the rows committed, no collections row joined to them, so ListCollections,
+// every size figure and the orphan sweep were all blind to them and they held
+// disk forever.
+//
+// Nothing is retried here. The stale id is dropped from the cache so a later
+// call resolves it again — recreating the collection if the caller genuinely
+// still wants to index that project — but deciding that is the caller's job,
+// not a silent side effect of a failed batch. Whatever rows earlier batches of
+// the same call committed are already gone: they were cascaded away with the
+// collections row.
 func (s *Store) UpsertChunks(ctx context.Context, projectPath string, chunks []Chunk, embeddings [][]float32) error {
 	if len(chunks) != len(embeddings) {
 		return fmt.Errorf("vectorstore: chunks(%d) and embeddings(%d) length mismatch", len(chunks), len(embeddings))
@@ -282,7 +317,8 @@ func (s *Store) UpsertChunks(ctx context.Context, projectPath string, chunks []C
 		return err
 	}
 
-	collID, err := s.ensureCollection(ctx, collectionName(projectPath))
+	name := collectionName(projectPath)
+	collID, err := s.ensureCollection(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -290,6 +326,11 @@ func (s *Store) UpsertChunks(ctx context.Context, projectPath string, chunks []C
 	for start := 0; start < len(chunks); start += upsertBatchSize {
 		end := min(start+upsertBatchSize, len(chunks))
 		if err := s.upsertBatch(ctx, collID, chunks[start:end], embeddings[start:end], start); err != nil {
+			if isCollectionGone(err) {
+				s.forgetCollection(name)
+				return fmt.Errorf("vectorstore upsert batch [%d:%d] into %q: %w: %v",
+					start, end, name, ErrCollectionDeleted, err)
+			}
 			return fmt.Errorf("vectorstore upsert batch [%d:%d]: %w", start, end, err)
 		}
 	}

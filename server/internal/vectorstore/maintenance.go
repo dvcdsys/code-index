@@ -201,7 +201,32 @@ func (s *Store) DeleteCollectionByName(name string) error {
 		return fmt.Errorf("vectorstore delete collection %q: %w", name, err)
 	}
 	s.forgetCollection(name)
+	s.reclaimFreePages(ctx)
 	return nil
+}
+
+// reclaimFreePages hands freed pages back to the filesystem.
+//
+// Deleting a collection only moves its pages to the freelist: the database file
+// keeps its size and `df` never confirms the number the Resources screen just
+// reported as reclaimed. auto_vacuum=INCREMENTAL (set at creation, or by the
+// v2 rebuild) makes them movable; this pragma is what actually moves them and
+// shortens the file. In WAL mode the shrink lands in the WAL and the file is
+// physically truncated at the next checkpoint.
+//
+// Deliberately NOT called from DeleteByFile. The watcher deletes and reinserts
+// a file's chunks continuously, and those pages are reused by the very next
+// insert — measured on the previous schema: 100 delete+reinsert cycles over
+// 72k rows grew the file by 3.8 MB and ended with an empty freelist. Vacuuming
+// there would trade free page recycling for constant page shuffling. Bulk
+// deletes are different: nothing is coming to reuse a whole dropped project.
+//
+// Best effort. Failing to shrink a file is not a reason to report a successful
+// delete as failed.
+func (s *Store) reclaimFreePages(ctx context.Context) {
+	if _, err := s.db.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
+		s.logger.Warn("vectorstore: incremental vacuum after delete", "err", err)
+	}
 }
 
 // BaseDir implements Maintainer.

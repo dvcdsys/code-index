@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -39,6 +40,17 @@ const DBFileName = "vectors.db"
 // statement that materialises page 1 freezes the page size for the life of the
 // file.
 const pageSize = 8192
+
+// schemaVersion is stamped into PRAGMA user_version and is what openDB uses to
+// decide whether an existing file needs rebuilding.
+//
+//	0  the original shipped schema — nothing stamped user_version at all.
+//	   Treated as v1: plain rowid collection ids, no foreign keys, auto_vacuum
+//	   off.
+//	1  reserved for the same shape, in case a build ever stamped it.
+//	2  AUTOINCREMENT collection ids, ON DELETE CASCADE foreign keys,
+//	   auto_vacuum=INCREMENTAL. See upgrade.go for how a v1 file gets here.
+const schemaVersion = 2
 
 // busyTimeoutMS bounds how long a writer waits for the WAL write lock before
 // giving up. Indexing commits in small transactions and the file watcher can
@@ -103,13 +115,34 @@ const idleConnTimeout = 30 * time.Second
 // A row here means "this collection has been dealt with" — it is deliberately
 // NOT removed when a collection is deleted, or the next boot would re-import
 // the collection an admin just reclaimed.
+//
+// Two guards on collections.id carry the schema-v2 rebuild (see upgrade.go),
+// and both exist because a collection id is CACHED by callers (Store.collIDs,
+// and through it the indexer) across the window in which an admin can delete
+// the collection:
+//
+//   - AUTOINCREMENT. A plain INTEGER PRIMARY KEY is the rowid, and SQLite
+//     reuses the largest free rowid: deleting the highest-numbered collection
+//     hands its id to the NEXT collection created. Any row that outlived the
+//     delete is then silently adopted by an unrelated project, and search
+//     answers one project's query with another project's chunks. AUTOINCREMENT
+//     makes ids monotonic, so a stale id can only ever point at nothing.
+//   - The REFERENCES clauses, with PRAGMA foreign_keys=ON applied per
+//     connection. Without them an upsert holding a stale id commits rows whose
+//     collection_id has no collections row. ListCollections joins FROM
+//     collections, so those rows are invisible to every count, every size, and
+//     the orphan sweep — they simply occupy disk forever. With the constraint
+//     the upsert fails loudly instead (see UpsertChunks).
+//
+// ON DELETE CASCADE covers both child tables, so dropping the collections row
+// is by itself sufficient to leave nothing behind.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS collections (
-  id   INTEGER PRIMARY KEY,
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE
 );
 CREATE TABLE IF NOT EXISTS vectors (
-  collection_id INTEGER NOT NULL,
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
   doc_id        TEXT NOT NULL,
   file_path     TEXT NOT NULL,
   start_line    INTEGER NOT NULL,
@@ -123,7 +156,7 @@ CREATE TABLE IF NOT EXISTS vectors (
 CREATE INDEX IF NOT EXISTS idx_vec_coll ON vectors(collection_id);
 CREATE INDEX IF NOT EXISTS idx_vec_coll_file ON vectors(collection_id, file_path);
 CREATE TABLE IF NOT EXISTS vector_contents (
-  collection_id INTEGER NOT NULL,
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
   doc_id        TEXT NOT NULL,
   content       TEXT NOT NULL,
   PRIMARY KEY (collection_id, doc_id)
@@ -183,8 +216,9 @@ func sqliteDriver() (driver.Driver, error) {
 }
 
 // openDB opens (creating if needed) the database at path and returns a pool
-// with the pragmas applied on every connection.
-func openDB(path string, mmapBytes int64) (*sql.DB, error) {
+// with the pragmas applied on every connection. An existing file below
+// schemaVersion is rebuilt first — see upgradeSchema.
+func openDB(path string, mmapBytes int64, logger *slog.Logger) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("vectorstore: create %s: %w", filepath.Dir(path), err)
 	}
@@ -198,6 +232,14 @@ func openDB(path string, mmapBytes int64) (*sql.DB, error) {
 		return nil, err
 	}
 
+	// Before the pool exists: the rebuild replaces the file wholesale, so it
+	// must be the only thing holding it open.
+	if !fresh {
+		if err := upgradeSchema(drv, path, logger); err != nil {
+			return nil, err
+		}
+	}
+
 	// cache_size is left at the driver default (2 MB). Measured: raising it
 	// buys no latency for this workload — a collection's working set is far
 	// larger than any realistic cache, so every query streams it regardless —
@@ -206,6 +248,10 @@ func openDB(path string, mmapBytes int64) (*sql.DB, error) {
 		fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS),
 		"PRAGMA synchronous=NORMAL",
 		fmt.Sprintf("PRAGMA journal_size_limit=%d", journalSizeLimitBytes),
+		// Off by default in SQLite, and per CONNECTION, so it has to be set
+		// here rather than once at open — a declared REFERENCES clause that is
+		// never enforced is just a comment. See schemaSQL for what it protects.
+		"PRAGMA foreign_keys=ON",
 	}
 	if mmapBytes > 0 {
 		pragmas = append(pragmas, fmt.Sprintf("PRAGMA mmap_size=%d", mmapBytes))
@@ -228,9 +274,10 @@ func openDB(path string, mmapBytes int64) (*sql.DB, error) {
 	return db, nil
 }
 
-// initDatabase sets the file-scoped pragmas and creates the schema. page_size
-// and journal_mode are properties of the FILE, not of a connection, so they
-// are applied once, on one dedicated connection, before anything writes.
+// initDatabase sets the file-scoped pragmas and creates the schema. page_size,
+// auto_vacuum and journal_mode are properties of the FILE, not of a connection,
+// so they are applied once, on one dedicated connection, before anything
+// writes.
 func initDatabase(db *sql.DB, fresh bool) error {
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
@@ -240,9 +287,14 @@ func initDatabase(db *sql.DB, fresh bool) error {
 	defer conn.Close()
 
 	if fresh {
-		// Must precede the first statement that materialises page 1.
+		// Both must precede the first statement that materialises page 1: the
+		// page size freezes there, and auto_vacuum can only be turned on for a
+		// database that has no tables yet (afterwards it costs a full VACUUM).
 		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA page_size=%d", pageSize)); err != nil {
 			return fmt.Errorf("vectorstore: set page_size: %w", err)
+		}
+		if _, err := conn.ExecContext(ctx, "PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
+			return fmt.Errorf("vectorstore: set auto_vacuum: %w", err)
 		}
 	}
 	var journal string
@@ -260,6 +312,12 @@ func initDatabase(db *sql.DB, fresh bool) error {
 	}
 	if _, err := conn.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("vectorstore: create schema: %w", err)
+	}
+	// Stamped unconditionally: a fresh file is v2 by construction, and an
+	// existing one only reaches here after upgradeSchema has rebuilt it (which
+	// stamps it too — this is the belt to that braces).
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
+		return fmt.Errorf("vectorstore: stamp schema version: %w", err)
 	}
 	return nil
 }
