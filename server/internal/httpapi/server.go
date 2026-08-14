@@ -393,13 +393,25 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path open
 }
 
 // projectArtifacts wires the off-database cleanup for a project delete: the
-// vector collection (resident in RAM until dropped) and the cloned checkout.
+// vector collection and the cloned checkout.
 // Returns nil when neither is available, which keeps router-only tests working.
 func (s *Server) projectArtifacts() *projects.Artifacts {
 	art := &projects.Artifacts{}
 	if m, ok := s.Deps.VectorStore.(vectorstore.Maintainer); ok && m != nil {
 		art.DropCollection = func(hostPath string) error {
-			return m.DeleteCollectionByName(vectorstore.CollectionName(hostPath))
+			if err := m.DeleteCollectionByName(vectorstore.CollectionName(hostPath)); err != nil {
+				return err
+			}
+			// A deleted project's pages otherwise sit in the freelist for the
+			// life of the file, holding its high-water size and inflating the
+			// "Vector store" usage row. This is a single admin-initiated
+			// delete, not a batch, so the vacuum cost (~170 ms per 20k-doc
+			// collection) is fine here — the batched-reclaim reasoning in
+			// maintenance.Clean does not apply. The indexer's own
+			// DeleteCollection before a full reindex stays vacuum-free on
+			// purpose: the reindex reuses those pages immediately.
+			m.ReclaimFreePages(context.Background())
+			return nil
 		}
 	}
 	if s.Deps.DataDir != "" {

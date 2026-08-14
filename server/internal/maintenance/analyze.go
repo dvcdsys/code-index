@@ -270,8 +270,9 @@ func (s *Service) scanOrphanCollections(ctx context.Context, st *scanState) (Cat
 			Detail: fmt.Sprintf("%d documents", col.Documents),
 			// The store reports the logical size of the rows. It excludes
 			// index entries and page slack, so it is a floor on what the
-			// delete gives back — which the store does return to the
-			// filesystem: DeleteCollectionByName runs an incremental vacuum.
+			// delete gives back — which the clean does return to the
+			// filesystem: after the batch of deletes it runs one incremental
+			// vacuum (Maintainer.ReclaimFreePages, see cleanCategory).
 			SizeBytes:  col.SizeBytes,
 			collection: col.Name,
 		})
