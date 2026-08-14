@@ -215,23 +215,28 @@ func rebuildInto(drv driver.Driver, src, dst string) (dropped int64, err error) 
 	return dropped, nil
 }
 
-// commitRebuild makes tmp the database at path: fsync the rebuilt file, rename
-// it over the original, drop the original's now-meaningless sidecars, and fsync
-// the directory so the rename itself survives a crash.
+// commitRebuild makes tmp the database at path: fsync the rebuilt file, drop
+// the original's sidecars, rename the rebuilt file over the original, and
+// fsync the directory so the rename itself survives a crash.
+//
+// The sidecars go BEFORE the rename so there is never a moment where the new
+// database sits next to the old file's -wal/-shm. The old pair was fully
+// checkpointed into the data the rebuild copied, so removing it first loses
+// nothing — the crash window merely re-runs the rebuild — while removing it
+// after would rely on SQLite ignoring a WAL whose salts don't match the
+// renamed file's header. That happens to be true, but the ordering makes the
+// argument unnecessary.
 func commitRebuild(tmp, path string) error {
 	if err := fsyncPath(tmp); err != nil {
 		return fmt.Errorf("vectorstore: sync %s: %w", tmp, err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("vectorstore: replace %s: %w", path, err)
-	}
-	// The old -wal and -shm describe a file that no longer exists. SQLite would
-	// reject or misread them; they were fully checkpointed into the data the
-	// rebuild copied, so there is nothing in them to lose.
 	for _, suffix := range []string{"-wal", "-shm"} {
 		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("vectorstore: remove stale %s: %w", path+suffix, err)
 		}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("vectorstore: replace %s: %w", path, err)
 	}
 	if err := fsyncPath(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("vectorstore: sync %s: %w", filepath.Dir(path), err)

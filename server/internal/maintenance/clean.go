@@ -141,6 +141,7 @@ func (s *Service) cleanCategory(ctx context.Context, cat Category, st *scanState
 			}
 			return res
 		}
+		dropped := 0
 		for _, it := range cat.all {
 			if hostPath, live := st.liveCollections[it.collection]; live {
 				skip(it.Key, fmt.Sprintf("project %s was re-created", hostPath))
@@ -151,6 +152,14 @@ func (s *Service) cleanCategory(ctx context.Context, cat Category, st *scanState
 				continue
 			}
 			deleted(it)
+			dropped++
+		}
+		// One vacuum for the whole batch: the incremental vacuum shuffles tail
+		// pages under the write lock (~170 ms per 20k-doc collection), so
+		// running it per delete would re-shuffle the tail N times while the
+		// indexer waits on busy_timeout.
+		if dropped > 0 {
+			vs.ReclaimFreePages(ctx)
 		}
 
 	case CatOrphanRepos:

@@ -44,22 +44,25 @@ type chromemCollectionMeta struct {
 // chromemMetadataFile is the fixed name of the per-collection metadata gob.
 const chromemMetadataFile = "00000000.gob"
 
-// importSpaceFactor is how much free space the import is assumed to need,
-// relative to the gob tree it reads.
-//
-// Measured on the same real 2.5 GB gob tree: the finished SQLite file is
-// 1.86 GB, i.e. 0.74x. (An earlier 0.45x figure came from a prototype that did
-// not store chunk content; the shipping schema does — see vector_contents in
-// schemaSQL — so it is not the number to size a disk guard with.)
-//
-// The remaining 0.16 is for the WAL. The import commits one transaction per
+// importDBFactor is how much space the finished database is assumed to need,
+// relative to the gob tree it reads. Measured on the real 2.5 GB gob tree: the
+// finished SQLite file is 1.86 GB, i.e. 0.74x. (An earlier 0.45x figure came
+// from a prototype that did not store chunk content; the shipping schema does
+// — see vector_contents in schemaSQL — so it is not the number to size a disk
+// guard with.)
+const importDBFactor = 0.74
+
+// importWALFactor sizes the transient WAL peak, relative to the LARGEST single
+// collection — not the whole tree. The import commits one transaction per
 // collection so that an interruption redoes exactly one collection, and every
 // page a transaction touches sits in the WAL until it commits — so the WAL
-// still reaches roughly one collection's worth of pages, whatever the write
-// batch size is. PRAGMA journal_size_limit (see sqlite.go) truncates the file
-// back to its cap at the next checkpoint, so this is a transient peak rather
-// than a permanent high-water mark, but the import has to fit through it.
-const importSpaceFactor = 0.9
+// peaks at roughly one collection's worth of pages, whatever the write batch
+// size is. A flat share of the total would under-provision whenever one
+// collection dominates the tree (a monorepo). PRAGMA journal_size_limit (see
+// sqlite.go) truncates the file back to its cap at the next checkpoint, so
+// this is a transient peak rather than a permanent high-water mark, but the
+// import has to fit through it.
+const importWALFactor = 0.8
 
 // importLogEvery throttles progress logging to one line per N collections.
 const importLogEvery = 10
@@ -104,7 +107,7 @@ func (s *Store) importLegacyChromem(ctx context.Context) error {
 		name string // chromem collection name
 	}
 	var todo []pending
-	var totalBytes int64
+	var totalBytes, maxBytes int64
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -124,14 +127,17 @@ func (s *Store) importLegacyChromem(ctx context.Context) error {
 			continue
 		}
 		todo = append(todo, pending{dir: dir, name: name})
-		totalBytes += dirBytes(dir)
+		b := dirBytes(dir)
+		totalBytes += b
+		maxBytes = max(maxBytes, b)
 	}
 	if len(todo) == 0 {
 		return nil
 	}
 	sort.Slice(todo, func(i, j int) bool { return todo[i].name < todo[j].name })
 
-	if err := checkFreeSpace(s.dir, int64(float64(totalBytes)*importSpaceFactor)); err != nil {
+	need := int64(float64(totalBytes)*importDBFactor + float64(maxBytes)*importWALFactor)
+	if err := checkFreeSpace(s.dir, need); err != nil {
 		return err
 	}
 
@@ -161,6 +167,14 @@ func (s *Store) importLegacyChromem(ctx context.Context) error {
 				"docs", totalDocs,
 				"elapsed", time.Since(started).Round(time.Second).String())
 		}
+	}
+	// The last collection's transaction leaves its pages sitting in the WAL
+	// until some future checkpoint — on a freshly migrated idle server that is
+	// ~100+ MB of dead disk counted in the "Vector store" usage row. Truncate
+	// it now, while nothing else is writing. Best effort: a busy WAL just
+	// waits for the ordinary checkpoint cadence instead.
+	if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		s.logger.Warn("vectorstore: post-import wal checkpoint", "err", err)
 	}
 	s.logger.Warn("vector store migration complete",
 		"collections", len(todo), "docs", totalDocs,
