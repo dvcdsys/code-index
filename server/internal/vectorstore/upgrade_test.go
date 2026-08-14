@@ -580,6 +580,44 @@ func TestOpen_RefusesAForeignDatabase(t *testing.T) {
 	}
 }
 
+// A views-only database has ZERO tables but is still somebody's data — the
+// emptiness probe must read "master is literally empty", not "no tables", or
+// this file slips through the empty branch and gets silently recreated. The
+// crash-on-first-boot class always has a literally empty master, so the
+// stricter definition costs nothing.
+func TestOpen_RefusesAViewsOnlyDatabase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DBFileName)
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE VIEW somebody_elses_view AS SELECT 1 AS x`); err != nil {
+		t.Fatalf("build views-only fixture: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(dir); err == nil {
+		t.Fatal("Open adopted or recreated a views-only database instead of refusing")
+	} else if !strings.Contains(err.Error(), "not a cix vector store") {
+		t.Errorf("refusal message %q does not tell the operator what the file is", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("views-only file gone after refusal: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("views-only file changed size %d -> %d — a refusal must not modify the file", len(before), len(after))
+	}
+}
+
 // A file stamped by a NEWER binary must keep its stamp. upgradeSchema already
 // leaves version >= ours alone; the trap was initDatabase restamping OUR
 // version unconditionally afterwards — one old-binary run against a new data

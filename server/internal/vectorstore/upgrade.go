@@ -99,14 +99,14 @@ func upgradeSchema(drv driver.Driver, path string, logger *slog.Logger) error {
 	return nil
 }
 
-// readUserVersion opens path just long enough to read PRAGMA user_version.
-// A database written before the stamp existed reports 0.
 // probeDatabase classifies the file at path before the pool opens.
 //
-// empty: sqlite_master has no tables at all. A fully created store always has
-// tables, so an empty master is proof the file was abandoned before its schema
-// was written (the crash-on-first-boot class: zero-byte, header-only, or a
-// created-then-dropped page 1) — and proof that recreating it loses nothing.
+// empty: sqlite_master holds nothing AT ALL — not "no tables". The distinction
+// matters: a views-only database has zero tables but is still somebody's data,
+// and recreating it would be silent destruction. A literally empty master is
+// exactly the crash-on-first-boot class (zero-byte, header-only, or a
+// created-then-dropped page 1 — all three verified to land here), and it is
+// proof that recreating the file loses nothing.
 //
 // ours: the schema's anchor table (collections — present in every version
 // since v1) exists. A file that is neither empty nor ours belongs to something
@@ -118,15 +118,17 @@ func probeDatabase(drv driver.Driver, path string) (empty, ours bool, err error)
 		fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS),
 	}})
 	defer db.Close()
-	var tables, anchor int
+	var rows, anchor int
 	if err := db.QueryRow(
-		`SELECT count(*), coalesce(sum(name = 'collections'), 0) FROM sqlite_master WHERE type = 'table'`,
-	).Scan(&tables, &anchor); err != nil {
+		`SELECT count(*), coalesce(sum(type = 'table' AND name = 'collections'), 0) FROM sqlite_master`,
+	).Scan(&rows, &anchor); err != nil {
 		return false, false, fmt.Errorf("vectorstore: inspect %s: %w", path, err)
 	}
-	return tables == 0, anchor > 0, nil
+	return rows == 0, anchor > 0, nil
 }
 
+// readUserVersion opens path just long enough to read PRAGMA user_version.
+// A database written before the stamp existed reports 0.
 func readUserVersion(drv driver.Driver, path string) (int, error) {
 	db := sql.OpenDB(&pragmaConnector{drv: drv, dsn: "file:" + path, pragmas: []string{
 		fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS),
