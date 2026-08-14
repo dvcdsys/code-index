@@ -14,7 +14,7 @@ query string ──▶ "Represent this query for searching relevant code: " + qu
        llama-server sidecar (CodeRankEmbed Q8_0 GGUF) — 768-dim vector
               │
               ▼
-   chromem-go cosine search over the project's collection
+   cosine search over the project's vector collection
               │
               ▼
    per-chunk hits → merge windowed overlaps → group by file → top-N files
@@ -55,7 +55,7 @@ and groups everything by file path. The top-N flag (`--limit`) is N
 
 ## 2. FTS5 / BM25 chunk mirror
 
-Every chunk that lands in chromem-go also lands as a row in two
+Every chunk that lands in the vector store also lands as a row in two
 sister SQLite tables:
 
 - `chunks_meta` — regular indexed shadow (project_path, file_path,
@@ -99,7 +99,7 @@ workspace path can rely on it.
                 ┌────────────────▼──┐         ┌──▼──────────────┐
                 │ dense fan-out     │         │ BM25 fan-out    │
                 │ (per-project      │         │ (chunks_fts per │
-                │  chromem cosine)  │         │  project)       │
+                │  vector cosine)   │         │  project)       │
                 └────────┬──────────┘         └─────────┬───────┘
                          │                              │
                          ▼                              ▼

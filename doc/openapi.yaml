@@ -1543,7 +1543,7 @@ paths:
       summary: Semantic (vector) search
       description: |
         Embeds the query and runs an approximate nearest-neighbour search
-        against the project's chromem-go collection. Results are
+        against the project's vector collection. Results are
         post-filtered by `min_score`, `paths` (whitelist, prefix-OR-substring
         match), `excludes` (blacklist, same matching), and `languages` —
         then merged into per-file groups and ranked by best match score.
@@ -2570,7 +2570,7 @@ paths:
       summary: Hybrid BM25+dense search across all repos in a workspace
       description: |
         Embeds the query, then fans out two parallel sub-queries per
-        project: dense (chromem cosine) and sparse (SQLite FTS5 BM25
+        project: dense (cosine over stored vectors) and sparse (SQLite FTS5 BM25
         over chunks_fts). Per-project the two ranked lists are fused
         via Reciprocal Rank Fusion (k=60).
 
@@ -4214,9 +4214,9 @@ components:
           type: integer
           format: int64
           description: |
-            Heap attributable to these items, apportioned by document count.
-            Only set for orphan_collections, and an estimate rather than a
-            measurement — chromem exposes no per-collection allocation figure.
+            Legacy. It reported heap attributable to these items back when the
+            vector store held every document in memory. Nothing sets it now —
+            the SQLite store's footprint is not proportional to what it holds.
         default_selected:
           type: boolean
           description: Whether the dashboard should pre-tick this category.
@@ -4988,7 +4988,9 @@ components:
         chroma_path:
           type: string
           nullable: true
-          description: Resolved chromem-go collection directory for this project. NULL when not computed.
+          description: |
+            Path of the SQLite vector database holding this project's
+            collection. NULL when not computed.
         sqlite_size_bytes:
           type: integer
           format: int64

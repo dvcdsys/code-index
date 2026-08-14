@@ -23,7 +23,7 @@ A single `cix-server` container exposes:
 - `:21847` — REST API (Bearer API key) + cookie-session web dashboard at
   `/dashboard`, Swagger UI at `/docs`.
 - An embedded indexing pipeline (tree-sitter chunking → embeddings →
-  chromem-go vector store + SQLite FTS5/BM25 mirror).
+  SQLite vector store + SQLite FTS5/BM25 mirror).
 - An embedding backend — by default a **bundled llama.cpp sidecar** (no
   external calls), optionally **Voyage AI** or an **OpenAI-compatible**
   endpoint (see §6).
