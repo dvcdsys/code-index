@@ -1,13 +1,26 @@
-# Native macOS setup (Apple Silicon, Metal GPU)
+# Native macOS setup from source (Apple Silicon, Metal GPU)
+
+> [!IMPORTANT]
+> **The normal way to run cix on a Mac is the app.** `cix.app` is a
+> drag-to-install menu bar launcher that downloads the same
+> Metal-accelerated server into `~/.cix/runtime/`, creates your admin
+> account, wires up the CLI and keeps itself and the server updated — no
+> Go, Node or Xcode toolchain involved. See [`MACOS_APP.md`](MACOS_APP.md).
+>
+> This document is the **advanced path**: building and running the server
+> out of a checkout, which is what you want when you are working on cix
+> itself, need a build of an unreleased branch, or want the launchd agent
+> under your own control.
 
 Docker Desktop on macOS runs containers inside a Linux VM, and the
-Metal GPU is **not accessible** from within that VM. For full Metal
-acceleration on Apple Silicon you must run cix-server natively.
+Metal GPU is **not accessible** from within that VM — so a Mac gets its
+Metal acceleration from a natively-built `cix-server` either way. The app
+ships one; the rest of this doc builds one.
 
 > For Docker (CPU) and Docker (CUDA) deployments, follow README's
-> *Quick Start* section instead. This doc is only for native macOS.
+> *Quick Start* section instead.
 
-## 1. Install (recommended: the installer)
+## 1. Install from source (recommended: the installer)
 
 Prerequisites:
 
@@ -167,6 +180,8 @@ The minimum env-var set for a Metal native run:
 | `CIX_N_GPU_LAYERS` | (leave unset) | macOS defaults to offloading all layers to Metal. `0` forces CPU. |
 | `CIX_EMBEDDINGS_ENABLED` | `true` | Default. Set `false` to skip the sidecar entirely. |
 | `CIX_LLAMA_BIN_DIR` | (set by `make run`) | Path to the `llama-server` bundle dir. The dev runner sets it; for `launchd` you set it yourself (see below). |
+| `CIX_VECTORS_DIR` | `~/.cix/data/vectors` | Where the vectors actually live — one SQLite database per embedding namespace. See [`VECTORSTORE.md`](VECTORSTORE.md). |
+| `CIX_CHROMA_PERSIST_DIR` | `~/.cix/data/chroma` | Only relevant when upgrading a pre-0.13 install: the legacy chromem tree the one-time import reads. Never written to. |
 
 The full env-var surface is documented in
 [`CONFIG_REFERENCE.md`](CONFIG_REFERENCE.md).
@@ -206,6 +221,9 @@ and `YOUR_USER` placeholder before loading.
     <key>CIX_LLAMA_BIN_DIR</key><string>/ABSOLUTE/PATH/TO/server/dist/cix-darwin-arm64/llama</string>
     <key>CIX_PORT</key><string>21847</string>
     <key>CIX_SQLITE_PATH</key><string>/Users/YOUR_USER/.cix/data/sqlite/projects.db</string>
+    <key>CIX_VECTORS_DIR</key><string>/Users/YOUR_USER/.cix/data/vectors</string>
+    <!-- Only for a server upgraded from 0.12 or earlier: the frozen chromem
+         tree the one-time import reads. Nothing is ever written to it. -->
     <key>CIX_CHROMA_PERSIST_DIR</key><string>/Users/YOUR_USER/.cix/data/chroma</string>
     <key>CIX_GGUF_CACHE_DIR</key><string>/Users/YOUR_USER/.cix/data/models</string>
   </dict>
@@ -252,6 +270,7 @@ place instead of being duplicated into `EnvironmentVariables`.)
 | `make bundle` fails downloading llama-server | Network blocked, or upstream release moved. | Inspect `server/Makefile`'s download URL; report if upstream changed. |
 | Server starts but `/health` 404s | Wrong port. | `lsof -i :21847` to confirm. Check `CIX_PORT` in `.env`. |
 | Health check takes minutes on first boot | The embedding model (~150 MB) downloads before serving. | Watch `tail -f ~/.cix/logs/cix-server.err`; it's a one-time cost. |
+| Server silent for a while on the first boot after upgrading to 0.13 | The one-time chromem→SQLite vector import runs before the HTTP listener binds (17 s on a 312k-document index; longer on a slow disk). | Watch `tail -f ~/.cix/logs/cix-server.err` for `migrating vector store`; it logs progress and is resumable if interrupted. |
 | GPU not used (CPU fallback) | `CIX_N_GPU_LAYERS=0` set in `.env`. | Remove it (macOS default offloads all layers) or set `99`. |
 | "killed: 9" on first llama-server launch | macOS amfid rejected the unsigned binary. | Re-run `make bundle` (or the installer) to refresh the local signature. |
 | Server starts via terminal but not via `launchd` | Launcher script or `.env` missing / unreadable. | Check `~/.cix/logs/cix-server.err`; re-run `./install-server.sh` to regenerate. |

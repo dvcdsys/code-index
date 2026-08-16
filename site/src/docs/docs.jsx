@@ -94,23 +94,24 @@ export function DocsApp() {
           </Section>
 
           <Section id="install" title="Install" eyebrow="Quick start">
-            <h3>Server — one command, any mode</h3>
-            <p>The interactive installer detects your platform and offers the right mode — <b>native</b> (macOS Apple Silicon, full Metal GPU), <b>docker</b> (CPU, any OS), or <b>docker-gpu</b> (NVIDIA CUDA). It checks prerequisites, asks a few questions (every one has a sensible default), writes the configuration, and brings the server up:</p>
-            <CodeBlock>{`curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
-
-# equivalent, from a clone:
-git clone https://github.com/dvcdsys/code-index && cd code-index
-./install-server.sh`}</CodeBlock>
-            <p>At the end it prints the dashboard URL and your admin login (the password is temporary — you change it on first login), and offers to install the <code>cix</code> CLI and connect it to the new server — so <code>cix init</code> works immediately. Re-running after a <code>git pull</code> upgrades in place; <code>--uninstall</code> removes the server but keeps your data. Forgot the admin password later? <code>./server/scripts/reset-password.sh &lt;email&gt;</code> resets it offline. Details: <a href="https://github.com/dvcdsys/code-index/blob/main/doc/SETUP_MACOS_NATIVE.md">SETUP_MACOS_NATIVE.md</a>.</p>
-
-            <h3>macOS — the menu bar app</h3>
-            <p>On an Apple Silicon Mac there is a second way in: <b>cix.app</b>, a menu bar app that runs the server for you. It sets up an admin account on first launch, downloads the server itself (about 40&nbsp;MB, the same build the Docker images are cut from), and gives you start/stop, network access, launch-at-login and a password reset without a terminal. The server keeps running when you quit the app, and both halves update themselves. <a href={`${GITHUB_URL}/releases/tag/mac/v${MAC_APP_VERSION}`}>Download cix.app {MAC_APP_VERSION}</a> — macOS 13 or later, Apple Silicon only (upstream llama.cpp publishes no macOS x86_64 build).</p>
+            <h3>macOS — start here</h3>
+            <p>On an Apple Silicon Mac the whole thing is an app: <b>cix.app</b>, a menu bar launcher that runs the server for you. The download is about 4&nbsp;MB because the server is not inside it — on first launch the app sets up an admin account, downloads the server itself (about 37&nbsp;MB, the same build the Docker images are cut from) into <code>~/.cix/runtime/</code>, mints an API key and points the <code>cix</code> CLI at it. You get start/stop, network access, launch-at-login and a password reset without a terminal; the server keeps running when you quit the app, and both halves update themselves. <a href={`${GITHUB_URL}/releases/tag/mac/v${MAC_APP_VERSION}`}>Download cix.app {MAC_APP_VERSION}</a> — macOS 13 or later, Apple Silicon only (upstream llama.cpp publishes no macOS x86_64 build).</p>
+            <p>That covers the rest of this section: the installer, the first login and the CLI configuration below have already happened by the time the app finishes, so the next thing you do is <a href="#cli">index a project</a>. Full detail: <a href="https://github.com/dvcdsys/code-index/blob/main/doc/MACOS_APP.md">MACOS_APP.md</a>.</p>
 
             <p><b>macOS will block the download</b>, twice: once for the disk image, once for the app inside it. cix is open source and not signed with a paid Apple Developer certificate, so macOS cannot verify it — nothing is wrong with your download. The fastest way through is one command <i>before</i> you open the image, because the app inherits the download mark from the image at the moment you copy it out:</p>
             <CodeBlock>{`xattr -d com.apple.quarantine ~/Downloads/cix-*-arm64.dmg`}</CodeBlock>
             <p>Then open the image and drag <b>cix.app</b> onto <b>Applications</b> as usual — no dialogs. Already dragged it across and hit the block? Clear it in place instead: <code>xattr -dr com.apple.quarantine /Applications/cix.app</code>. (<code>No such xattr</code> in either case just means it was already clear.)</p>
 
             <p>To click through it instead: open the <code>.dmg</code>, and when macOS says it "could not verify" the file choose <b>Done</b> — never <i>Move to Bin</i>, which deletes the download. Then go to <b>System Settings → Privacy &amp; Security</b>, scroll to <b>Security</b>, and click <b>Open Anyway</b> next to the blocked file. That button appears only <i>after</i> the failed attempt, so going there first shows nothing. Drag the app across, open it, and repeat for the app itself. On macOS 15 and later the old right-click → Open shortcut works for neither block. You do this once per version.</p>
+
+            <h3>Everywhere else — one command, any mode</h3>
+            <p>The interactive installer detects your platform and offers the right mode — <b>docker</b> (CPU, any OS), <b>docker-gpu</b> (NVIDIA CUDA), or <b>native</b> (a from-source build on Apple Silicon, for hacking on cix itself). It checks prerequisites, asks a few questions (every one has a sensible default), writes the configuration, and brings the server up:</p>
+            <CodeBlock>{`curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
+
+# equivalent, from a clone:
+git clone https://github.com/dvcdsys/code-index && cd code-index
+./install-server.sh`}</CodeBlock>
+            <p>At the end it prints the dashboard URL and your admin login (the password is temporary — you change it on first login), and offers to install the <code>cix</code> CLI and connect it to the new server — so <code>cix init</code> works immediately. Re-running after a <code>git pull</code> upgrades in place; <code>--uninstall</code> removes the server but keeps your data. Forgot the admin password later? <code>./server/scripts/reset-password.sh &lt;email&gt;</code> resets it offline. Building the macOS server from a checkout: <a href="https://github.com/dvcdsys/code-index/blob/main/doc/SETUP_MACOS_NATIVE.md">SETUP_MACOS_NATIVE.md</a>.</p>
 
             <h3>Manual setup (what the installer automates)</h3>
             <p><b>Docker (CPU):</b></p>
@@ -123,7 +124,7 @@ curl http://localhost:21847/health   # → {"status":"ok"}`}</CodeBlock>
             <p><b>Docker (CUDA / NVIDIA GPU)</b> — requires an NVIDIA driver ≥ 525 (CUDA 12.x) and the NVIDIA Container Toolkit; the CUDA image sets <code>CIX_N_GPU_LAYERS=99</code> for full GPU offload:</p>
             <CodeBlock>{`docker compose -f docker-compose.cuda.yml pull
 docker compose -f docker-compose.cuda.yml up -d`}</CodeBlock>
-            <p><b>Native macOS (Apple Silicon)</b> — Docker on macOS can't reach the Metal GPU; for full Metal offload build and run natively (Go 1.25+, Node.js, Xcode CLT):</p>
+            <p><b>Native macOS from source (advanced)</b> — this is the path for working on cix itself; to just run it on a Mac, use <a href="#install">the app</a>, which installs the same natively-built server without a toolchain. Docker on macOS can't reach the Metal GPU, so a from-source build is how you get full Metal offload out of a checkout (Go 1.25+, Node.js, Xcode CLT):</p>
             <CodeBlock>{`cd server && make bundle             # builds server + downloads Metal-enabled llama-server
 cp ../.env.example ../.env           # set the bootstrap admin vars
 make run`}</CodeBlock>
@@ -132,16 +133,16 @@ make run`}</CodeBlock>
             <p>Open <code>http://localhost:21847/dashboard</code> and sign in with the bootstrap admin credentials from <code>.env</code> (<code>CIX_BOOTSTRAP_ADMIN_EMAIL</code> / <code>CIX_BOOTSTRAP_ADMIN_PASSWORD</code>). Go to <b>API&nbsp;Keys → New key</b>, name the key, and copy the revealed <code>cix_…</code> value — it is shown exactly once. The same dialog also gives you a ready-to-paste <code>cix config</code> connect command, so you can skip the manual configuration below.</p>
             <div className="shot-row">
               <figure className="shot shot-wide">
-                <img src="/img/dashboard-api-keys.png" alt="The API keys page of the cix dashboard, with the New key button in the top right corner" loading="lazy" width="1600" height="1006" />
+                <img src="/img/dashboard-api-keys.png" alt="The API keys page of the cix dashboard, with the New key button in the top right corner" loading="lazy" width="1800" height="787" />
                 <figcaption>API Keys → New key. Keys are bearer tokens for CLI / SDK access — created here, revoked here.</figcaption>
               </figure>
               <figure className="shot">
-                <img src="/img/dashboard-create-key.png" alt="The Create API key dialog asking for a key name" loading="lazy" width="1024" height="502" />
+                <img src="/img/dashboard-create-key.png" alt="The Create API key dialog asking for a key name" loading="lazy" width="1100" height="608" />
                 <figcaption>Name the key after the machine or agent that will use it.</figcaption>
               </figure>
               <figure className="shot">
-                <img src="/img/dashboard-key-created.png" alt="The API key created dialog revealing the one-time key and a ready-to-paste cix config connect command" loading="lazy" width="1024" height="1094" />
-                <figcaption>The full key is revealed once, together with a copy-paste connect command for the CLI. (The key on this screenshot is long revoked.)</figcaption>
+                <img src="/img/dashboard-key-created.png" alt="The API key created dialog revealing the one-time key and a ready-to-paste cix config connect command" loading="lazy" width="1100" height="886" />
+                <figcaption>The full key is revealed once, together with a copy-paste connect command for the CLI. (Every screenshot on this page comes from a throwaway demo server that no longer exists — the key shown is not a credential to anything.)</figcaption>
               </figure>
             </div>
 
@@ -242,6 +243,10 @@ cix config set default_server <name>`}</CodeBlock>
           </Section>
 
           <Section id="tuning" title="Tuning search" eyebrow="Quality">
+            <figure className="shot shot-wide">
+              <img src="/img/dashboard-search.png" alt="The dashboard search page: a natural-language query, the project and limit controls, a min-score slider, and one ranked result showing the matching function with its score and line numbers" loading="lazy" width="1800" height="1153" />
+              <figcaption>The same five modes as the CLI, with <code>limit</code> and <code>--min-score</code> as controls. Results carry the score and the exact line range.</figcaption>
+            </figure>
             <p>The CLI defaults to <code>--min-score 0.4</code> (the raw HTTP endpoint defaults lower, 0.2). The threshold is calibrated for <b>CodeRankEmbed-Q8</b> with the path-aware embedding format. Score ranges look lower than generic models because CodeRankEmbed is asymmetric — queries get a different prefix than passages.</p>
             <table className="tbl">
               <thead><tr><th>Match strength</th><th>Score range</th><th>Action</th></tr></thead>
@@ -265,13 +270,18 @@ cix reindex --full`}</CodeBlock>
           </Section>
 
           <Section id="config" title="Configuration" eyebrow="Environment">
-            <p>All server settings use the <code>CIX_*</code> prefix. This is the curated set — the full reference (~40 variables) lives in <a href={`${GITHUB_URL}/blob/main/doc/CONFIG_REFERENCE.md`} target="_blank" rel="noopener"><code>doc/CONFIG_REFERENCE.md</code></a>. Tuning values are also editable at runtime from <code>/dashboard/server</code>; env values are the boot-time seed.</p>
+            <p>All server settings use the <code>CIX_*</code> prefix. This is the curated set — the full reference (~40 variables) lives in <a href={`${GITHUB_URL}/blob/main/doc/CONFIG_REFERENCE.md`} target="_blank" rel="noopener"><code>doc/CONFIG_REFERENCE.md</code></a>. Tuning values are also editable at runtime from <b>Server → Runtime settings</b>; env values are the boot-time seed. The neighbouring <b>Server → Resources</b> tab is where an admin sees resident memory and disk by category, reclaims orphaned collections, abandoned embedding namespaces and the pre-0.13 chromem tree, and runs or schedules database maintenance.</p>
+            <figure className="shot shot-wide">
+              <img src="/img/dashboard-server-resources.png" alt="Server → Resources: resident memory, peak resident, vector document count and disk used, followed by the paths cix writes to and the database maintenance card" loading="lazy" width="1800" height="1265" />
+              <figcaption>A server holding a small index at rest. Resident memory is what the OS reports, not the Go heap — vectors are read from SQLite per query rather than loaded at startup, so this figure barely moves as the index grows.</figcaption>
+            </figure>
             <h3>Core</h3>
             <VarTable rows={[
               ['CIX_PORT', '21847', 'HTTP listen port.'],
               ['CIX_BOOTSTRAP_ADMIN_EMAIL', null, 'First-admin seed; only used while the users table is empty.'],
               ['CIX_BOOTSTRAP_ADMIN_PASSWORD', null, 'Forces a password change on first login.'],
               ['CIX_API_KEY', null, 'Optional; imported as a legacy API key at first boot.'],
+              ['CIX_BIND_ADDR', 'every interface', <>Interface to listen on, as a bare address with no port. <code>127.0.0.1</code> makes the server reachable only from the machine it runs on — which is what the macOS app writes at first run, behind its <i>Allow Network Access</i> toggle.</>],
               ['CIX_AUTH_DISABLED', 'false', 'Dev only. Never set in production.'],
               ['CIX_LOG_LEVEL', 'info', <><code>debug|info|warn|error</code>.</>],
             ]}/>
@@ -279,8 +289,17 @@ cix reindex --full`}</CodeBlock>
             <VarTable rows={[
               ['CIX_DATA_DIR', '~/.cix/data', 'Root for everything below.'],
               ['CIX_SQLITE_PATH', '<data>/sqlite/projects.db', 'Model-independent system DB.'],
-              ['CIX_CHROMA_PERSIST_DIR', '<data>/chroma', 'Vector store; namespaced per provider/model.'],
+              ['CIX_VECTORS_DIR', '<data>/vectors', 'The vector store — one SQLite database per embedding namespace (provider kind + model).'],
+              ['CIX_VECTOR_MMAP_SIZE', '0 (off)', <><code>PRAGMA mmap_size</code> in bytes. Buys ~40% lower search latency by trading resident memory for it — mapped pages count in RSS.</>],
+              ['CIX_CHROMA_PERSIST_DIR', '<data>/chroma', 'Legacy chromem-go tree. Read once for the import into the SQLite store, then never written — it is the rollback path.'],
               ['CIX_REPOS_DIR', '<sqlite dir>/repos', 'Server-side clones of GitHub-backed projects.'],
+            ]}/>
+            <h3>Database maintenance</h3>
+            <p>Normally driven from <b>Server → Resources → Database</b>; these exist for deployments nobody opens a dashboard for. A compaction takes the server <b>read-only and then restarts it</b> — read <a href={`${GITHUB_URL}/blob/main/doc/DATABASE_MAINTENANCE.md`} target="_blank" rel="noopener"><code>doc/DATABASE_MAINTENANCE.md</code></a> before scheduling one on a server other people use. Reclaim, the cheaper of the two, needs no window at all.</p>
+            <VarTable rows={[
+              ['CIX_DB_MAINTENANCE_CRON', null, 'Crontab expression for the recurring database tasks. Unset means nothing runs on its own.'],
+              ['CIX_DB_MAINTENANCE_MIN_FREE_PERCENT', '25', 'How much of the file must be freelist waste before a scheduled run bothers.'],
+              ['CIX_DB_MAINTENANCE_MIN_FREE_BYTES', '256 MiB', 'The same threshold in bytes; both have to be met.'],
             ]}/>
             <h3>Embeddings &amp; sidecar</h3>
             <VarTable rows={[
@@ -368,7 +387,13 @@ POST /api/v1/admin/users/{id}/reset-password
 GET/PUT /api/v1/admin/runtime-config
 GET /api/v1/admin/models · /login-locks      POST …/login-locks/reset
 GET /api/v1/admin/embedding-providers        GET/PUT …/active · POST …/{kind}/test
-POST /api/v1/admin/sidecar/restart           GET …/sidecar/status`}</CodeBlock>
+POST /api/v1/admin/sidecar/restart           GET …/sidecar/status
+
+GET /api/v1/admin/resources · …/resources/analyze
+POST /api/v1/admin/resources/clean
+GET /api/v1/admin/database                   POST …/database/compact · …/database/reclaim
+PUT /api/v1/admin/database/auto-vacuum
+GET /api/v1/admin/schedules                  PUT …/schedules/{name}`}</CodeBlock>
           </Section>
 
           <Section id="workspaces" title="Workspaces" eyebrow="Multi-repo">
@@ -432,7 +457,7 @@ cix mcp uninstall claude-desktop`}</CodeBlock>
           </Section>
 
           <Section id="plugin" title="Claude Code plugin" eyebrow="Agents">
-            <p>The official Claude Code plugin (v{PLUGIN_VERSION}) ships from the repo's marketplace. It is a <b>client for your self-hosted cix server</b> — install the server first (see <a href="#install">Install</a>); without a reachable server the commands and skills have nothing to talk to. It bundles the CLI, <b>eight slash commands</b>, two lazy-loading skills (<code>cix</code> + <code>cix-workspace</code>), a <code>cix-workspace-investigator</code> sub-agent for parallel cross-repo research, and five behavioral hooks. The skills were distilled from dozens of recorded agent sessions on large codebases, scored retrospectively for grep-vs-semantic effectiveness.</p>
+            <p>The official Claude Code plugin (v{PLUGIN_VERSION}) ships from the repo's marketplace. It is a <b>client for your self-hosted cix server</b> — install the server first (see <a href="#install">Install</a>); without a reachable server the commands and skills have nothing to talk to. It bundles the CLI, <b>eight slash commands</b>, two lazy-loading skills (<code>cix</code> + <code>cix-workspace</code>), a <code>cix-workspace-investigator</code> sub-agent for parallel cross-repo research, and hooks on five events. The skills were distilled from dozens of recorded agent sessions on large codebases, scored retrospectively for grep-vs-semantic effectiveness.</p>
             <h3>Install</h3>
             <CodeBlock>{`# Run in a terminal — NOT inside a Claude Code session.
 claude plugin marketplace add dvcdsys/code-index

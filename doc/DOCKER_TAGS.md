@@ -4,12 +4,15 @@
 
 | Tag | Architecture | Base | Size | Notes |
 |---|---|---|---|---|
-| `latest` | linux/amd64 + linux/arm64 | Go CPU (distroless/static) | ~100 MB | Use with `CIX_EMBEDDINGS_ENABLED=false` |
-| `<version>` (e.g. `0.6.0`) | linux/amd64 + linux/arm64 | same as `latest` | ~100 MB | Version-pinned CPU image. Immutable. |
-| `cu128` | linux/amd64 | distroless/cc-debian13 + CUDA libs | ~1.0 GB | RTX 3090 prod; embeddings via llama-server |
-| `<version>-cu128` (e.g. `0.6.0-cu128`) | linux/amd64 | same as `cu128` | ~1.0 GB | Version-pinned CUDA image. Immutable. |
-| `develop-cu128` | linux/amd64 | same as `cu128` | ~1.0 GB | Floating pre-release; force-updated on every merge to `develop` that touches `server/`. Not for production. |
+| `latest` | linux/amd64 + linux/arm64 | distroless/cc-debian13 + bundled CPU llama.cpp | ~80 MB | Embeddings work out of the box on CPU; `CIX_EMBEDDINGS_ENABLED=false` only if you want none. |
+| `<version>` (e.g. `0.6.0`) | linux/amd64 + linux/arm64 | same as `latest` | ~80 MB | Version-pinned CPU image. Immutable. |
+| `cu128` | linux/amd64 | distroless/cc-debian13 + CUDA libs | ~1.1 GB | RTX 3090 prod; embeddings via llama-server |
+| `<version>-cu128` (e.g. `0.6.0-cu128`) | linux/amd64 | same as `cu128` | ~1.1 GB | Version-pinned CUDA image. Immutable. |
+| `develop-cu128` | linux/amd64 | same as `cu128` | ~1.1 GB | Floating pre-release; force-updated on every merge to `develop` that touches `server/`. Not for production. |
 | `0.2-python-legacy` | linux/amd64 | Python FastAPI | ~5 GB | Frozen; rollback only |
+
+Sizes are the compressed pull as Docker Hub reports it for `linux/amd64`
+(v0.13.0: 81 MB CPU, 1077 MB CUDA; the arm64 CPU image is 73 MB).
 
 ## Develop channels
 

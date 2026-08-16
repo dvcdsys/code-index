@@ -8,16 +8,17 @@ service to run, no nginx config, no separate static-files volume.
 | Page | Audience | What it does |
 |------|----------|--------------|
 | **Home** | everyone | Live status strip (server version, current embedding model, sidecar Ready/Loading), update-available banner when a newer `server/v*` release is published on GitHub, module shortcuts. |
-| **Projects** | everyone | List indexed projects with stats (file count, languages, symbols, vector count, sqlite/chroma sizes), per-project **Reindex** button + live indexing indicator, copy reindex commands. Cards turn red with a **Stale model** badge when the runtime embedding model differs from the model the project was indexed with (see [Drift indicator](#drift-indicator)). |
+| **Projects** | everyone | List indexed projects with stats (file count, languages, symbols, vector count, SQLite size and vector-store size — the latter is the logical byte count of that project's rows inside the shared `vectors.db`, a floor rather than a file size), per-project **Reindex** button + live indexing indicator, copy reindex commands. Cards turn red with a **Stale model** badge when the runtime embedding model differs from the model the project was indexed with (see [Drift indicator](#drift-indicator)). |
 | **Workspaces** | everyone | Group multiple repositories into a named workspace and search them as one corpus. The in-dashboard add-repo flow streams clone + index progress live; pick the org/account first, then the repo. Status tracking: `pending` → `cloning` → `indexing` → `indexed` / `failed`. Hybrid BM25 + dense search across the whole group. See [`../workspaces.md`](../workspaces.md). |
 | **Search** | everyone | Five modes: semantic, symbols, references, definitions, files. Same engine the CLI uses. |
 | **API Keys** | everyone | Mint long-lived `cix_*` keys (256-bit entropy, GitHub-class), copy them once, revoke at any time. Keys inherit the issuing user's role. |
-| **GitHub Tokens** | admin | Store personal access tokens used by external (cloned) projects + workspaces. Tokens are AES-256-GCM encrypted at rest; the plaintext is returned once on creation and never again. Scopes are **derived from GitHub** at storage time (not user-declared), so the dashboard shows the PAT's true capabilities. |
+| **GitHub Integration** | admin | Store personal access tokens used by external (cloned) projects + workspaces. Tokens are AES-256-GCM encrypted at rest; the plaintext is returned once on creation and never again. Scopes are **derived from GitHub** at storage time (not user-declared), so the dashboard shows the PAT's true capabilities. |
 | **Users** | admin | Invite teammates, set role (admin / user), reset password (forces change on next login), disable account. |
-| **Groups** | admin | Manage *view-groups* — named user sets used to share projects and workspaces with specific people. Add/remove members, grant shares from the project or workspace detail page. |
+| **View Groups** | admin | Manage *view-groups* — named user sets used to share projects and workspaces with specific people. Add/remove members, grant shares from the project or workspace detail page. |
 | **Managed Tunnels** | admin | Enable a Cloudflare Tunnel or ngrok tunnel to give the server a public origin for GitHub webhook ingress from behind NAT. Configure provider, mode (quick / named), and credentials; agent binary auto-installs on demand; live status + restart + round-trip test. |
+| **Login security** | admin | Accounts currently locked out by failed sign-ins, with the ability to clear a lock. |
 | **Settings** | everyone | Theme, default editor, change own password. |
-| **Server** | admin | Runtime config — embedding model, `n_ctx`, `n_gpu_layers`, `n_threads`, batch size, queue concurrency. **Save & Restart** drains in-flight embeddings, restarts the sidecar, polls until ready. Source pill on each field shows whether the live value comes from the DB override, env bootstrap, or the recommended fallback. |
+| **Server** | admin | Two tabs. **Runtime settings** — embedding provider and model, `n_ctx`, `n_gpu_layers`, `n_threads`, batch size, queue concurrency; **Save & restart** drains in-flight embeddings, restarts the sidecar and polls until ready, and a source pill on each field shows whether the live value comes from the DB override, env bootstrap, or the recommended fallback. **Resources** — see [Resources & maintenance](#resources--maintenance) below. |
 
 ## Authentication
 
@@ -51,10 +52,46 @@ the caller isn't allowed to use, and the CLI surfaces a 404 (not a 403) when
 probing a resource the caller has no business knowing exists. Full hardening
 posture: [`SECURITY_DEPLOYMENT.md`](SECURITY_DEPLOYMENT.md).
 
+## Resources & maintenance
+
+**Server → Resources** is where an admin sees what cix is costing the machine
+and gets it back. It holds two cards.
+
+**Storage & memory** leads with the server process's resident memory as the
+operating system reports it — not the Go heap, which since 0.13.0 says almost
+nothing about the real footprint (the vector store's pages live outside it).
+Below that is disk, attributed by category, behind an explicit **Analyze**
+pass because the scan walks the filesystem and the database. **Clean** then
+removes what you select:
+
+| Category | What it is |
+|---|---|
+| `orphan_collections` | A vector collection with no matching row in `projects`. |
+| `orphan_repos` | A cloned checkout under `<repos>/` whose project is gone. |
+| `stale_namespaces` | A vector-store namespace for a provider/model that is no longer active. |
+| `legacy_chromem` | The pre-0.13 chromem gob tree of a namespace already imported into SQLite. |
+| `stale_jobs` | Finished rows in the `jobs` queue, which has no retention policy of its own. |
+| `unused_models` | A cached GGUF other than the active model. Off by default — re-downloading costs minutes. |
+
+`legacy_chromem` is the one that cannot be undone. Nothing reads that tree any
+more, but it is what a downgrade to a pre-0.13 server would read, so it is
+kept until you say otherwise and the dashboard says so before it deletes.
+Everything else here is recoverable by reindexing or re-downloading. See
+[`VECTORSTORE.md`](VECTORSTORE.md).
+
+**Database** reports how much of the system SQLite file is freelist waste and
+offers **Reclaim now** (bounded, no window, needs incremental auto-vacuum),
+**Compact now** (rebuild + restart), the auto-vacuum mode switch, and a cron
+schedule for both. A compaction puts the server into a read-only window and
+then restarts it, so a banner announces it across the dashboard while it runs.
+The whole feature, including what a compaction does to other people's
+sessions, is in [`DATABASE_MAINTENANCE.md`](DATABASE_MAINTENANCE.md).
+
 ## Drift indicator
 
-When you change the runtime embedding model (Server → Embedding model → Save &
-Restart), every project indexed with the previous model becomes stale —
+When you change the runtime embedding model (Server → Runtime settings →
+Embedding model → Save & restart), every project indexed with the previous
+model becomes stale —
 vectors are no longer comparable to fresh queries. The dashboard surfaces this
 with red borders + `Stale model` badges on project cards, and a banner on the
 project detail page with a copy-to-clipboard `cix reindex --full <path>`

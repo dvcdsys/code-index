@@ -553,7 +553,7 @@ unrelated repos.
 **The structural failure:**
 
 1. Pure-dense fan-out cannot tell "no signal" apart from "weak
-   signal" — chromem always returns the K nearest vectors.
+   signal" — a vector search always returns the K nearest vectors.
 2. Long natural-language queries dilute the few tokens that carry
    the actual gating signal.
 3. Without a sparse-retrieval channel, an acronym or unique
@@ -615,9 +615,9 @@ Either:
 ### `status: "partial_failure"`
 
 At least one repo errored out (`failed_repos` array names them).
-Common cause: corrupt chromem collection. The remaining repos still
-returned results. Surface to the user; don't silently treat as
-complete.
+Common cause: a missing or corrupt vector collection. The remaining
+repos still returned results. Surface to the user; don't silently
+treat as complete.
 
 ### Top-2 projects are at near-equal candidacy
 

@@ -31,7 +31,13 @@ cix watch stop && cix watch /path/to/project
 - Lower the threshold: `cix search "query" --min-score 0.2` (default `0.4`)
 - `cix list` to verify the project is registered
 
-**Dashboard shows "Stale model" on every project after upgrade** → The runtime model was changed (or its version stamp shifted). Either reindex affected projects (`cix reindex --full` per project) or revert the model change in **Server → Embedding model**.
+**Dashboard shows "Stale model" on every project after upgrade** → The runtime model was changed (or its version stamp shifted). Either reindex affected projects (`cix reindex --full` per project) or revert the model change in **Server → Runtime settings → Embedding model**.
+
+**First boot after upgrading to 0.13 takes minutes and the server answers nothing** → It is importing your existing vectors from the legacy chromem files into the SQLite vector store. That runs before the HTTP listener binds — 17 s on a 312k-document index, longer on a slow disk or a cold cache. It logs progress at warn level (`migrating vector store …`) and is resumable, so an interrupted import picks up where it stopped rather than starting over. Nothing is re-embedded and no reindex is needed. See [`VECTORSTORE.md`](VECTORSTORE.md#migration-from-chromem-go).
+
+**Every write answers `503` with a `Retry-After`, but reads work** → A database compaction is running. The server is deliberately read-only for the duration and then restarts itself to adopt the compacted file; `/health` keeps returning `200` (with `"maintenance": true`) so a container restart policy does not kill it mid-run. `GET /maintenance/status` and the dashboard banner report progress. See [`DATABASE_MAINTENANCE.md`](DATABASE_MAINTENANCE.md).
+
+**Memory grew after setting `CIX_VECTOR_MMAP_SIZE`** → That is what it does: it trades resident memory for search latency by letting SQLite map the vector database into the process. A fan-out across a large index can then hold gigabytes rather than tens of megabytes. Unset it to go back, or size it deliberately under a memory ceiling. See [`VECTORSTORE.md`](VECTORSTORE.md#pragmas).
 
 **Dashboard banner says an update is available** → A newer `server/v*` release is on GitHub. Click through to the release notes; bump your Docker tag / native build at a convenient time. Disable the poll with `CIX_VERSION_CHECK_ENABLED=false` if you don't want it. See [`UPDATES.md`](UPDATES.md).
 

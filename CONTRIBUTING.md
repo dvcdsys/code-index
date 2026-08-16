@@ -15,6 +15,9 @@ code-index/
 ├── plugins/cix/      # Claude Code plugin (hooks, skills, slash commands, bats tests)
 ├── skills/           # Canonical sources for cross-cutting skills
 │                     # (mirrored into plugins/cix/skills/ via sync-skills.sh)
+├── mac/              # cix.app — bundle template, artwork, build + DMG scripts
+│                     # (the launcher itself lives in cli/launcher/)
+├── site/             # codeindex.app — marketing site (Vite, deployed from main)
 └── doc/              # Tracked documentation
 ```
 
@@ -33,13 +36,19 @@ The repo runs a two-branch model:
 **Open every PR against `develop`.** Promotion from `develop` to `main`
 happens as part of the release workflow, not per-feature.
 
-CI is wired in three workflows — `ci-cli.yml`, `ci-server.yml`,
-`ci-plugin.yml` — all gated on the same branch set:
+CI is wired in four path-filtered workflows — `ci-cli.yml`,
+`ci-server.yml`, `ci-plugin.yml`, `ci-site.yml` — all gated on the same
+branch set:
 
 - Push to `main` or `develop` runs CI.
 - Pull request targeting `main` or `develop` runs CI.
 - Push to any other branch does **not** trigger CI directly — CI fires
   when you open the PR.
+
+`mac/` has no CI job of its own: the app is built only by
+`release-mac.yml`, on a `mac/v*` tag. A change under `mac/` is therefore
+worth building locally (`mac/scripts/build-app.sh`) before merging — see
+[`mac/README.md`](mac/README.md).
 
 There is no required branch-name convention. You can name your feature
 branch anything (`feat/foo`, `fix/bug-123`, `your-handle/sandbox`, …);
@@ -70,7 +79,7 @@ what.
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Go | 1.24+ | server + CLI |
+| Go | 1.26+ (server) / 1.25+ (CLI) | matches each module's `go` directive |
 | Docker | 24+ | containerized server |
 | make | any | build shortcuts |
 
@@ -92,9 +101,13 @@ make build   # → server/dist/cix-darwin-arm64/cix-server (or linux-amd64)
 make bundle
 
 # Run server locally (no embeddings)
+# Point BOTH vector paths at /tmp: the store imports the legacy chromem
+# tree it finds under CIX_CHROMA_PERSIST_DIR on first open, and the
+# default is your real ~/.cix/data/chroma.
 CIX_PORT=21847 CIX_EMBEDDINGS_ENABLED=false \
   CIX_SQLITE_PATH=/tmp/cix-dev.db \
-  CIX_CHROMA_PERSIST_DIR=/tmp/cix-chroma \
+  CIX_VECTORS_DIR=/tmp/cix-dev-vectors \
+  CIX_CHROMA_PERSIST_DIR=/tmp/cix-dev-chroma \
   ./dist/cix-darwin-arm64/cix-server
 ```
 

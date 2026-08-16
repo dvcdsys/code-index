@@ -1,9 +1,9 @@
 # Keeping cix Up to Date
 
-cix ships in two release streams (server + CLI) and has a built-in
-release-poll banner on the dashboard so you know when an upgrade is
-available. This doc covers how the banner works, how to opt out, and
-how to use the **develop channel** for testing unreleased changes.
+cix ships in three release streams — server, CLI, and the macOS app — and
+has a built-in release-poll banner on the dashboard so you know when an
+upgrade is available. This doc covers how the banner works, how to opt out,
+and how to use the **develop channel** for testing unreleased changes.
 
 ## 1. Release-poll banner
 
@@ -29,7 +29,15 @@ How it works:
   `GET /api/v1/admin/version` for the dashboard.
 
 The banner is informational only — it links to the release page on
-GitHub. cix does not self-update.
+GitHub. A Docker or from-source server does not self-update.
+
+**The macOS app is the exception.** `cix.app` watches two streams of its
+own — `server/v*` for the runtime it manages and `mac/v*` for itself — at
+startup and at most every 30 minutes after, and updates both: the server by
+unpacking beside the running version and moving a symlink (with automatic
+rollback if the new one does not come back), the app by a detached helper
+that swaps the bundle while it is closed. See
+[`MACOS_APP.md`](MACOS_APP.md#check-for-updates).
 
 ### Configuration
 
@@ -133,11 +141,19 @@ button (`596748e`); from the CLI it's `cix reindex --full <path>`.
 Upgrading the **CLI** never requires a reindex — the CLI is a thin
 HTTP client.
 
+**0.13.0 is not one of these cases.** It moves the vector store from
+chromem-go to SQLite, and the server imports the vectors you already have
+on its first boot — nothing is re-embedded and no reindex is needed. The
+import runs before the listener binds, so that one boot takes longer than
+usual (17 s on a 312k-document index). See
+[`VECTORSTORE.md`](VECTORSTORE.md#migration-from-chromem-go).
+
 ## 4. Related files
 
 - `server/internal/versioncheck/check.go` — release-poll service
 - `install.sh` / `install-develop.sh` — stable + develop installers
-- `.github/workflows/release-server.yml` / `release-cli.yml` — stable build pipelines
+- `.github/workflows/release-server.yml` / `release-cli.yml` / `release-mac.yml` — stable build pipelines
+- [`MACOS_APP.md`](MACOS_APP.md) — the macOS app's own update mechanism
 - `.github/workflows/prerelease-server.yml` / `prerelease-cli.yml` — develop build pipelines
 - [`DOCKER_TAGS.md`](DOCKER_TAGS.md) — Docker tag lifecycle, including `develop-cu128`
 - [`RELEASES.md`](RELEASES.md) — how to cut a stable release

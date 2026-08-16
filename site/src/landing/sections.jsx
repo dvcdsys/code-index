@@ -1,4 +1,5 @@
 import { CLITabs } from './tabs.jsx';
+import { InstallTabs } from './install-tabs.jsx';
 import { WorkspaceDemo } from './workspace-demo.jsx';
 import { GITHUB_URL, PLUGIN_VERSION } from '../shared/versions.js';
 import { TeamDiagram } from '../shared/team-diagram.jsx';
@@ -82,9 +83,9 @@ const FEATURES = [
   { glyph: '~', cls: 'moss', title: 'Live file watcher',
     body: 'Native filesystem events (FSEvents / inotify) with a 5-second debounce. Edit a file — the index follows. SHA-256 hashes mean only changed files re-embed.' },
   { glyph: '⊕', cls: '', title: 'Embedded dashboard',
-    body: 'React SPA baked into the Go binary at /dashboard. Projects, search, users, API keys, runtime sidecar control. No extra service.' },
-  { glyph: '⏻', cls: 'alt', title: 'Self-hosted. GPU optional.',
-    body: 'Single distroless container; your code stays on your network by default. CUDA image for NVIDIA, native Metal on Apple Silicon — or plain CPU: the model is 145 MB on disk, ~0.7 GB VRAM.' },
+    body: 'React SPA baked into the Go binary at /dashboard. Projects, workspaces, search, users, API keys, view-groups — plus a Server page for runtime tuning, disk reclaim and database maintenance. No extra service.' },
+  { glyph: '⏻', cls: 'alt', title: 'Self-hosted, and small enough to leave running',
+    body: 'Single distroless container, a menu bar app on Apple Silicon, CUDA image for NVIDIA — your code stays on your network by default. Vectors live in SQLite and are read per query rather than loaded into RAM, so an idle server sits at tens of megabytes whatever the index size. The model adds 145 MB on disk and ~0.7 GB while loaded.' },
 ];
 
 export function Features() {
@@ -260,38 +261,11 @@ export function Agent() {
   );
 }
 
+// What the three installs have in common. Everything above this point differs
+// by route (see install-tabs.jsx); everything from here down is one cix.
 const QS_STEPS = [
   {
-    n: '01', title: 'Run the installer',
-    desc: <>One interactive installer for every mode — Docker CPU, Docker CUDA (driver ≥ 525 + Container Toolkit), or native Metal on Apple Silicon. It picks the right mode for your machine, brings the server up, and installs + connects the <code>cix</code> CLI for you.</>,
-    code: <>
-      <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
-      {'    '}/dvcdsys/code-index/main/install-server.sh | bash{'\n'}
-      <span className="comment"># a few questions → server up, CLI connected,</span>{'\n'}
-      <span className="comment"># dashboard URL + admin login printed</span>
-    </>,
-  },
-  {
-    n: '02', title: 'Log in & set your password',
-    desc: <>Sign in with the admin login the installer printed. The password is temporary — the dashboard makes you pick a real one right away. That's the whole step.</>,
-    code: <>
-      <span className="prompt">$</span> open http://localhost:21847/dashboard{'\n'}
-      <span className="comment"># sign in with the admin login from step 01</span>{'\n'}
-      <span className="comment"># → you're asked to set a new password</span>
-    </>,
-  },
-  {
-    n: '03', title: 'Connect more machines (optional)',
-    desc: <>The machine you installed on is already connected — skip ahead. For a laptop or agent box elsewhere: mint a key in <b>API&nbsp;Keys → New key</b> (revealed once, with a ready-to-paste connect command), install the CLI there, paste.</>,
-    code: <>
-      <span className="comment"># on the other machine:</span>{'\n'}
-      <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
-      {'    '}/dvcdsys/code-index/main/install.sh | bash{'\n'}
-      <span className="prompt">$</span> <span className="comment"># paste the connect command from the key dialog</span>
-    </>,
-  },
-  {
-    n: '04', title: 'Index & first search',
+    n: '01', title: 'Index & first search',
     desc: <><code>cix init</code> registers, indexes, and starts the file watcher in the background. Search from the terminal, the dashboard, or any agent with shell access.</>,
     code: <>
       <span className="prompt">$</span> cd ~/code/your-project{'\n'}
@@ -302,7 +276,7 @@ const QS_STEPS = [
     </>,
   },
   {
-    n: '05', title: 'Hook up your agent',
+    n: '02', title: 'Hook up your agent',
     desc: <>Run in a terminal, <i>not</i> inside a Claude session — the plugin activates on the next <code>claude</code> start. It ships the CLI, eight slash commands, the <code>/cix</code> and <code>/cix-workspace</code> skills, and hooks that steer Claude toward cix in indexed projects. Claude Desktop / Cowork: <code>cix mcp install claude-desktop</code>.</>,
     code: <>
       <span className="prompt">$</span> claude plugin marketplace add dvcdsys/code-index{'\n'}
@@ -315,6 +289,16 @@ const QS_STEPS = [
       <span className="prompt">$</span> claude plugin update cix@code-index
     </>,
   },
+  {
+    n: '03', title: 'Connect more machines (optional)',
+    desc: <>The machine you installed on is already connected — skip this. For a laptop or agent box elsewhere: mint a key in <b>API&nbsp;Keys → New key</b> (revealed once, with a ready-to-paste connect command), install the CLI there, paste.</>,
+    code: <>
+      <span className="comment"># on the other machine:</span>{'\n'}
+      <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
+      {'    '}/dvcdsys/code-index/main/install.sh | bash{'\n'}
+      <span className="prompt">$</span> <span className="comment"># paste the connect command from the key dialog</span>
+    </>,
+  },
 ];
 
 export function QuickStart() {
@@ -323,7 +307,12 @@ export function QuickStart() {
       <div className="wrap">
         <div className="section-head">
           <span className="eyebrow">Quick start</span>
-          <h2>Clone to agent-ready.<br/>About ten minutes.</h2>
+          <h2>Pick how you run it.<br/>Agent-ready in ten minutes.</h2>
+          <p className="lead">A menu bar app on a Mac, a container anywhere else, or a checkout if you're here to hack on it. Three routes to the same server — and one shared path after it's up.</p>
+        </div>
+        <InstallTabs />
+        <div className="qs-after">
+          <span className="eyebrow">Then, whichever route you took</span>
         </div>
         <div className="qs-grid">
           {QS_STEPS.map(s => (
@@ -349,7 +338,7 @@ export function QuickStart() {
 
 const FAQS = [
   { q: 'Does my code leave my machine?',
-    a: <>Not by default. The server runs on your hardware (Docker, native macOS, or your own GPU box), and embeddings happen locally via a llama.cpp sidecar — no SaaS endpoint, no telemetry. If you <i>choose</i> to switch the embedding provider to a remote API (Voyage, OpenAI-compatible), chunks go to that provider; that's an explicit admin action, off by default.</> },
+    a: <>Not by default. The server runs on your hardware (Docker, the macOS menu bar app, a native build, or your own GPU box), and embeddings happen locally via a llama.cpp sidecar — no SaaS endpoint, no telemetry. If you <i>choose</i> to switch the embedding provider to a remote API (Voyage, OpenAI-compatible), chunks go to that provider; that's an explicit admin action, off by default.</> },
   { q: "How is this different from Sourcegraph, GitHub code search, or Cursor's indexing?",
     a: <>Scope. Those give you search inside <i>their</i> surface — a web app, a code host, one editor. cix ships the whole platform as one MIT repo you run yourself: the Go server with an embedded dashboard, the CLI, the file watcher, multi-repo workspaces, a Claude Code plugin (slash commands, skills, hooks), an MCP server for Claude Desktop &amp; Cowork, and team-deployment docs down to TLS, backups and upgrades. It's not an indexer you build a workflow around — it <i>is</i> the workflow, from <code>docker compose up</code> to your agent quoting <code>file:line</code>.</> },
   { q: 'How is this different from indexing frameworks like CocoIndex or LlamaIndex?',

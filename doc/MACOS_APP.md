@@ -101,9 +101,9 @@ Everything it runs lives outside it, under your home directory:
 
 ```
 ~/.cix/runtime/
-  0.12.8/      cix-server  cix  llama/  runtime.json
-  0.12.7/      the version this one replaced, kept for rollback
-  current ->   0.12.8
+  0.13.0/      cix-server  cix  llama/  runtime.json
+  0.12.9/      the version this one replaced, kept for rollback
+  current ->   0.13.0
 ```
 
 Those are *server* versions — the same ones on Docker Hub. The app has its own,
@@ -132,7 +132,7 @@ is what catches a runtime that is not what it claims to be.
 ## First run
 
 The very first launch asks for an email address, downloads the runtime (about
-40 MB), then generates a password and an API key, starts the server, and shows
+37 MB), then generates a password and an API key, starts the server, and shows
 you the credentials. You will be asked to change the password when you first
 sign in.
 
@@ -175,8 +175,8 @@ macOS announces any newly registered background agent.
 ● Embeddings: llama.cpp (bundled)      Port: 21847
   Model: awhiteside/Co…bed-Q8_0-GGUF   Network: this Mac only
 ─────────────                          Model: awhiteside/CodeRankEmbed-Q8_0-GGUF
-Stop Server                            Server 0.12.8
-Open Dashboard                         Server 0.12.8 (llama b10238)
+Stop Server                            Server 0.13.0
+Open Dashboard                         Server 0.13.0 (llama b10238)
 ─────────────
 Start at Login                ✓
 Allow Network Access          ✓

@@ -32,7 +32,13 @@ Headers (caching + CSP) live in [`public/_headers`](public/_headers).
    them, run the command and transcribe, don't invent.
 2. **Versions are hand-maintained** in
    [`src/shared/versions.js`](src/shared/versions.js). Bump on each
-   server/CLI/plugin release.
+   server/CLI/plugin release. `MAC_APP_VERSION` is load-bearing rather than
+   decorative: the Quick start's download button builds its href from it
+   (`releases/download/mac/v$V/cix-$V-arm64.dmg`), and that static link is what
+   every visitor gets whenever the GitHub API lookup in
+   [`src/shared/mac-release.js`](src/shared/mac-release.js) is rate limited,
+   blocked or offline. `ci-site.yml` fails the build if any of the four drifts
+   from the newest tag.
 3. **Brand:** the full product name is **CodeIndeX** (one word, capital C-I-X);
    `cix` is the CLI command and short form. First mention on any surface pairs
    both: “cix — CodeIndeX”. Domain `codeindex.app`, repo `code-index` are the

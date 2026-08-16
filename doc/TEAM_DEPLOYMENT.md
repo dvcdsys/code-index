@@ -36,16 +36,19 @@ Everyone on the team connects to *this one server*:
   CI jobs (CIX_API_URL + key)       ├────────►  reverse proxy / TLS
   Claude Code plugin                ┘            │
                                                  ▼
-                                       cix-server :21847  ──►  /data (sqlite+chroma)
+                                       cix-server :21847  ──►  /data (sqlite+vectors)
                                                             └►  embedding provider
 ```
 
 Two images, pick one (never merge them):
 
-| Image | Base | Size | Runtime user | Use |
+| Image | Base | Download | Runtime user | Use |
 |---|---|---|---|---|
-| `dvcdsys/code-index:latest` | distroless static | ~40 MB | `65532:65532` | CPU-only |
-| `dvcdsys/code-index:cu128` | distroless cc + CUDA libs | ~1.0 GB | `1001:1001` | NVIDIA GPU |
+| `dvcdsys/code-index:latest` | distroless cc + bundled CPU llama.cpp | ~80 MB | `65532:65532` | CPU-only |
+| `dvcdsys/code-index:cu128` | distroless cc + CUDA libs | ~1.1 GB | `1001:1001` | NVIDIA GPU |
+
+Sizes are the compressed pull, as Docker Hub reports them for `linux/amd64`
+(v0.13.0: 81 MB and 1077 MB; the arm64 CPU image is 73 MB).
 
 See [`DOCKER_TAGS.md`](DOCKER_TAGS.md) for the full tag lifecycle.
 
@@ -56,8 +59,8 @@ See [`DOCKER_TAGS.md`](DOCKER_TAGS.md) for the full tag lifecycle.
 - Docker Engine 24+ with Compose v2.
 - For the CUDA image: an NVIDIA GPU, recent driver, and the
   **NVIDIA Container Toolkit** installed on the host (`nvidia-ctk`).
-- A persistent disk for `/data` (SQLite + chroma vectors grow with the
-  number and size of indexed repos).
+- A persistent disk for `/data` (the SQLite database and the vector store
+  grow with the number and size of indexed repos).
 - DNS + TLS termination if the team reaches it over the network
   (reverse proxy — see §7).
 - For server-side workspace cloning of private repos: a GitHub PAT
@@ -130,8 +133,12 @@ at runtime from **Dashboard → Server** without a restart.
 The compose files mount two things:
 
 - `${HOME}/.cix/data:/data` — operator-managed bind holding **SQLite**
-  (`/data/sqlite/projects.db`) and **chroma vectors** (`/data/chroma`). Back
-  this up.
+  (`/data/sqlite/projects.db`) and the **vector store** (`/data/vectors`,
+  one `vectors.db` per embedding namespace). Back both up. A server upgraded
+  from 0.12 or earlier also has `/data/chroma` — the frozen pre-0.13
+  chromem-go tree, kept only as a rollback path (see
+  [`VECTORSTORE.md`](VECTORSTORE.md)); it is never written to and does not
+  need backing up.
 - `cix-models:/data/models` — Docker-managed named volume for the GGUF model
   cache. Downloaded once; survives `docker compose down` (not `down -v`).
 
@@ -223,8 +230,11 @@ Back up, in order of importance:
 
 1. **`/data/sqlite/projects.db`** — users, API keys, projects, symbols,
    workspaces, runtime config. Use SQLite online backup or stop-copy-start.
-2. **`/data/chroma`** — vector store. Recoverable by reindex, but a backup
-   avoids re-embedding everything.
+2. **`/data/vectors`** — the vector store, one SQLite database per embedding
+   namespace. Recoverable by reindex, but a backup avoids re-embedding
+   everything. Copy it the way you copy any live SQLite database — online
+   backup, or stop-copy-start; a plain `cp` of `vectors.db` without its
+   `-wal` is not a valid backup.
 3. **The secret key** (`CIX_SECRET_KEYFILE`, or the auto-generated keyfile
    under the SQLite parent dir). **Losing it invalidates every stored GitHub
    PAT** — they'd all have to be re-entered. Back it up *separately* from the
@@ -270,12 +280,21 @@ upgrade developer CLIs in lockstep. See [`RELEASES.md`](RELEASES.md).
 
 - **Liveness:** the image's own check, `/cix-server -healthcheck` (already
   wired in both compose files — no `curl` needed), GETs `/health` and exits
-  0/1. `start_period` is 120 s to allow the first model download.
+  0/1. `start_period` is 600 s: it has to cover the first model download and,
+  on the first boot after upgrading to 0.13, the one-time chromem→SQLite
+  vector import (17 s on a 312k-document index, longer on slow disks).
 - **Readiness probe (external):** `GET /health` on `:21847`.
 - **Logs:** `docker compose logs -f code-index-api`. Set `CIX_LOG_LEVEL=debug`
   to diagnose indexing or provider issues.
-- **Drift indicator** in the dashboard flags projects whose on-disk code has
-  diverged from the index.
+- **Drift indicator** in the dashboard flags projects indexed with an
+  embedding model other than the one now running ("Stale model") — their
+  vectors are no longer comparable to fresh queries, so they need a reindex.
+- **During a database compaction** the server is deliberately read-only and
+  then restarts itself: writes answer `503` with `Retry-After`, `/health`
+  keeps returning `200` with `"maintenance": true` so a restart policy does
+  not kill the run, and `GET /maintenance/status` reports progress. See
+  [`DATABASE_MAINTENANCE.md`](DATABASE_MAINTENANCE.md) before scheduling one
+  on a shared server.
 
 ---
 

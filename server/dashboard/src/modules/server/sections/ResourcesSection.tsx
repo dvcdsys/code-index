@@ -11,13 +11,13 @@ import { ConfirmCleanDialog } from '../components/ConfirmCleanDialog';
 import { ReclaimCategoryList } from '../components/ReclaimCategoryList';
 import { useAnalyzeReclaimable, useCleanResources, useResourceUsage } from '../hooks';
 
-// Resources answers "why is this process holding 4 GB?" and then offers to do
-// something about it.
+// Resources answers "what is this server costing the machine?" and then offers
+// to do something about it.
 //
-// The honest answer to that question is that the vector store is an in-memory
-// database — chromem loads every document of every collection at startup and
-// never evicts — so the heap figure and the resident document count are the
-// two numbers that belong side by side here.
+// The headline is resident memory as the operating system reports it, not the
+// Go heap: since the vector store moved to SQLite the heap says almost nothing
+// about the real footprint, because the pages a query touches are not in it.
+// Everything below that is disk, which is where the reclaimable garbage lives.
 export function ResourcesSection() {
   const usage = useResourceUsage();
   const analyze = useAnalyzeReclaimable();
