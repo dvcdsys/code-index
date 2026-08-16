@@ -1,6 +1,6 @@
 import { CLITabs } from './tabs.jsx';
 import { WorkspaceDemo } from './workspace-demo.jsx';
-import { GITHUB_URL, PLUGIN_VERSION } from '../shared/versions.js';
+import { GITHUB_URL, MAC_APP_VERSION, PLUGIN_VERSION } from '../shared/versions.js';
 import { TeamDiagram } from '../shared/team-diagram.jsx';
 
 const FIT = [
@@ -82,9 +82,9 @@ const FEATURES = [
   { glyph: '~', cls: 'moss', title: 'Live file watcher',
     body: 'Native filesystem events (FSEvents / inotify) with a 5-second debounce. Edit a file — the index follows. SHA-256 hashes mean only changed files re-embed.' },
   { glyph: '⊕', cls: '', title: 'Embedded dashboard',
-    body: 'React SPA baked into the Go binary at /dashboard. Projects, search, users, API keys, runtime sidecar control. No extra service.' },
-  { glyph: '⏻', cls: 'alt', title: 'Self-hosted. GPU optional.',
-    body: 'Single distroless container; your code stays on your network by default. CUDA image for NVIDIA, native Metal on Apple Silicon — or plain CPU: the model is 145 MB on disk, ~0.7 GB VRAM.' },
+    body: 'React SPA baked into the Go binary at /dashboard. Projects, workspaces, search, users, API keys, view-groups — plus a Server page for runtime tuning, disk reclaim and database maintenance. No extra service.' },
+  { glyph: '⏻', cls: 'alt', title: 'Self-hosted, and small enough to leave running',
+    body: 'Single distroless container, a menu bar app on Apple Silicon, CUDA image for NVIDIA — your code stays on your network by default. Vectors live in SQLite and are read per query rather than loaded into RAM, so an idle server sits at tens of megabytes whatever the index size. The model adds 145 MB on disk and ~0.7 GB while loaded.' },
 ];
 
 export function Features() {
@@ -263,7 +263,7 @@ export function Agent() {
 const QS_STEPS = [
   {
     n: '01', title: 'Run the installer',
-    desc: <>One interactive installer for every mode — Docker CPU, Docker CUDA (driver ≥ 525 + Container Toolkit), or native Metal on Apple Silicon. It picks the right mode for your machine, brings the server up, and installs + connects the <code>cix</code> CLI for you.</>,
+    desc: <>One interactive installer for every mode — Docker CPU, Docker CUDA (driver ≥ 525 + Container Toolkit), or a native Metal build on Apple Silicon. It picks the right mode for your machine, brings the server up, and installs + connects the <code>cix</code> CLI for you. <b>On a Mac, <a href={`${GITHUB_URL}/releases/tag/mac/v${MAC_APP_VERSION}`}>download the app</a> instead</b> — it installs the same server into <code>~/.cix/runtime/</code>, creates your account and connects the CLI, so you land straight on step 04.</>,
     code: <>
       <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
       {'    '}/dvcdsys/code-index/main/install-server.sh | bash{'\n'}
@@ -349,7 +349,7 @@ export function QuickStart() {
 
 const FAQS = [
   { q: 'Does my code leave my machine?',
-    a: <>Not by default. The server runs on your hardware (Docker, native macOS, or your own GPU box), and embeddings happen locally via a llama.cpp sidecar — no SaaS endpoint, no telemetry. If you <i>choose</i> to switch the embedding provider to a remote API (Voyage, OpenAI-compatible), chunks go to that provider; that's an explicit admin action, off by default.</> },
+    a: <>Not by default. The server runs on your hardware (Docker, the macOS menu bar app, a native build, or your own GPU box), and embeddings happen locally via a llama.cpp sidecar — no SaaS endpoint, no telemetry. If you <i>choose</i> to switch the embedding provider to a remote API (Voyage, OpenAI-compatible), chunks go to that provider; that's an explicit admin action, off by default.</> },
   { q: "How is this different from Sourcegraph, GitHub code search, or Cursor's indexing?",
     a: <>Scope. Those give you search inside <i>their</i> surface — a web app, a code host, one editor. cix ships the whole platform as one MIT repo you run yourself: the Go server with an embedded dashboard, the CLI, the file watcher, multi-repo workspaces, a Claude Code plugin (slash commands, skills, hooks), an MCP server for Claude Desktop &amp; Cowork, and team-deployment docs down to TLS, backups and upgrades. It's not an indexer you build a workflow around — it <i>is</i> the workflow, from <code>docker compose up</code> to your agent quoting <code>file:line</code>.</> },
   { q: 'How is this different from indexing frameworks like CocoIndex or LlamaIndex?',
