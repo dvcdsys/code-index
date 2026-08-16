@@ -71,11 +71,32 @@ numbers have not been backfilled. The doc states "Once
 actual measured deltas."
 
 Expected baseline (CodeRankEmbed Q8_0 on RTX 3090): ~0.5–0.7 GB idle
-VRAM (weights ~200–250 MB + pre-allocated `n_ctx=8192` context
+VRAM (weights ~200–250 MB + pre-allocated `n_ctx=2048` context
 ~200–400 MB).
 
 If you re-run the profiler, update `vram-profiling.md` in place — the
 file was always intended as a placeholder.
+
+---
+
+## 4. SQLite vector store vs chromem-go
+
+**Last measured:** server/v0.13.0, on a real 312,334-document /
+47-collection index.
+**Where:** [`VECTORSTORE.md`](VECTORSTORE.md#why-it-changed) (headline
+table), plus the scan-latency and page-size measurements in the *Search*
+and *Pragmas* sections of the same file.
+
+Headline: resident memory at idle 2209 MB → 19 MB, time from process
+start to first answerable query 47 s → ≈1 ms, search latency roughly 4×
+higher and far less sensitive to `k`, whole-index import 17 s.
+
+## 5. Database compaction & auto-vacuum
+
+**Last measured:** server/v0.13.0.
+**Where:** [`DATABASE_MAINTENANCE.md`](DATABASE_MAINTENANCE.md) — the
+compaction wall-clock per gigabyte, what the read-only window costs, and
+the insert-side price of incremental auto-vacuum.
 
 ---
 

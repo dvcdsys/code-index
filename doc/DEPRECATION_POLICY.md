@@ -17,6 +17,24 @@
 
 See `doc/DOCKER_TAGS.md` for the current tag inventory.
 
+## chromem-go vector store and `CIX_CHROMA_PERSIST_DIR`
+
+Deprecated in `server/v0.13.0`, which replaced the chromem-go store with a
+SQLite one (`doc/VECTORSTORE.md`). Nothing writes to the chromem tree any
+more:
+
+- `CIX_CHROMA_PERSIST_DIR` is still read, for exactly two things — locating
+  the legacy gob files for the one-time import, and deriving the default
+  `CIX_VECTORS_DIR` beside them. Set `CIX_VECTORS_DIR` explicitly and it
+  stops mattering.
+- The `<data>/chroma` tree is kept deliberately: it is what a downgrade to a
+  pre-0.13 server would read. **Server → Resources → Clean** offers it as the
+  `legacy_chromem` category, which is the supported way to reclaim it once
+  you have decided you will not roll back.
+
+Neither is scheduled for removal yet. When one is, the notice lands here one
+minor version ahead, per the rule above.
+
 ## Python backend
 
 The Python FastAPI backend (`legacy/python-api/`) was deprecated in

@@ -32,8 +32,10 @@ See `.env.example` for a complete template.
 
 ## Vector store (action required)
 
-The Python server used ChromaDB (DuckDB + parquet).
-The Go server uses chromem-go (JSON format). **These are not compatible.**
+The Python server used ChromaDB (DuckDB + parquet). The Go server stores
+vectors in SQLite (`server/internal/vectorstore/`, since 0.13.0; chromem-go
+gob files before that). **None of these layouts are compatible with each
+other.**
 
 On first boot the Go server automatically detects the old ChromaDB layout
 (`chroma.sqlite3` in the persist dir) and backs it up:
@@ -63,6 +65,9 @@ If you need to go back to the Python server:
 # The chroma backup is preserved at /data/chroma.python-backup.*
 # Rename it back to /data/chroma to restore the old index.
 ```
+
+Restoring that backup only means anything together with rolling the image
+back: a 0.13+ server reads `/data/vectors` and would not look at it.
 
 ## Sunset timeline
 

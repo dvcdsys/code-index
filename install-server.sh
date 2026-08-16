@@ -495,6 +495,17 @@ elif [[ "$HAS_NVIDIA" == true ]]; then
     MODE_DEFAULT="docker-gpu"
 fi
 
+if [[ -z "$ARG_MODE" && "$OS" == "Darwin" && "$ARCH" == "arm64" ]]; then
+    # The app is the usual way to run cix on a Mac; this script builds from a
+    # checkout, which is the path for hacking on cix itself. Say so once —
+    # someone who ran the one-liner may simply not know the app exists. Only
+    # informational: the default below is unchanged.
+    say "On a Mac, cix.app is the usual install — a menu bar launcher that"
+    say "downloads and self-updates the server for you, no toolchain needed:"
+    say "  https://github.com/dvcdsys/code-index/releases  (cix-*-arm64.dmg)"
+    say "This script builds the server from this checkout instead."
+fi
+
 if [[ -n "$ARG_MODE" ]]; then
     MODE="$ARG_MODE"
 else

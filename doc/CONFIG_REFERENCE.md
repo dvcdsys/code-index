@@ -31,8 +31,9 @@ the DB.
 | Variable | Default | Description |
 |---|---|---|
 | `CIX_PORT` | `21847` | Listen port (both Docker images bake this in). |
+| `CIX_DATA_DIR` | `~/.cix/data` (`/tmp/cix-data` with no `$HOME`) | Base directory the other storage defaults are derived from. Ignored where a path is set explicitly — which the containers do, so it is a native-install variable in practice. |
 | `CIX_BIND_ADDR` | — | Interface to listen on, as a bare address with no port. Empty means every interface, which is what a container needs; set `127.0.0.1` to make the server reachable only from the machine it runs on. The macOS app writes `127.0.0.1` at first run and exposes a menu toggle. |
-| `CIX_SQLITE_PATH` | `/data/sqlite/projects.db` | SQLite path. Suffixed with the model-safe name on open. |
+| `CIX_SQLITE_PATH` | `/data/sqlite/projects.db` | System SQLite database — opened literally, with no model suffix appended. (A pre-0.x per-model filename is migrated to this path on first boot.) |
 | `CIX_CHROMA_PERSIST_DIR` | `/data/chroma` | Legacy chromem-go store. Read on startup for the one-time import into the SQLite vector store, then left untouched as the rollback path. See [VECTORSTORE.md](VECTORSTORE.md). |
 | `CIX_VECTORS_DIR` | sibling of `CIX_CHROMA_PERSIST_DIR` (`/data/vectors`) | Vector store directory: one SQLite database per embedding namespace. |
 | `CIX_VECTOR_MMAP_SIZE` | `0` (off) | `PRAGMA mmap_size` for the vector store, in bytes. Roughly 40% lower search latency in exchange for resident memory — mapped database pages count in RSS. |
@@ -49,6 +50,8 @@ the DB.
 | `CIX_LANGUAGES` | all | Comma-separated allow-list of chunker languages. Empty = all baked-in. See [`LANGUAGES.md`](LANGUAGES.md). |
 | `CIX_EMBED_INCLUDE_PATH` | `true` | Path/language/symbol preamble before each chunk. Toggling requires `cix reindex --full`. |
 | `CIX_MAX_CHUNK_TOKENS` | `1500` | Max chunk size before falling back to sliding window. Must stay ≤ `CIX_LLAMA_CTX`. |
+| `CIX_INDEX_EMBED_BATCH_CHUNKS` | `0` (built-in default) | Chunks per embedding batch during indexing. Also editable at runtime from the dashboard. |
+| `CIX_CHUNK_MAX_CONCURRENT` | `0` (built-in default) | Files chunked in parallel. Also editable at runtime from the dashboard. |
 
 ## llama-server sidecar
 
@@ -61,6 +64,7 @@ the DB.
 | `CIX_LLAMA_CTX` | `2048` | `--ctx-size` passed to llama-server. |
 | `CIX_N_GPU_LAYERS` | `-1` darwin / `0` else / `99` Docker CUDA | `99` offloads all layers; `0` forces CPU. |
 | `CIX_LLAMA_STARTUP_TIMEOUT` | `60` | Seconds to wait for the sidecar's readiness probe. |
+| `CIX_LLAMA_CACHE_RAM` | `0` (disabled) | llama-server's host prompt cache in MiB (`--cache-ram`). Embeddings get no prompt reuse from it, and upstream's 8192 default has OOM-killed this server; `-1` is unlimited. |
 | `CIX_GGUF_PATH` | auto-resolve | Absolute path to a GGUF file. Empty → cache lookup → HF download. |
 | `CIX_BOOTSTRAP_GGUF_PATH` | — | Optional. If set, cix imports this `.gguf` into `CIX_GGUF_CACHE_DIR` once (atomic `.partial → rename`) and ignores the env on subsequent boots. Useful for air-gapped or rate-limited environments. |
 
@@ -96,6 +100,39 @@ See [`WORKSPACES.md`](WORKSPACES.md) for the operator guide,
 [`WEBHOOKS.md`](WEBHOOKS.md) for webhook lifecycle, and
 [`POLLING.md`](POLLING.md) for the polling alternative.
 
+### Managed tunnels
+
+A managed tunnel gives a NAT-ed server a public URL for webhook delivery.
+The binaries are in both Docker images; on a native install they come from
+`PATH` unless a path is given here.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CIX_TUNNEL_CLOUDFLARE_BIN_PATH` | `cloudflared` (from `PATH`; images set `/cloudflared`) | `cloudflared` executable. |
+| `CIX_TUNNEL_CLOUDFLARE_METRICS_ADDR` | `127.0.0.1:21848` | Where `cloudflared` exposes its metrics endpoint, which is how readiness is detected. |
+| `CIX_TUNNEL_CLOUDFLARE_STARTUP_TIMEOUT` | `30` | Seconds to wait for the tunnel to come up. |
+| `CIX_TUNNEL_NGROK_BIN_PATH` | `ngrok` (from `PATH`) | `ngrok` executable. |
+| `CIX_TUNNEL_NGROK_STARTUP_TIMEOUT` | `30` | Seconds to wait for the tunnel to come up. |
+| `CIX_TUNNEL_BIN_MANAGED` | `false` | Let the server download and update the tunnel binary itself. |
+| `CIX_TUNNEL_BIN_DIR` | `<SQLite dir>/tunnel-bin` | Where a managed binary is kept. |
+
+## Database maintenance
+
+Reclaim and compaction are normally driven from **Server → Resources →
+Database**; these variables exist for deployments nobody opens a dashboard
+for. A schedule saved in the dashboard overrides the environment, and an
+invalid cron expression is refused at startup rather than at the first tick.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CIX_DB_MAINTENANCE_CRON` | — (no automatic run) | Default schedule for the database tasks, as a crontab expression. |
+| `CIX_DB_MAINTENANCE_MIN_FREE_PERCENT` | `25` | How much of the file must be freelist waste before a scheduled run bothers. |
+| `CIX_DB_MAINTENANCE_MIN_FREE_BYTES` | `256 MiB` | The same threshold in absolute bytes; both have to be met. |
+
+Compaction takes the server **read-only and then restarts it** — read
+[`DATABASE_MAINTENANCE.md`](DATABASE_MAINTENANCE.md) before scheduling one
+on a server other people use.
+
 ## Version-check banner
 
 | Variable | Default | Description |
@@ -110,12 +147,21 @@ See [`UPDATES.md`](UPDATES.md) for how the banner works end-to-end.
 
 | | Native (Apple Silicon) | Docker (CPU) | Docker (CUDA) |
 |--|---|---|---|
-| Image size | n/a | ~21 MB | ~1.0 GB |
-| Memory (idle) | ~1 GB | ~1 GB | ~1 GB (system) + ~0.7 GB VRAM |
-| Memory (indexing) | up to 2 GB | up to 2 GB | up to 2 GB system + ~0.7 GB VRAM |
+| Image size (compressed pull) | n/a | ~80 MB | ~1.1 GB |
+| Memory, `cix-server` idle | tens of MB | tens of MB | tens of MB |
+| Memory, `llama-server` sidecar | ~0.5–0.7 GB | ~0.5–0.7 GB | ~0.2 GB system + ~0.7 GB VRAM |
+| Memory (indexing) | up to ~1.5 GB total | up to ~1.5 GB total | same + ~0.7 GB VRAM |
 | GPU | Metal | none | NVIDIA CUDA 12.x |
 | Disk | `~/.cix/data/` (~50–200 MB/project) | same (mounted volume) | same |
-| Auto-restart | `launchd` agent, set up by `install-server.sh` (see [`SETUP_MACOS_NATIVE.md`](SETUP_MACOS_NATIVE.md)) | yes | yes |
+| Auto-restart | `launchd` agent, installed by **cix.app** (see [`MACOS_APP.md`](MACOS_APP.md)) or by `install-server.sh` for a from-source build | yes | yes |
+
+Since 0.13.0 the server's own resident memory no longer scales with the
+index: vectors are read from SQLite per query instead of being loaded into
+the heap at startup, and idle connections are closed after 30 seconds
+([`VECTORSTORE.md`](VECTORSTORE.md) measures 19 MB idle on a
+312k-document index that cost 2209 MB before). The one setting that
+brings index-proportional memory back on purpose is
+`CIX_VECTOR_MMAP_SIZE`. What is left at idle is the embedding sidecar.
 
 ## Switching embedding models
 
@@ -136,12 +182,15 @@ You can switch in two places:
   restart. The dashboard's runtime override (if any) wins; the env
   value becomes the bootstrap default.
 
-ChromaDB and SQLite paths are suffixed by a sanitised form of the
-model name (e.g. `projects_awhiteside_coderankembed_q8_0_gguf.db`).
-This isolates vector spaces per model — switching back and forth
-keeps old indices intact and avoids dim-mismatch errors.
-Re-indexing under a model is not free (chunk count × embedding
-latency), but you don't lose state.
+Vector spaces are isolated per model by **directory**, not by filename:
+each embedding namespace — provider kind, model slug, optional variant —
+gets its own `<CIX_VECTORS_DIR>/<kind>/<model-slug>/vectors.db`
+(`Config.VectorDirFor`). The system SQLite database is shared and not
+model-specific. Switching back and forth therefore opens a different
+`vectors.db`, keeps old indices intact and makes a dim-mismatch
+impossible. Re-indexing under a model is not free (chunk count ×
+embedding latency), but you don't lose state. See
+[`VECTORSTORE.md`](VECTORSTORE.md).
 
 ## Related files
 

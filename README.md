@@ -34,6 +34,10 @@ Or open `http://localhost:21847/dashboard` in your browser:
 > pipeline stabilizes, an upgrade can change how code is embedded. A reindex
 > brings every project onto the new pipeline; within a version, search is
 > consistent once reindexed.
+>
+> The 0.13.0 vector-store change is the exception: it moves the vectors you
+> already have into SQLite by itself, on first boot, without re-embedding
+> anything ([`doc/VECTORSTORE.md`](doc/VECTORSTORE.md)).
 
 ---
 
@@ -51,8 +55,9 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 
 ## What you get
 
-- **`cix-server`** — Go HTTP API with embedded llama.cpp sidecar for embeddings, SQLite for symbols + metadata, chromem-go for vectors, FTS5 BM25 mirror for hybrid ranking. Ships as a single distroless container.
-- **Web dashboard** at `/dashboard` — projects, search, users + API keys, runtime sidecar control, drift indicator. Embedded in the server binary. See [`doc/DASHBOARD.md`](doc/DASHBOARD.md).
+- **`cix-server`** — Go HTTP API with embedded llama.cpp sidecar for embeddings, SQLite for symbols, metadata **and vectors**, FTS5 BM25 mirror for hybrid ranking. Vectors are read from disk per query rather than held in RAM, so an idle server sits at tens of megabytes regardless of index size ([`doc/VECTORSTORE.md`](doc/VECTORSTORE.md)). Ships as a single distroless container.
+- **Web dashboard** at `/dashboard` — projects, search, users + API keys, runtime settings, resource + database maintenance, drift indicator. Embedded in the server binary. See [`doc/DASHBOARD.md`](doc/DASHBOARD.md).
+- **macOS menu bar app** — `cix.app`, a drag-to-install launcher that runs and self-updates a local server on Apple Silicon. See [`doc/MACOS_APP.md`](doc/MACOS_APP.md).
 - **`cix` CLI** — `cix search`/`symbols`/`files`/`workspace …` for terminal + agent use. See [`doc/CLI_REFERENCE.md`](doc/CLI_REFERENCE.md).
 - **File watcher** — `cix watch` keeps the index fresh as you edit.
 - **Workspaces** — group multiple repos into one named corpus; cix clones them server-side, indexes them, and runs hybrid BM25 + dense search across the union. GitHub webhooks auto-reindex on `push`. See [`workspaces.md`](workspaces.md).
@@ -80,7 +85,7 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 │  Indexing pipeline                                              │
 │  ├── tree-sitter/wasm (AST chunking, 30+ langs)  (wazero)       │
 │  ├── embedding provider (local llama.cpp / Voyage / OpenAI)     │
-│  ├── chromem-go (cosine similarity vector store)                │
+│  ├── SQLite vector store (float32 BLOBs, streamed cosine scan)  │
 │  └── SQLite FTS5 mirror (BM25) + metadata (modernc/sqlite)      │
 └────────────┬─────────────────────────────────────┬──────────────┘
              │ HTTP                                │ Unix socket
@@ -98,13 +103,24 @@ Pure-Go static binary; CUDA-image variants add a CUDA runtime layer for GPU embe
 
 | Mode | Best for | GPU | Prerequisites |
 |------|----------|-----|---------------|
+| **macOS app** | Apple Silicon Macs — the default on a Mac | Metal | macOS 13+, Apple Silicon |
 | **Docker (CPU)** | any OS, dev / small repos | none | Docker |
 | **Docker (CUDA)** | NVIDIA GPU servers | CUDA 12.x | Docker + NVIDIA Container Toolkit |
-| **Native (macOS)** | Apple Silicon w/ full Metal | Metal | Go 1.25+, Node.js, Xcode CLT |
+| **Native from source (macOS)** | hacking on cix itself | Metal | Go 1.25+, Node.js, Xcode CLT |
 
 ### 1. Start the server
 
-One command, any mode — the installer detects your platform, asks a few questions (deployment mode, admin email, password, port — every one has a sensible default), and brings the server up:
+**On a Mac, install the app.** `cix.app` is a menu bar launcher: download
+`cix-<version>-arm64.dmg` from the
+[releases page](https://github.com/dvcdsys/code-index/releases), drag it to
+Applications, and open it. It downloads the server, the CLI and a
+Metal-accelerated `llama-server` into `~/.cix/runtime/`, creates your admin
+account and an API key, points the `cix` CLI at it, and keeps the server updated
+in place — so steps 2 and 3 below are already done and you can go straight to
+step 4. macOS blocks an ad-hoc-signed app twice on first launch; clearing that
+and everything else the app does is in [`doc/MACOS_APP.md`](doc/MACOS_APP.md).
+
+**Everywhere else, one command** — the installer detects your platform, asks a few questions (deployment mode, admin email, password, port — every one has a sensible default), and brings the server up:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-server.sh | bash
@@ -112,7 +128,7 @@ curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install-ser
 
 (Equivalent from a clone: `git clone https://github.com/dvcdsys/code-index && cd code-index && ./install-server.sh`.)
 
-At the end it prints the dashboard URL and your admin login — and offers to install the `cix` CLI and connect it to the new server, so `cix init` works immediately (steps 2–3 below happen automatically on a fresh install). Re-running after a `git pull` upgrades in place; `--uninstall` removes the server but keeps your data. Native-mode details and manual setup: [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md). For shared/team deployment, see [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md).
+At the end it prints the dashboard URL and your admin login — and offers to install the `cix` CLI and connect it to the new server, so `cix init` works immediately (steps 2–3 below happen automatically on a fresh install). Re-running after a `git pull` upgrades in place; `--uninstall` removes the server but keeps your data. Building the macOS server from a checkout instead of installing the app: [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md). For shared/team deployment, see [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md).
 
 <details>
 <summary>Manual Docker setup (what the installer automates)</summary>
@@ -243,6 +259,7 @@ Most common environment variables (full surface in [`doc/CONFIG_REFERENCE.md`](d
 | `CIX_EMBEDDING_MODEL` | `awhiteside/CodeRankEmbed-Q8_0-GGUF` | Local GGUF repo or absolute path. |
 | `CIX_N_GPU_LAYERS` | `-1` macOS / `0` else / `99` Docker CUDA | `99` = full offload, `0` = CPU. |
 | `CIX_EMBEDDINGS_ENABLED` | `true` | `false` boots without the llama sidecar. |
+| `CIX_VECTORS_DIR` | sibling of the chroma dir, i.e. `<data>/vectors` | Where the vector databases live. Must be on a persistent volume — this is your index. |
 | `CIX_SECRET_KEY` / `_KEYFILE` | auto-generated keyfile | AES-256-GCM key for `github_tokens` encryption. **Back this up.** |
 | `CIX_PUBLIC_URL` | — | Public origin for webhook URLs. Trumped by a live Managed Tunnel. |
 
@@ -279,18 +296,25 @@ docker compose down -v          # stop AND wipe data + models (destructive)
 | Doc | Purpose |
 |---|---|
 | [`doc/CLI_REFERENCE.md`](doc/CLI_REFERENCE.md) | Full CLI command surface + per-project config (`.cixignore`, `.cixconfig.yaml`) |
+| [`doc/CLI_CONFIG.md`](doc/CLI_CONFIG.md) | Everything the CLI lets you configure (servers, defaults, output) |
 | [`doc/DASHBOARD.md`](doc/DASHBOARD.md) | Dashboard pages, authentication, authorization model, drift indicator |
+| [`doc/MACOS_APP.md`](doc/MACOS_APP.md) | The macOS menu bar app — install, first run, updates, uninstall |
 | [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md) | Self-hosting cix for a team — production / shared-infrastructure deployment for DevOps |
 | [`doc/TROUBLESHOOTING.md`](doc/TROUBLESHOOTING.md) | Common issues + search-quality tuning (`--min-score`) |
 | [`workspaces.md`](workspaces.md) | User-facing workspace guide (when to use, agent trust rules, query patterns) |
 | [`doc/WORKSPACES.md`](doc/WORKSPACES.md) | Operator setup (encryption keys, Cloudflare tunnel, workers, REST API) |
 | [`doc/SEARCH_ALGORITHM.md`](doc/SEARCH_ALGORITHM.md) | How per-project + hybrid workspace search rank results |
+| [`doc/VECTORSTORE.md`](doc/VECTORSTORE.md) | The SQLite vector store — layout, tuning, migration from chromem-go |
+| [`doc/DATABASE_MAINTENANCE.md`](doc/DATABASE_MAINTENANCE.md) | Reclaim, compaction, scheduled maintenance |
 | [`doc/WEBHOOKS.md`](doc/WEBHOOKS.md) | GitHub webhook lifecycle, modes, HMAC validation |
+| [`doc/POLLING.md`](doc/POLLING.md) | Git polling sync, for repos where a webhook is not an option |
 | [`doc/COWORK_MCP.md`](doc/COWORK_MCP.md) | Using cix from Claude Desktop / Cowork over MCP (`cix mcp install`, multi-server) |
 | [`doc/UPDATES.md`](doc/UPDATES.md) | Release-poll banner + stable vs develop install channels |
 | [`doc/CONFIG_REFERENCE.md`](doc/CONFIG_REFERENCE.md) | Complete env-var reference |
-| [`doc/RELEASES.md`](doc/RELEASES.md) | Cutting CLI + server releases, CVE scans, make targets |
-| [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md) | Native macOS Metal setup + launchd plist |
+| [`doc/RELEASES.md`](doc/RELEASES.md) | Cutting CLI + server + app releases, CVE scans, make targets |
+| [`doc/DEPRECATION_POLICY.md`](doc/DEPRECATION_POLICY.md) | How long a removed feature is announced before it goes |
+| [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md) | Building the macOS server from a checkout (the app is the normal path) |
+| [`mac/README.md`](mac/README.md) | How the macOS app and its runtime are built and signed |
 | [`doc/SECURITY_DEPLOYMENT.md`](doc/SECURITY_DEPLOYMENT.md) | Production hardening |
 | [`doc/DOCKER_TAGS.md`](doc/DOCKER_TAGS.md) | Docker Hub tag lifecycle |
 | [`doc/LANGUAGES.md`](doc/LANGUAGES.md) | Supported chunker languages |
@@ -328,9 +352,12 @@ projects and teams that make it possible:
   tree-sitter binding cix's AST chunking first grew from; thank you for the
   head start.
 - [chromem-go](https://github.com/philippgille/chromem-go) — the
-  embedded cosine-similarity vector store.
+  embedded vector store cix shipped through v0.12.x, and the model its
+  collection semantics still follow. Now kept only to read a pre-0.13
+  index during the one-time import.
 - [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) — cgo-free
-  SQLite for project metadata, symbols, and the FTS5/BM25 mirror.
+  SQLite for project metadata, symbols, the FTS5/BM25 mirror, and (since
+  v0.13.0) the vectors themselves.
 - [go-git](https://github.com/go-git/go-git) — server-side repository
   cloning for workspaces.
 
