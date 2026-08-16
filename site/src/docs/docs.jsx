@@ -133,16 +133,16 @@ make run`}</CodeBlock>
             <p>Open <code>http://localhost:21847/dashboard</code> and sign in with the bootstrap admin credentials from <code>.env</code> (<code>CIX_BOOTSTRAP_ADMIN_EMAIL</code> / <code>CIX_BOOTSTRAP_ADMIN_PASSWORD</code>). Go to <b>API&nbsp;Keys → New key</b>, name the key, and copy the revealed <code>cix_…</code> value — it is shown exactly once. The same dialog also gives you a ready-to-paste <code>cix config</code> connect command, so you can skip the manual configuration below.</p>
             <div className="shot-row">
               <figure className="shot shot-wide">
-                <img src="/img/dashboard-api-keys.png" alt="The API keys page of the cix dashboard, with the New key button in the top right corner" loading="lazy" width="1600" height="1006" />
+                <img src="/img/dashboard-api-keys.png" alt="The API keys page of the cix dashboard, with the New key button in the top right corner" loading="lazy" width="1800" height="787" />
                 <figcaption>API Keys → New key. Keys are bearer tokens for CLI / SDK access — created here, revoked here.</figcaption>
               </figure>
               <figure className="shot">
-                <img src="/img/dashboard-create-key.png" alt="The Create API key dialog asking for a key name" loading="lazy" width="1024" height="502" />
+                <img src="/img/dashboard-create-key.png" alt="The Create API key dialog asking for a key name" loading="lazy" width="1100" height="608" />
                 <figcaption>Name the key after the machine or agent that will use it.</figcaption>
               </figure>
               <figure className="shot">
-                <img src="/img/dashboard-key-created.png" alt="The API key created dialog revealing the one-time key and a ready-to-paste cix config connect command" loading="lazy" width="1024" height="1094" />
-                <figcaption>The full key is revealed once, together with a copy-paste connect command for the CLI. (The key on this screenshot is long revoked.)</figcaption>
+                <img src="/img/dashboard-key-created.png" alt="The API key created dialog revealing the one-time key and a ready-to-paste cix config connect command" loading="lazy" width="1100" height="886" />
+                <figcaption>The full key is revealed once, together with a copy-paste connect command for the CLI. (Every screenshot on this page comes from a throwaway demo server that no longer exists — the key shown is not a credential to anything.)</figcaption>
               </figure>
             </div>
 
@@ -243,6 +243,10 @@ cix config set default_server <name>`}</CodeBlock>
           </Section>
 
           <Section id="tuning" title="Tuning search" eyebrow="Quality">
+            <figure className="shot shot-wide">
+              <img src="/img/dashboard-search.png" alt="The dashboard search page: a natural-language query, the project and limit controls, a min-score slider, and one ranked result showing the matching function with its score and line numbers" loading="lazy" width="1800" height="1153" />
+              <figcaption>The same five modes as the CLI, with <code>limit</code> and <code>--min-score</code> as controls. Results carry the score and the exact line range.</figcaption>
+            </figure>
             <p>The CLI defaults to <code>--min-score 0.4</code> (the raw HTTP endpoint defaults lower, 0.2). The threshold is calibrated for <b>CodeRankEmbed-Q8</b> with the path-aware embedding format. Score ranges look lower than generic models because CodeRankEmbed is asymmetric — queries get a different prefix than passages.</p>
             <table className="tbl">
               <thead><tr><th>Match strength</th><th>Score range</th><th>Action</th></tr></thead>
@@ -267,6 +271,10 @@ cix reindex --full`}</CodeBlock>
 
           <Section id="config" title="Configuration" eyebrow="Environment">
             <p>All server settings use the <code>CIX_*</code> prefix. This is the curated set — the full reference (~40 variables) lives in <a href={`${GITHUB_URL}/blob/main/doc/CONFIG_REFERENCE.md`} target="_blank" rel="noopener"><code>doc/CONFIG_REFERENCE.md</code></a>. Tuning values are also editable at runtime from <b>Server → Runtime settings</b>; env values are the boot-time seed. The neighbouring <b>Server → Resources</b> tab is where an admin sees resident memory and disk by category, reclaims orphaned collections, abandoned embedding namespaces and the pre-0.13 chromem tree, and runs or schedules database maintenance.</p>
+            <figure className="shot shot-wide">
+              <img src="/img/dashboard-server-resources.png" alt="Server → Resources: resident memory, peak resident, vector document count and disk used, followed by the paths cix writes to and the database maintenance card" loading="lazy" width="1800" height="1265" />
+              <figcaption>A server holding a small index at rest. Resident memory is what the OS reports, not the Go heap — vectors are read from SQLite per query rather than loaded at startup, so this figure barely moves as the index grows.</figcaption>
+            </figure>
             <h3>Core</h3>
             <VarTable rows={[
               ['CIX_PORT', '21847', 'HTTP listen port.'],
