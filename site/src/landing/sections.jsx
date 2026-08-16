@@ -1,7 +1,7 @@
 import { CLITabs } from './tabs.jsx';
 import { InstallTabs } from './install-tabs.jsx';
 import { WorkspaceDemo } from './workspace-demo.jsx';
-import { GITHUB_URL, PLUGIN_VERSION } from '../shared/versions.js';
+import { CLI_VERSION, GITHUB_URL, PLUGIN_VERSION } from '../shared/versions.js';
 import { TeamDiagram } from '../shared/team-diagram.jsx';
 
 const FIT = [
@@ -265,7 +265,19 @@ export function Agent() {
 // by route (see install-tabs.jsx); everything from here down is one cix.
 const QS_STEPS = [
   {
-    n: '01', title: 'Index & first search',
+    n: '01', title: 'Install the cix CLI',
+    desc: <>One installer, same on every platform, on whichever machine you want to search from. The Docker and Source installers already offered it. After the macOS app it needs no configuration either — the app has written <code>~/.cix/config.yaml</code> pointing at your server with an API key. Your dashboard's home page carries the detailed version: a <b>Connect Claude Code to cix</b> card with a connect command already filled in for that server.</>,
+    code: <>
+      <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
+      {'    '}/dvcdsys/code-index/main/install.sh | bash{'\n'}
+      <span className="comment"># ✓ cix {CLI_VERSION} installed at /usr/local/bin/cix</span>{'\n'}
+      <span className="prompt">$</span> cix config show{'\n'}
+      <span className="comment"># servers (1):</span>{'\n'}
+      <span className="comment"># * local  url=http://localhost:21847 key=(set)</span>
+    </>,
+  },
+  {
+    n: '02', title: 'Index & first search',
     desc: <><code>cix init</code> registers, indexes, and starts the file watcher in the background. Search from the terminal, the dashboard, or any agent with shell access.</>,
     code: <>
       <span className="prompt">$</span> cd ~/code/your-project{'\n'}
@@ -276,7 +288,7 @@ const QS_STEPS = [
     </>,
   },
   {
-    n: '02', title: 'Hook up your agent',
+    n: '03', title: 'Hook up your agent',
     desc: <>Run in a terminal, <i>not</i> inside a Claude session — the plugin activates on the next <code>claude</code> start. It ships the CLI, eight slash commands, the <code>/cix</code> and <code>/cix-workspace</code> skills, and hooks that steer Claude toward cix in indexed projects. Claude Desktop / Cowork: <code>cix mcp install claude-desktop</code>.</>,
     code: <>
       <span className="prompt">$</span> claude plugin marketplace add dvcdsys/code-index{'\n'}
@@ -290,7 +302,7 @@ const QS_STEPS = [
     </>,
   },
   {
-    n: '03', title: 'Connect more machines (optional)',
+    n: '04', title: 'Connect more machines (optional)',
     desc: <>The machine you installed on is already connected — skip this. For a laptop or agent box elsewhere: mint a key in <b>API&nbsp;Keys → New key</b> (revealed once, with a ready-to-paste connect command), install the CLI there, paste.</>,
     code: <>
       <span className="comment"># on the other machine:</span>{'\n'}
