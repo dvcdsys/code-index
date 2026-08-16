@@ -24,12 +24,12 @@ separate things:
 | Asset | Stream | Contents | Size |
 |---|---|---|---|
 | `cix-<ver>-arm64.dmg` | `mac/v*` | the app — `cix-launcher` and its icons, nothing else | ~4 MB |
-| `cix-runtime-<ver>-darwin-arm64.tar.gz` | `server/v*` | `cix-server`, the `cix` CLI, `llama/` | ~35 MB |
+| `cix-runtime-<ver>-darwin-arm64.tar.gz` | `server/v*` | `cix-server`, the `cix` CLI, `llama/` | ~37 MB |
 
 The runtime **is** the server, so it carries the server's version and ships from
 the server's tag — the same `server/vX.Y.Z` and the same workflow run that
 publishes the Docker images (`release-server.yml`, job `macos-runtime`). A Mac
-install on 0.12.8 and a container on 0.12.8 are the same server. That is also
+install on 0.13.0 and a container on 0.13.0 are the same server. That is also
 why llama has no version of its own here: a llama bump is a server release, as
 it has always been.
 

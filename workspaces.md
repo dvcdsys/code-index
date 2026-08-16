@@ -566,7 +566,7 @@ query
   ▼
 For every indexed workspace repo, in parallel:
   │
-  ├── dense path: chromem.Search(query_embedding) → top-50 by cosine
+  ├── dense path: vector store scan (query_embedding) → top-50 by cosine
   ├── sparse path: SQLite FTS5 BM25 over chunks_fts → top-50 by BM25
   │
   ▼
@@ -625,8 +625,8 @@ Request-time:
 ### Why hybrid
 
 The pre-hybrid algorithm (pure dense fan-out) had a known failure mode:
-chromem always returns the nearest K vectors regardless of how far
-"nearest" actually is. A workspace with repos that share zero
+a nearest-neighbour search always returns the nearest K vectors
+regardless of how far "nearest" actually is. A workspace with repos that share zero
 vocabulary with the query still surfaced 50 chunks per repo at
 noise-level cosine. BM25 fixes this: a repo that scores 0 on the
 literal token side gets caught by the relative project gate even if
@@ -895,8 +895,8 @@ re-add it via `POST /git-repos` with the correct branch.
 `POST /api/v1/projects/{hash}/reindex` on each.
 
 **`status: "partial_failure"`**
-→ At least one repo's dense search errored (corrupt chromem collection,
-disk pressure). Other repos still returned. Check server logs; the
+→ At least one repo's dense search errored (missing or corrupt vector
+collection, disk pressure). Other repos still returned. Check server logs; the
 fastest fix is usually a reindex of the failed repo.
 
 **Webhook isn't triggering reindex**

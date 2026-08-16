@@ -64,9 +64,13 @@ sister SQLite tables:
 - `chunks_fts` — FTS5 virtual table over `(content, symbol_name,
   file_path)` — provides BM25 scoring against literal tokens.
 
-Both tables share a rowid and are written inside the indexer's
-per-file SQL transaction, so a chunk is either in *both* stores or
-*neither*.
+Both tables share a rowid and are written inside the indexer's per-file
+SQL transaction, together with that file's symbols, references and hash —
+so a chunk is in both of *these* tables or neither. The vector store is a
+separate database file with its own write (see
+[`VECTORSTORE.md`](VECTORSTORE.md)), so it is not part of that
+transaction: an interrupted index can leave a file embedded but not
+mirrored, which the next indexing pass corrects.
 
 Code: `server/internal/chunksfts/chunksfts.go`. Introduced by `f00e3d3`.
 
@@ -139,8 +143,8 @@ Trust rules for an agent consuming the response (`chunks[]` vs
 ## 4. Symbols / definitions / references / files
 
 These bypass the embedding pipeline entirely. They run against
-SQLite-backed indexes that the chunker populates in the same per-file
-transaction as the vector store:
+SQLite-backed indexes in the system database, which the chunker fills in
+its own per-file transaction alongside the FTS mirror:
 
 - **`cix symbols <name>`** — substring-and-trigram lookup over
   `symbols` (kind ∈ {function, class, method, type}). Fast (<50 ms on a
