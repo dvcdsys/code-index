@@ -67,17 +67,13 @@ function MacPane() {
           },
           {
             title: 'First launch sets everything up',
-            desc: <>Exactly what the panel on the left is playing: one question — an email address for the admin account, which goes nowhere — then it downloads the server, the CLI and a Metal-accelerated <code>llama-server</code> (about 40&nbsp;MB) into <code>~/.cix/runtime/</code>, generates your password and an API key, starts the server and hands you the login. You change that password on first sign-in. That is steps 01–03 of every other route already done — go straight to <b>Index &amp; first search</b> below.</>,
-          },
-          {
-            title: 'Put the CLI on your PATH',
-            code: <>
-              <span className="prompt">$</span> ln -sf ~/.cix/runtime/current/cix \{'\n'}
-              {'    '}/usr/local/bin/cix
-            </>,
-            desc: <>A <b>symlink into <code>current</code></b>, so the CLI follows every runtime update instead of pinning the version you installed today. The app keeps itself and the server up to date on separate release streams: a server update is a download, a signature check and a symlink rename, with automatic rollback if the new one does not come back.</>,
+            desc: <>Exactly what the panel on the left is playing: one question — an email address for the admin account, which goes nowhere — then it downloads the server, the CLI and a Metal-accelerated <code>llama-server</code> (about 40&nbsp;MB) into <code>~/.cix/runtime/</code>, generates your password and an API key, starts the server and hands you the login. You change that password on first sign-in.</>,
           },
         ]} />
+
+        <p className="inst-note">
+          <b>That is the install.</b> No terminal, no toolchain, nothing left to configure — the server is running, your account exists, and the app keeps both halves current on their own release streams (a server update is a download, a signature check and a symlink rename, with automatic rollback if the new one does not come back). The <code>cix</code> command is a separate install, identical on every platform: it is the first of the shared steps below.
+        </p>
       </div>
     </div>
   );
