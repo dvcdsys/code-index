@@ -417,7 +417,7 @@ CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_symbol);
 CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_symbol);
 
 -- PR14 dropped the workspaces communities/community_members tables.
--- Workspace search is now a weighted fan-out across per-project chromem
+-- Workspace search is now a weighted fan-out across per-project vector
 -- collections (no Louvain, no centroid index). migrateDropCommunities
 -- DROPs the tables on upgrade for installs that ran any of PR5..PR12.
 
@@ -441,8 +441,8 @@ CREATE INDEX IF NOT EXISTS idx_chunks_meta_project_file
 CREATE INDEX IF NOT EXISTS idx_chunks_meta_project
     ON chunks_meta(project_path);
 
--- chunks_fts is the BM25-searchable side, parallel to chromem-go's dense
--- vector store. Workspace search runs both in parallel per project then
+-- chunks_fts is the BM25-searchable side, parallel to the dense vector
+-- store. Workspace search runs both in parallel per project then
 -- fuses by RRF; project-relevance gating uses BM25 signal to drop repos
 -- that share no token with the query (the dense-only fan-out leaks
 -- semantically-distant repos as false positives).
