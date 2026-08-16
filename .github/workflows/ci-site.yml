@@ -65,14 +65,15 @@ jobs:
           # the comparison below fail unconditionally.
           v() { grep -oE "^export const $1 = '[^']+'" src/shared/versions.js | cut -d"'" -f2; }
           SERVER=$(v SERVER_VERSION); CLI=$(v CLI_VERSION); PLUGIN=$(v PLUGIN_VERSION)
+          MAC=$(v MAC_APP_VERSION)
           PLUGIN_JSON=$(node -p "require('../plugins/cix/.claude-plugin/plugin.json').version")
           TAGS=$(git ls-remote --tags origin)
           # Newest semver tag per release stream. The trailing `$` anchor skips
           # the `^{}` peeled refs that annotated tags add to ls-remote output.
           newest() { echo "$TAGS" | grep -oE "refs/tags/$1/v[0-9]+\.[0-9]+\.[0-9]+$" | sed "s#refs/tags/$1/v##" | sort -V | tail -n1; }
-          NEWEST_SERVER=$(newest server); NEWEST_CLI=$(newest cli)
-          echo "site: server=$SERVER cli=$CLI plugin=$PLUGIN"
-          echo "repo: server=$NEWEST_SERVER cli=$NEWEST_CLI plugin.json=$PLUGIN_JSON"
+          NEWEST_SERVER=$(newest server); NEWEST_CLI=$(newest cli); NEWEST_MAC=$(newest mac)
+          echo "site: server=$SERVER cli=$CLI plugin=$PLUGIN mac=$MAC"
+          echo "repo: server=$NEWEST_SERVER cli=$NEWEST_CLI plugin.json=$PLUGIN_JSON mac=$NEWEST_MAC"
           FAIL=0
           if [ "$PLUGIN" != "$PLUGIN_JSON" ]; then
             echo "::error::versions.js PLUGIN_VERSION ($PLUGIN) != plugins/cix plugin.json ($PLUGIN_JSON)"; FAIL=1
@@ -82,5 +83,13 @@ jobs:
           fi
           if [ "$CLI" != "$NEWEST_CLI" ]; then
             echo "::error::versions.js CLI_VERSION ($CLI) != newest release cli/v$NEWEST_CLI — bump it so the site stops advertising a stale version"; FAIL=1
+          fi
+          # MAC_APP_VERSION is load-bearing, not decorative: the Quick start's
+          # download button builds its href from it
+          # (releases/download/mac/v$MAC/cix-$MAC-arm64.dmg), and that static
+          # link is what every visitor gets when the GitHub API lookup is rate
+          # limited, blocked or offline. A stale constant is a 404 button.
+          if [ "$MAC" != "$NEWEST_MAC" ]; then
+            echo "::error::versions.js MAC_APP_VERSION ($MAC) != newest release mac/v$NEWEST_MAC — the macOS download link is built from it and would 404"; FAIL=1
           fi
           exit $FAIL

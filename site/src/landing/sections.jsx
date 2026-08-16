@@ -1,6 +1,7 @@
 import { CLITabs } from './tabs.jsx';
+import { InstallTabs } from './install-tabs.jsx';
 import { WorkspaceDemo } from './workspace-demo.jsx';
-import { GITHUB_URL, MAC_APP_VERSION, PLUGIN_VERSION } from '../shared/versions.js';
+import { GITHUB_URL, PLUGIN_VERSION } from '../shared/versions.js';
 import { TeamDiagram } from '../shared/team-diagram.jsx';
 
 const FIT = [
@@ -260,38 +261,11 @@ export function Agent() {
   );
 }
 
+// What the three installs have in common. Everything above this point differs
+// by route (see install-tabs.jsx); everything from here down is one cix.
 const QS_STEPS = [
   {
-    n: '01', title: 'Run the installer',
-    desc: <>One interactive installer for every mode — Docker CPU, Docker CUDA (driver ≥ 525 + Container Toolkit), or a native Metal build on Apple Silicon. It picks the right mode for your machine, brings the server up, and installs + connects the <code>cix</code> CLI for you. <b>On a Mac, <a href={`${GITHUB_URL}/releases/tag/mac/v${MAC_APP_VERSION}`}>download the app</a> instead</b> — it installs the same server into <code>~/.cix/runtime/</code>, creates your account and connects the CLI, so you land straight on step 04.</>,
-    code: <>
-      <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
-      {'    '}/dvcdsys/code-index/main/install-server.sh | bash{'\n'}
-      <span className="comment"># a few questions → server up, CLI connected,</span>{'\n'}
-      <span className="comment"># dashboard URL + admin login printed</span>
-    </>,
-  },
-  {
-    n: '02', title: 'Log in & set your password',
-    desc: <>Sign in with the admin login the installer printed. The password is temporary — the dashboard makes you pick a real one right away. That's the whole step.</>,
-    code: <>
-      <span className="prompt">$</span> open http://localhost:21847/dashboard{'\n'}
-      <span className="comment"># sign in with the admin login from step 01</span>{'\n'}
-      <span className="comment"># → you're asked to set a new password</span>
-    </>,
-  },
-  {
-    n: '03', title: 'Connect more machines (optional)',
-    desc: <>The machine you installed on is already connected — skip ahead. For a laptop or agent box elsewhere: mint a key in <b>API&nbsp;Keys → New key</b> (revealed once, with a ready-to-paste connect command), install the CLI there, paste.</>,
-    code: <>
-      <span className="comment"># on the other machine:</span>{'\n'}
-      <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
-      {'    '}/dvcdsys/code-index/main/install.sh | bash{'\n'}
-      <span className="prompt">$</span> <span className="comment"># paste the connect command from the key dialog</span>
-    </>,
-  },
-  {
-    n: '04', title: 'Index & first search',
+    n: '01', title: 'Index & first search',
     desc: <><code>cix init</code> registers, indexes, and starts the file watcher in the background. Search from the terminal, the dashboard, or any agent with shell access.</>,
     code: <>
       <span className="prompt">$</span> cd ~/code/your-project{'\n'}
@@ -302,7 +276,7 @@ const QS_STEPS = [
     </>,
   },
   {
-    n: '05', title: 'Hook up your agent',
+    n: '02', title: 'Hook up your agent',
     desc: <>Run in a terminal, <i>not</i> inside a Claude session — the plugin activates on the next <code>claude</code> start. It ships the CLI, eight slash commands, the <code>/cix</code> and <code>/cix-workspace</code> skills, and hooks that steer Claude toward cix in indexed projects. Claude Desktop / Cowork: <code>cix mcp install claude-desktop</code>.</>,
     code: <>
       <span className="prompt">$</span> claude plugin marketplace add dvcdsys/code-index{'\n'}
@@ -315,6 +289,16 @@ const QS_STEPS = [
       <span className="prompt">$</span> claude plugin update cix@code-index
     </>,
   },
+  {
+    n: '03', title: 'Connect more machines (optional)',
+    desc: <>The machine you installed on is already connected — skip this. For a laptop or agent box elsewhere: mint a key in <b>API&nbsp;Keys → New key</b> (revealed once, with a ready-to-paste connect command), install the CLI there, paste.</>,
+    code: <>
+      <span className="comment"># on the other machine:</span>{'\n'}
+      <span className="prompt">$</span> curl -fsSL https://raw.githubusercontent.com{'\n'}
+      {'    '}/dvcdsys/code-index/main/install.sh | bash{'\n'}
+      <span className="prompt">$</span> <span className="comment"># paste the connect command from the key dialog</span>
+    </>,
+  },
 ];
 
 export function QuickStart() {
@@ -323,7 +307,12 @@ export function QuickStart() {
       <div className="wrap">
         <div className="section-head">
           <span className="eyebrow">Quick start</span>
-          <h2>Clone to agent-ready.<br/>About ten minutes.</h2>
+          <h2>Pick how you run it.<br/>Agent-ready in ten minutes.</h2>
+          <p className="lead">A menu bar app on a Mac, a container anywhere else, or a checkout if you're here to hack on it. Three routes to the same server — and one shared path after it's up.</p>
+        </div>
+        <InstallTabs />
+        <div className="qs-after">
+          <span className="eyebrow">Then, whichever route you took</span>
         </div>
         <div className="qs-grid">
           {QS_STEPS.map(s => (
