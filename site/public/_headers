@@ -7,11 +7,18 @@
 # The beacon POSTs measurements to cloudflareinsights.com, hence the
 # connect-src entry. Both hosts are exactly what the analytics needs and
 # nothing more — no cookies, no ad network.
+#
+# api.github.com is the third connect-src host: the Quick start's macOS tab
+# resolves the current cix.app release there so the download button follows a
+# release without a site deploy (src/shared/mac-release.js). It is a plain
+# unauthenticated GET of the public releases list, made only when that tab is
+# open, and every failure falls back to the link baked into the build — so
+# removing this entry degrades the button, it does not break it.
 /*
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   X-Frame-Options: DENY
-  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://cloudflareinsights.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable

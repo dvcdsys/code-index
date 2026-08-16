@@ -898,6 +898,440 @@ h3 { font-size: clamp(20px, 2vw, 24px); }
 .code-block .comment { color: var(--code-mute); }
 .qs-step p { font-size: 14px; color: var(--ink-soft); margin: 0; }
 
+.qs-after {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 40px 0 22px;
+}
+.qs-after::after {
+  content: "";
+  flex: 1;
+  height: 0;
+  border-top: 2px dashed var(--ink);
+  opacity: 0.35;
+}
+
+/* Install tabs (Quick start) — same shell as the CLI playground tabs, but the
+   panels are documentation on paper rather than terminal output, so the body
+   loses the dark background. */
+.install-tabs .tab-bar { background: var(--bg-2); }
+.inst-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 12px 24px;
+  text-align: left;
+}
+.inst-tab b { font-size: 14px; font-weight: 700; }
+.inst-tab-sub {
+  font-size: 11px;
+  color: var(--ink-mute);
+  letter-spacing: 0.02em;
+}
+.inst-tab.active .inst-tab-sub { color: var(--red); }
+.inst-body {
+  background: var(--paper);
+  padding: 28px;
+}
+.inst-cols {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 34px;
+  align-items: start;
+}
+.inst-main { min-width: 0; }
+
+.inst-dl {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding-bottom: 24px;
+  margin-bottom: 8px;
+  border-bottom: 2px dashed var(--ink);
+}
+.inst-dl-meta {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-mute);
+}
+.inst-dl-meta a { color: var(--ink-soft); }
+
+.inst-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 24px;
+}
+.inst-step {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.inst-step .n {
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  background: var(--ochre);
+  border: 2.5px solid var(--ink);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 800;
+}
+.inst-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.inst-step h4 {
+  margin: 4px 0 0;
+  font-size: 17px;
+  font-weight: 700;
+}
+.inst-step p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.inst-step .code-block { margin: 0; }
+
+.inst-facts {
+  background: var(--bg-2);
+  border: 2.5px solid var(--ink);
+  border-radius: 16px;
+  padding: 20px 22px;
+}
+.inst-facts h4 {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+.inst-facts dl { margin: 0 0 14px; }
+.inst-facts dt {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 700;
+  margin-top: 12px;
+}
+.inst-facts dt:first-child { margin-top: 0; }
+.inst-facts dd {
+  margin: 3px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.inst-facts p {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.inst-facts .inst-warn {
+  border-left: 3px solid var(--red);
+  padding-left: 12px;
+}
+
+/* ── The miniature cix.app panel ──────────────────────────────────────────
+   A replica of cli/launcher/panel.html at roughly 0.8×, so it keeps the app's
+   own tokens rather than the site's — same cream, same ink border, same blocky
+   progress cells. Sizes are the panel's, scaled; nothing else is restyled.
+   The height is pinned to the tallest state (indexing) so the demo does not
+   reflow the page every few seconds as states change. */
+.mac-stage {
+  --mp-surface: #F7EEDC;
+  --mp-sunken: #EFE2C8;
+  --mp-border: #1F140F;
+  --mp-text: #1F140F;
+  --mp-text2: #6B5340;
+  --mp-muted: #8B7358;
+  --mp-faint: #A4906F;
+  --mp-accent: #D73E2C;
+  --mp-ok: #2F7A55;
+  --mp-idle: #A4906F;
+  --mp-idle-word: #8B7358;
+  --mp-track-off: #E3D4B6;
+  --mp-knob: #F7EEDC;
+  width: 320px;
+  max-width: 100%;
+}
+.mac-stage-label {
+  display: block;
+  margin-bottom: 9px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+/* the tallest state (indexing: five table rows, two buttons, the sweep) lands
+   at ~453px; the few px of slack keep a font fallback from resizing the slot */
+.mac-panel-slot { min-height: 464px; }
+/* The panel hugs its content and resizes between states, which is what the
+   real one does — panel.html reports its height back to Cocoa on every render.
+   .mac-panel-slot absorbs that so no page content moves with it. */
+.mac-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--mp-surface);
+  color: var(--mp-text);
+  border: 1.5px solid var(--mp-border);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 6px 6px 0 var(--ink);
+  font-family: var(--font-sans);
+  animation: mpFade 140ms ease-out;
+}
+/* one crossfade per state flip, like the panel's own .fade */
+.mac-panel.stopped, .mac-panel.starting, .mac-panel.running, .mac-panel.indexing {
+  animation: mpFade 140ms ease-out;
+}
+@keyframes mpFade { from { opacity: 0.55; } to { opacity: 1; } }
+
+.mp-section { border-top: 1.5px solid var(--mp-border); }
+.mp-hd {
+  padding: 13px 14px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mp-statusline { display: flex; align-items: center; gap: 9px; }
+.mp-dot { width: 8px; height: 8px; flex: none; background: var(--mp-idle); }
+.mp-dot.ok { background: var(--mp-ok); }
+.mp-dot.accent { background: var(--mp-accent); }
+.mp-word {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--mp-idle-word);
+}
+.mp-word.ok { color: var(--mp-ok); }
+.mp-word.accent { color: var(--mp-accent); }
+.mp-fact {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--mp-muted);
+}
+.mp-heroline { display: flex; align-items: baseline; gap: 9px; }
+.mp-hero {
+  font-family: var(--font-mono);
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.mp-caption { font-size: 11.5px; color: var(--mp-text2); }
+.mp-sentence { font-size: 12px; line-height: 1.5; color: var(--mp-text2); }
+
+.mp-progress { display: flex; gap: 2.5px; }
+.mp-cell {
+  flex: 1;
+  height: 8px;
+  background: var(--mp-track-off);
+  border: 1.5px solid var(--mp-border);
+}
+.mp-cell.on { background: var(--mp-accent); }
+
+.mp-table {
+  padding: 10px 14px;
+  display: grid;
+  gap: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.mp-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; }
+.mp-k { color: var(--mp-muted); }
+.mp-v {
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+}
+
+.mp-actions {
+  padding: 11px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.mp-btn {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1.5px solid var(--mp-border);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--mp-text);
+  background: transparent;
+}
+.mp-btn.primary { background: var(--mp-border); color: var(--mp-surface); }
+.mp-btn.destructive { background: var(--mp-accent); color: #F7EEDC; }
+.mp-btn.disabled { opacity: 0.45; }
+.mp-ext { font-family: var(--font-mono); font-size: 11px; color: var(--mp-muted); }
+.mp-btn.destructive .mp-ext { color: #F7EEDC; }
+/* three pulsing squares — the panel's loader, never a rounded spinner */
+.mp-load { display: inline-flex; gap: 3px; margin-right: 3px; }
+.mp-load span {
+  width: 7px; height: 7px;
+  background: currentColor;
+  opacity: 0.25;
+  animation: mpPulse 900ms linear infinite;
+}
+.mp-load span:nth-child(2) { animation-delay: 150ms; }
+.mp-load span:nth-child(3) { animation-delay: 300ms; }
+@keyframes mpPulse { 0%, 60%, 100% { opacity: 0.25; } 30% { opacity: 1; } }
+
+.mp-toggles {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.mp-toggle {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 26px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+}
+.mp-toggle.off-limits { opacity: 0.45; }
+/* the click landing on the row — the switch itself does not move until the
+   restarted server reports the new binding */
+.mp-toggle.hit { background: var(--mp-sunken); opacity: 1; }
+.mp-track {
+  width: 28px; height: 15px;
+  flex: none;
+  position: relative;
+  background: var(--mp-track-off);
+  border: 1.5px solid var(--mp-border);
+  transition: background 120ms linear;
+}
+.mp-toggle.on .mp-track { background: var(--mp-ok); }
+.mp-knob {
+  position: absolute;
+  top: 1px; left: 1px;
+  width: 12px; height: 10px;
+  background: var(--mp-knob);
+  transition: left 120ms linear;
+}
+.mp-toggle.on .mp-knob { left: 12px; }
+.mp-lbl { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.mp-name { font-size: 11.5px; font-weight: 600; }
+.mp-hint { font-family: var(--font-mono); font-size: 9.5px; color: var(--mp-muted); }
+
+.mp-ft {
+  padding: 9px 14px 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.mp-link { font-size: 11px; color: var(--mp-text2); white-space: nowrap; }
+.mp-note { font-family: var(--font-mono); font-size: 9.5px; color: var(--mp-faint); white-space: nowrap; }
+.mp-spacer { flex: 1; min-width: 6px; }
+
+/* -- the in-panel dialog ------------------------------------------------- */
+/* Every question the app asks renders as a card OVER the panel's own content,
+   Docker-Desktop-style, with the panel dimmed by a scrim underneath — the
+   launcher replaced every osascript window with this. */
+.mac-panel { position: relative; }
+.mp-dialog {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px 14px;
+  background: rgba(31, 20, 15, 0.45);
+}
+.mp-dcard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  background: var(--mp-surface);
+  border: 1.5px solid var(--mp-border);
+  padding: 14px 14px 12px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
+  animation: mpCardIn 140ms ease-out;
+}
+@keyframes mpCardIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.mp-dtitle { font-size: 13.5px; font-weight: 700; }
+.mp-dmsg {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--mp-text2);
+  white-space: pre-wrap;
+}
+.mp-dinput {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  min-height: 30px;
+  padding: 7px 10px;
+  border: 1.5px solid var(--mp-border);
+  background: var(--mp-surface);
+}
+.mp-dinput.focus { background: var(--mp-sunken); }
+.mp-caret {
+  display: inline-block;
+  width: 1.5px;
+  height: 12px;
+  margin-left: 1px;
+  vertical-align: -2px;
+  background: var(--mp-text);
+  animation: mpBlink 1s steps(2) infinite;
+}
+@keyframes mpBlink { 50% { opacity: 0; } }
+.mp-dsecret {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 8px 10px;
+  border: 1.5px solid var(--mp-border);
+  background: var(--mp-sunken);
+  word-break: break-all;
+}
+.mp-dnote {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--mp-muted);
+}
+.mp-dbtns { display: flex; gap: 7px; margin-top: 2px; }
+.mp-dbtns .mp-btn { flex: 1; }
+.mp-btn.pressed { background: #3A2519; }
+.mp-dbusy {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 2px;
+  color: var(--mp-muted);
+}
+
+.mac-stage-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-mute);
+}
+.mac-stage-foot .demo-ctl button { border-color: var(--ink-mute); color: var(--ink-mute); }
+.mac-stage-foot .demo-ctl button:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+
 /* FAQ */
 .faq-list {
   display: grid;
@@ -1027,6 +1461,11 @@ footer.foot {
   .feat, .feat.wide, .feat.full { grid-column: span 1; }
   .agent { grid-template-columns: 1fr; }
   .qs-grid { grid-template-columns: 1fr; }
+  /* The launcher replica and the fact cards move above the steps rather than
+     beside them; the panel keeps its fixed 320px so it stays a replica. */
+  .inst-cols { grid-template-columns: minmax(0, 1fr); gap: 26px; }
+  .inst-body { padding: 20px; }
+  .inst-tab { padding: 10px 16px; }
   /* On phones keep the conversion links (Docs, GitHub) and drop only the
      section anchors — a marketing site with zero header nav loses its
      primary paths on the majority device class. */
