@@ -133,7 +133,7 @@ make run`}</CodeBlock>
             <p>Open <code>http://localhost:21847/dashboard</code> and sign in with the bootstrap admin credentials from <code>.env</code> (<code>CIX_BOOTSTRAP_ADMIN_EMAIL</code> / <code>CIX_BOOTSTRAP_ADMIN_PASSWORD</code>). Go to <b>API&nbsp;Keys → New key</b>, name the key, and copy the revealed <code>cix_…</code> value — it is shown exactly once. The same dialog also gives you a ready-to-paste <code>cix config</code> connect command, so you can skip the manual configuration below.</p>
             <div className="shot-row">
               <figure className="shot shot-wide">
-                <img src="/img/dashboard-api-keys.png" alt="The API keys page of the cix dashboard, with the New key button in the top right corner" loading="lazy" width="1800" height="731" />
+                <img src="/img/dashboard-api-keys.png" alt="The API keys page of the cix dashboard, with the New key button in the top right corner" loading="lazy" width="1800" height="787" />
                 <figcaption>API Keys → New key. Keys are bearer tokens for CLI / SDK access — created here, revoked here.</figcaption>
               </figure>
               <figure className="shot">
