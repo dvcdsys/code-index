@@ -11,7 +11,8 @@
 // embedding namespace and a query streams the collection past a dot product
 // with a top-K heap. Opening is one file open (sub-millisecond), resident
 // memory is a couple of page-cache buffers per active query, and the cost is
-// search latency: roughly 3x chromem's on the same data.
+// search latency: roughly 4x chromem's on the same data — see the measured
+// table in doc/VECTORSTORE.md.
 //
 // # Frozen contracts
 //

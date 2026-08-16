@@ -83,7 +83,7 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 │  └── embedded React dashboard + Swagger UI                      │
 │                                                                 │
 │  Indexing pipeline                                              │
-│  ├── tree-sitter/wasm (AST chunking, 30+ langs)  (wazero)       │
+│  ├── tree-sitter/wasm (AST chunking, 31 langs)   (wazero)       │
 │  ├── embedding provider (local llama.cpp / Voyage / OpenAI)     │
 │  ├── SQLite vector store (float32 BLOBs, streamed cosine scan)  │
 │  └── SQLite FTS5 mirror (BM25) + metadata (modernc/sqlite)      │
@@ -96,6 +96,8 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 ```
 
 Pure-Go static binary; CUDA-image variants add a CUDA runtime layer for GPU embeddings. Workspace clones live in `<data-dir>/repos/`.
+
+**Why vectors live in SQLite.** Through v0.12.x cix used [chromem-go](https://github.com/philippgille/chromem-go), an in-memory vector database. It decodes every document of every collection into the heap at startup and never evicts, so memory was proportional to the index rather than to the work: a real 312k-document index cost **2.2 GB resident while idle** and 47 seconds before it could answer anything. v0.13.0 replaced it with a SQLite store that keeps embeddings as float32 BLOBs and scans them per query — the same index now idles at **tens of megabytes** and answers about a millisecond after boot. The trade is search latency, roughly 4× higher and far less sensitive to how many results you ask for. Existing indexes are imported automatically on first boot; nothing is re-embedded. Numbers, layout and the migration: [`doc/VECTORSTORE.md`](doc/VECTORSTORE.md).
 
 ---
 
@@ -346,15 +348,8 @@ projects and teams that make it possible:
 
 **Indexing & storage**
 - [tree-sitter](https://tree-sitter.github.io/tree-sitter/) — AST-aware
-  chunking across 30+ languages, run via
+  chunking across 31 languages, run via
   [wazero](https://github.com/tetratelabs/wazero) (pure-Go WASM runtime).
-- [gotreesitter](https://github.com/odvcencio/gotreesitter) — the Go
-  tree-sitter binding cix's AST chunking first grew from; thank you for the
-  head start.
-- [chromem-go](https://github.com/philippgille/chromem-go) — the
-  embedded vector store cix shipped through v0.12.x, and the model its
-  collection semantics still follow. Now kept only to read a pre-0.13
-  index during the one-time import.
 - [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) — cgo-free
   SQLite for project metadata, symbols, the FTS5/BM25 mirror, and (since
   v0.13.0) the vectors themselves.
@@ -367,6 +362,8 @@ projects and teams that make it possible:
   [oapi-codegen](https://github.com/oapi-codegen/oapi-codegen) —
   OpenAPI-as-source-of-truth codegen for the Go interface and TypeScript
   dashboard types.
+- [gronx](https://github.com/adhocore/gronx) — the crontab expressions
+  behind scheduled database maintenance.
 - [brotli](https://github.com/andybalholm/brotli) and the
   [Go](https://go.dev/) standard library and `golang.org/x` ecosystem.
 
@@ -382,19 +379,34 @@ projects and teams that make it possible:
 - [notify](https://github.com/rjeczalik/notify) — cross-platform filesystem
   watching for the index-on-change watcher.
 - [koanf](https://github.com/knadh/koanf) — layered configuration
-  (flags → env → `~/.cix/config.yaml`).
+  (flags → env → `~/.cix/config.yaml`), with
+  [validator](https://github.com/go-playground/validator) checking what
+  lands there.
+- [go-gitignore](https://github.com/sabhiram/go-gitignore) — `.cixignore`
+  and `.gitignore` matching, so the watcher and the indexer agree with git
+  about what is source.
 
 **Dashboard (web UI)**
 - [React](https://react.dev/) + [Vite](https://vitejs.dev/) — the embedded
-  dashboard served at `/dashboard`.
+  dashboard served at `/dashboard`, routed by
+  [React Router](https://reactrouter.com/).
 - [Radix UI](https://www.radix-ui.com/) + [Tailwind CSS](https://tailwindcss.com/)
   — accessible component primitives and styling (the shadcn/ui pattern).
 - [TanStack Query](https://tanstack.com/query) — server-state and data
   fetching.
 - [openapi-typescript](https://github.com/openapi-ts/openapi-typescript) —
   generates the dashboard's API types from the OpenAPI spec.
-- [lucide](https://lucide.dev/) and [sonner](https://github.com/emilkowalski/sonner)
-  — icons and toast notifications.
+- [sonner](https://github.com/emilkowalski/sonner) — toast notifications.
+
+**No longer in the stack, still owed thanks**
+- [chromem-go](https://github.com/philippgille/chromem-go) — the embedded
+  vector store cix shipped through v0.12.x, and the model its collection
+  semantics still follow. It is why the early versions worked at all; it
+  is kept as a dependency only to read a pre-0.13 index during the
+  one-time import.
+- [gotreesitter](https://github.com/odvcencio/gotreesitter) — the Go
+  tree-sitter binding cix's AST chunking first grew from, before the move
+  to WASM grammars on wazero. Thank you for the head start.
 
 Full dependency lists with versions live in
 [`server/go.mod`](server/go.mod), [`cli/go.mod`](cli/go.mod), and

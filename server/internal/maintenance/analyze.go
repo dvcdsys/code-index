@@ -96,7 +96,7 @@ func (s *Service) Analyze(ctx context.Context) (*Analysis, error) {
 // scanState is the live picture every scanner reconciles against, read once so
 // five scanners do not issue the same queries five times.
 type scanState struct {
-	// liveCollections maps chromem collection name -> host_path, for every
+	// liveCollections maps vector-store collection name -> host_path, for every
 	// row currently in `projects`.
 	liveCollections map[string]string
 	// liveHashes is the set of projects.HashPath values currently in use.

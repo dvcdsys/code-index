@@ -110,9 +110,9 @@ func (p *Provider) ID() string {
 	return "ollama:" + p.cfg.Model
 }
 
-// Dimension returns 0 — the vector store infers dimension from the
-// first upsert (chromem-go behaviour) and CodeRankEmbed-Q8 reports
-// it on first call.
+// Dimension returns 0 — the vector store takes whatever width the first
+// upsert carries (each namespace holds one model's vectors, so they cannot
+// mix) and CodeRankEmbed-Q8 reports it on first call.
 func (p *Provider) Dimension() int { return 0 }
 
 // SupportsTokenize is true: llama-server exposes /tokenize.

@@ -76,7 +76,7 @@ type Deps struct {
 	// server is started with CIX_EMBEDDINGS_ENABLED=false (e.g. in router
 	// tests). Phase 5 uses it for semantic search.
 	EmbeddingSvc EmbeddingsQuerier
-	// VectorStore is the chromem-go backed vector store (Phase 4). Nil-safe:
+	// VectorStore is the SQLite-backed vector store. Nil-safe:
 	// semantic search returns empty results when absent. Typed as the
 	// vectorstore.Interface so production can supply a *vectorstore.Holder
 	// (swappable on provider switch) while tests pass a raw *Store.
