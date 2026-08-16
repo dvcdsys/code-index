@@ -28,10 +28,10 @@ type DiskUsage struct {
 	FSFreeBytes  *int64 `json:"fs_free_bytes,omitempty"`
 }
 
-// VectorStoreUsage summarises the in-memory vector database. Every field here
-// is read from chromem's process image, so this costs nothing — which is why
-// the usage endpoint can report document counts even when it skips the
-// directory walks.
+// VectorStoreUsage summarises the vector store. The counts are aggregates over
+// the store's own tables rather than a filesystem walk, which is why the usage
+// endpoint can still report them when it skips the directory walks — but they
+// are a query, not a free read of a process image as they were under chromem.
 type VectorStoreUsage struct {
 	Collections int    `json:"collections"`
 	Documents   int64  `json:"documents"`

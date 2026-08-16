@@ -1,17 +1,19 @@
 // Package maintenance answers two admin questions about a running server:
 // "what is it using?" and "how much of that is garbage I can drop?".
 //
-// It exists because the vector store is an in-memory database. chromem-go
-// eagerly decodes every document of every collection at startup and never
-// evicts, so a collection whose project was deleted from SQLite keeps its
-// documents resident — for the life of the process — while being reachable by
-// nothing. Deleting a project used to leave exactly that: the row went away,
-// FK CASCADE took the chunks and symbols, and the vector collection stayed in
-// RAM forever. The delete path now cleans up after itself (see
-// projects.Artifacts), but every server that ran the old code has a backlog,
-// and a cloned checkout or an abandoned provider namespace can still be
-// orphaned by a crash mid-delete. This package finds that backlog and removes
-// it on request.
+// It exists because nothing else reconciles what is on disk against what the
+// database still claims. A collection whose project was deleted from SQLite is
+// reachable by nothing and pays for itself in disk forever: the row went away,
+// FK CASCADE took the chunks and symbols, and the vector collection stayed.
+// The delete path now cleans up after itself (see projects.Artifacts), but
+// every server that ran the old code has a backlog, and a cloned checkout or
+// an abandoned provider namespace can still be orphaned by a crash mid-delete.
+// This package finds that backlog and removes it on request.
+//
+// Under chromem-go — the vector store through v0.12.x — an orphan cost
+// resident memory too, because that engine decoded every document of every
+// collection at startup and never evicted. Since v0.13.0 the vectors live in
+// SQLite and are read per query, so what is being reclaimed here is disk.
 //
 // The split of responsibilities is deliberate: this package holds all the
 // logic and touches the filesystem, the database and the vector store
@@ -41,14 +43,14 @@ import (
 type CategoryID string
 
 const (
-	// CatOrphanCollections is the only category that frees RAM as well as
-	// disk: a chromem collection with no matching row in `projects`.
+	// CatOrphanCollections is a vector-store collection with no matching row
+	// in `projects`.
 	CatOrphanCollections CategoryID = "orphan_collections"
 	// CatOrphanRepos is a cloned checkout under <repos>/ whose project is gone.
 	CatOrphanRepos CategoryID = "orphan_repos"
 	// CatStaleNamespaces is a vector-store namespace directory belonging to a
-	// provider/model that is no longer active. Disk only — chromem opens the
-	// active namespace and nothing else, so these were never in RAM.
+	// provider/model that is no longer active. The server opens the active
+	// namespace and nothing else, so these cost disk and nothing more.
 	CatStaleNamespaces CategoryID = "stale_namespaces"
 	// CatLegacyChromem is the pre-migration chromem gob tree of a namespace
 	// whose collections are all in the SQLite store. Nothing reads it; it is
@@ -156,7 +158,8 @@ type Item struct {
 	// which is a SQL delete. Unexported: it is an implementation detail of
 	// Clean and must never reach the client.
 	path string
-	// collection is the raw chromem collection name for orphan_collections.
+	// collection is the raw vector-store collection name for
+	// orphan_collections.
 	collection string
 }
 
