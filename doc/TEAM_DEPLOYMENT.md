@@ -251,10 +251,12 @@ docker compose pull
 docker compose up -d
 ```
 
-> **Reindex after a server upgrade.** Until the parsing/chunking/embedding
-> pipeline stabilizes, an upgrade can change how code is embedded. Trigger a
-> reindex (dashboard or `cix reindex`) so every project lands on the new
-> pipeline. Within a version, search is consistent once reindexed.
+> **An upgrade does not normally need a reindex.** Existing indexes keep
+> working, and 0.13's move of the vectors into SQLite imports them for you on
+> first boot without re-embedding anything. The cases that do call for one —
+> the embedding model changing, or a release that backfills new chunk-level
+> data — are listed in [`UPDATES.md`](UPDATES.md#3-reindex-after-an-upgrade),
+> and the dashboard flags affected projects itself.
 
 Server and CLI are released on **independent tag streams** (`server/vX.Y.Z`
 vs CLI tags) and are wire-compatible across a minor skew — you don't have to

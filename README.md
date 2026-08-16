@@ -29,16 +29,6 @@ Or open `http://localhost:21847/dashboard` in your browser:
 
 <img src="site/public/img/dashboard-home.png" alt="The cix dashboard — server status at a glance and a guided “Connect Claude Code to cix” onboarding with copy-paste commands" width="900">
 
-> [!IMPORTANT]
-> **Reindex after upgrading the server.** Until the parsing/chunking/embedding
-> pipeline stabilizes, an upgrade can change how code is embedded. A reindex
-> brings every project onto the new pipeline; within a version, search is
-> consistent once reindexed.
->
-> The 0.13.0 vector-store change is the exception: it moves the vectors you
-> already have into SQLite by itself, on first boot, without re-embedding
-> anything ([`doc/VECTORSTORE.md`](doc/VECTORSTORE.md)).
-
 ---
 
 ## Why
