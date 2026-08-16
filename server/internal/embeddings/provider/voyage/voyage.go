@@ -9,7 +9,7 @@
 //     (256/512/1024/2048). Part of Provider.ID() because changing it
 //     invalidates the existing index.
 //   - output_dtype: float|int8 (binary/ubinary are out of scope —
-//     chromem-go has no hamming search). For int8 the server returns
+//     the vector store has no hamming search). For int8 the server returns
 //     a list of integers per dimension; we dequantize to float32 in
 //     this package before returning vectors to the vector store.
 //
@@ -734,7 +734,7 @@ func (p *Provider) embed(ctx context.Context, texts []string, inputType string) 
 // the approximate unit-norm float representation.
 //
 // This is the only place in the codebase that handles int8 quantized
-// embeddings; chromem-go and the search path both work exclusively
+// embeddings; the vector store and the search path both work exclusively
 // in float32.
 func dequantize(raw json.RawMessage, dtype string) ([]float32, error) {
 	switch dtype {

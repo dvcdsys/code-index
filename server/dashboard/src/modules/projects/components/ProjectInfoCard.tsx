@@ -4,7 +4,7 @@ import { formatBytes } from '@/lib/formatBytes';
 import { formatDateTime, formatRelative } from '@/lib/formatDate';
 
 // Metadata that would otherwise need an SSH session: which embedding model
-// produced the vectors, where this project's SQLite and chromem-go state
+// produced the vectors, where this project's SQLite and vector-store state
 // lives, and how big both are. Storage fields are nullable — an
 // embeddings-disabled server has no resolvable paths, and "—" beats "0 B".
 //

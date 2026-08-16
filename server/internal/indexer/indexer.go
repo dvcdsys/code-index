@@ -818,8 +818,9 @@ func (s *Service) ProcessFilesStreaming(
 	}
 
 	// ---- Stage 3: WRITE (serial, ordered) --------------------------------
-	// Vector-store + per-file DB writes run on this single goroutine: chromem
-	// is thread-safe but serialising keeps SQLite's WAL writer uncontended and
+	// Vector-store + per-file DB writes run on this single goroutine: the
+	// store is thread-safe, but serialising keeps SQLite's WAL writer
+	// uncontended and
 	// preserves deterministic progress-event ordering. Each write is local and
 	// sub-ms, so serialising costs nothing next to the (now parallel) embeds.
 	for _, p := range prep {
@@ -868,7 +869,7 @@ func (s *Service) ProcessFilesStreaming(
 			}
 		}
 
-		// Build chunksfts payload from the same chunks pushed to chromem.
+		// Build chunksfts payload from the same chunks pushed to the vector store.
 		ftsChunks := make([]chunksfts.Chunk, len(p.vsChunks))
 		for i, c := range p.vsChunks {
 			ftsChunks[i] = chunksfts.Chunk{

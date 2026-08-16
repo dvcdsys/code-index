@@ -119,14 +119,14 @@ type projectHits struct {
 // WorkspaceSearch — GET /api/v1/workspaces/{id}/search.
 //
 // Hybrid BM25+dense fan-out. Each project runs two queries in
-// parallel: dense (chromem cosine) and sparse (SQLite FTS5 BM25 over
+// parallel: dense (vector-store cosine) and sparse (SQLite FTS5 BM25 over
 // chunks_fts). Per project, the two ranked lists are fused via
 // Reciprocal Rank Fusion. Across projects, an α-blended candidacy
 // score (with per-query min-max normalization on both signals) plus
 // a relative threshold (`candidacy ≥ best × 0.4`) keeps the result
 // set focused on repos that actually share vocabulary or semantics
 // with the query — pure-dense fan-out leaked every workspace repo at
-// noise-level cosine similarity, since chromem returns the N nearest
+// noise-level cosine similarity, since a top-K scan returns the N nearest
 // vectors regardless of how far away "nearest" actually is.
 //
 // Observed pre-hybrid: in a workspace of N repos, the repos that
@@ -756,9 +756,9 @@ func projectLabel(projectPath string) string {
 	return projectPath
 }
 
-// round4 rounds f to 4 decimal places — matches the chunk-side
-// rounding chromem already applies, so scores in the response look
-// consistent across nested fields.
+// round4 rounds f to 4 decimal places — matches the chunk-side rounding the
+// vector store already applies, so scores in the response look consistent
+// across nested fields.
 func round4(f float32) float32 {
 	if math.IsNaN(float64(f)) {
 		return 0

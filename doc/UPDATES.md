@@ -127,7 +127,7 @@ Upgrading the **server** can require a reindex in two cases:
    model (or you change it yourself via Dashboard → Server →
    Embedding model), every project becomes stale. The dashboard's
    drift indicator paints affected projects red with a "Stale model"
-   badge until you reindex. See README's *Drift indicator* section.
+   badge until you reindex. See [`DASHBOARD.md`](DASHBOARD.md#drift-indicator).
 2. **Schema migration adds chunk-level data.** Releases that backfill
    new chunk metadata (e.g. the FTS5 mirror introduced by `f00e3d3`)
    may prompt the dashboard to recommend a reindex on existing
