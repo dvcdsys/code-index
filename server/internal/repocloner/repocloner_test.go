@@ -2,6 +2,7 @@ package repocloner
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -335,6 +336,138 @@ func TestCloneOrFetch_EmptyPrevSHA_ReturnsNilChangeSet(t *testing.T) {
 	}
 	if res.Changes != nil {
 		t.Errorf("Changes = %+v, want nil with empty PrevIndexedSHA", res.Changes)
+	}
+}
+
+func TestCloneOrFetch_HalfWrittenClone_SelfHeals(t *testing.T) {
+	upstream, w := makeBareUpstream(t, "main")
+	headSHA := w.CommitFiles(t, "init", map[string]string{
+		"a.go": "package a\n",
+	})
+
+	// Simulate what a SIGKILL mid-PlainClone leaves behind: .git exists
+	// (so needsClone says "reuse") but holds no usable repository state.
+	local := filepath.Join(t.TempDir(), "clone")
+	if err := os.MkdirAll(filepath.Join(local, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir fake .git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(local, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("write fake HEAD: %v", err)
+	}
+
+	res, err := CloneOrFetch(context.Background(), CloneOptions{
+		GitHubURL: "file://" + upstream,
+		Branch:    "main",
+		LocalDir:  local,
+	})
+	if err != nil {
+		t.Fatalf("CloneOrFetch on half-written clone: %v (want self-heal, got permanent failure)", err)
+	}
+	if res.HeadSHA != headSHA {
+		t.Errorf("HeadSHA = %s, want %s", res.HeadSHA, headSHA)
+	}
+	if res.RecloneReason == "" {
+		t.Error("RecloneReason empty, want the local-state failure that forced the re-clone")
+	}
+}
+
+func TestCloneOrFetch_RemoteURLChanged_Reclones(t *testing.T) {
+	upstreamA, wa := makeBareUpstream(t, "main")
+	wa.CommitFiles(t, "init A", map[string]string{"a.go": "package a\n"})
+
+	local := filepath.Join(t.TempDir(), "clone")
+	initialCloneFor(t, upstreamA, local, "main")
+
+	upstreamB, wb := makeBareUpstream(t, "main")
+	headB := wb.CommitFiles(t, "init B", map[string]string{"b.go": "package b\n"})
+
+	res, err := CloneOrFetch(context.Background(), CloneOptions{
+		GitHubURL: "file://" + upstreamB,
+		Branch:    "main",
+		LocalDir:  local,
+	})
+	if err != nil {
+		t.Fatalf("CloneOrFetch with changed URL: %v (want re-clone, got error)", err)
+	}
+	if res.HeadSHA != headB {
+		t.Errorf("HeadSHA = %s, want %s (upstream B)", res.HeadSHA, headB)
+	}
+	if res.RecloneReason == "" {
+		t.Error("RecloneReason empty, want the remote-mismatch reason")
+	}
+}
+
+func TestCloneOrFetch_PackfileBudget_Reclones(t *testing.T) {
+	upstream, w := makeBareUpstream(t, "main")
+	w.CommitFiles(t, "init", map[string]string{"a.go": "package a\n"})
+
+	local := filepath.Join(t.TempDir(), "clone")
+	initialCloneFor(t, upstream, local, "main")
+
+	// Pad the object store up to the budget with dummy packs — the count is
+	// what matters, not the content.
+	packDir := filepath.Join(local, ".git", "objects", "pack")
+	for i := packfileCount(local); i < maxFetchPacks; i++ {
+		name := filepath.Join(packDir, fmt.Sprintf("pack-%040d.pack", i))
+		if err := os.WriteFile(name, []byte("dummy"), 0o644); err != nil {
+			t.Fatalf("write dummy pack: %v", err)
+		}
+	}
+
+	headSHA := w.CommitFiles(t, "v2", map[string]string{"b.go": "package b\n"})
+
+	res, err := CloneOrFetch(context.Background(), CloneOptions{
+		GitHubURL: "file://" + upstream,
+		Branch:    "main",
+		LocalDir:  local,
+	})
+	if err != nil {
+		t.Fatalf("CloneOrFetch over pack budget: %v", err)
+	}
+	if res.RecloneReason == "" {
+		t.Error("RecloneReason empty, want the packfile-budget reason")
+	}
+	if res.HeadSHA != headSHA {
+		t.Errorf("HeadSHA = %s, want %s", res.HeadSHA, headSHA)
+	}
+	if n := packfileCount(local); n >= maxFetchPacks {
+		t.Errorf("packfileCount = %d after re-clone, want it back to a fresh clone's worth", n)
+	}
+}
+
+func TestCloneOrFetch_FetchFailure_KeepsClone(t *testing.T) {
+	upstream, w := makeBareUpstream(t, "main")
+	headSHA := w.CommitFiles(t, "init", map[string]string{"a.go": "package a\n"})
+
+	local := filepath.Join(t.TempDir(), "clone")
+	initialCloneFor(t, upstream, local, "main")
+
+	// Kill the upstream. The URL still matches the checkout's origin, so
+	// this is indistinguishable from a network outage — the fetch must
+	// fail WITHOUT costing us the healthy local clone.
+	if err := os.RemoveAll(upstream); err != nil {
+		t.Fatalf("remove upstream: %v", err)
+	}
+
+	_, err := CloneOrFetch(context.Background(), CloneOptions{
+		GitHubURL: "file://" + upstream,
+		Branch:    "main",
+		LocalDir:  local,
+	})
+	if err == nil {
+		t.Fatal("CloneOrFetch succeeded against a dead upstream, want error")
+	}
+
+	repo, oerr := git.PlainOpen(local)
+	if oerr != nil {
+		t.Fatalf("local clone destroyed by a fetch failure: %v", oerr)
+	}
+	head, herr := repo.Head()
+	if herr != nil {
+		t.Fatalf("local clone HEAD unreadable after fetch failure: %v", herr)
+	}
+	if head.Hash().String() != headSHA {
+		t.Errorf("local HEAD = %s, want untouched %s", head.Hash().String(), headSHA)
 	}
 }
 

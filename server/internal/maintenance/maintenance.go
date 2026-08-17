@@ -217,9 +217,13 @@ type Analysis struct {
 	Warnings              []string   `json:"warnings,omitempty"`
 }
 
-// DirSizeBytes walks dir and sums regular-file sizes. Returns (0,false) on any
-// error (missing dir, permission, cancelled context) so callers can omit the
-// number rather than report a misleading 0.
+// DirSizeBytes walks dir and sums regular-file sizes. An unreadable entry
+// inside the tree is skipped and the rest still counts — a partial number
+// beats no number on a tree of hundreds of thousands of git objects, where a
+// single bad directory used to make the whole "Cloned repositories" row
+// vanish. Returns (partial, false) only when nothing trustworthy could be
+// produced: the root itself is missing/unreadable (so "unreadable" and
+// "empty" stay distinguishable) or the context was cancelled mid-walk.
 //
 // The context is checked every so many entries: on a vector store that is one
 // file per document these walks visit hundreds of thousands of entries, and a
@@ -231,9 +235,16 @@ type Analysis struct {
 func DirSizeBytes(ctx context.Context, dir string) (int64, bool) {
 	var total int64
 	var seen int
-	walkErr := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			// Root failure means there is nothing to report; anything
+			// deeper is one bad subtree — skip it and keep counting.
+			// (WalkDir already skips the children of a directory it
+			// could not read.)
+			if path == dir {
+				return err
+			}
+			return nil
 		}
 		// Checking every entry would make ctx.Err() a meaningful share of the
 		// walk's cost; every 512 keeps cancellation prompt for free.
@@ -253,7 +264,7 @@ func DirSizeBytes(ctx context.Context, dir string) (int64, bool) {
 		return nil
 	})
 	if walkErr != nil {
-		return 0, false
+		return total, false
 	}
 	return total, true
 }

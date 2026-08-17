@@ -241,6 +241,10 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 		d.recordFailure(ctx, g, fmt.Errorf("clone: %w", err))
 		return err
 	}
+	if result.RecloneReason != "" {
+		d.Logger.Info("repojobs: checkout discarded and re-cloned",
+			"project", g.ProjectPath, "reason", result.RecloneReason)
+	}
 
 	if err := d.GitRepos.SetClone(ctx, g.ProjectPath, result.HeadSHA, ""); err != nil {
 		d.Logger.Warn("repojobs: set last_sha failed", "project", g.ProjectPath, "err", err)
