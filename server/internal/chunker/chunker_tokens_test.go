@@ -7,36 +7,77 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/tokenizer"
 )
 
-// fakeBudget counts one token per whitespace-separated word and cuts on word
-// boundaries. Deterministic and independent of any vocabulary, so these tests
-// assert the CHUNKER's behaviour rather than a tokenizer's — the real
-// tokenizer has its own tests.
+// fakeBudget is deliberately ADVERSARIAL: a newline costs a token, exactly
+// like it does in the real tokenizer, where a line break plus the next line's
+// indentation forms its own pre-token.
+//
+// The first version of this double counted whitespace-separated words and let
+// newlines be free. That made the sum of per-line counts equal the count of
+// the joined text — which is precisely the assumption the implementation got
+// wrong, so the double agreed with the bug and the tests passed while real
+// files came out 3% over budget. A test double that cannot express the
+// failure mode cannot catch it.
+//
+// Counting rule: one token per word start, one per newline. Sum over pieces
+// therefore does NOT equal the count of the concatenation unless the pieces
+// are substrings — which is the property the splitter must have.
 type fakeBudget struct{ maxInput int }
 
 func (f fakeBudget) MaxInputTokens() int { return f.maxInput }
 func (f fakeBudget) ExactCounts() bool   { return true }
 
-func (f fakeBudget) CountTokens(s string) int { return len(strings.Fields(s)) }
-
-func (f fakeBudget) SplitPoints(s string, budget int) ([]int, int) {
-	var offsets []int
-	count, since := 0, 0
-	inWord := false
+func (f fakeBudget) CountTokens(s string) int {
+	n, inWord := 0, false
 	for i := 0; i < len(s); i++ {
-		isSpace := s[i] == ' ' || s[i] == '\t' || s[i] == '\n'
-		if !isSpace && !inWord {
-			inWord = true
-			count++
-			since++
-			if since > budget {
-				offsets = append(offsets, i)
-				since = 1
-			}
-		} else if isSpace {
+		switch c := s[i]; {
+		case c == '\n':
+			n++
 			inWord = false
+		case c == ' ' || c == '\t' || c == '\r':
+			inWord = false
+		default:
+			if !inWord {
+				inWord = true
+				n++
+			}
 		}
 	}
-	return offsets, count
+	return n
+}
+
+// SplitPoints cuts before the token that would overflow the budget, so every
+// piece it produces costs at most budget under CountTokens above.
+func (f fakeBudget) SplitPoints(s string, budget int) ([]int, int) {
+	var offsets []int
+	total, since := 0, 0
+	inWord := false
+	cut := func(at int) {
+		offsets = append(offsets, at)
+		since = 1
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\n':
+			total++
+			since++
+			if since > budget {
+				cut(i)
+			}
+			inWord = false
+		case c == ' ' || c == '\t' || c == '\r':
+			inWord = false
+		default:
+			if !inWord {
+				inWord = true
+				total++
+				since++
+				if since > budget {
+					cut(i)
+				}
+			}
+		}
+	}
+	return offsets, total
 }
 
 var _ tokenizer.Budget = fakeBudget{}
