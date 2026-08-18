@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/dvcdsys/code-index/server/internal/tokenizer"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -187,7 +188,7 @@ func TestPlanBatches_SplitsByTokenBudget(t *testing.T) {
 	small := "tiny"
 	texts := []string{big, small, small, small, small, small}
 
-	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch)
+	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch, nil)
 	if len(batches) < 2 {
 		t.Fatalf("expected at least 2 batches, got %d", len(batches))
 	}
@@ -213,7 +214,7 @@ func TestPlanBatches_RespectsCountCap(t *testing.T) {
 	for i := range texts {
 		texts[i] = "chunk"
 	}
-	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch)
+	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch, nil)
 	if len(batches) != 2 {
 		t.Fatalf("expected 2 batches (128 + 72), got %d", len(batches))
 	}
@@ -650,5 +651,37 @@ func TestInt8Dequantize_Base64(t *testing.T) {
 	v := vecs[0]
 	if v[0] < 0.999 || v[1] > -0.999 || v[2] != 0 || v[3] < 0.50 || v[3] > 0.51 {
 		t.Errorf("base64 int8 dequantized values out of range: %v", v)
+	}
+}
+
+// TestProviderSatisfiesBudget pins the provider to the interface the chunker
+// consumes. A compile-time assertion rather than a runtime test: the whole
+// point of the interface is that the chunker never imports this package.
+func TestProviderSatisfiesBudget(t *testing.T) {
+	var _ tokenizer.Budget = (*Provider)(nil)
+}
+
+// TestFallbackWithoutTokenizer covers the degraded path: no tokenizer.json
+// means estimates, the conservative batch cap, and ExactCounts()==false so a
+// caller can widen its margins instead of trusting the number.
+func TestFallbackWithoutTokenizer(t *testing.T) {
+	p := &Provider{cfg: Config{Model: "voyage-code-3"}}
+	if p.ExactCounts() {
+		t.Error("ExactCounts must be false without a tokenizer")
+	}
+	if got := p.maxTokensPerBatch(); got != defaultMaxTokensPerBatch {
+		t.Errorf("batch cap = %d, want the conservative %d", got, defaultMaxTokensPerBatch)
+	}
+	if got, want := p.CountTokens("hello world"), len("hello world")/bytesPerToken; got != want {
+		t.Errorf("CountTokens = %d, want the byte estimate %d", got, want)
+	}
+}
+
+// TestOperatorOverrideWinsOverExactCap — an explicit MaxTokensPerRequest is
+// the operator's call and must not be silently raised by exact counting.
+func TestOperatorOverrideWinsOverExactCap(t *testing.T) {
+	p := &Provider{cfg: Config{Model: "voyage-code-3", MaxTokensPerRequest: 42_000}}
+	if got := p.maxTokensPerBatch(); got != 42_000 {
+		t.Errorf("batch cap = %d, want the operator's 42000", got)
 	}
 }

@@ -33,6 +33,13 @@ func (factory) SchemaJSON() []byte {
 				Description: "int8 is dequantized to float32 on the server side.",
 			},
 			{Name: "truncation", Label: "Truncate over-length input", Kind: "bool", Default: true},
+			{
+				Name: "tokenizer_path", Label: "Tokenizer file", Kind: "string",
+				Description: "Absolute path to the model's tokenizer.json (huggingface.co/voyageai/<model>). " +
+					"Set it and token counts become exact: batches pack to the real limit instead of a " +
+					"byte guess that overestimates ~2x, and over-long inputs split on token boundaries " +
+					"instead of byte windows. Empty falls back to the estimate.",
+			},
 			{Name: "api_key_env", Label: "API key env var", Kind: "secret-env", Required: true, Default: defaultAPIKeyEnv},
 		},
 	}
