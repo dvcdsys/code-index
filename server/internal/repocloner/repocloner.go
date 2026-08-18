@@ -12,12 +12,13 @@
 // go-git into the binary keeps the runtime image untouched.
 //
 // What this package does:
-//   - Clone a branch (public OR PAT-authenticated)
+//   - Clone a branch (public OR PAT-authenticated), shallow and tag-free
 //   - Fetch + reset to remote HEAD on subsequent runs
+//   - Compact the object store in place when fetch packs pile up or legacy
+//     tag snapshots are present (see compact.go) — go-git has no gc of its
+//     own and the distroless runtime has no git binary
 //   - Discard and re-clone a checkout whose local state is unusable
-//     (half-written clone, changed remote URL) or whose object store has
-//     accumulated too many fetch packfiles — go-git never runs gc, so
-//     re-cloning is the only way the store ever shrinks
+//     (half-written clone, changed remote URL, failed compaction)
 //   - Report the current HEAD SHA (for last_sha bookkeeping)
 //   - Resolve a "github.com/owner/repo" + branch to a deterministic local
 //     directory under DataDir/repos/{path_hash}/
@@ -53,15 +54,6 @@ var ErrAlreadyUpToDate = errors.New("repo already up to date")
 // (fetch/transport failures) is returned as-is so a network blip never costs
 // an otherwise healthy clone.
 var errLocalState = errors.New("local clone state unusable")
-
-// maxFetchPacks bounds packfile accumulation in a reused checkout. Every
-// fetch persists one new .pack/.idx pair, the subsequent hard reset makes the
-// previously fetched tree unreachable, and go-git has no gc — so without a
-// bound the object store grows with every upstream push, forever. Real git
-// self-triggers gc at 50 packs; we re-clone earlier because a shallow
-// re-clone is cheap (one pack, worktree-sized) while the accumulated packs
-// are pure dead weight.
-const maxFetchPacks = 20
 
 // CloneOptions parameterises a clone or fetch.
 type CloneOptions struct {
@@ -129,10 +121,13 @@ type Result struct {
 	// caller can skip enqueueing an index_repo job entirely.
 	NoChanges bool
 	// RecloneReason is non-empty when an existing checkout was discarded
-	// and cloned fresh (unusable local state, changed remote URL, or the
-	// packfile budget was exceeded). Purely informational — callers log it
-	// so the operator can see why a fetch turned into a full clone.
+	// and cloned fresh (unusable local state, changed remote URL, or a
+	// failed compaction). Purely informational — callers log it so the
+	// operator can see why a fetch turned into a full clone.
 	RecloneReason string
+	// Compaction is set when this call rewrote the checkout's object store
+	// (see compact.go). Purely informational — callers log it.
+	Compaction *CompactStats
 }
 
 // CloneOrFetch clones the repo when LocalDir is empty, otherwise fetches
@@ -142,10 +137,16 @@ type Result struct {
 // An existing checkout is discarded and cloned fresh (Result.RecloneReason
 // says why) in three situations: its .git state is unusable — the half-clone
 // a SIGKILL mid-clone leaves behind used to fail every retry forever; its
-// origin URL no longer matches the requested one (github_url changed); or its
-// object store has accumulated maxFetchPacks fetch packfiles. Fetch/transport
-// failures are NOT grounds for a re-clone — a network blip must not cost a
-// healthy clone (and force the full reindex that follows one).
+// origin URL no longer matches the requested one (github_url changed); or a
+// compaction of its object store failed. Fetch/transport failures are NOT
+// grounds for a re-clone — a network blip must not cost a healthy clone (and
+// force the full reindex that follows one).
+//
+// After a successful update the checkout's object store is compacted when it
+// needs it (accumulated fetch packs, or tag snapshots left behind by
+// pre-NoTags server versions — which makes the first update after a server
+// upgrade clean every existing checkout, with no separate migration). See
+// compact.go for the mechanism and its measured costs.
 //
 // The caller is responsible for choosing a LocalDir that won't collide
 // across repos — typically `<DataDir>/repos/<path_hash>/` keyed by
@@ -164,21 +165,15 @@ func CloneOrFetch(ctx context.Context, opts CloneOptions) (Result, error) {
 	url := normaliseURL(opts.GitHubURL)
 	auth := authFor(opts.PAT)
 
-	// First-time clone path: LocalDir is missing or empty.
+	// First-time clone path: LocalDir is missing or empty. A fresh NoTags
+	// clone is one branch-snapshot pack — nothing to compact.
 	if needsClone(opts.LocalDir) {
 		return cloneFresh(ctx, opts, url, auth)
 	}
 
-	// Packfile budget: every fetch below adds a pack and nothing ever
-	// removes one, so past the budget the store is mostly unreachable
-	// dead weight. Cheaper to start over than to keep carrying it.
-	if n := packfileCount(opts.LocalDir); n >= maxFetchPacks {
-		return reclone(ctx, opts, url, auth, fmt.Sprintf("object store has %d fetch packfiles (budget %d)", n, maxFetchPacks))
-	}
-
 	res, err := updateExisting(ctx, opts, url, auth)
 	if err == nil {
-		return res, nil
+		return maybeCompact(ctx, opts, url, auth, res)
 	}
 	// Only local-state failures are recoverable by re-cloning, and never on
 	// a dead context — a cancelled shutdown fetch is not evidence the
@@ -187,6 +182,32 @@ func CloneOrFetch(ctx context.Context, opts CloneOptions) (Result, error) {
 		return Result{}, err
 	}
 	return reclone(ctx, opts, url, auth, err.Error())
+}
+
+// maybeCompact runs the object-store compaction after a successful update
+// when the checkout warrants it. It runs on the NoChanges path too: the
+// post-upgrade cleanup of a tag-carrying checkout must not wait for the
+// repo's next actual commit. A failed compaction falls back to nuke +
+// re-clone — the store's state is unknown at that point, and a shallow
+// re-clone is always correct (Changes degrade to nil, so the caller
+// reconciles instead of diffing).
+func maybeCompact(ctx context.Context, opts CloneOptions, url string, auth *http.BasicAuth, res Result) (Result, error) {
+	if ctx.Err() != nil || !needsCompaction(opts.LocalDir) {
+		return res, nil
+	}
+	var protect []plumbing.Hash
+	if s := strings.TrimSpace(opts.PrevIndexedSHA); s != "" {
+		// The indexed commit is the base of the NEXT incremental diff; no
+		// ref points at it once the branch has moved on, so it must be
+		// protected explicitly.
+		protect = append(protect, plumbing.NewHash(s))
+	}
+	st, err := compactCheckout(opts.LocalDir, protect...)
+	if err != nil {
+		return reclone(ctx, opts, url, auth, fmt.Sprintf("compaction failed: %v", err))
+	}
+	res.Compaction = &st
+	return res, nil
 }
 
 // cloneFresh is the first-time clone into an empty or missing LocalDir.
@@ -200,6 +221,11 @@ func cloneFresh(ctx context.Context, opts CloneOptions, url string, auth *http.B
 		ReferenceName: plumbing.NewBranchReferenceName(opts.Branch),
 		SingleBranch:  true,
 		Depth:         1, // shallow — minimises bandwidth + disk
+		// go-git's clone default is AllTags, and on a shallow clone every
+		// tag arrives as a FULL tree snapshot (spring-boot's 391 tags cost
+		// a 102 MB store for a 39 MB worktree). cix indexes one branch and
+		// never reads tags.
+		Tags: git.NoTags,
 	})
 	if err != nil {
 		// Cleanup so the next retry isn't stuck with a half-clone.
@@ -258,6 +284,9 @@ func updateExisting(ctx context.Context, opts CloneOptions, url string, auth *ht
 		RefSpecs: []config.RefSpec{config.RefSpec(fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", opts.Branch, opts.Branch))},
 		Depth:    1,
 		Force:    true,
+		// Default is TagFollowing; without NoTags every fetch can drag in
+		// new tag snapshots. See the matching option in cloneFresh.
+		Tags: git.NoTags,
 	})
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return Result{}, fmt.Errorf("fetch: %w", err)

@@ -245,6 +245,13 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 		d.Logger.Info("repojobs: checkout discarded and re-cloned",
 			"project", g.ProjectPath, "reason", result.RecloneReason)
 	}
+	if c := result.Compaction; c != nil {
+		d.Logger.Info("repojobs: checkout object store compacted",
+			"project", g.ProjectPath,
+			"bytes_before", c.ObjectsBefore, "bytes_after", c.ObjectsAfter,
+			"packs_deleted", c.PacksDeleted, "tag_refs_dropped", c.TagRefsDropped,
+			"objects", c.Reachable, "ms", c.Duration.Milliseconds())
+	}
 
 	if err := d.GitRepos.SetClone(ctx, g.ProjectPath, result.HeadSHA, ""); err != nil {
 		d.Logger.Warn("repojobs: set last_sha failed", "project", g.ProjectPath, "err", err)
