@@ -49,6 +49,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/go-git/go-git/v5/storage"
+	"golang.org/x/sys/unix"
 )
 
 const branch = "main"
@@ -273,6 +274,7 @@ type compactStats struct {
 	// fully written while every old pack still exists. This is the extra disk
 	// headroom the algorithm transiently needs.
 	packDirPeak int64
+	tagsDropped int
 }
 
 // compact rewrites the checkout's object store down to exactly the objects
@@ -292,6 +294,31 @@ func compact(dir string, protect ...plumbing.Hash) (compactStats, error) {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
 		return st, fmt.Errorf("open: %w", err)
+	}
+
+	// Optional: drop tag refs before computing reachability. cix indexes one
+	// branch and never serves tags, yet a default go-git clone brings a full
+	// shallow SNAPSHOT PER TAG (spring-boot: 391 tags -> 345k objects for a
+	// 39MB worktree). Dropping the refs lets the walk collapse to the branch
+	// snapshot; paired with Tags:NoTags on clone/fetch they never return.
+	if os.Getenv("GCPOC_DROP_TAGS") == "1" {
+		refs, err := repo.References()
+		if err != nil {
+			return st, err
+		}
+		var tagRefs []plumbing.ReferenceName
+		_ = refs.ForEach(func(ref *plumbing.Reference) error {
+			if strings.HasPrefix(ref.Name().String(), "refs/tags/") {
+				tagRefs = append(tagRefs, ref.Name())
+			}
+			return nil
+		})
+		for _, name := range tagRefs {
+			if err := repo.Storer.RemoveReference(name); err != nil {
+				return st, fmt.Errorf("remove tag ref %s: %w", name, err)
+			}
+			st.tagsDropped++
+		}
 	}
 
 	shallowList, err := repo.Storer.Shallow()
@@ -475,6 +502,12 @@ func (w *shallowWalker) walk(hash plumbing.Hash) error {
 	case *object.Tree:
 		for i := range obj.Entries {
 			e := obj.Entries[i]
+			if e.Mode == filemode.Submodule {
+				// Gitlink: the hash is a commit in ANOTHER repository and is
+				// never present in this object store. (Stock go-git's
+				// objectWalker trips over these too.)
+				continue
+			}
 			if e.Mode|0o755 == filemode.Executable { // plain blob, any file mode
 				w.seen[e.Hash] = struct{}{}
 				continue
@@ -483,6 +516,9 @@ func (w *shallowWalker) walk(hash plumbing.Hash) error {
 				return err
 			}
 		}
+	case *object.Blob:
+		// Leaf (reached via a symlink or other non-regular tree entry —
+		// stock go-git's walker errors "unknown object" here).
 	case *object.Tag:
 		return w.walk(obj.Target)
 	default:
@@ -686,46 +722,104 @@ func rssBytes(maxrss int64) int64 {
 
 // runRepoMode compacts a COPY of an arbitrary real checkout (e.g. one scp'd
 // from production) and prints the same instrumentation. Read-only towards the
-// original.
+// original. GCPOC_REPEAT=N re-runs the compaction N times in this one process
+// — the algorithm is idempotent in content but does its full work every time,
+// so a heap/RSS/fd count that climbs across iterations is a leak.
 func runRepoMode(orig string) {
 	if _, err := os.Stat(filepath.Join(orig, ".git")); err != nil {
 		fail("%s does not look like a checkout: %v", orig, err)
 	}
+	repeat := envInt("GCPOC_REPEAT", 1)
 	tmp, err := os.MkdirTemp("", "gc-poc-repo-*")
 	must(err)
 	work := filepath.Join(tmp, "copy")
 	copyTree(orig, work)
-	fmt.Printf("compacting a copy of %s in %s\n\n", orig, work)
+	fmt.Printf("compacting a copy of %s in %s (window=%d, repeat=%d)\n\n", orig, work, packWindow(), repeat)
 	report(work, "before")
 	objectsBefore := dirSize(filepath.Join(work, ".git", "objects"))
 	pre := worktreeManifest(work)
+	haveGit := false
+	lsBefore := ""
+	if _, err := exec.LookPath("git"); err == nil {
+		haveGit = true
+		lsBefore = gitOut(work, "ls-tree", "-r", "HEAD")
+	}
 
 	var st compactStats
-	res, err := measured(func() error {
-		var cerr error
-		st, cerr = compact(work)
-		return cerr
-	})
-	must(err)
+	var res resUsage
+	for i := 1; i <= repeat; i++ {
+		res, err = measured(func() error {
+			var cerr error
+			st, cerr = compact(work)
+			return cerr
+		})
+		must(err)
+		runtime.GC()
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		fmt.Printf("iter %2d: wall=%-8v cpu=%-8v heapPeak=%-9s heapAfterGC=%-9s rss=%-9s fds=%d\n",
+			i, res.wall.Round(time.Millisecond), (res.cpuUser + res.cpuSys).Round(time.Millisecond),
+			human(int64(res.heapPeak)), human(int64(ms.HeapAlloc)), human(res.maxRSSAfter), countFDs())
+	}
+
+	objectsAfter := dirSize(filepath.Join(work, ".git", "objects"))
 	report(work, "after")
 	fmt.Printf("\nobjects on disk : before=%s  PEAK during=%s  after=%s\n",
-		human(objectsBefore), human(st.packDirPeak), human(dirSize(filepath.Join(work, ".git", "objects"))))
-	fmt.Printf("wall time       : %v\n", res.wall.Round(time.Millisecond))
-	fmt.Printf("cpu time        : user=%v sys=%v\n", res.cpuUser.Round(time.Millisecond), res.cpuSys.Round(time.Millisecond))
-	fmt.Printf("go heap         : baseline=%s peak=%s (footprint ≈ %s)\n",
-		human(int64(res.heapBefore)), human(int64(res.heapPeak)), human(int64(res.heapPeak-res.heapBefore)))
-	fmt.Printf("process max RSS : %s (Δ %s)\n", human(res.maxRSSAfter), human(res.maxRSSAfter-res.maxRSSBefore))
-	fmt.Printf("objects packed  : %d; packs deleted: %d; shallow %d→%d\n",
-		st.reachable, st.packsDeleted, st.shallowBefore, st.shallowAfter)
+		human(objectsBefore), human(st.packDirPeak), human(objectsAfter))
+	fmt.Printf("last iteration  : wall=%v cpu user=%v sys=%v heap peak=%s ΔmaxRSS=%s\n",
+		res.wall.Round(time.Millisecond), res.cpuUser.Round(time.Millisecond), res.cpuSys.Round(time.Millisecond),
+		human(int64(res.heapPeak)), human(res.maxRSSAfter-res.maxRSSBefore))
+	fmt.Printf("objects packed  : %d; packs deleted: %d; loose pruned: %d; shallow %d→%d; tag refs dropped: %d\n",
+		st.reachable, st.packsDeleted, st.loosePruned, st.shallowBefore, st.shallowAfter, st.tagsDropped)
 
-	if worktreeManifest(work) != pre {
+	manifestOK := worktreeManifest(work) == pre
+	if !manifestOK {
 		fail("worktree changed across compaction")
 	}
 	fmt.Println("worktree manifest identical: OK")
-	if _, err := exec.LookPath("git"); err == nil {
-		fmt.Printf("git fsck --strict: %s\n", okOr(gitRun(work, "fsck", "--strict", "--no-dangling"), "CLEAN"))
+	lsOK, fsckMsg := true, "skipped (no git)"
+	if haveGit {
+		lsOK = gitOut(work, "ls-tree", "-r", "HEAD") == lsBefore
+		if !lsOK {
+			fail("ls-tree -r HEAD changed across compaction")
+		}
+		fmt.Println("git ls-tree -r HEAD identical: OK")
+		ferr := gitRun(work, "fsck", "--strict", "--no-dangling")
+		fsckMsg = okOr(ferr, "CLEAN")
+		fmt.Printf("git fsck --strict: %s\n", fsckMsg)
 	}
-	fmt.Printf("\ncopy left at %s for inspection\n", work)
+
+	// Machine-readable line for batch scaling analysis.
+	worktreeBytes := dirSize(work) - dirSize(filepath.Join(work, ".git"))
+	fmt.Printf("SUMMARY repo=%s worktree=%d objects_before=%d objects_after=%d reachable=%d wall_ms=%d cpu_ms=%d heap_peak=%d rss_delta=%d packs_deleted=%d manifest=%v lstree=%v fsck=%q\n",
+		filepath.Base(strings.TrimRight(orig, "/")), worktreeBytes, objectsBefore, objectsAfter, st.reachable,
+		res.wall.Milliseconds(), (res.cpuUser + res.cpuSys).Milliseconds(),
+		res.heapPeak, res.maxRSSAfter-res.maxRSSBefore, st.packsDeleted, manifestOK, lsOK, fsckMsg)
+
+	must(os.RemoveAll(tmp))
+}
+
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+// countFDs counts this process's open file descriptors (leak detector).
+// Probing fcntl works on both darwin and linux; /dev/fd is unreadable from a
+// plain ReadDir on macOS devfs.
+func countFDs() int {
+	n := 0
+	for fd := 0; fd < 4096; fd++ {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // ---------------------------------------------------------------------------
@@ -911,6 +1005,12 @@ func verifyEveryBlobReadable(dir string) {
 }
 
 func copyTree(src, dst string) {
+	// -c asks APFS for a copy-on-write clone (instant, no extra blocks until
+	// the compaction rewrites packs); fall back to a plain copy elsewhere.
+	if err := exec.Command("cp", "-Rc", src, dst).Run(); err == nil {
+		return
+	}
+	_ = os.RemoveAll(dst)
 	must(exec.Command("cp", "-R", src, dst).Run())
 }
 
