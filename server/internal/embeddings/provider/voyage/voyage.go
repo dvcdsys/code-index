@@ -199,7 +199,13 @@ func (c *Config) maxBatchSize() int {
 	return defaultMaxBatchSize
 }
 
-// maxTokensPerBatch returns the effective per-POST token cap.
+// maxTokensPerBatch returns the cap implied by config alone — the operator's
+// override, or the conservative byte-heuristic default.
+//
+// Callers on the hot path want (*Provider).maxTokensPerBatch instead, which
+// also knows whether a tokenizer is loaded. Two same-named methods one on
+// Config and one on Provider is how the batch log came to report 80K while
+// packing used 115K, so this one is only for the Provider method to build on.
 func (c *Config) maxTokensPerBatch() int {
 	if c.MaxTokensPerRequest > 0 {
 		return c.MaxTokensPerRequest
@@ -429,6 +435,38 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 // such chunk, but oversize chunks are rare on well-chunked
 // indexes — the indexer should already be cutting at function /
 // class boundaries.
+// splitForInput cuts one input down to what the model can read.
+//
+// With a tokenizer, the question "does this fit" has an exact answer, so the
+// byte cap is not consulted at all: an input under the model's context window
+// goes through whole, however many bytes it is, and one over it is cut on real
+// token boundaries. Without a tokenizer we are back to guessing, and the byte
+// cap is the guess.
+//
+// This matters because the chunker now sizes in tokens. Its bound and the
+// provider's byte cap are different units: at CIX_MAX_CHUNK_TOKENS=20000 —
+// legal, well inside the 32K window — chunks of 40-80 KB are ordinary, and
+// every one of them used to be byte-windowed here and have its window vectors
+// averaged into a single vector representing neither half. The averaging path
+// now only runs where it is genuinely needed: no tokenizer, no exact answer.
+func (p *Provider) splitForInput(text string, maxBytes int) []string {
+	if p.counter == nil {
+		return splitOversizeInput(text, maxBytes)
+	}
+	limit := p.MaxInputTokens()
+	offsets, total := p.counter.SplitPoints(text, limit)
+	if total <= limit || len(offsets) == 0 {
+		return []string{text}
+	}
+	out := make([]string, 0, len(offsets)+1)
+	prev := 0
+	for _, off := range offsets {
+		out = append(out, text[prev:off])
+		prev = off
+	}
+	return append(out, text[prev:])
+}
+
 func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputType string) ([][]float32, error) {
 	maxIn := p.cfg.maxInputBytes()
 
@@ -438,7 +476,7 @@ func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputTyp
 	var expanded []string
 	totalSplits := 0
 	for i, t := range texts {
-		windows := splitOversizeInput(t, maxIn)
+		windows := p.splitForInput(t, maxIn)
 		spans[i] = span{start: len(expanded), length: len(windows)}
 		expanded = append(expanded, windows...)
 		if len(windows) > 1 {
@@ -462,7 +500,7 @@ func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputTyp
 			"total_inputs", len(expanded),
 			"sub_batches", len(batches),
 			"limit_inputs", p.cfg.maxBatchSize(),
-			"limit_tokens", p.cfg.maxTokensPerBatch(),
+			"limit_tokens", p.maxTokensPerBatch(),
 		)
 	}
 	allVecs := make([][]float32, 0, len(expanded))
@@ -834,25 +872,43 @@ func (p *Provider) apiKey() (string, bool) {
 // drift rather than for our own error.
 const exactTokensPerBatch = 115_000
 
-// maxInputTokens is voyage-code-3's per-input context window. The 32K applies
-// to voyage-code-* and voyage-3*; smaller models would need a table here, but
-// undershooting only costs an unnecessary split.
-const maxInputTokens = 32_000
+// modelContextTokens is the per-input context window, per model. It is a table
+// rather than a constant because the factory's own enum offers voyage-code-2,
+// whose window is 16K — half of what the rest of the list takes. Treating that
+// as 32K would let the chunker build inputs the model cannot read, and with
+// truncation enabled Voyage would silently drop the tail.
+//
+// Unknown models fall back to the conservative 16K: undershooting costs an
+// unnecessary split, overshooting costs silent data loss.
+var modelContextTokens = map[string]int{
+	"voyage-code-3":  32_000,
+	"voyage-3-large": 32_000,
+	"voyage-3":       32_000,
+	"voyage-3-lite":  32_000,
+	"voyage-code-2":  16_000,
+}
+
+const fallbackContextTokens = 16_000
 
 // maxTokensPerBatch is the provider-level cap: an explicit operator override
 // wins, then the exact-counting cap, then the conservative byte-heuristic one.
 func (p *Provider) maxTokensPerBatch() int {
 	if p.cfg.MaxTokensPerRequest > 0 {
-		return p.cfg.MaxTokensPerRequest
+		return p.cfg.maxTokensPerBatch()
 	}
 	if p.counter != nil {
 		return exactTokensPerBatch
 	}
-	return defaultMaxTokensPerBatch
+	return p.cfg.maxTokensPerBatch()
 }
 
 // MaxInputTokens reports the model's context window for a single input.
-func (p *Provider) MaxInputTokens() int { return maxInputTokens }
+func (p *Provider) MaxInputTokens() int {
+	if n, ok := modelContextTokens[p.cfg.Model]; ok {
+		return n
+	}
+	return fallbackContextTokens
+}
 
 // ExactCounts reports whether CountTokens/SplitPoints are exact rather than
 // estimated. False means no tokenizer.json was loaded.
@@ -876,19 +932,13 @@ func (p *Provider) CountTokens(s string) int {
 // behaviour, kept only so a caller that ignores ExactCounts still gets
 // something it can send. Check ExactCounts before trusting these.
 func (p *Provider) SplitPoints(s string, budget int) ([]int, int) {
-	if p.counter != nil {
-		return p.counter.SplitPoints(s, budget)
-	}
-	var offsets []int
-	maxBytes := budget * bytesPerToken
-	if maxBytes <= 0 {
+	if p.counter == nil {
+		// No tokenizer: there are no token boundaries to report. Returning
+		// byte windows here would be the old behaviour wearing the new
+		// interface's clothes, and callers check ExactCounts() precisely so
+		// they can avoid it. splitForInput still byte-windows internally
+		// where that is genuinely all we have.
 		return nil, estimateTokens(s)
 	}
-	for off := maxBytes; off < len(s); off += maxBytes {
-		for off > 0 && !utf8.RuneStart(s[off]) {
-			off--
-		}
-		offsets = append(offsets, off)
-	}
-	return offsets, estimateTokens(s)
+	return p.counter.SplitPoints(s, budget)
 }

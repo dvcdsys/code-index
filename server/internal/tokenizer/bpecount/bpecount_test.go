@@ -1,7 +1,9 @@
 package bpecount
 
 import (
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -53,8 +55,8 @@ func TestCountMatchesReference(t *testing.T) {
 // input cost an extra token.
 func TestNFCNormalisation(t *testing.T) {
 	c := load(t)
-	nfc := "caf\u00e9"        // é as one code point
-	nfd := "cafe\u0301"       // e + combining acute
+	nfc := "caf\u00e9"  // é as one code point
+	nfd := "cafe\u0301" // e + combining acute
 	if a, b := c.Count(nfc), c.Count(nfd); a != b {
 		t.Errorf("NFC %d != NFD %d — normaliser not applied", a, b)
 	}
@@ -109,10 +111,11 @@ func TestSplitPointsFitsAlready(t *testing.T) {
 // single pre-token bigger than the budget (base64 blobs, minified lines).
 func TestSplitPointsOversizePreToken(t *testing.T) {
 	c := load(t)
-	blob := ""
-	for i := 0; i < 4000; i++ {
-		blob += "aB3"
-	}
+	// One unbroken run of a single character class. "aB3" repeated would NOT
+	// do: the pre-tokenizer breaks letters from digits, so it yields 2-byte
+	// pre-tokens that never exceed the budget and the splitInside path this
+	// test exists for is never entered.
+	blob := strings.Repeat("a", 4000)
 	const budget = 100
 	offsets, _ := c.SplitPoints(blob, budget)
 	if len(offsets) == 0 {
@@ -137,8 +140,7 @@ func TestSplitPointsOversizePreToken(t *testing.T) {
 func syntheticCounter(t *testing.T) *Counter {
 	t.Helper()
 	// Merges are ranked: "a b" collapses first, then "ab c".
-	tj := `{"model":{"type":"BPE","merges":["a b","ab c","f u","fu n"]}}`
-	c, err := LoadBytes([]byte(tj))
+	c, err := LoadBytes(syntheticJSON("a b", "ab c", "f u", "fu n"))
 	if err != nil {
 		t.Fatalf("LoadBytes: %v", err)
 	}
@@ -228,6 +230,97 @@ func TestPreTokenBoundaries(t *testing.T) {
 				t.Errorf("split(%q) = %q, want %q", tc.in, got, tc.want)
 				break
 			}
+		}
+	}
+}
+
+// TestNFDPiecesRespectBudget covers input that is not already NFC, where the
+// normalised copy counting works on has different byte offsets from the
+// caller's string. Before the fix, offsets computed against the normalised
+// copy were returned as-is: decomposed text made them land mid-rune, and the
+// composition exclusions at U+0958..U+095F (which DEcompose under NFC, making
+// the normalised form longer) pushed them past the end of the original, so the
+// caller's slice expression panicked. Every other fixture in this file is
+// ASCII or already-NFC and could not see it.
+func TestNFDPiecesRespectBudget(t *testing.T) {
+	c := load(t)
+	for _, raw := range []string{
+		strings.Repeat("// café comment here\n", 200),
+		strings.Repeat("x क़ख़ग़ ", 400),
+		strings.Repeat("Ώ ", 900),
+	} {
+		offs, total := c.SplitPoints(raw, 50)
+		prev := 0
+		for _, off := range append(offs, len(raw)) {
+			if off > len(raw) || off < prev {
+				t.Fatalf("bad offset %d (len %d, prev %d)", off, len(raw), prev)
+			}
+			if n := c.Count(raw[prev:off]); n > 50 {
+				t.Errorf("piece [%d:%d] is %d tokens, over budget 50", prev, off, n)
+			}
+			prev = off
+		}
+		if total != c.Count(raw) {
+			t.Errorf("total %d != Count %d", total, c.Count(raw))
+		}
+	}
+}
+
+// TestSplitInsideChargesTail — an over-budget pre-token used to leave its tail
+// uncounted, letting the next piece stack a full budget on top of it.
+func TestSplitInsideChargesTail(t *testing.T) {
+	c, err := LoadBytes(syntheticJSON("a b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := strings.Repeat("x", 10) + " " + strings.Repeat("y", 4)
+	offs, _ := c.SplitPoints(in, 5)
+	prev := 0
+	for _, off := range append(offs, len(in)) {
+		if n := c.Count(in[prev:off]); n > 5 {
+			t.Errorf("piece %q is %d tokens, over budget 5", in[prev:off], n)
+		}
+		prev = off
+	}
+}
+
+// syntheticJSON builds a tokenizer.json with a hand-picked merge table and the
+// real pipeline sections, so LoadBytes's compatibility check sees what it
+// expects. Tests that only exercise merging still have to declare the pipeline
+// they are pretending to be — which is the point of the check.
+func syntheticJSON(merges ...string) []byte {
+	doc := map[string]any{
+		"model":      map[string]any{"type": "BPE", "merges": merges},
+		"normalizer": map[string]any{"type": "NFC"},
+		"pre_tokenizer": map[string]any{
+			"type": "Sequence",
+			"pretokenizers": []any{
+				map[string]any{"type": "Split", "pattern": map[string]any{"Regex": qwen2SplitPattern}},
+				map[string]any{"type": "ByteLevel"},
+			},
+		},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// TestRejectsForeignPipeline — a GPT-2 or o200k tokenizer.json parses cleanly
+// and declares BPE, but its pre-tokenizer is not the one implemented here. It
+// must be refused rather than counted wrongly.
+func TestRejectsForeignPipeline(t *testing.T) {
+	for name, doc := range map[string]string{
+		"gpt2 (no Split stage)": `{"model":{"type":"BPE","merges":["a b"]},
+			"normalizer":null,"pre_tokenizer":{"type":"ByteLevel"}}`,
+		"o200k (different pattern)": `{"model":{"type":"BPE","merges":["a b"]},
+			"normalizer":{"type":"NFC"},"pre_tokenizer":{"type":"Sequence","pretokenizers":[
+			{"type":"Split","pattern":{"Regex":"[^\\r\\n\\p{L}\\p{N}]?[\\p{L}]+"}},
+			{"type":"ByteLevel"}]}}`,
+	} {
+		if _, err := LoadBytes([]byte(doc)); err == nil {
+			t.Errorf("%s: expected a load error, got none", name)
 		}
 	}
 }

@@ -487,7 +487,7 @@ func ChunkFileTokens(filePath, content, language string, maxSize int, budget tok
 	}
 	if budget != nil {
 		if maxTokens <= 0 {
-			maxTokens = defaultMaxChunkTokens
+			maxTokens = DefaultMaxChunkTokens
 		}
 		if lim := budget.MaxInputTokens(); lim > 0 && maxTokens > lim {
 			maxTokens = lim
@@ -505,7 +505,10 @@ func ChunkFileTokens(filePath, content, language string, maxSize int, budget tok
 	chunks, refs, err := chunkWithTreesitter(filePath, content, language, innerMax)
 	if err != nil {
 		// Fallback: sliding window, no references.
-		return boundTokens(chunkFallback(filePath, content, language), budget, maxTokens), nil, nil
+		return chunkFallbackTokens(filePath, content, language, budget, maxTokens), nil, nil
+	}
+	if len(chunks) == 0 {
+		return chunkFallbackTokens(filePath, content, language, budget, maxTokens), nil, nil
 	}
 	return boundTokens(chunks, budget, maxTokens), refs, nil
 }
@@ -523,6 +526,14 @@ func boundTokens(chunks []Chunk, budget tokenizer.Budget, maxTokens int) []Chunk
 	}
 	out := make([]Chunk, 0, len(chunks))
 	for _, c := range chunks {
+		// A byte-level BPE token can never cover less than one byte, so a
+		// chunk shorter than the budget provably fits and needs no counting
+		// at all. Most chunks are, so this skips the tokenizer on the hot
+		// path rather than paying for an answer already known.
+		if len(c.Content) <= maxTokens {
+			out = append(out, c)
+			continue
+		}
 		if budget.CountTokens(c.Content) > maxTokens {
 			out = append(out, splitChunkTokens(c, budget, maxTokens)...)
 			continue
@@ -547,6 +558,44 @@ func chunkFallback(filePath, content, language string) []Chunk {
 		}
 	}
 	return chunkSlidingWindow(filePath, content, language)
+}
+
+// chunkFallbackTokens is chunkFallback with a token budget: the sliding window
+// walks token boundaries instead of a fixed byte count.
+//
+// The byte window is 4000 bytes regardless of what those bytes contain, so a
+// file of Cyrillic or CJK prose — two to three bytes per character — produced
+// windows worth a third of the intended tokens, and this is the path such
+// files take, because "no grammar" and "not ASCII" go together often enough to
+// matter. boundTokens alone could not fix it: it splits chunks that are too
+// large and has no way to grow ones that are too small.
+func chunkFallbackTokens(filePath, content, language string, budget tokenizer.Budget, maxTokens int) []Chunk {
+	if budget == nil || maxTokens <= 0 {
+		return chunkFallback(filePath, content, language)
+	}
+	if language == "bash" {
+		if c := bashRegexChunks(filePath, content); len(c) > 0 {
+			return boundTokens(c, budget, maxTokens)
+		}
+	}
+	if len(content) == 0 {
+		return nil
+	}
+	// One chunk, then let the token splitter cut it — same code path, same
+	// guarantees (pieces are substrings, none over budget, line numbers
+	// tracked) as every other over-budget chunk in this package.
+	whole := Chunk{
+		Content:   content,
+		ChunkType: "block",
+		FilePath:  filePath,
+		StartLine: 1,
+		EndLine:   countNewlines(content) + 1,
+		Language:  language,
+	}
+	if budget.CountTokens(content) <= maxTokens {
+		return []Chunk{whole}
+	}
+	return splitChunkTokens(whole, budget, maxTokens)
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,11 +1174,15 @@ func sortRanges(ranges [][2]int) {
 	}
 }
 
-// defaultMaxChunkTokens is the token equivalent of maxChunkSize. The byte
+// DefaultMaxChunkTokens is the token equivalent of maxChunkSize. The byte
 // default was written as 1500*3 — a 1500-token target at three bytes each —
 // so the token target is that same 1500, now expressed in the unit that
-// actually matters. CIX_MAX_CHUNK_TOKENS overrides it.
-const defaultMaxChunkTokens = 1500
+// actually matters.
+//
+// Exported so config.go can use it as the CIX_MAX_CHUNK_TOKENS default rather
+// than repeating the number: two copies of a chunk-size default drifting apart
+// is the exact failure this change removes for maxChunkSize.
+const DefaultMaxChunkTokens = 1500
 
 // splitChunkTokens cuts an over-budget chunk into pieces of <= maxTokens.
 //
@@ -1151,40 +1204,60 @@ const defaultMaxChunkTokens = 1500
 // boundary to snap to; there the exact cut stands and the line is split
 // internally — which is the case the byte splitter could not handle at all.
 func splitChunkTokens(chunk Chunk, budget tokenizer.Budget, maxTokens int) []Chunk {
+	content := chunk.Content
 	var out []Chunk
-	rest := chunk.Content
-	line := chunk.StartLine
+	pos, line := 0, chunk.StartLine
+	var cuts []int // absolute offsets into content; nil means "recompute"
 
-	for rest != "" {
-		cuts, _ := budget.SplitPoints(rest, maxTokens)
-		if len(cuts) == 0 {
-			out = append(out, mkPiece(chunk, rest, line, len(out) == 0))
-			break
+	for pos < len(content) {
+		if cuts == nil {
+			rel, _ := budget.SplitPoints(content[pos:], maxTokens)
+			if len(rel) == 0 {
+				out = append(out, mkPiece(chunk, content[pos:], line, len(out) == 0))
+				break
+			}
+			cuts = make([]int, 0, len(rel))
+			for _, r := range rel {
+				cuts = append(cuts, pos+r)
+			}
 		}
 
 		at := cuts[0]
-		// Pull the cut back to a line start so a piece never begins
-		// mid-line: search results and the stored line range both lie
-		// otherwise. Moving backwards only shrinks this piece, so it stays
-		// inside the budget. A line wider than the whole budget has no
-		// earlier boundary — there the exact cut stands and the line is
-		// split internally, which is the case the byte splitter could not
-		// handle at all.
-		if nl := strings.LastIndexByte(rest[:at], '\n'); nl >= 0 {
-			at = nl + 1
+		// Pull the cut back to a line start so a piece never begins mid-line:
+		// search results and the stored line range both lie otherwise. Moving
+		// backwards only shrinks this piece, so it stays inside the budget. A
+		// line wider than the whole budget has no earlier boundary — there the
+		// exact cut stands and the line is split internally, which is the case
+		// the byte splitter could not handle at all.
+		snapped := at
+		if nl := strings.LastIndexByte(content[pos:at], '\n'); nl >= 0 {
+			snapped = pos + nl + 1
 		}
-		if at == 0 {
-			at = cuts[0]
+		if snapped <= pos {
+			snapped = at
 		}
 
-		piece := rest[:at]
+		piece := content[pos:snapped]
 		out = append(out, mkPiece(chunk, piece, line, len(out) == 0))
 		line += strings.Count(piece, "\n")
-		rest = rest[at:]
-		// Recomputing the next cut from the NEW start is the whole point of
-		// the loop: snapping back moved the boundary, so the remaining cuts
-		// SplitPoints returned no longer apply — reusing them would hand the
-		// next piece the words this one gave up and push it over budget.
+		pos = snapped
+
+		if snapped == at {
+			// The boundary landed where the tokenizer put it, so the cuts
+			// after it are still valid and can be consumed without another
+			// pass. This is what keeps a 66 KB single line — where the
+			// newline snap never fires — from costing one full scan per
+			// piece.
+			cuts = cuts[1:]
+			if len(cuts) == 0 {
+				cuts = nil
+			}
+			continue
+		}
+		// Snapping moved the boundary: every later cut was measured from a
+		// start that no longer exists, and reusing them would hand the next
+		// piece the tokens this one gave up. Recompute.
+		cuts = nil
 	}
 	return out
 }

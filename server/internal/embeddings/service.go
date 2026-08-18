@@ -458,8 +458,6 @@ func (s *Service) Status() provider.Status {
 	return st
 }
 
-// CurrentKind reports the kind of the active provider, or "" when
-// disabled / not yet built. Used by /status and admin endpoints.
 // TokenBudget returns the active provider as a token budget when it can
 // count tokens, and nil otherwise. The chunker uses it to size chunks in the
 // model's own unit; nil keeps it on the byte heuristic.
@@ -467,6 +465,12 @@ func (s *Service) Status() provider.Status {
 // Snapshotted under the read lock like CurrentKind, because a provider swap
 // mid-file would otherwise mix two models' limits inside one chunk set.
 func (s *Service) TokenBudget() tokenizer.Budget {
+	// A typed-nil *Service still satisfies the capability interface the
+	// indexer asserts on, so the guard is not decoration: without it the
+	// first indexed file panics inside RLock.
+	if s == nil || s.disabled {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.current == nil {
@@ -479,6 +483,8 @@ func (s *Service) TokenBudget() tokenizer.Budget {
 	return b
 }
 
+// CurrentKind reports the kind of the active provider, or "" when
+// disabled / not yet built. Used by /status and admin endpoints.
 func (s *Service) CurrentKind() string {
 	if s == nil || s.disabled {
 		return ""

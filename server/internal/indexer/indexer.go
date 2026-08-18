@@ -113,6 +113,17 @@ type TokenAwareEmbedder interface {
 	TokenizeAndEmbed(ctx context.Context, texts []string) ([][]float32, error)
 }
 
+// TokenBudgetSource is the capability of telling the chunker what a chunk
+// costs in the active model's tokens. Named rather than asserted inline so a
+// rename of TokenBudget is a compile error somewhere instead of a silent
+// return to byte-sized chunking everywhere.
+//
+// *embeddings.Service satisfies it; test fakes generally do not, and get the
+// byte path.
+type TokenBudgetSource interface {
+	TokenBudget() tokenizer.Budget
+}
+
 // Service owns sessions and wires dependencies for the three-phase protocol.
 type Service struct {
 	db     *sql.DB
@@ -676,6 +687,7 @@ func (s *Service) ProcessFilesStreaming(
 	// is CPU-local and cheap, so it stays sequential to keep progress-event
 	// order; the expensive embed work is parallelised in stage 2.
 	prep := make([]*preparedFile, 0, len(files))
+	budgetSrc, _ := s.emb.(TokenBudgetSource)
 	for fi, fp := range files {
 		// file_started — emit even for files we'll skip below, so the client
 		// counter advances monotonically and rendering stays aligned with N.
@@ -716,14 +728,12 @@ func (s *Service) ProcessFilesStreaming(
 			language = "text"
 		}
 
-		// The token budget comes from the LIVE provider, asked per file: a
-		// provider swap between files is legitimate, mixing two models'
-		// limits inside one file's chunks is not.
+		// The budget is re-read per file: a provider swap between files is
+		// legitimate, mixing two models' limits inside one file's chunks is
+		// not. The type assertion itself is hoisted out of the loop.
 		var budget tokenizer.Budget
-		if tb, ok := s.emb.(interface {
-			TokenBudget() tokenizer.Budget
-		}); ok {
-			budget = tb.TokenBudget()
+		if budgetSrc != nil {
+			budget = budgetSrc.TokenBudget()
 		}
 		chunks, refs, err := chunker.ChunkFileTokens(fp.Path, fp.Content, language, 0, budget, s.maxChunkTokens)
 		if err != nil {

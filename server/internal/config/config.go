@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/dvcdsys/code-index/server/internal/chunker"
 	"net"
 	"os"
 	"path/filepath"
@@ -352,7 +353,7 @@ func Load() (*Config, error) {
 	}
 	c.ChunkMaxConcurrent = chunkConc
 
-	maxChunk, err := getenvInt("CIX_MAX_CHUNK_TOKENS", 1500)
+	maxChunk, err := getenvInt("CIX_MAX_CHUNK_TOKENS", chunker.DefaultMaxChunkTokens)
 	if err != nil {
 		return nil, err
 	}

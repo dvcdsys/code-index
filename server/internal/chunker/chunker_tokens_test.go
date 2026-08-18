@@ -256,3 +256,38 @@ func TestTokenSplitLineNumbers(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestFallbackFillsTheBudget covers the path a file with no grammar takes.
+// The byte-sized sliding window cut every 4000 bytes regardless of content, so
+// multi-byte text produced windows worth a fraction of the intended tokens —
+// and boundTokens could not repair that, since it only splits chunks that are
+// too big and cannot merge ones that are too small.
+func TestFallbackFillsTheBudget(t *testing.T) {
+	// Two-bytes-per-character text, well past one byte window.
+	src := strings.Repeat("привіт світ це коментар українською\n", 400)
+	b := fakeBudget{maxInput: 4096}
+	const budget = 200
+
+	chunks, _, err := ChunkFileTokens("notes.unknownlang", src, "unknownlang", 0, b, budget)
+	if err != nil {
+		t.Fatalf("chunk: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected several chunks, got %d", len(chunks))
+	}
+	var under int
+	for i, c := range chunks {
+		n := b.CountTokens(c.Content)
+		if n > budget {
+			t.Errorf("chunk %d is %d tokens, over budget %d", i, n, budget)
+		}
+		// The last chunk is a remainder and may legitimately be short.
+		if i < len(chunks)-1 && n < budget/2 {
+			under++
+		}
+	}
+	if under > 0 {
+		t.Errorf("%d of %d chunks are under half the budget — the window is still byte-sized",
+			under, len(chunks))
+	}
+}
