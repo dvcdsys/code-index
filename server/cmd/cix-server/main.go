@@ -437,6 +437,7 @@ func run() (restart bool, err error) {
 
 	idx := indexer.New(database, vsHolder, embedSvc, logger)
 	idx.SetEmbedIncludePath(cfg.EmbedIncludePath)
+	idx.SetMaxChunkTokens(cfg.MaxChunkTokens)
 	// Record the active embedding model on every indexed project so the
 	// dashboard can highlight stale vectors when the runtime provider /
 	// model changes. Wire it as a live lookup so a runtime provider

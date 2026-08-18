@@ -10,7 +10,10 @@
 package chunker
 
 import (
+	"errors"
+	"github.com/dvcdsys/code-index/server/internal/tokenizer"
 	"log/slog"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -457,15 +460,88 @@ type Reference struct {
 // falls back to sliding-window chunking for unsupported languages. The maxSize
 // parameter controls per-chunk character limit; pass 0 to use the default.
 func ChunkFile(filePath, content, language string, maxSize int) ([]Chunk, []Reference, error) {
+	return ChunkFileTokens(filePath, content, language, maxSize, nil, 0)
+}
+
+// ChunkFileTokens is ChunkFile with a token budget.
+//
+// maxSize (bytes) has always been a stand-in for a token limit: the default
+// 4500 is "1500 tokens x 3 bytes", a ratio that holds for dense ASCII code and
+// falls apart everywhere else — Cyrillic or CJK comments cost two to three
+// bytes per character, so a byte-sized chunk carries far fewer tokens than
+// intended, while minified JavaScript packs far more.
+//
+// When budget is non-nil and reports exact counts, the size decision is made
+// in tokens instead, and an over-budget chunk is cut on real token boundaries
+// (via Budget.SplitPoints) rather than on a byte count. maxTokens <= 0 uses
+// DefaultMaxChunkTokens. A nil or estimating budget keeps the byte path
+// unchanged, so nothing about existing behaviour depends on a provider
+// having a tokenizer.
+func ChunkFileTokens(filePath, content, language string, maxSize int, budget tokenizer.Budget, maxTokens int) ([]Chunk, []Reference, error) {
 	if maxSize <= 0 {
 		maxSize = maxChunkSize
 	}
-	chunks, refs, err := chunkWithTreesitter(filePath, content, language, maxSize)
-	if err != nil {
-		// Fallback: sliding window, no references.
-		return chunkFallback(filePath, content, language), nil, nil
+	if budget != nil && !budget.ExactCounts() {
+		// An estimate is what the byte path already is; do not pretend
+		// otherwise by routing through the token splitter.
+		budget = nil
 	}
-	return chunks, refs, nil
+	if budget != nil {
+		if maxTokens <= 0 {
+			maxTokens = DefaultMaxChunkTokens
+		}
+		if lim := budget.MaxInputTokens(); lim > 0 && maxTokens > lim {
+			maxTokens = lim
+		}
+	}
+	// With a token budget the byte cap must not fire first: it is the very
+	// bias being removed (a byte limit cuts Cyrillic or CJK three times
+	// sooner than ASCII for the same token cost). Let the inner path emit
+	// whole semantic units and bound them in tokens afterwards.
+	innerMax := maxSize
+	if budget != nil {
+		innerMax = math.MaxInt32
+	}
+
+	chunks, refs, err := chunkWithTreesitter(filePath, content, language, innerMax)
+	if err != nil || len(chunks) == 0 {
+		// Tree-sitter declined (no grammar, parse failure, minified input) or
+		// produced nothing. Either way the fallback runs here, where the
+		// budget is known, rather than inside the tree-sitter path where it
+		// is not.
+		return chunkFallbackTokens(filePath, content, language, budget, maxTokens), nil, nil
+	}
+	return boundTokens(chunks, budget, maxTokens), refs, nil
+}
+
+// boundTokens enforces the token budget over chunks from ANY path — the
+// tree-sitter one, the bash regex extractor, or the sliding-window fallback.
+// Applying it here rather than inside the tree-sitter path is deliberate:
+// minified JavaScript and files with no grammar are exactly the inputs that
+// reach the fallback, and they are also the ones most likely to blow the
+// model's input limit. A budget that only covered the happy path would miss
+// them.
+func boundTokens(chunks []Chunk, budget tokenizer.Budget, maxTokens int) []Chunk {
+	if budget == nil || maxTokens <= 0 {
+		return chunks
+	}
+	out := make([]Chunk, 0, len(chunks))
+	for _, c := range chunks {
+		// A byte-level BPE token can never cover less than one byte, so a
+		// chunk shorter than the budget provably fits and needs no counting
+		// at all. Most chunks are, so this skips the tokenizer on the hot
+		// path rather than paying for an answer already known.
+		if len(c.Content) <= maxTokens {
+			out = append(out, c)
+			continue
+		}
+		if budget.CountTokens(c.Content) > maxTokens {
+			out = append(out, splitChunkTokens(c, budget, maxTokens)...)
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // chunkFallback returns reasonable chunks for content that the tree-sitter
@@ -476,6 +552,17 @@ func ChunkFile(filePath, content, language string, maxSize int) ([]Chunk, []Refe
 // `block` ones, which is much more useful for semantic search. If the
 // extractor returns nil (no symbols found), we fall through to the universal
 // sliding-window strategy so the file content is still indexed.
+// errUseFallback tells the caller that the tree-sitter path declined this
+// file and the fallback chunker must run instead.
+//
+// It exists because chunkWithTreesitter used to CALL chunkFallback itself and
+// return the result as success. That made the caller's fallback branch
+// unreachable — which is exactly how a token-aware fallback shipped as dead
+// code: no-grammar, minified, parse-failure and empty-AST files all came back
+// as byte windows wearing a success return, and no budget ever reached them.
+// The decision belongs to whoever knows whether a token budget is in play.
+var errUseFallback = errors.New("chunker: tree-sitter declined, use fallback")
+
 func chunkFallback(filePath, content, language string) []Chunk {
 	if language == "bash" {
 		if c := bashRegexChunks(filePath, content); len(c) > 0 {
@@ -483,6 +570,54 @@ func chunkFallback(filePath, content, language string) []Chunk {
 		}
 	}
 	return chunkSlidingWindow(filePath, content, language)
+}
+
+// chunkFallbackTokens is chunkFallback with a token budget: the sliding window
+// walks token boundaries instead of a fixed byte count.
+//
+// The byte window is 4000 bytes regardless of what those bytes contain, so a
+// file of Cyrillic or CJK prose — two to three bytes per character — produced
+// windows worth a third of the intended tokens, and this is the path such
+// files take, because "no grammar" and "not ASCII" go together often enough to
+// matter. boundTokens alone could not fix it: it splits chunks that are too
+// large and has no way to grow ones that are too small.
+func chunkFallbackTokens(filePath, content, language string, budget tokenizer.Budget, maxTokens int) []Chunk {
+	if budget == nil || maxTokens <= 0 {
+		return chunkFallback(filePath, content, language)
+	}
+	if language == "bash" {
+		if c := bashRegexChunks(filePath, content); len(c) > 0 {
+			return boundTokens(c, budget, maxTokens)
+		}
+	}
+	if len(content) == 0 {
+		return nil
+	}
+	// One chunk, then let the token splitter cut it — same code path, same
+	// guarantees (pieces are substrings, none over budget, line numbers
+	// tracked) as every other over-budget chunk in this package.
+	//
+	// Note this drops the byte window's 500-byte overlap. That overlap existed
+	// so a match spanning a window boundary would still be found in one of the
+	// two windows, and nothing replaces it here: pieces are contiguous. The
+	// trade is deliberate for now — overlap has to be expressed in tokens to
+	// coexist with a token budget (size pieces at budget minus overlap, then
+	// extend each start back into the previous piece), which is a change worth
+	// making on its own rather than smuggling into a correctness fix. The
+	// tree-sitter path has never overlapped, so this makes the two paths
+	// consistent rather than making the fallback worse than its neighbours.
+	whole := Chunk{
+		Content:   content,
+		ChunkType: "block",
+		FilePath:  filePath,
+		StartLine: 1,
+		EndLine:   countNewlines(content) + 1,
+		Language:  language,
+	}
+	if budget.CountTokens(content) <= maxTokens {
+		return []Chunk{whole}
+	}
+	return splitChunkTokens(whole, budget, maxTokens)
 }
 
 // ---------------------------------------------------------------------------
@@ -529,11 +664,11 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	registryMu.RUnlock()
 
 	if !ok {
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	if nodeKinds == nil {
 		// Grammar exists but we don't have node definitions → sliding window.
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	if looksMinified(filePath, content, language) {
 		// Minified/bundled sources are the parser's pathological case: a
@@ -541,7 +676,7 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 		// instance to its memory cap, and forces a pool recycle — all to
 		// produce AST chunks with near-zero semantic-search value. Skip
 		// straight to the sliding window.
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 
 	// Build flat target → kind map.
@@ -559,10 +694,10 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 		// fall back to sliding window so the file is still indexed.
 		slog.Warn("chunker: wasm parse failed, falling back to sliding window",
 			"path", filePath, "language", language, "err", err)
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	if len(nodes) == 0 {
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	tree := buildFlatTree(nodes)
 
@@ -604,7 +739,7 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	}
 
 	if len(finalChunks) == 0 {
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	return finalChunks, refs, nil
 }
@@ -1059,4 +1194,114 @@ func sortRanges(ranges [][2]int) {
 			j--
 		}
 	}
+}
+
+// DefaultMaxChunkTokens is the token equivalent of maxChunkSize. The byte
+// default was written as 1500*3 — a 1500-token target at three bytes each —
+// so the token target is that same 1500, now expressed in the unit that
+// actually matters.
+//
+// Exported so config.go can use it as the CIX_MAX_CHUNK_TOKENS default rather
+// than repeating the number: two copies of a chunk-size default drifting apart
+// is the exact failure this change removes for maxChunkSize.
+const DefaultMaxChunkTokens = 1500
+
+// splitChunkTokens cuts an over-budget chunk into pieces of <= maxTokens.
+//
+// It keeps splitChunk's attribution rule: only the first piece inherits
+// SymbolName/ChunkType, the rest become `block`, so one long function does not
+// produce N symbol rows all claiming to be it.
+//
+// The cut positions come from Budget.SplitPoints over the WHOLE content rather
+// than from summing per-line counts. Per-line summing is off by the separators
+// — joining lines reinserts newlines, and a newline plus the next line's
+// indentation forms its own pre-token — so a budget of 1500 produced chunks of
+// up to 1546 tokens on real files, roughly one extra token per line boundary.
+// SplitPoints is exact by construction, so the bound actually holds.
+//
+// Each exact cut is then pulled BACK to the nearest line start, because a chunk
+// that begins mid-line reads badly in search results and its line range lies.
+// Moving a cut backwards only ever shrinks the piece before it, so the budget
+// survives the adjustment. A line longer than the whole budget has no earlier
+// boundary to snap to; there the exact cut stands and the line is split
+// internally — which is the case the byte splitter could not handle at all.
+func splitChunkTokens(chunk Chunk, budget tokenizer.Budget, maxTokens int) []Chunk {
+	content := chunk.Content
+	var out []Chunk
+	pos, line := 0, chunk.StartLine
+	var cuts []int // absolute offsets into content; nil means "recompute"
+
+	for pos < len(content) {
+		if cuts == nil {
+			rel, _ := budget.SplitPoints(content[pos:], maxTokens)
+			if len(rel) == 0 {
+				out = append(out, mkPiece(chunk, content[pos:], line, len(out) == 0))
+				break
+			}
+			cuts = make([]int, 0, len(rel))
+			for _, r := range rel {
+				cuts = append(cuts, pos+r)
+			}
+		}
+
+		at := cuts[0]
+		// Pull the cut back to a line start so a piece never begins mid-line:
+		// search results and the stored line range both lie otherwise. Moving
+		// backwards only shrinks this piece, so it stays inside the budget. A
+		// line wider than the whole budget has no earlier boundary — there the
+		// exact cut stands and the line is split internally, which is the case
+		// the byte splitter could not handle at all.
+		snapped := at
+		if nl := strings.LastIndexByte(content[pos:at], '\n'); nl >= 0 {
+			snapped = pos + nl + 1
+		}
+		if snapped <= pos {
+			snapped = at
+		}
+
+		piece := content[pos:snapped]
+		out = append(out, mkPiece(chunk, piece, line, len(out) == 0))
+		line += strings.Count(piece, "\n")
+		pos = snapped
+
+		if snapped == at {
+			// The boundary landed where the tokenizer put it, so the cuts
+			// after it are still valid and can be consumed without another
+			// pass. This is what keeps a 66 KB single line — where the
+			// newline snap never fires — from costing one full scan per
+			// piece.
+			cuts = cuts[1:]
+			if len(cuts) == 0 {
+				cuts = nil
+			}
+			continue
+		}
+		// Snapping moved the boundary: every later cut was measured from a
+		// start that no longer exists, and reusing them would hand the next
+		// piece the tokens this one gave up. Recompute.
+		cuts = nil
+	}
+	return out
+}
+
+// mkPiece builds one output chunk, preserving splitChunk's attribution rule:
+// only the first piece keeps SymbolName/ChunkType, so a long function does not
+// produce N symbol rows all claiming to be it.
+func mkPiece(src Chunk, content string, startLine int, first bool) Chunk {
+	c := Chunk{
+		Content:    content,
+		FilePath:   src.FilePath,
+		StartLine:  startLine,
+		EndLine:    startLine + strings.Count(strings.TrimSuffix(content, "\n"), "\n"),
+		Language:   src.Language,
+		ParentName: src.ParentName,
+	}
+	if first {
+		c.ChunkType = src.ChunkType
+		c.SymbolName = src.SymbolName
+		c.SymbolSignature = src.SymbolSignature
+	} else {
+		c.ChunkType = "block"
+	}
+	return c
 }

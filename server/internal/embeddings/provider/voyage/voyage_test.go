@@ -5,9 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/dvcdsys/code-index/server/internal/tokenizer"
+	"github.com/dvcdsys/code-index/server/internal/tokenizer/bpecount"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -187,7 +190,7 @@ func TestPlanBatches_SplitsByTokenBudget(t *testing.T) {
 	small := "tiny"
 	texts := []string{big, small, small, small, small, small}
 
-	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch)
+	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch, nil)
 	if len(batches) < 2 {
 		t.Fatalf("expected at least 2 batches, got %d", len(batches))
 	}
@@ -213,7 +216,7 @@ func TestPlanBatches_RespectsCountCap(t *testing.T) {
 	for i := range texts {
 		texts[i] = "chunk"
 	}
-	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch)
+	batches := planBatches(texts, defaultMaxBatchSize, defaultMaxTokensPerBatch, nil)
 	if len(batches) != 2 {
 		t.Fatalf("expected 2 batches (128 + 72), got %d", len(batches))
 	}
@@ -650,5 +653,80 @@ func TestInt8Dequantize_Base64(t *testing.T) {
 	v := vecs[0]
 	if v[0] < 0.999 || v[1] > -0.999 || v[2] != 0 || v[3] < 0.50 || v[3] > 0.51 {
 		t.Errorf("base64 int8 dequantized values out of range: %v", v)
+	}
+}
+
+// TestProviderSatisfiesBudget pins the provider to the interface the chunker
+// consumes. A compile-time assertion rather than a runtime test: the whole
+// point of the interface is that the chunker never imports this package.
+func TestProviderSatisfiesBudget(t *testing.T) {
+	var _ tokenizer.Budget = (*Provider)(nil)
+}
+
+// TestFallbackWithoutTokenizer covers the degraded path: no tokenizer.json
+// means estimates, the conservative batch cap, and ExactCounts()==false so a
+// caller can widen its margins instead of trusting the number.
+func TestFallbackWithoutTokenizer(t *testing.T) {
+	p := &Provider{cfg: Config{Model: "voyage-code-3"}}
+	if p.ExactCounts() {
+		t.Error("ExactCounts must be false without a tokenizer")
+	}
+	if got := p.maxTokensPerBatch(); got != defaultMaxTokensPerBatch {
+		t.Errorf("batch cap = %d, want the conservative %d", got, defaultMaxTokensPerBatch)
+	}
+	if got, want := p.CountTokens("hello world"), len("hello world")/bytesPerToken; got != want {
+		t.Errorf("CountTokens = %d, want the byte estimate %d", got, want)
+	}
+}
+
+// TestOperatorOverrideWinsOverExactCap — an explicit MaxTokensPerRequest is
+// the operator's call and must not be silently raised by exact counting.
+func TestOperatorOverrideWinsOverExactCap(t *testing.T) {
+	p := &Provider{cfg: Config{Model: "voyage-code-3", MaxTokensPerRequest: 42_000}}
+	if got := p.maxTokensPerBatch(); got != 42_000 {
+		t.Errorf("batch cap = %d, want the operator's 42000", got)
+	}
+}
+
+// TestSplitForInputUsesTokenBoundaries exercises the provider-level split with
+// a tokenizer loaded — the branch that keeps a large-but-legal chunk out of the
+// byte-window-and-average path. It needs the real tokenizer.json, so it skips
+// on a clean checkout like the other fixture-backed tests.
+func TestSplitForInputUsesTokenBoundaries(t *testing.T) {
+	const tokPath = "../../../../../loadtests/bench/voyage-code-3.tokenizer.json"
+	if _, err := os.Stat(tokPath); err != nil {
+		t.Skip("tokenizer.json not present")
+	}
+	c, err := bpecount.Load(tokPath)
+	if err != nil {
+		t.Fatalf("load tokenizer: %v", err)
+	}
+	p := &Provider{cfg: Config{Model: "voyage-code-3"}, counter: c}
+
+	// Comfortably over the old 30 KB byte cap, comfortably under the model's
+	// 32K-token window: byte-windowing would split and average this, token
+	// counting must pass it through whole.
+	big := strings.Repeat("func handler(w http.ResponseWriter) { defer r.Body.Close() }\n", 700)
+	if n := p.CountTokens(big); n >= p.MaxInputTokens() {
+		t.Fatalf("fixture is %d tokens, needs to be under %d", n, p.MaxInputTokens())
+	}
+	if got := p.splitForInput(big, 30_000); len(got) != 1 {
+		t.Errorf("input of %d bytes / %d tokens split into %d windows; a token-sized "+
+			"input must pass through whole", len(big), p.CountTokens(big), len(got))
+	}
+
+	// Past the window: must split, and every piece must fit.
+	huge := strings.Repeat("x := compute(alpha, beta, gamma) // annotate the result\n", 40_000)
+	pieces := p.splitForInput(huge, 30_000)
+	if len(pieces) < 2 {
+		t.Fatalf("input of %d tokens was not split", p.CountTokens(huge))
+	}
+	for i, piece := range pieces {
+		if n := p.CountTokens(piece); n > p.MaxInputTokens() {
+			t.Errorf("piece %d is %d tokens, over the %d-token window", i, n, p.MaxInputTokens())
+		}
+	}
+	if strings.Join(pieces, "") != huge {
+		t.Error("pieces do not reconstruct the input")
 	}
 }
