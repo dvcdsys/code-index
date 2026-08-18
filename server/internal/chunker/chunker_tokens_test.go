@@ -143,3 +143,75 @@ func TestNilBudgetUnchanged(t *testing.T) {
 		t.Errorf("nil budget diverged from ChunkFile: %d vs %d chunks", len(a), len(b))
 	}
 }
+
+// TestTokenSplitPreservesContent pins the invariant that makes the token
+// splitter exact: its pieces are SUBSTRINGS of the chunk it was given, so
+// concatenating them reproduces it byte for byte — nothing lost, nothing
+// duplicated.
+//
+// The first implementation instead re-joined lines it had counted separately,
+// and the newlines it reinserted cost tokens the running total never saw. A
+// 1500-token budget produced 1546-token chunks on real files. Slicing the
+// original removes that class of error rather than compensating for it.
+//
+// Asserted on splitChunkTokens directly, not through ChunkFileTokens: the
+// sliding-window fallback deliberately overlaps its windows for recall, so
+// whole-pipeline output is not expected to concatenate back.
+func TestTokenSplitPreservesContent(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 200; i++ {
+		sb.WriteString("some line with a handful of words in it\n")
+	}
+	src := Chunk{
+		Content:    sb.String(),
+		FilePath:   "x.txt",
+		StartLine:  1,
+		EndLine:    200,
+		ChunkType:  "function",
+		SymbolName: strPtr("run"),
+	}
+	b := fakeBudget{maxInput: 4096}
+
+	pieces := splitChunkTokens(src, b, 40)
+	var rebuilt strings.Builder
+	for i, c := range pieces {
+		rebuilt.WriteString(c.Content)
+		if n := b.CountTokens(c.Content); n > 40 {
+			t.Errorf("piece %d is %d tokens, over budget 40", i, n)
+		}
+	}
+	if rebuilt.String() != src.Content {
+		t.Errorf("concatenated pieces differ from the source (%d bytes vs %d)",
+			rebuilt.Len(), len(src.Content))
+	}
+	if pieces[0].SymbolName == nil || *pieces[0].SymbolName != "run" || pieces[0].ChunkType != "function" {
+		t.Error("first piece must inherit the symbol")
+	}
+	for i, c := range pieces[1:] {
+		if c.SymbolName != nil || c.ChunkType != "block" {
+			t.Errorf("piece %d must be an anonymous block, got type %q", i+1, c.ChunkType)
+		}
+	}
+}
+
+// TestTokenSplitLineNumbers — a piece that starts mid-file must report the
+// line it actually starts on, or `cix search` sends the reader to the wrong
+// place.
+func TestTokenSplitLineNumbers(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 100; i++ {
+		sb.WriteString("word word word word word\n")
+	}
+	b := fakeBudget{maxInput: 4096}
+
+	chunks := splitChunkTokens(Chunk{Content: sb.String(), FilePath: "x.txt", StartLine: 1}, b, 20)
+	line := 1
+	for i, c := range chunks {
+		if c.StartLine != line {
+			t.Errorf("chunk %d starts at line %d, expected %d", i, c.StartLine, line)
+		}
+		line += strings.Count(c.Content, "\n")
+	}
+}
+
+func strPtr(s string) *string { return &s }

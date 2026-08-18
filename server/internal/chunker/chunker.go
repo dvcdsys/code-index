@@ -1133,92 +1133,80 @@ const defaultMaxChunkTokens = 1500
 
 // splitChunkTokens cuts an over-budget chunk into pieces of <= maxTokens.
 //
-// It is the token-aware sibling of splitChunk and keeps its attribution rule:
-// only the first piece inherits SymbolName/ChunkType, the rest become `block`,
-// so one long function does not produce N rows all claiming to be that symbol.
+// It keeps splitChunk's attribution rule: only the first piece inherits
+// SymbolName/ChunkType, the rest become `block`, so one long function does not
+// produce N symbol rows all claiming to be it.
 //
-// Two differences that matter:
+// The cut positions come from Budget.SplitPoints over the WHOLE content rather
+// than from summing per-line counts. Per-line summing is off by the separators
+// — joining lines reinserts newlines, and a newline plus the next line's
+// indentation forms its own pre-token — so a budget of 1500 produced chunks of
+// up to 1546 tokens on real files, roughly one extra token per line boundary.
+// SplitPoints is exact by construction, so the bound actually holds.
 //
-//   - The running size is counted, not estimated, so a chunk of Cyrillic
-//     comments is no longer cut three times sooner than an equivalent chunk of
-//     ASCII.
-//   - A single line longer than the budget is cut INSIDE the line, on token
-//     boundaries from Budget.SplitPoints. The byte splitter could not do this
-//     (its loop requires len(currentLines) > 1), which is how a 65 KB minified
-//     line reached the embedder as one chunk and got byte-windowed and
-//     vector-averaged downstream.
+// Each exact cut is then pulled BACK to the nearest line start, because a chunk
+// that begins mid-line reads badly in search results and its line range lies.
+// Moving a cut backwards only ever shrinks the piece before it, so the budget
+// survives the adjustment. A line longer than the whole budget has no earlier
+// boundary to snap to; there the exact cut stands and the line is split
+// internally — which is the case the byte splitter could not handle at all.
 func splitChunkTokens(chunk Chunk, budget tokenizer.Budget, maxTokens int) []Chunk {
-	lines := splitLines(chunk.Content)
-	var subChunks []Chunk
+	var out []Chunk
+	rest := chunk.Content
+	line := chunk.StartLine
 
-	emit := func(content string, startLine, endLine int) {
-		if content == "" {
-			return
+	for rest != "" {
+		cuts, _ := budget.SplitPoints(rest, maxTokens)
+		if len(cuts) == 0 {
+			out = append(out, mkPiece(chunk, rest, line, len(out) == 0))
+			break
 		}
-		c := Chunk{
-			Content:    content,
-			FilePath:   chunk.FilePath,
-			StartLine:  startLine,
-			EndLine:    endLine,
-			Language:   chunk.Language,
-			ParentName: chunk.ParentName,
+
+		at := cuts[0]
+		// Pull the cut back to a line start so a piece never begins
+		// mid-line: search results and the stored line range both lie
+		// otherwise. Moving backwards only shrinks this piece, so it stays
+		// inside the budget. A line wider than the whole budget has no
+		// earlier boundary — there the exact cut stands and the line is
+		// split internally, which is the case the byte splitter could not
+		// handle at all.
+		if nl := strings.LastIndexByte(rest[:at], '\n'); nl >= 0 {
+			at = nl + 1
 		}
-		if len(subChunks) == 0 {
-			c.ChunkType = chunk.ChunkType
-			c.SymbolName = chunk.SymbolName
-			c.SymbolSignature = chunk.SymbolSignature
-		} else {
-			c.ChunkType = "block"
+		if at == 0 {
+			at = cuts[0]
 		}
-		subChunks = append(subChunks, c)
+
+		piece := rest[:at]
+		out = append(out, mkPiece(chunk, piece, line, len(out) == 0))
+		line += strings.Count(piece, "\n")
+		rest = rest[at:]
+		// Recomputing the next cut from the NEW start is the whole point of
+		// the loop: snapping back moved the boundary, so the remaining cuts
+		// SplitPoints returned no longer apply — reusing them would hand the
+		// next piece the words this one gave up and push it over budget.
 	}
+	return out
+}
 
-	var currentLines []string
-	currentStart := chunk.StartLine
-	currentTokens := 0
-
-	flush := func(endLine int) {
-		if len(currentLines) == 0 {
-			return
-		}
-		emit(joinLines(currentLines), currentStart, endLine)
-		currentLines = nil
-		currentTokens = 0
+// mkPiece builds one output chunk, preserving splitChunk's attribution rule:
+// only the first piece keeps SymbolName/ChunkType, so a long function does not
+// produce N symbol rows all claiming to be it.
+func mkPiece(src Chunk, content string, startLine int, first bool) Chunk {
+	c := Chunk{
+		Content:    content,
+		FilePath:   src.FilePath,
+		StartLine:  startLine,
+		EndLine:    startLine + strings.Count(strings.TrimSuffix(content, "\n"), "\n"),
+		Language:   src.Language,
+		ParentName: src.ParentName,
 	}
-
-	for i, line := range lines {
-		lineNo := chunk.StartLine + i
-		n := budget.CountTokens(line)
-
-		// A line that cannot fit on its own: close what we have, then cut
-		// the line itself on token boundaries.
-		if n > maxTokens {
-			flush(lineNo - 1)
-			offsets, _ := budget.SplitPoints(line, maxTokens)
-			prev := 0
-			for _, off := range offsets {
-				emit(line[prev:off], lineNo, lineNo)
-				prev = off
-			}
-			// Tail of the line seeds the next piece so short following
-			// lines can still join it.
-			currentLines = []string{line[prev:]}
-			currentStart = lineNo
-			currentTokens = budget.CountTokens(line[prev:])
-			continue
-		}
-
-		if len(currentLines) > 0 && currentTokens+n > maxTokens {
-			flush(lineNo - 1)
-			currentStart = lineNo
-		}
-		currentLines = append(currentLines, line)
-		currentTokens += n
+	if first {
+		c.ChunkType = src.ChunkType
+		c.SymbolName = src.SymbolName
+		c.SymbolSignature = src.SymbolSignature
+	} else {
+		c.ChunkType = "block"
 	}
-	flush(chunk.StartLine + len(lines) - 1)
-
-	if len(subChunks) == 0 {
-		return []Chunk{chunk}
-	}
-	return subChunks
+	return c
 }
