@@ -27,13 +27,18 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-git/go-git/v5"
@@ -49,6 +54,13 @@ import (
 const branch = "main"
 
 func main() {
+	repoFlag := flag.String("repo", "", "compact a COPY of this existing checkout under instrumentation, skip the synthetic scenarios")
+	flag.Parse()
+	if *repoFlag != "" {
+		runRepoMode(*repoFlag)
+		return
+	}
+
 	root, err := os.MkdirTemp("", "gc-poc-*")
 	must(err)
 	fmt.Printf("workdir: %s\n\n", root)
@@ -134,7 +146,7 @@ func main() {
 	fmt.Println("second compaction (idempotency): OK")
 
 	// ---------------------------------------------------------------- 4. AFTER
-	fmt.Println("\n== 4. AFTER: fetch+reset keeps working; incremental diff preserved ==")
+	fmt.Println("\n== 4. AFTER: prod order fetch → compact(protect=indexed_sha) → diff ==")
 	indexedSHA := gitOut(clone, "rev-parse", "HEAD") // what indexed_sha would be
 	pushUpstream(upstream, 1001)
 	fetchAndReset(clone, upstream)
@@ -142,23 +154,29 @@ func main() {
 	if newHead == indexedSHA {
 		fail("fetch after compaction brought no new commit")
 	}
+	// Compaction runs BETWEEN the fetch and the index job, so the not-yet-
+	// reindexed base commit survives only because it is protected.
+	if _, err := compact(clone, plumbing.NewHash(indexedSHA)); err != nil {
+		fail("compact with protected indexed_sha: %v", err)
+	}
 	cs, err := changeSet(clone, indexedSHA, newHead)
 	if err != nil {
 		fmt.Printf("tree-diff %s..%s FAILED: %v (a re-clone strategy always fails here)\n", short(indexedSHA), short(newHead), err)
 	} else {
-		fmt.Printf("tree-diff %s..%s: %d modified, %d added, %d deleted — INCREMENTAL INDEXING PRESERVED\n",
+		fmt.Printf("tree-diff %s..%s after an intervening compaction: %d modified, %d added, %d deleted — INCREMENTAL INDEXING PRESERVED\n",
 			short(indexedSHA), short(newHead), len(cs.mod), len(cs.add), len(cs.del))
 	}
 
 	// Steady state: compact after every fetch for 20 more pushes.
-	fmt.Println("\n-- steady state: 20 more pushes, compacting after every fetch --")
+	fmt.Println("\n-- steady state: 20 more pushes, compact(protect=prev head) after every fetch --")
 	var maxPacks, maxSize int64
 	var totalCompact time.Duration
 	for i := 2; i <= 21; i++ {
+		prev := gitOut(clone, "rev-parse", "HEAD")
 		pushUpstream(upstream, 1000+i)
 		fetchAndReset(clone, upstream)
 		t0 := time.Now()
-		_, err := compact(clone)
+		_, err := compact(clone, plumbing.NewHash(prev))
 		must(err)
 		totalCompact += time.Since(t0)
 		if n := int64(packCount(clone)); n > maxPacks {
@@ -189,6 +207,54 @@ func main() {
 	fmt.Printf("git fsck --strict: %s\n", okOr(fsck, "CLEAN"))
 	verifyEveryBlobReadable(clone)
 
+	// ---------------------------------------------------------------- 6. CANONICAL
+	fmt.Println("\n== 6. CANONICAL: compacted checkout vs a full-history git clone ==")
+	compareAgainstCanonical(root, upstream, clone, "small")
+
+	// ---------------------------------------------------------------- 7. RESOURCES
+	fmt.Println("\n== 7. RESOURCES: large repo (binary blobs), instrumented compaction ==")
+	bigUp := filepath.Join(root, "big-upstream")
+	seedBigUpstream(bigUp)
+	bigClone := filepath.Join(root, "big-clone")
+	cloneShallow(bigUp, bigClone)
+	report(bigClone, "after initial shallow clone")
+	for i := 1; i <= 12; i++ {
+		pushBigUpstream(bigUp, i)
+		fetchAndReset(bigClone, bigUp)
+	}
+	report(bigClone, "after 12 pushes")
+
+	objectsBefore := dirSize(filepath.Join(bigClone, ".git", "objects"))
+	preManifest := worktreeManifest(bigClone)
+	var bigStats compactStats
+	res, err := measured(func() error {
+		var cerr error
+		bigStats, cerr = compact(bigClone)
+		return cerr
+	})
+	must(err)
+	objectsAfter := dirSize(filepath.Join(bigClone, ".git", "objects"))
+	report(bigClone, "after compaction")
+	fmt.Printf("\n-- resource usage of compact() on the large repo --\n")
+	fmt.Printf("objects on disk : before=%s  PEAK during=%s (new pack coexists with old)  after=%s\n",
+		human(objectsBefore), human(bigStats.packDirPeak), human(objectsAfter))
+	fmt.Printf("wall time       : %v\n", res.wall.Round(time.Millisecond))
+	fmt.Printf("cpu time        : user=%v sys=%v (%.0f%% of one core)\n",
+		res.cpuUser.Round(time.Millisecond), res.cpuSys.Round(time.Millisecond),
+		100*float64(res.cpuUser+res.cpuSys)/float64(res.wall))
+	fmt.Printf("go heap         : baseline=%s  peak during=%s  (algorithm footprint ≈ %s)\n",
+		human(int64(res.heapBefore)), human(int64(res.heapPeak)), human(int64(res.heapPeak-res.heapBefore)))
+	fmt.Printf("process max RSS : %s (Δ vs before the call: %s)\n", human(res.maxRSSAfter), human(res.maxRSSAfter-res.maxRSSBefore))
+	fmt.Printf("reachable objects packed: %d; packs deleted: %d\n\n", bigStats.reachable, bigStats.packsDeleted)
+
+	if worktreeManifest(bigClone) != preManifest {
+		fail("large repo worktree changed across compaction")
+	}
+	fmt.Println("worktree manifest identical across compaction: OK")
+	fsck = gitRun(bigClone, "fsck", "--strict", "--no-dangling")
+	fmt.Printf("git fsck --strict: %s\n", okOr(fsck, "CLEAN"))
+	compareAgainstCanonical(root, bigUp, bigClone, "big")
+
 	fmt.Println("\nall checks passed")
 }
 
@@ -203,21 +269,45 @@ type compactStats struct {
 	loosePruned   int
 	shallowBefore int
 	shallowAfter  int
+	// packDirPeak is .git/objects size at the worst moment: the new pack is
+	// fully written while every old pack still exists. This is the extra disk
+	// headroom the algorithm transiently needs.
+	packDirPeak int64
 }
 
 // compact rewrites the checkout's object store down to exactly the objects
-// reachable from its current references, honouring the shallow boundary.
-func compact(dir string) (compactStats, error) {
+// reachable from its current references, honouring the shallow boundary the
+// way git itself does: a commit listed in .git/shallow is a graft point and
+// its parents are NOT walked, even when they happen to be in the store.
+// (Every Depth:1-fetched tip is such a graft point, so without this rule the
+// store retains every previously fetched snapshot forever — reachable to a
+// naive walker, invisible to git rev-list, pure dead weight.)
+//
+// protect lists commits that must survive even though no ref points at them —
+// in production that is git_repos.indexed_sha, the base of the next
+// incremental tree-diff. A protected commit that is not in the store is
+// silently skipped (nothing to protect).
+func compact(dir string, protect ...plumbing.Hash) (compactStats, error) {
 	var st compactStats
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
 		return st, fmt.Errorf("open: %w", err)
 	}
 
-	// 1. Reachable set. Like go-git's objectWalker, but a commit parent that
-	//    is not in the object store is the SHALLOW BOUNDARY, not an error.
-	//    Missing trees/blobs stay fatal — those would mean real corruption.
-	w := &shallowWalker{storer: repo.Storer, seen: map[plumbing.Hash]struct{}{}}
+	shallowList, err := repo.Storer.Shallow()
+	if err != nil {
+		return st, fmt.Errorf("read shallow: %w", err)
+	}
+	shallowSet := make(map[plumbing.Hash]struct{}, len(shallowList))
+	for _, h := range shallowList {
+		shallowSet[h] = struct{}{}
+	}
+
+	// 1. Reachable set. Like go-git's objectWalker, but with git's shallow
+	//    semantics for commit parents (see above); a parent missing from the
+	//    store is likewise a boundary, not an error. Missing trees/blobs stay
+	//    fatal — those would mean real corruption.
+	w := &shallowWalker{storer: repo.Storer, shallow: shallowSet, seen: map[plumbing.Hash]struct{}{}}
 	refs, err := repo.References()
 	if err != nil {
 		return st, err
@@ -230,6 +320,17 @@ func compact(dir string) (compactStats, error) {
 	})
 	if err != nil {
 		return st, fmt.Errorf("reachability walk: %w", err)
+	}
+	for _, h := range protect {
+		if h.IsZero() {
+			continue
+		}
+		if _, err := object.GetObject(repo.Storer, h); err == plumbing.ErrObjectNotFound {
+			continue
+		}
+		if err := w.walk(h); err != nil {
+			return st, fmt.Errorf("walk protected %s: %w", h, err)
+		}
 	}
 	st.reachable = len(w.seen)
 	objs := make([]plumbing.Hash, 0, len(w.seen))
@@ -258,13 +359,14 @@ func compact(dir string) (compactStats, error) {
 		return st, err
 	}
 	enc := packfile.NewEncoder(wc, repo.Storer, false)
-	newPack, err := enc.Encode(objs, 10)
+	newPack, err := enc.Encode(objs, packWindow())
 	if cerr := wc.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
 		return st, fmt.Errorf("encode pack: %w", err)
 	}
+	st.packDirPeak = dirSize(filepath.Join(dir, ".git", "objects"))
 
 	// 4. Only now that the new pack is durable: delete every old pack.
 	for _, h := range oldPacks {
@@ -316,12 +418,28 @@ func compact(dir string) (compactStats, error) {
 	return st, nil
 }
 
-// shallowWalker is objectWalker with one behavioural change: a commit parent
-// missing from the object store terminates that branch of the walk instead of
-// failing it.
+// packWindow is the delta-compression window for the new pack. 10 is git's
+// default; GCPOC_WINDOW=0 disables delta search entirely, which matters for
+// CPU: with shallow-correct reachability the packed set is mostly a single
+// snapshot with few cross-object deltas to find anyway.
+func packWindow() uint {
+	if v := os.Getenv("GCPOC_WINDOW"); v != "" {
+		var n uint
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return 10
+}
+
+// shallowWalker is objectWalker with two behavioural changes: commits listed
+// in .git/shallow are graft points whose parents are never walked (git's own
+// semantics), and a commit parent missing from the object store terminates
+// that branch of the walk instead of failing it.
 type shallowWalker struct {
-	storer storage.Storer
-	seen   map[plumbing.Hash]struct{}
+	storer  storage.Storer
+	shallow map[plumbing.Hash]struct{}
+	seen    map[plumbing.Hash]struct{}
 }
 
 func (w *shallowWalker) walk(hash plumbing.Hash) error {
@@ -338,11 +456,15 @@ func (w *shallowWalker) walk(hash plumbing.Hash) error {
 		if err := w.walk(obj.TreeHash); err != nil {
 			return err
 		}
+		if _, grafted := w.shallow[obj.Hash]; grafted {
+			// Shallow graft point: git treats this commit as parentless.
+			break
+		}
 		for _, p := range obj.ParentHashes {
 			if _, ok := w.seen[p]; ok {
 				continue
 			}
-			// Shallow boundary: the commit names a parent we never fetched.
+			// The commit names a parent we never fetched.
 			if _, err := object.GetObject(w.storer, p); err == plumbing.ErrObjectNotFound {
 				continue
 			}
@@ -446,8 +568,209 @@ func changeSet(dir, oldSHA, newSHA string) (*cset, error) {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical comparison: the compacted shallow checkout must be
+// indistinguishable — file bytes AND git object identity — from a fresh
+// FULL-history clone of the same upstream at the same commit.
+// ---------------------------------------------------------------------------
+
+func compareAgainstCanonical(root, upstream, clone, label string) {
+	canonical := filepath.Join(root, "canonical-"+label)
+	gitMust(filepath.Dir(canonical), "clone", "--quiet", "--branch", branch, "file://"+upstream, canonical)
+
+	// Same commit on both sides (the loop always fetched to upstream HEAD).
+	cHead := gitOut(clone, "rev-parse", "HEAD")
+	kHead := gitOut(canonical, "rev-parse", "HEAD")
+	if cHead != kHead {
+		fail("HEAD mismatch: compacted=%s canonical=%s", cHead, kHead)
+	}
+
+	// 1. File bytes: every path, sha256, both directions.
+	if worktreeManifest(clone) != worktreeManifest(canonical) {
+		fail("worktree bytes differ from canonical full clone")
+	}
+	fmt.Println("file content vs canonical full clone (path+sha256, both directions): IDENTICAL")
+
+	// 2. Git object identity: ls-tree -r prints mode, type, blob hash and path
+	//    for every entry — equal output means the compacted store serves
+	//    byte-identical git objects, not just byte-identical files.
+	if gitOut(clone, "ls-tree", "-r", "HEAD") != gitOut(canonical, "ls-tree", "-r", "HEAD") {
+		fail("ls-tree -r HEAD differs from canonical")
+	}
+	fmt.Println("git ls-tree -r HEAD vs canonical: IDENTICAL")
+
+	// 3. History mode: every commit that SURVIVES in the shallow store
+	//    (rev-list stops at the shallow boundary) must exist in canonical
+	//    history with the same tree hash.
+	surviving := strings.Fields(gitOut(clone, "rev-list", "HEAD"))
+	for _, sha := range surviving {
+		if gitOut(clone, "rev-parse", sha+"^{tree}") != gitOut(canonical, "rev-parse", sha+"^{tree}") {
+			fail("commit %s: tree hash differs from canonical history", sha)
+		}
+	}
+	fmt.Printf("surviving history (%d commits up to the shallow boundary): every commit present in canonical history with an identical tree hash\n", len(surviving))
+}
+
+// ---------------------------------------------------------------------------
+// Resource instrumentation.
+// ---------------------------------------------------------------------------
+
+type resUsage struct {
+	wall             time.Duration
+	cpuUser, cpuSys  time.Duration
+	heapBefore       uint64
+	heapPeak         uint64
+	maxRSSBefore     int64
+	maxRSSAfter      int64
+}
+
+// measured runs fn while sampling the Go heap every 2ms and diffing
+// getrusage around the call. maxRSS is a process-lifetime high-water mark, so
+// the "before" value is the baseline the call may or may not have raised.
+func measured(fn func() error) (resUsage, error) {
+	var r resUsage
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	r.heapBefore = ms.HeapAlloc
+	var ruBefore, ruAfter syscall.Rusage
+	must(syscall.Getrusage(syscall.RUSAGE_SELF, &ruBefore))
+	r.maxRSSBefore = rssBytes(ruBefore.Maxrss)
+
+	var peak atomic.Uint64
+	peak.Store(ms.HeapAlloc)
+	stop := make(chan struct{})
+	sampled := make(chan struct{})
+	go func() {
+		defer close(sampled)
+		t := time.NewTicker(2 * time.Millisecond)
+		defer t.Stop()
+		var m runtime.MemStats
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				runtime.ReadMemStats(&m)
+				if m.HeapAlloc > peak.Load() {
+					peak.Store(m.HeapAlloc)
+				}
+			}
+		}
+	}()
+
+	start := time.Now()
+	err := fn()
+	r.wall = time.Since(start)
+	close(stop)
+	<-sampled
+
+	must(syscall.Getrusage(syscall.RUSAGE_SELF, &ruAfter))
+	r.maxRSSAfter = rssBytes(ruAfter.Maxrss)
+	r.cpuUser = timevalDuration(ruAfter.Utime) - timevalDuration(ruBefore.Utime)
+	r.cpuSys = timevalDuration(ruAfter.Stime) - timevalDuration(ruBefore.Stime)
+	r.heapPeak = peak.Load()
+	return r, err
+}
+
+func timevalDuration(tv syscall.Timeval) time.Duration {
+	return time.Duration(tv.Sec)*time.Second + time.Duration(tv.Usec)*time.Microsecond
+}
+
+// rssBytes normalises getrusage maxrss: bytes on darwin, kilobytes on linux.
+func rssBytes(maxrss int64) int64 {
+	if runtime.GOOS == "linux" {
+		return maxrss * 1024
+	}
+	return maxrss
+}
+
+// runRepoMode compacts a COPY of an arbitrary real checkout (e.g. one scp'd
+// from production) and prints the same instrumentation. Read-only towards the
+// original.
+func runRepoMode(orig string) {
+	if _, err := os.Stat(filepath.Join(orig, ".git")); err != nil {
+		fail("%s does not look like a checkout: %v", orig, err)
+	}
+	tmp, err := os.MkdirTemp("", "gc-poc-repo-*")
+	must(err)
+	work := filepath.Join(tmp, "copy")
+	copyTree(orig, work)
+	fmt.Printf("compacting a copy of %s in %s\n\n", orig, work)
+	report(work, "before")
+	objectsBefore := dirSize(filepath.Join(work, ".git", "objects"))
+	pre := worktreeManifest(work)
+
+	var st compactStats
+	res, err := measured(func() error {
+		var cerr error
+		st, cerr = compact(work)
+		return cerr
+	})
+	must(err)
+	report(work, "after")
+	fmt.Printf("\nobjects on disk : before=%s  PEAK during=%s  after=%s\n",
+		human(objectsBefore), human(st.packDirPeak), human(dirSize(filepath.Join(work, ".git", "objects"))))
+	fmt.Printf("wall time       : %v\n", res.wall.Round(time.Millisecond))
+	fmt.Printf("cpu time        : user=%v sys=%v\n", res.cpuUser.Round(time.Millisecond), res.cpuSys.Round(time.Millisecond))
+	fmt.Printf("go heap         : baseline=%s peak=%s (footprint ≈ %s)\n",
+		human(int64(res.heapBefore)), human(int64(res.heapPeak)), human(int64(res.heapPeak-res.heapBefore)))
+	fmt.Printf("process max RSS : %s (Δ %s)\n", human(res.maxRSSAfter), human(res.maxRSSAfter-res.maxRSSBefore))
+	fmt.Printf("objects packed  : %d; packs deleted: %d; shallow %d→%d\n",
+		st.reachable, st.packsDeleted, st.shallowBefore, st.shallowAfter)
+
+	if worktreeManifest(work) != pre {
+		fail("worktree changed across compaction")
+	}
+	fmt.Println("worktree manifest identical: OK")
+	if _, err := exec.LookPath("git"); err == nil {
+		fmt.Printf("git fsck --strict: %s\n", okOr(gitRun(work, "fsck", "--strict", "--no-dangling"), "CLEAN"))
+	}
+	fmt.Printf("\ncopy left at %s for inspection\n", work)
+}
+
+// ---------------------------------------------------------------------------
 // Upstream side: a real git repo, driven through the git binary.
 // ---------------------------------------------------------------------------
+
+// seedBigUpstream builds a repo big enough for resource numbers to mean
+// something: ~3000 source files plus five 2MB incompressible blobs
+// (~18MB worktree). Pushes rewrite one blob + 100 sources, so every fetch
+// pack carries megabytes.
+func seedBigUpstream(dir string) {
+	must(os.MkdirAll(dir, 0o755))
+	gitMust(dir, "init", "-b", branch)
+	gitMust(dir, "config", "user.email", "poc@example.com")
+	gitMust(dir, "config", "user.name", "poc")
+	for i := range 3000 {
+		writeFile(dir, fmt.Sprintf("src/pkg%02d/file%04d.go", i%40, i), fileBody(i, 0))
+	}
+	for i := range 5 {
+		writeRandomBlob(dir, i, 0)
+	}
+	gitMust(dir, "add", "-A")
+	gitMust(dir, "commit", "-q", "-m", "seed")
+}
+
+func pushBigUpstream(dir string, n int) {
+	for i := range 100 {
+		f := (n*31 + i*17) % 3000
+		writeFile(dir, fmt.Sprintf("src/pkg%02d/file%04d.go", f%40, f), fileBody(f, n))
+	}
+	writeRandomBlob(dir, n%5, n)
+	gitMust(dir, "add", "-A")
+	gitMust(dir, "commit", "-q", "-m", fmt.Sprintf("big push %d", n))
+}
+
+// writeRandomBlob writes a deterministic 2MB pseudo-random (incompressible)
+// blob — the realistic worst case for pack size.
+func writeRandomBlob(dir string, id, rev int) {
+	rnd := rand.New(rand.NewSource(int64(id)*1_000_003 + int64(rev)))
+	b := make([]byte, 2<<20)
+	rnd.Read(b)
+	full := filepath.Join(dir, fmt.Sprintf("assets/blob%d.bin", id))
+	must(os.MkdirAll(filepath.Dir(full), 0o755))
+	must(os.WriteFile(full, b, 0o644))
+}
 
 func seedUpstream(dir string) {
 	must(os.MkdirAll(dir, 0o755))
