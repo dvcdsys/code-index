@@ -150,21 +150,85 @@ on disk, deliberately: it keeps the package self-contained and
 live in `vectors`. A multi-kilobyte `TEXT` column pushes a row past SQLite's
 local-payload limit, and SQLite then keeps only ~1 kB of the row in the table
 page and spills the rest — *including the embedding* — into an overflow chain,
-roughly doubling the pages a scan touches. Kept apart, a `vectors` row is
-~3.2 kB and two of them share an 8 KiB page. Content is read only for the K
+roughly doubling the pages a scan touches. Kept apart, a 768-dim `vectors` row
+is ~3.2 kB and two of them share an 8 KiB page. Content is read only for the K
 winners of a search: one extra lookup per result.
+
+**Why the scan reads a second copy of every vector.** The paragraph above stops
+being true once the model is bigger than 1024 dimensions. A 2048-dim float32
+embedding is 8192 bytes on its own, past the 8157-byte local-payload limit, so
+every `vectors` row spills into an overflow page and the scan is back to the
+layout splitting out the content was meant to avoid. Measured with `dbstat`
+over 400 rows, bytes a full scan must read per vector:
+
+| dimensions | representation | leaf | overflow | bytes/vector |
+|---|---|---|---|---|
+| 768 | float32 | 200 | 0 | 4096 |
+| 1024 | float32 | 400 | 0 | 8192 |
+| 2048 | float32 | 50 | 400 | 9216 |
+| 768 | int8 | 40 | 0 | 819 |
+| 1024 | int8 | 58 | 0 | 1188 |
+| 2048 | int8 | 134 | 0 | 2744 |
+
+The pathological line is 1024, not 2048: nothing overflows there and the scan
+still reads 8192 bytes to obtain 4096, because two 4.1 kB rows cannot share an
+8 KiB page. Halving `output_dimension` to save time bought half the vector
+quality for 89% of the I/O.
+
+`vectors_q8` removes the whole step function by scanning one byte per component
+instead of four. `TestScanPackingEfficiency` and `TestScanBytesPerVectorBudget`
+assert those numbers — as pages, not milliseconds, so they mean the same thing
+in CI, on a laptop, and on the production box.
 
 ## Search
 
 ```
-SELECT rowid, embedding FROM vectors INDEXED BY idx_vec_coll
- WHERE collection_id = ?  [AND <metadata filters>]
+SELECT doc_id, scale, embedding FROM vectors_q8 INDEXED BY idx_q8_coll
+ WHERE collection_id = ?  [AND language = ?]
 ```
 
-Rows stream past a dot product (embeddings are stored L2-normalised, so cosine
-similarity *is* the dot product) into a top-K min-heap that rejects a losing
-row with one comparison. Metadata and chunk text are fetched afterwards, for
-the winners only.
+Rows stream past an integer dot product into a top-K min-heap that rejects a
+losing row with one comparison. The heap is wider than the caller's limit — the
+int8 ranking chooses a shortlist, it does not produce the answer. The shortlist
+is then rescored against the exact float32 vectors in `vectors`, and metadata
+and chunk text are fetched for the winners only.
+
+**What the approximation costs.** Measured on 60k vectors of the load-test
+fixture's largest collection (`ziglang/zig`, voyage-code-3 @2048) against 50
+real query-side embeddings, recall of the exact float32 top-K:
+
+| shortlist | k=10 | k=20 |
+|---|---|---|
+| 20 | 0.998 | 0.994 |
+| 40 | 0.998 | 0.999 |
+| **60** | **1.000** | **1.000** |
+| 200 | 1.000 | 1.000 |
+
+Without rescoring at all the int8 ranking alone gives 0.994 at both k — the
+quantisation misorders near-ties, it does not lose the documents, which is
+exactly why re-reading a few dozen exact vectors recovers all of them.
+`q8Shortlist` therefore uses a floor of 64 and 4x the limit above it. Scan CPU
+in the same run: 127 ms per query float32, 42 ms int8 (3.0x).
+
+Scores returned to callers are always the exact cosine, never the int8
+estimate. That is load-bearing beyond cosmetics: `min_score` thresholds on it,
+the workspace fan-out normalises across projects with it, and hybrid search
+blends it with BM25 — an approximate score would move results between projects
+in a way no single-project test would catch. `TestSearchScoresAreExact` pins it.
+
+**Building and rebuilding the copy.** Writes maintain `vectors_q8` in the same
+transaction as `vectors`, so a collection created by this code is complete by
+construction, and `q8_state` records that at creation — the readiness check is
+a primary-key lookup, never a `COUNT`. A store written before the table existed
+is converted by a background pass at open, largest collection first, in 2000-row
+transactions at a 50% duty cycle; until a collection is covered its searches
+take the float32 scan, which is correct and simply slower. Nothing is ever
+marked complete before it is: the flag is written in the same transaction as
+the batch that proves it. Set `CIX_VECTOR_SCAN_QUANT=false` to opt out — the
+copy is roughly a quarter of the float32 bytes on top of an already large
+store, so an operator short of disk needs a way to say no. Turning it off also
+withdraws the completion flag from anything written while it is off, so turning
+it back on rebuilds rather than trusting a stale copy.
 
 `INDEXED BY` is not an optimisation hint, it is a guarantee, and *which* index
 matters. Measured on the real index, scanning its largest (74k-row) collection:
@@ -187,6 +251,10 @@ across the collection's whole rowid span, for 1.8x the time.
 The metadata filter (`where`) mirrors chromem's semantics exactly, including
 the two odd cases: an unknown key with a non-empty value matches nothing, and
 an unknown key with an empty value matches everything.
+
+`TestQ8ScanUsesCollectionIndex` pins the same guarantee for the compact table:
+`idx_q8_coll`'s keys are `(collection_id, rowid)` for the same reason, and the
+language filter must not change the driving index.
 
 **Concurrency.** One scan per query, and a process-wide semaphore caps
 concurrent scans at `NumCPU`. Splitting a single query across workers was

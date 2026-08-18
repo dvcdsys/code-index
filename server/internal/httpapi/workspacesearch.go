@@ -509,26 +509,34 @@ func workspaceSearchResponse(
 // reindex before BM25 can contribute. A best-effort detector: if any
 // SQL probe errors out we log + return nil rather than fail the
 // request, since the warning is informational, not load-bearing.
+//
+// EXISTS, not COUNT(*), and the difference is not cosmetic: the question is
+// "are there any rows", and COUNT walks every matching index entry to answer
+// it. Measured on the 45-repo load-test index (1.95M rows in chunks_meta),
+// this loop cost 53 ms per workspace search as COUNT and 0.2 ms as EXISTS —
+// and it runs BEFORE the fan-out, so every query pays it serially. The LIMIT 1
+// that used to be on these statements did nothing: it bounds the result rows
+// of an aggregate that always returns exactly one.
 func (s *Server) detectStaleFTSRepos(ctx context.Context, projectPaths []string) []workspaceSearchStaleFTSRepoPayload {
 	out := make([]workspaceSearchStaleFTSRepoPayload, 0)
 	for _, pp := range projectPaths {
-		var nMeta, nFiles int
+		var hasMeta, hasFiles bool
 		if err := s.Deps.DB.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM chunks_meta WHERE project_path = ? LIMIT 1`, pp).Scan(&nMeta); err != nil {
+			`SELECT EXISTS(SELECT 1 FROM chunks_meta WHERE project_path = ?)`, pp).Scan(&hasMeta); err != nil {
 			s.Deps.Logger.Warn("workspaces search: stale-fts probe (chunks_meta)",
 				"project_path", pp, "err", err)
 			return nil
 		}
-		if nMeta > 0 {
+		if hasMeta {
 			continue
 		}
 		if err := s.Deps.DB.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM file_hashes WHERE project_path = ? LIMIT 1`, pp).Scan(&nFiles); err != nil {
+			`SELECT EXISTS(SELECT 1 FROM file_hashes WHERE project_path = ?)`, pp).Scan(&hasFiles); err != nil {
 			s.Deps.Logger.Warn("workspaces search: stale-fts probe (file_hashes)",
 				"project_path", pp, "err", err)
 			return nil
 		}
-		if nFiles > 0 {
+		if hasFiles {
 			out = append(out, workspaceSearchStaleFTSRepoPayload{ProjectPath: pp})
 		}
 	}

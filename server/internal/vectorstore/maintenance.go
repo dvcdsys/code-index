@@ -88,6 +88,16 @@ SELECT c.name, COALESCE(SUM(LENGTH(vc.content) + LENGTH(vc.doc_id)), 0)
   LEFT JOIN vector_contents vc ON vc.collection_id = c.id
  GROUP BY c.id`
 
+// q8SizeSQL accounts for the compact scan copy. It is a third of the float32
+// bytes and it is real disk, so leaving it out would make the Resources screen
+// under-report the store by ~25% — the same kind of quiet mismatch the WAL
+// high-water mark used to cause.
+const q8SizeSQL = `
+SELECT c.name, COALESCE(SUM(LENGTH(q.embedding) + LENGTH(q.doc_id) + LENGTH(q.language) + 16), 0)
+  FROM collections c
+  LEFT JOIN vectors_q8 q ON q.collection_id = c.id
+ GROUP BY c.id`
+
 // ListCollections implements Maintainer. Results are sorted by name so callers
 // (and their tests) see a stable order.
 func (s *Store) ListCollections() []CollectionInfo {
@@ -118,29 +128,45 @@ func (s *Store) ListCollections() []CollectionInfo {
 		return nil
 	}
 
-	// Chunk text lives in its own table (see schemaSQL); fold it into the
-	// reported size with a second aggregate rather than a join that would
-	// multiply the row counts.
-	crows, err := s.db.QueryContext(ctx, contentSizeSQL)
-	if err != nil {
-		s.logger.Error("vectorstore: list collection contents", "err", err)
-		return out
+	// Chunk text and the compact scan copy live in their own tables (see
+	// schemaSQL); fold each into the reported size with its own aggregate
+	// rather than joins that would multiply the row counts.
+	for _, q := range []struct {
+		what string
+		sql  string
+	}{
+		{"contents", contentSizeSQL},
+		{"scan copy", q8SizeSQL},
+	} {
+		sizes, err := s.sizesByCollection(ctx, q.sql)
+		if err != nil {
+			s.logger.Error("vectorstore: list collection "+q.what, "err", err)
+			return out
+		}
+		for i := range out {
+			out[i].SizeBytes += sizes[out[i].Name]
+		}
 	}
-	defer crows.Close()
-	sizes := make(map[string]int64, len(out))
-	for crows.Next() {
+	return out
+}
+
+// sizesByCollection runs one name -> bytes aggregate.
+func (s *Store) sizesByCollection(ctx context.Context, query string) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sizes := map[string]int64{}
+	for rows.Next() {
 		var name string
 		var n int64
-		if err := crows.Scan(&name, &n); err != nil {
-			s.logger.Error("vectorstore: list collection contents", "err", err)
-			return out
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
 		}
 		sizes[name] = n
 	}
-	for i := range out {
-		out[i].SizeBytes += sizes[out[i].Name]
-	}
-	return out
+	return sizes, rows.Err()
 }
 
 // CollectionSizeBytes implements Maintainer.
@@ -155,7 +181,7 @@ func (s *Store) CollectionSizeBytes(projectPath string) (int64, bool) {
 	if err != nil || !ok {
 		return 0, false
 	}
-	var vecBytes, contentBytes int64
+	var vecBytes, contentBytes, q8Bytes int64
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(`+sizeExprVectors+`), 0) FROM vectors v WHERE v.collection_id = ?`,
 		collID).Scan(&vecBytes); err != nil {
@@ -166,7 +192,12 @@ func (s *Store) CollectionSizeBytes(projectPath string) (int64, bool) {
 		  FROM vector_contents WHERE collection_id = ?`, collID).Scan(&contentBytes); err != nil {
 		return 0, false
 	}
-	return vecBytes + contentBytes, true
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(LENGTH(embedding) + LENGTH(doc_id) + LENGTH(language) + 16), 0)
+		  FROM vectors_q8 WHERE collection_id = ?`, collID).Scan(&q8Bytes); err != nil {
+		return 0, false
+	}
+	return vecBytes + contentBytes + q8Bytes, true
 }
 
 // DeleteCollectionByName implements Maintainer.
@@ -196,6 +227,8 @@ func (s *Store) DeleteCollectionByName(name string) error {
 
 	for _, stmt := range []string{
 		`DELETE FROM vector_contents WHERE collection_id = ?`,
+		`DELETE FROM vectors_q8 WHERE collection_id = ?`,
+		`DELETE FROM q8_state WHERE collection_id = ?`,
 		`DELETE FROM vectors WHERE collection_id = ?`,
 		`DELETE FROM collections WHERE id = ?`,
 	} {
@@ -207,6 +240,7 @@ func (s *Store) DeleteCollectionByName(name string) error {
 		return fmt.Errorf("vectorstore delete collection %q: %w", name, err)
 	}
 	s.forgetCollection(name)
+	s.forgetQ8(collID)
 	return nil
 }
 

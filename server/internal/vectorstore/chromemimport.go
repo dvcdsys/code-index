@@ -313,6 +313,13 @@ func (s *Store) importCollection(ctx context.Context, dir, name string) (int, er
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM collections WHERE name = ?`, name).Scan(&collID); err != nil {
 		return 0, err
 	}
+	// No compact scan copy is written here, deliberately. The import is
+	// already the slowest thing a boot can do, it creates its collection with
+	// raw SQL rather than ensureCollection so nothing marks it complete, and
+	// the background backfill that runs right after the import (see
+	// startQ8Backfill) converts it at a duty cycle that leaves the server
+	// usable. Until then those collections search the float32 way, which is
+	// exactly what they did before this table existed.
 	vecStmt, err := tx.PrepareContext(ctx, upsertVectorSQL)
 	if err != nil {
 		return 0, err

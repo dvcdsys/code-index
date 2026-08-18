@@ -207,6 +207,19 @@ func TestSearchWhereFilterMirrorsChromemSemantics(t *testing.T) {
 		t.Errorf("start_line filter returned %+v, want the single chunk starting at 11", got)
 	}
 
+	// A KNOWN key with an empty value is a filter, not the absence of one:
+	// chromem compared metadata["language"] to "", which matches only rows
+	// whose language is empty. The compact scan supports exactly this one
+	// column, so it is the one place the two scan paths could disagree about
+	// what an empty value means.
+	got, err = s.Search(ctx, project, embs[0], 5, map[string]string{"language": ""})
+	if err != nil {
+		t.Fatalf("empty language filter: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("language=\"\" returned %d results, want 0 — every chunk here is Go", len(got))
+	}
+
 	// Several keys must all match.
 	got, err = s.Search(ctx, project, embs[0], 5,
 		map[string]string{"language": "go", "file_path": "b.go"})
