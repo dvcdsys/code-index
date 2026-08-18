@@ -10,7 +10,9 @@
 package chunker
 
 import (
+	"github.com/dvcdsys/code-index/server/internal/tokenizer"
 	"log/slog"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -457,15 +459,77 @@ type Reference struct {
 // falls back to sliding-window chunking for unsupported languages. The maxSize
 // parameter controls per-chunk character limit; pass 0 to use the default.
 func ChunkFile(filePath, content, language string, maxSize int) ([]Chunk, []Reference, error) {
+	return ChunkFileTokens(filePath, content, language, maxSize, nil, 0)
+}
+
+// ChunkFileTokens is ChunkFile with a token budget.
+//
+// maxSize (bytes) has always been a stand-in for a token limit: the default
+// 4500 is "1500 tokens x 3 bytes", a ratio that holds for dense ASCII code and
+// falls apart everywhere else — Cyrillic or CJK comments cost two to three
+// bytes per character, so a byte-sized chunk carries far fewer tokens than
+// intended, while minified JavaScript packs far more.
+//
+// When budget is non-nil and reports exact counts, the size decision is made
+// in tokens instead, and an over-budget chunk is cut on real token boundaries
+// (via Budget.SplitPoints) rather than on a byte count. maxTokens <= 0 uses
+// defaultMaxChunkTokens. A nil or estimating budget keeps the byte path
+// unchanged, so nothing about existing behaviour depends on a provider
+// having a tokenizer.
+func ChunkFileTokens(filePath, content, language string, maxSize int, budget tokenizer.Budget, maxTokens int) ([]Chunk, []Reference, error) {
 	if maxSize <= 0 {
 		maxSize = maxChunkSize
 	}
-	chunks, refs, err := chunkWithTreesitter(filePath, content, language, maxSize)
+	if budget != nil && !budget.ExactCounts() {
+		// An estimate is what the byte path already is; do not pretend
+		// otherwise by routing through the token splitter.
+		budget = nil
+	}
+	if budget != nil {
+		if maxTokens <= 0 {
+			maxTokens = defaultMaxChunkTokens
+		}
+		if lim := budget.MaxInputTokens(); lim > 0 && maxTokens > lim {
+			maxTokens = lim
+		}
+	}
+	// With a token budget the byte cap must not fire first: it is the very
+	// bias being removed (a byte limit cuts Cyrillic or CJK three times
+	// sooner than ASCII for the same token cost). Let the inner path emit
+	// whole semantic units and bound them in tokens afterwards.
+	innerMax := maxSize
+	if budget != nil {
+		innerMax = math.MaxInt32
+	}
+
+	chunks, refs, err := chunkWithTreesitter(filePath, content, language, innerMax)
 	if err != nil {
 		// Fallback: sliding window, no references.
-		return chunkFallback(filePath, content, language), nil, nil
+		return boundTokens(chunkFallback(filePath, content, language), budget, maxTokens), nil, nil
 	}
-	return chunks, refs, nil
+	return boundTokens(chunks, budget, maxTokens), refs, nil
+}
+
+// boundTokens enforces the token budget over chunks from ANY path — the
+// tree-sitter one, the bash regex extractor, or the sliding-window fallback.
+// Applying it here rather than inside the tree-sitter path is deliberate:
+// minified JavaScript and files with no grammar are exactly the inputs that
+// reach the fallback, and they are also the ones most likely to blow the
+// model's input limit. A budget that only covered the happy path would miss
+// them.
+func boundTokens(chunks []Chunk, budget tokenizer.Budget, maxTokens int) []Chunk {
+	if budget == nil || maxTokens <= 0 {
+		return chunks
+	}
+	out := make([]Chunk, 0, len(chunks))
+	for _, c := range chunks {
+		if budget.CountTokens(c.Content) > maxTokens {
+			out = append(out, splitChunkTokens(c, budget, maxTokens)...)
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // chunkFallback returns reasonable chunks for content that the tree-sitter
@@ -1059,4 +1123,102 @@ func sortRanges(ranges [][2]int) {
 			j--
 		}
 	}
+}
+
+// defaultMaxChunkTokens is the token equivalent of maxChunkSize. The byte
+// default was written as 1500*3 — a 1500-token target at three bytes each —
+// so the token target is that same 1500, now expressed in the unit that
+// actually matters. CIX_MAX_CHUNK_TOKENS overrides it.
+const defaultMaxChunkTokens = 1500
+
+// splitChunkTokens cuts an over-budget chunk into pieces of <= maxTokens.
+//
+// It is the token-aware sibling of splitChunk and keeps its attribution rule:
+// only the first piece inherits SymbolName/ChunkType, the rest become `block`,
+// so one long function does not produce N rows all claiming to be that symbol.
+//
+// Two differences that matter:
+//
+//   - The running size is counted, not estimated, so a chunk of Cyrillic
+//     comments is no longer cut three times sooner than an equivalent chunk of
+//     ASCII.
+//   - A single line longer than the budget is cut INSIDE the line, on token
+//     boundaries from Budget.SplitPoints. The byte splitter could not do this
+//     (its loop requires len(currentLines) > 1), which is how a 65 KB minified
+//     line reached the embedder as one chunk and got byte-windowed and
+//     vector-averaged downstream.
+func splitChunkTokens(chunk Chunk, budget tokenizer.Budget, maxTokens int) []Chunk {
+	lines := splitLines(chunk.Content)
+	var subChunks []Chunk
+
+	emit := func(content string, startLine, endLine int) {
+		if content == "" {
+			return
+		}
+		c := Chunk{
+			Content:    content,
+			FilePath:   chunk.FilePath,
+			StartLine:  startLine,
+			EndLine:    endLine,
+			Language:   chunk.Language,
+			ParentName: chunk.ParentName,
+		}
+		if len(subChunks) == 0 {
+			c.ChunkType = chunk.ChunkType
+			c.SymbolName = chunk.SymbolName
+			c.SymbolSignature = chunk.SymbolSignature
+		} else {
+			c.ChunkType = "block"
+		}
+		subChunks = append(subChunks, c)
+	}
+
+	var currentLines []string
+	currentStart := chunk.StartLine
+	currentTokens := 0
+
+	flush := func(endLine int) {
+		if len(currentLines) == 0 {
+			return
+		}
+		emit(joinLines(currentLines), currentStart, endLine)
+		currentLines = nil
+		currentTokens = 0
+	}
+
+	for i, line := range lines {
+		lineNo := chunk.StartLine + i
+		n := budget.CountTokens(line)
+
+		// A line that cannot fit on its own: close what we have, then cut
+		// the line itself on token boundaries.
+		if n > maxTokens {
+			flush(lineNo - 1)
+			offsets, _ := budget.SplitPoints(line, maxTokens)
+			prev := 0
+			for _, off := range offsets {
+				emit(line[prev:off], lineNo, lineNo)
+				prev = off
+			}
+			// Tail of the line seeds the next piece so short following
+			// lines can still join it.
+			currentLines = []string{line[prev:]}
+			currentStart = lineNo
+			currentTokens = budget.CountTokens(line[prev:])
+			continue
+		}
+
+		if len(currentLines) > 0 && currentTokens+n > maxTokens {
+			flush(lineNo - 1)
+			currentStart = lineNo
+		}
+		currentLines = append(currentLines, line)
+		currentTokens += n
+	}
+	flush(chunk.StartLine + len(lines) - 1)
+
+	if len(subChunks) == 0 {
+		return []Chunk{chunk}
+	}
+	return subChunks
 }

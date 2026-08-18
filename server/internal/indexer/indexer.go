@@ -23,6 +23,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/langdetect"
 	"github.com/dvcdsys/code-index/server/internal/symbolindex"
+	"github.com/dvcdsys/code-index/server/internal/tokenizer"
 	"github.com/dvcdsys/code-index/server/internal/vectorstore"
 )
 
@@ -141,6 +142,10 @@ type Service struct {
 	// reindexed under the new format.
 	embedIncludePath bool
 
+	// maxChunkTokens is the per-chunk token target (CIX_MAX_CHUNK_TOKENS).
+	// 0 means the chunker's own default.
+	maxChunkTokens int
+
 	// embeddingModel is the active embedding model identifier persisted on
 	// projects.indexed_with_model at FinishIndexing. Set via
 	// SetEmbeddingModel from main; empty string keeps the column NULL so
@@ -206,6 +211,12 @@ func (s *Service) Shutdown() {
 // are not interchangeable with vectors trained on bare content.
 func (s *Service) SetEmbedIncludePath(v bool) {
 	s.embedIncludePath = v
+}
+
+// SetMaxChunkTokens sets the per-chunk token target used when the active
+// embedding provider can count tokens exactly.
+func (s *Service) SetMaxChunkTokens(n int) {
+	s.maxChunkTokens = n
 }
 
 // SetEmbeddingModel records the model identifier the indexer will write to
@@ -705,7 +716,16 @@ func (s *Service) ProcessFilesStreaming(
 			language = "text"
 		}
 
-		chunks, refs, err := chunker.ChunkFile(fp.Path, fp.Content, language, 0)
+		// The token budget comes from the LIVE provider, asked per file: a
+		// provider swap between files is legitimate, mixing two models'
+		// limits inside one file's chunks is not.
+		var budget tokenizer.Budget
+		if tb, ok := s.emb.(interface {
+			TokenBudget() tokenizer.Budget
+		}); ok {
+			budget = tb.TokenBudget()
+		}
+		chunks, refs, err := chunker.ChunkFileTokens(fp.Path, fp.Content, language, 0, budget, s.maxChunkTokens)
 		if err != nil {
 			s.logger.Warn("indexer: chunk file failed", "path", fp.Path, "err", err)
 			progressSend(progress, ProgressEvent{

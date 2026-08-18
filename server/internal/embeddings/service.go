@@ -20,6 +20,7 @@ import (
 	// provider purely by kind string — these imports are the wiring.
 	_ "github.com/dvcdsys/code-index/server/internal/embeddings/provider/openai"
 	_ "github.com/dvcdsys/code-index/server/internal/embeddings/provider/voyage"
+	"github.com/dvcdsys/code-index/server/internal/tokenizer"
 )
 
 // Service is the public embeddings API used by handlers and the indexer.
@@ -459,6 +460,25 @@ func (s *Service) Status() provider.Status {
 
 // CurrentKind reports the kind of the active provider, or "" when
 // disabled / not yet built. Used by /status and admin endpoints.
+// TokenBudget returns the active provider as a token budget when it can
+// count tokens, and nil otherwise. The chunker uses it to size chunks in the
+// model's own unit; nil keeps it on the byte heuristic.
+//
+// Snapshotted under the read lock like CurrentKind, because a provider swap
+// mid-file would otherwise mix two models' limits inside one chunk set.
+func (s *Service) TokenBudget() tokenizer.Budget {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.current == nil {
+		return nil
+	}
+	b, ok := s.current.(tokenizer.Budget)
+	if !ok {
+		return nil
+	}
+	return b
+}
+
 func (s *Service) CurrentKind() string {
 	if s == nil || s.disabled {
 		return ""
