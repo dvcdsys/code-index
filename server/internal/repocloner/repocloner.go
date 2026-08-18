@@ -121,13 +121,16 @@ type Result struct {
 	// caller can skip enqueueing an index_repo job entirely.
 	NoChanges bool
 	// RecloneReason is non-empty when an existing checkout was discarded
-	// and cloned fresh (unusable local state, changed remote URL, or a
-	// failed compaction). Purely informational — callers log it so the
-	// operator can see why a fetch turned into a full clone.
+	// and cloned fresh (unusable local state or a changed remote URL).
+	// Purely informational — callers log it so the operator can see why a
+	// fetch turned into a full clone.
 	RecloneReason string
-	// Compaction is set when this call rewrote the checkout's object store
-	// (see compact.go). Purely informational — callers log it.
-	Compaction *CompactStats
+	// PrevHeadSHA is the commit that was on disk BEFORE this update moved
+	// the checkout (empty on a fresh clone). Callers pass it to
+	// MaybeCompact's protect list: it is the target of a possibly
+	// still-queued index job, and nothing else keeps it alive once the
+	// branch ref has moved on.
+	PrevHeadSHA string
 }
 
 // CloneOrFetch clones the repo when LocalDir is empty, otherwise fetches
@@ -135,18 +138,19 @@ type Result struct {
 // after the operation completes.
 //
 // An existing checkout is discarded and cloned fresh (Result.RecloneReason
-// says why) in three situations: its .git state is unusable — the half-clone
-// a SIGKILL mid-clone leaves behind used to fail every retry forever; its
-// origin URL no longer matches the requested one (github_url changed); or a
-// compaction of its object store failed. Fetch/transport failures are NOT
-// grounds for a re-clone — a network blip must not cost a healthy clone (and
-// force the full reindex that follows one).
+// says why) in two situations: its .git state is unusable — the half-clone
+// a SIGKILL mid-clone leaves behind used to fail every retry forever — or
+// its origin URL no longer matches the requested one (github_url changed).
+// The local-state check is retried once first: transient filesystem pressure
+// (EMFILE under concurrent jobs, a momentary EACCES) must not cost a
+// multi-GB checkout, while a genuinely broken one fails the retry the same
+// way. Fetch/transport failures are never grounds for a re-clone — a network
+// blip must not cost a healthy clone (and force the full reindex that
+// follows one).
 //
-// After a successful update the checkout's object store is compacted when it
-// needs it (accumulated fetch packs, or tag snapshots left behind by
-// pre-NoTags server versions — which makes the first update after a server
-// upgrade clean every existing checkout, with no separate migration). See
-// compact.go for the mechanism and its measured costs.
+// Compaction of the object store is NOT part of this call: callers run
+// MaybeCompact afterwards, outside their per-repo write lock — see that
+// function for why the locking is layered that way.
 //
 // The caller is responsible for choosing a LocalDir that won't collide
 // across repos — typically `<DataDir>/repos/<path_hash>/` keyed by
@@ -165,15 +169,19 @@ func CloneOrFetch(ctx context.Context, opts CloneOptions) (Result, error) {
 	url := normaliseURL(opts.GitHubURL)
 	auth := authFor(opts.PAT)
 
-	// First-time clone path: LocalDir is missing or empty. A fresh NoTags
-	// clone is one branch-snapshot pack — nothing to compact.
+	// First-time clone path: LocalDir is missing or empty.
 	if needsClone(opts.LocalDir) {
 		return cloneFresh(ctx, opts, url, auth)
 	}
 
 	res, err := updateExisting(ctx, opts, url, auth)
+	if err != nil && errors.Is(err, errLocalState) && ctx.Err() == nil {
+		// One retry before concluding the state is structural: EMFILE/EIO
+		// class failures heal, a half-written clone fails identically.
+		res, err = updateExisting(ctx, opts, url, auth)
+	}
 	if err == nil {
-		return maybeCompact(ctx, opts, url, auth, res)
+		return res, nil
 	}
 	// Only local-state failures are recoverable by re-cloning, and never on
 	// a dead context — a cancelled shutdown fetch is not evidence the
@@ -182,32 +190,6 @@ func CloneOrFetch(ctx context.Context, opts CloneOptions) (Result, error) {
 		return Result{}, err
 	}
 	return reclone(ctx, opts, url, auth, err.Error())
-}
-
-// maybeCompact runs the object-store compaction after a successful update
-// when the checkout warrants it. It runs on the NoChanges path too: the
-// post-upgrade cleanup of a tag-carrying checkout must not wait for the
-// repo's next actual commit. A failed compaction falls back to nuke +
-// re-clone — the store's state is unknown at that point, and a shallow
-// re-clone is always correct (Changes degrade to nil, so the caller
-// reconciles instead of diffing).
-func maybeCompact(ctx context.Context, opts CloneOptions, url string, auth *http.BasicAuth, res Result) (Result, error) {
-	if ctx.Err() != nil || !needsCompaction(opts.LocalDir) {
-		return res, nil
-	}
-	var protect []plumbing.Hash
-	if s := strings.TrimSpace(opts.PrevIndexedSHA); s != "" {
-		// The indexed commit is the base of the NEXT incremental diff; no
-		// ref points at it once the branch has moved on, so it must be
-		// protected explicitly.
-		protect = append(protect, plumbing.NewHash(s))
-	}
-	st, err := compactCheckout(opts.LocalDir, protect...)
-	if err != nil {
-		return reclone(ctx, opts, url, auth, fmt.Sprintf("compaction failed: %v", err))
-	}
-	res.Compaction = &st
-	return res, nil
 }
 
 // cloneFresh is the first-time clone into an empty or missing LocalDir.
@@ -262,10 +244,10 @@ func reclone(ctx context.Context, opts CloneOptions, url string, auth *http.Basi
 func updateExisting(ctx context.Context, opts CloneOptions, url string, auth *http.BasicAuth) (Result, error) {
 	repo, err := git.PlainOpen(opts.LocalDir)
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: open existing repo at %s: %v", errLocalState, opts.LocalDir, err)
+		return Result{}, fmt.Errorf("%w: open existing repo at %s: %w", errLocalState, opts.LocalDir, err)
 	}
 	if err := ensureRemote(repo, url); err != nil {
-		return Result{}, fmt.Errorf("%w: %v", errLocalState, err)
+		return Result{}, fmt.Errorf("%w: %w", errLocalState, err)
 	}
 
 	// Snapshot the pre-fetch HEAD so we can short-circuit on NoChanges
@@ -276,7 +258,7 @@ func updateExisting(ctx context.Context, opts CloneOptions, url string, auth *ht
 	// clone (SIGKILL mid-PlainClone leaves .git without refs).
 	prevHead, err := repo.Head()
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: resolve pre-fetch HEAD: %v", errLocalState, err)
+		return Result{}, fmt.Errorf("%w: resolve pre-fetch HEAD: %w", errLocalState, err)
 	}
 
 	err = repo.FetchContext(ctx, &git.FetchOptions{
@@ -294,17 +276,19 @@ func updateExisting(ctx context.Context, opts CloneOptions, url string, auth *ht
 
 	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", opts.Branch), true)
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: resolve remote ref: %v", errLocalState, err)
+		return Result{}, fmt.Errorf("%w: resolve remote ref: %w", errLocalState, err)
 	}
 
 	newSHA := remoteRef.Hash()
-	// No-op fetch: remote HEAD already matches what's on disk. Skip the
-	// reset (it would be a no-op anyway) and tell the caller there is
-	// nothing to reindex. NoChanges supersedes Changes — the caller
-	// should not enqueue an index job at all.
-	if prevHead.Hash() == newSHA {
-		return Result{HeadSHA: newSHA.String(), NoChanges: true}, nil
-	}
+	// No-op fetch: remote HEAD already matches what's on disk. Tell the
+	// caller there is nothing to reindex (NoChanges supersedes Changes —
+	// no index job should be enqueued) but still run the hard reset below:
+	// a crash mid-reset on a previous run leaves HEAD already pointing at
+	// newSHA over half-rewritten files, and this path is the only chance
+	// to repair that — go-git writes HEAD before it touches the worktree,
+	// so the torn state looks exactly like a completed update. On a clean
+	// worktree the reset writes nothing.
+	noChanges := prevHead.Hash() == newSHA
 
 	// Best-effort change-set computation. Runs BEFORE the reset so
 	// tree.Diff still sees both commits via their stored tree objects.
@@ -312,7 +296,7 @@ func updateExisting(ctx context.Context, opts CloneOptions, url string, auth *ht
 	// falls back to a full reindex.
 	var changes *ChangeSet
 	diffBase := strings.TrimSpace(opts.PrevIndexedSHA)
-	if diffBase != "" {
+	if diffBase != "" && !noChanges {
 		cs, derr := computeChangeSet(repo, diffBase, newSHA.String())
 		if derr == nil {
 			changes = cs
@@ -325,7 +309,7 @@ func updateExisting(ctx context.Context, opts CloneOptions, url string, auth *ht
 
 	wt, err := repo.Worktree()
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: worktree: %v", errLocalState, err)
+		return Result{}, fmt.Errorf("%w: worktree: %w", errLocalState, err)
 	}
 	// Hard reset — discards any local mutation that crept in. Worker-managed
 	// checkouts have no human edits we'd want to preserve. The commit was
@@ -334,14 +318,19 @@ func updateExisting(ctx context.Context, opts CloneOptions, url string, auth *ht
 		Commit: newSHA,
 		Mode:   git.HardReset,
 	}); err != nil {
-		return Result{}, fmt.Errorf("%w: reset: %v", errLocalState, err)
+		return Result{}, fmt.Errorf("%w: reset: %w", errLocalState, err)
 	}
 
 	head, err := repo.Head()
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: resolve HEAD post-reset: %v", errLocalState, err)
+		return Result{}, fmt.Errorf("%w: resolve HEAD post-reset: %w", errLocalState, err)
 	}
-	return Result{HeadSHA: head.Hash().String(), Changes: changes}, nil
+	return Result{
+		HeadSHA:     head.Hash().String(),
+		Changes:     changes,
+		NoChanges:   noChanges,
+		PrevHeadSHA: prevHead.Hash().String(),
+	}, nil
 }
 
 // computeChangeSet diffs the tree of oldSHA against the tree of newSHA

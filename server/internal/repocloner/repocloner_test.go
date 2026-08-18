@@ -3,6 +3,7 @@ package repocloner
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -505,12 +506,33 @@ func TestCloneOrFetch_FreshClone_HasNoTags(t *testing.T) {
 	}
 }
 
-// TestCloneOrFetch_UpgradeCompactsLegacyCheckout is the no-explicit-migration
-// upgrade path: a checkout produced by a PRE-NoTags server (AllTags clone,
-// accumulated fetch packs) must be cleaned by the FIRST CloneOrFetch the
-// upgraded server runs on it — tags dropped, packs collapsed to one, disk
-// reclaimed — while the incremental diff for that same update still computes.
-func TestCloneOrFetch_UpgradeCompactsLegacyCheckout(t *testing.T) {
+// updateAndCompact drives one update the way repojobs.handleClone does:
+// CloneOrFetch, then MaybeCompact with the indexed SHA and the pre-fetch
+// HEAD in the protect set.
+func updateAndCompact(t *testing.T, upstream, local, indexedSHA string) (Result, *CompactStats) {
+	t.Helper()
+	res, err := CloneOrFetch(context.Background(), CloneOptions{
+		GitHubURL:      "file://" + upstream,
+		Branch:         "main",
+		LocalDir:       local,
+		PrevIndexedSHA: indexedSHA,
+	})
+	if err != nil {
+		t.Fatalf("CloneOrFetch: %v", err)
+	}
+	st, err := MaybeCompact(context.Background(), local, nil, indexedSHA, res.PrevHeadSHA)
+	if err != nil {
+		t.Fatalf("MaybeCompact: %v", err)
+	}
+	return res, st
+}
+
+// TestUpgradeCompactsLegacyCheckout is the no-explicit-migration upgrade
+// path: a checkout produced by a PRE-NoTags server (AllTags clone,
+// accumulated fetch packs) must be cleaned by the FIRST update cycle the
+// upgraded server runs on it — even one where the upstream has nothing new —
+// and later updates must still get their incremental diffs.
+func TestUpgradeCompactsLegacyCheckout(t *testing.T) {
 	upstream, w := makeBareUpstream(t, "main")
 	w.CommitFiles(t, "v1", map[string]string{
 		"a.go":       "package a\n",
@@ -538,29 +560,20 @@ func TestCloneOrFetch_UpgradeCompactsLegacyCheckout(t *testing.T) {
 	}
 	objectsBefore := objectsDirSize(local)
 
-	// Server upgrades. The next upstream push triggers an ordinary update —
-	// and that first update must clean the store.
-	newSHA := w.CommitFiles(t, "v5", map[string]string{"c.go": "package c // v5\n"})
-	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL:      "file://" + upstream,
-		Branch:         "main",
-		LocalDir:       local,
-		PrevIndexedSHA: indexedSHA,
-	})
-	if err != nil {
-		t.Fatalf("first post-upgrade CloneOrFetch: %v", err)
-	}
-	if res.HeadSHA != newSHA {
-		t.Errorf("HeadSHA = %s, want %s", res.HeadSHA, newSHA)
+	// Server upgrades. The first update cycle sees NOTHING new upstream —
+	// cleanup must not wait for the repo's next commit.
+	res, st := updateAndCompact(t, upstream, local, indexedSHA)
+	if !res.NoChanges {
+		t.Errorf("NoChanges = false on an unchanged upstream")
 	}
 	if res.RecloneReason != "" {
 		t.Errorf("RecloneReason = %q — the upgrade path must compact in place, not re-clone", res.RecloneReason)
 	}
-	if res.Compaction == nil {
-		t.Fatal("Compaction stats nil — legacy checkout was not compacted on first update")
+	if st == nil {
+		t.Fatal("no compaction on the first post-upgrade update of a legacy checkout")
 	}
-	if res.Compaction.TagRefsDropped != 2 {
-		t.Errorf("TagRefsDropped = %d, want 2", res.Compaction.TagRefsDropped)
+	if st.TagRefsDropped != 2 {
+		t.Errorf("TagRefsDropped = %d, want 2", st.TagRefsDropped)
 	}
 	if n := tagRefCount(t, local); n != 0 {
 		t.Errorf("%d tag refs survive the upgrade compaction, want 0", n)
@@ -571,54 +584,250 @@ func TestCloneOrFetch_UpgradeCompactsLegacyCheckout(t *testing.T) {
 	if after := objectsDirSize(local); after >= objectsBefore {
 		t.Errorf("objects dir did not shrink: %d -> %d bytes", objectsBefore, after)
 	}
-	// The very update that compacted must still deliver the incremental
-	// change set (v4 -> v5, computed before the reset).
-	if res.Changes == nil {
-		t.Fatal("Changes nil across the compacting update, want incremental diff")
-	}
-	if got := sortedCopy(res.Changes.Modified); !equalSlices(got, []string{"c.go"}) {
-		t.Errorf("Modified = %v, want [c.go]", got)
-	}
 
-	// The protected diff base must survive compaction: pretend the index
-	// job after the upgrade never completed (indexed_sha still v4), push
-	// again, and demand a v4-based diff.
-	newestSHA := w.CommitFiles(t, "v6", map[string]string{"a.go": "package a // v6\n"})
-	res2, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL:      "file://" + upstream,
-		Branch:         "main",
-		LocalDir:       local,
-		PrevIndexedSHA: indexedSHA,
-	})
-	if err != nil {
-		t.Fatalf("second post-upgrade CloneOrFetch: %v", err)
-	}
-	if res2.HeadSHA != newestSHA {
-		t.Errorf("HeadSHA = %s, want %s", res2.HeadSHA, newestSHA)
+	// The indexed commit survived (it is HEAD here) — the next real update
+	// must deliver its incremental diff across the compacted store.
+	newSHA := w.CommitFiles(t, "v5", map[string]string{"c.go": "package c // v5\n"})
+	res2, st2 := updateAndCompact(t, upstream, local, indexedSHA)
+	if res2.HeadSHA != newSHA {
+		t.Errorf("HeadSHA = %s, want %s", res2.HeadSHA, newSHA)
 	}
 	if res2.Changes == nil {
-		t.Error("Changes nil — protected indexed_sha did not survive compaction")
+		t.Fatal("Changes nil after compaction, want incremental diff")
+	}
+	if got := sortedCopy(res2.Changes.Modified); !equalSlices(got, []string{"c.go"}) {
+		t.Errorf("Modified = %v, want [c.go]", got)
+	}
+	if st2 != nil {
+		t.Errorf("compaction ran again on a clean two-pack checkout: %+v", st2)
 	}
 
-	// And a quiet no-op cycle afterwards: nothing left to clean.
-	res3, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL:      "file://" + upstream,
-		Branch:         "main",
-		LocalDir:       local,
-		PrevIndexedSHA: newestSHA,
-	})
-	if err != nil {
-		t.Fatalf("no-op CloneOrFetch: %v", err)
+	// The protected diff base must survive future compactions too: pretend
+	// the index job never completed (indexed_sha still v4), push again, and
+	// demand a v4-based diff.
+	newestSHA := w.CommitFiles(t, "v6", map[string]string{"a.go": "package a // v6\n"})
+	res3, _ := updateAndCompact(t, upstream, local, indexedSHA)
+	if res3.HeadSHA != newestSHA {
+		t.Errorf("HeadSHA = %s, want %s", res3.HeadSHA, newestSHA)
 	}
-	if !res3.NoChanges {
-		t.Error("NoChanges = false on an unchanged upstream")
-	}
-	if res3.Compaction != nil {
-		t.Error("Compaction ran on a clean checkout below the pack threshold")
+	if res3.Changes == nil {
+		t.Error("Changes nil — protected indexed_sha did not survive")
 	}
 }
 
-func TestCloneOrFetch_PackAccumulationStaysBounded(t *testing.T) {
+// TestMaybeCompact_ProtectsPendingIndexTarget covers the race the protect
+// list exists for: clone cycle A fetched v2 and queued an index job for it,
+// but before that job ran, cycle B fetched v3 and compacted. v2 is
+// unreferenced by then — only PrevHeadSHA keeps it, and the diff from it
+// must still compute afterwards.
+func TestMaybeCompact_ProtectsPendingIndexTarget(t *testing.T) {
+	upstream, w := makeBareUpstream(t, "main")
+	w.CommitFiles(t, "v1", map[string]string{"a.go": "package a\n"})
+	local := filepath.Join(t.TempDir(), "clone")
+	initialCloneFor(t, upstream, local, "main")
+
+	pendingSHA := w.CommitFiles(t, "v2", map[string]string{"a.go": "package a // v2\n"})
+	resA, err := CloneOrFetch(context.Background(), CloneOptions{
+		GitHubURL: "file://" + upstream, Branch: "main", LocalDir: local,
+	})
+	if err != nil {
+		t.Fatalf("cycle A: %v", err)
+	}
+	if resA.HeadSHA != pendingSHA {
+		t.Fatalf("cycle A HeadSHA = %s, want %s", resA.HeadSHA, pendingSHA)
+	}
+
+	w.CommitFiles(t, "v3", map[string]string{"b.go": "package b\n"})
+	resB, err := CloneOrFetch(context.Background(), CloneOptions{
+		GitHubURL: "file://" + upstream, Branch: "main", LocalDir: local,
+	})
+	if err != nil {
+		t.Fatalf("cycle B: %v", err)
+	}
+	if resB.PrevHeadSHA != pendingSHA {
+		t.Fatalf("PrevHeadSHA = %s, want the pending index target %s", resB.PrevHeadSHA, pendingSHA)
+	}
+	// Compact below threshold on purpose — call the internals directly the
+	// way MaybeCompact would once the trigger fires.
+	if _, err := compactCheckout(context.Background(), local, plumbing.NewHash(resB.PrevHeadSHA)); err != nil {
+		t.Fatalf("compactCheckout: %v", err)
+	}
+
+	// The pending index job's diff base (v2) must still be usable.
+	finalSHA := w.CommitFiles(t, "v4", map[string]string{"c.go": "package c\n"})
+	resC, err := CloneOrFetch(context.Background(), CloneOptions{
+		GitHubURL: "file://" + upstream, Branch: "main", LocalDir: local,
+		PrevIndexedSHA: pendingSHA,
+	})
+	if err != nil {
+		t.Fatalf("cycle C: %v", err)
+	}
+	if resC.HeadSHA != finalSHA {
+		t.Errorf("HeadSHA = %s, want %s", resC.HeadSHA, finalSHA)
+	}
+	if resC.Changes == nil {
+		t.Error("Changes nil — the pending index target was not protected across compaction")
+	}
+}
+
+// TestCloneOrFetch_NoChangesStillRepairsWorktree: a crash mid-hard-reset
+// leaves HEAD already moved over half-rewritten files, which a later cycle
+// sees as "nothing to do". The NoChanges path must still reset so torn
+// content cannot survive indefinitely.
+func TestCloneOrFetch_NoChangesStillRepairsWorktree(t *testing.T) {
+	upstream, w := makeBareUpstream(t, "main")
+	headSHA := w.CommitFiles(t, "v1", map[string]string{"a.go": "package a\n"})
+	local := filepath.Join(t.TempDir(), "clone")
+	initialCloneFor(t, upstream, local, "main")
+
+	// Simulate the torn state: HEAD is right, a worktree file is not.
+	torn := filepath.Join(local, "a.go")
+	if err := os.WriteFile(torn, []byte("package torn\n"), 0o644); err != nil {
+		t.Fatalf("write torn file: %v", err)
+	}
+
+	res, err := CloneOrFetch(context.Background(), CloneOptions{
+		GitHubURL: "file://" + upstream, Branch: "main", LocalDir: local,
+		PrevIndexedSHA: headSHA,
+	})
+	if err != nil {
+		t.Fatalf("CloneOrFetch: %v", err)
+	}
+	if !res.NoChanges {
+		t.Errorf("NoChanges = false, want true (upstream unchanged)")
+	}
+	got, err := os.ReadFile(torn)
+	if err != nil {
+		t.Fatalf("read repaired file: %v", err)
+	}
+	if string(got) != "package a\n" {
+		t.Errorf("worktree file = %q after NoChanges cycle, want the committed content", got)
+	}
+}
+
+// TestMaybeCompact_ErrorKeepsCheckout: a compaction failure must leave the
+// checkout exactly as the update left it — valid, tags intact (so the
+// trigger re-fires) — and must not cascade into a delete or re-clone.
+func TestMaybeCompact_ErrorKeepsCheckout(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	upstream, w := makeBareUpstream(t, "main")
+	headSHA := w.CommitFiles(t, "v1", map[string]string{"a.go": "package a\n"})
+	w.Tag(t, "r1")
+	local := filepath.Join(t.TempDir(), "clone")
+	legacyClone(t, upstream, local, "main")
+
+	// Make the pack directory unwritable: the encoder cannot land the new
+	// pack, which is the earliest (and per the crash-ordering, the safest)
+	// failure point.
+	packDir := filepath.Join(local, ".git", "objects", "pack")
+	if err := os.Chmod(packDir, 0o555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(packDir, 0o755) })
+
+	st, err := MaybeCompact(context.Background(), local, nil)
+	if err == nil {
+		t.Fatalf("MaybeCompact succeeded against a read-only pack dir, stats=%+v", st)
+	}
+
+	// Checkout must be untouched and fully usable.
+	repo, oerr := git.PlainOpen(local)
+	if oerr != nil {
+		t.Fatalf("checkout destroyed by failed compaction: %v", oerr)
+	}
+	head, herr := repo.Head()
+	if herr != nil || head.Hash().String() != headSHA {
+		t.Fatalf("HEAD broken after failed compaction: %v (%v)", head, herr)
+	}
+	if n := tagRefCount(t, local); n != 1 {
+		t.Errorf("tag refs = %d after failed compaction, want 1 — the re-trigger must stay armed", n)
+	}
+}
+
+// TestMaybeCompact_CancelledContext: shutdown must be able to skip
+// compaction entirely; the store stays as-is and nothing is deleted.
+func TestMaybeCompact_CancelledContext(t *testing.T) {
+	upstream, w := makeBareUpstream(t, "main")
+	w.CommitFiles(t, "v1", map[string]string{"a.go": "package a\n"})
+	w.Tag(t, "r1")
+	local := filepath.Join(t.TempDir(), "clone")
+	legacyClone(t, upstream, local, "main")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	st, err := MaybeCompact(ctx, local, nil)
+	if st != nil || err != nil {
+		t.Fatalf("MaybeCompact(cancelled) = (%+v, %v), want (nil, nil)", st, err)
+	}
+	if n := tagRefCount(t, local); n != 1 {
+		t.Errorf("tag refs = %d, want 1 — cancelled compaction must not touch the store", n)
+	}
+}
+
+// TestNeedsCompaction_RatioBackstopRearms covers the crash window where a
+// previous compaction dropped the tag refs but died before deleting the old
+// packs: no tags, below the pack threshold, yet the store dwarfs the
+// worktree. The size-ratio trigger must re-arm cleanup.
+func TestNeedsCompaction_RatioBackstopRearms(t *testing.T) {
+	upstream, w := makeBareUpstream(t, "main")
+	// Incompressible payloads so zlib cannot hide the retained snapshots.
+	w.CommitFiles(t, "v1", map[string]string{"blob.bin": randomContent(t, 1, 1<<20)})
+	w.Tag(t, "r1")
+	w.CommitFiles(t, "v2", map[string]string{"blob.bin": randomContent(t, 2, 1<<20)})
+	w.Tag(t, "r2")
+
+	local := filepath.Join(t.TempDir(), "clone")
+	legacyClone(t, upstream, local, "main")
+	w.CommitFiles(t, "v3", map[string]string{"blob.bin": randomContent(t, 3, 1<<20)})
+	legacyFetchReset(t, local, "main")
+
+	// Simulate the crashed compaction: tags durably gone, bloat still here.
+	repo, err := git.PlainOpen(local)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for _, name := range []string{"r1", "r2"} {
+		if err := repo.Storer.RemoveReference(plumbing.ReferenceName("refs/tags/" + name)); err != nil {
+			t.Fatalf("drop tag %s: %v", name, err)
+		}
+	}
+	if n := packfileCount(local); n < 2 || n >= compactPackThreshold {
+		t.Fatalf("packfileCount = %d, want in [2, %d) — test setup broken", n, compactPackThreshold)
+	}
+
+	if !needsCompaction(local) {
+		t.Fatal("needsCompaction = false on a tagless bloated checkout — the ratio backstop is dead")
+	}
+	before := objectsDirSize(local)
+	st, err := MaybeCompact(context.Background(), local, nil)
+	if err != nil {
+		t.Fatalf("MaybeCompact: %v", err)
+	}
+	if st == nil {
+		t.Fatal("MaybeCompact did nothing")
+	}
+	if after := objectsDirSize(local); after >= before/2 {
+		t.Errorf("objects %d -> %d, want the retained snapshots reclaimed", before, after)
+	}
+	if needsCompaction(local) {
+		t.Error("needsCompaction still true after compaction — would loop every update")
+	}
+}
+
+// randomContent builds deterministic incompressible bytes.
+func randomContent(t *testing.T, seed int64, n int) string {
+	t.Helper()
+	rnd := rand.New(rand.NewSource(seed))
+	b := make([]byte, n)
+	if _, err := rnd.Read(b); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	return string(b)
+}
+
+func TestPackAccumulationStaysBounded(t *testing.T) {
 	upstream, w := makeBareUpstream(t, "main")
 	prev := w.CommitFiles(t, "init", map[string]string{"a.go": "package a\n"})
 
@@ -630,19 +839,11 @@ func TestCloneOrFetch_PackAccumulationStaysBounded(t *testing.T) {
 		sha := w.CommitFiles(t, fmt.Sprintf("push %d", i), map[string]string{
 			"a.go": fmt.Sprintf("package a // rev %d\n", i),
 		})
-		res, err := CloneOrFetch(context.Background(), CloneOptions{
-			GitHubURL:      "file://" + upstream,
-			Branch:         "main",
-			LocalDir:       local,
-			PrevIndexedSHA: prev,
-		})
-		if err != nil {
-			t.Fatalf("cycle %d: %v", i, err)
-		}
+		res, st := updateAndCompact(t, upstream, local, prev)
 		if res.HeadSHA != sha {
 			t.Fatalf("cycle %d: HeadSHA = %s, want %s", i, res.HeadSHA, sha)
 		}
-		if res.Compaction != nil {
+		if st != nil {
 			compactions++
 		}
 		if n := packfileCount(local); n > compactPackThreshold {

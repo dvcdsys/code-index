@@ -224,6 +224,8 @@ type Analysis struct {
 // vanish. Returns (partial, false) only when nothing trustworthy could be
 // produced: the root itself is missing/unreadable (so "unreadable" and
 // "empty" stay distinguishable) or the context was cancelled mid-walk.
+// Callers that need to tell a complete sum from an undercount use
+// dirSizeDetail, which also reports how many entries were skipped.
 //
 // The context is checked every so many entries: on a vector store that is one
 // file per document these walks visit hundreds of thousands of entries, and a
@@ -233,17 +235,22 @@ type Analysis struct {
 // Lives here rather than in httpapi because both the resource endpoints and
 // the project-detail card need it and there must be exactly one copy.
 func DirSizeBytes(ctx context.Context, dir string) (int64, bool) {
-	var total int64
+	n, _, ok := dirSizeDetail(ctx, dir)
+	return n, ok
+}
+
+func dirSizeDetail(ctx context.Context, dir string) (total int64, skipped int, ok bool) {
 	var seen int
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Root failure means there is nothing to report; anything
-			// deeper is one bad subtree — skip it and keep counting.
-			// (WalkDir already skips the children of a directory it
-			// could not read.)
+			// deeper is one bad subtree — count it as skipped and keep
+			// walking. (WalkDir already skips the children of a directory
+			// it could not read.)
 			if path == dir {
 				return err
 			}
+			skipped++
 			return nil
 		}
 		// Checking every entry would make ctx.Err() a meaningful share of the
@@ -264,9 +271,9 @@ func DirSizeBytes(ctx context.Context, dir string) (int64, bool) {
 		return nil
 	})
 	if walkErr != nil {
-		return total, false
+		return total, skipped, false
 	}
-	return total, true
+	return total, skipped, true
 }
 
 // dirSizeOrZero is the convenience form for places that already know the

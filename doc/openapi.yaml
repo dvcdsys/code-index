@@ -4137,6 +4137,12 @@ components:
             Size of the tree. Absent when it could not be walked, which keeps
             "unreadable" distinguishable from "empty". The SQLite entry
             includes the -wal and -shm sidecars.
+        partial:
+          type: boolean
+          description: |
+            True when used_bytes undercounts because some entries inside the
+            tree were unreadable and skipped. Absent means the sum is
+            complete.
         fs_total_bytes: { type: integer, format: int64 }
         fs_free_bytes: { type: integer, format: int64 }
 

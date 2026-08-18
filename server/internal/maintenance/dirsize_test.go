@@ -45,12 +45,15 @@ func TestDirSizeBytes_UnreadableSubtree_ReturnsPartial(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 
-	n, ok := DirSizeBytes(context.Background(), dir)
+	n, skipped, ok := dirSizeDetail(context.Background(), dir)
 	if !ok {
 		t.Fatal("ok = false — one unreadable subtree must not throw the whole number away")
 	}
 	if n != 100 {
 		t.Errorf("total = %d, want 100 (the readable part)", n)
+	}
+	if skipped == 0 {
+		t.Error("skipped = 0 — the undercount must be visible so DiskUsage can flag it as partial")
 	}
 }
 
