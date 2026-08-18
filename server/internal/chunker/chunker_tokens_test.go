@@ -266,7 +266,13 @@ func TestFallbackFillsTheBudget(t *testing.T) {
 	// Two-bytes-per-character text, well past one byte window.
 	src := strings.Repeat("привіт світ це коментар українською\n", 400)
 	b := fakeBudget{maxInput: 4096}
-	const budget = 200
+	// The budget must exceed one byte window's token worth, or the test
+	// passes on arithmetic: a 4000-byte window of this text is ~358 fake
+	// tokens, so at budget 200 boundTokens splits every window into 200+158
+	// and both halves clear half-budget without the fallback ever being
+	// token-aware. At 800 the raw window is BELOW half the budget, so an
+	// under-filled chunk can only come from a byte-sized window.
+	const budget = 800
 
 	chunks, _, err := ChunkFileTokens("notes.unknownlang", src, "unknownlang", 0, b, budget)
 	if err != nil {

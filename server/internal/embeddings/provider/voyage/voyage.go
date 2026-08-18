@@ -484,12 +484,24 @@ func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputTyp
 		}
 	}
 	if totalSplits > 0 {
-		p.logger.Info("voyage: oversize inputs split into byte-windows",
-			"original_inputs", len(texts),
-			"total_windows", len(expanded),
-			"split_windows", totalSplits,
-			"max_input_bytes", maxIn,
-		)
+		// Report the unit the split actually used: with a tokenizer the cut is
+		// on token boundaries against the model's context, and logging a byte
+		// cap there sends whoever reads this to the wrong knob.
+		if p.counter != nil {
+			p.logger.Info("voyage: oversize inputs split on token boundaries",
+				"original_inputs", len(texts),
+				"total_windows", len(expanded),
+				"split_windows", totalSplits,
+				"max_input_tokens", p.MaxInputTokens(),
+			)
+		} else {
+			p.logger.Info("voyage: oversize inputs split into byte-windows",
+				"original_inputs", len(texts),
+				"total_windows", len(expanded),
+				"split_windows", totalSplits,
+				"max_input_bytes", maxIn,
+			)
+		}
 	}
 
 	// Phase 2: batch + POST as before, on the expanded slice.

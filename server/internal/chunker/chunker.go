@@ -10,6 +10,7 @@
 package chunker
 
 import (
+	"errors"
 	"github.com/dvcdsys/code-index/server/internal/tokenizer"
 	"log/slog"
 	"math"
@@ -473,7 +474,7 @@ func ChunkFile(filePath, content, language string, maxSize int) ([]Chunk, []Refe
 // When budget is non-nil and reports exact counts, the size decision is made
 // in tokens instead, and an over-budget chunk is cut on real token boundaries
 // (via Budget.SplitPoints) rather than on a byte count. maxTokens <= 0 uses
-// defaultMaxChunkTokens. A nil or estimating budget keeps the byte path
+// DefaultMaxChunkTokens. A nil or estimating budget keeps the byte path
 // unchanged, so nothing about existing behaviour depends on a provider
 // having a tokenizer.
 func ChunkFileTokens(filePath, content, language string, maxSize int, budget tokenizer.Budget, maxTokens int) ([]Chunk, []Reference, error) {
@@ -503,11 +504,11 @@ func ChunkFileTokens(filePath, content, language string, maxSize int, budget tok
 	}
 
 	chunks, refs, err := chunkWithTreesitter(filePath, content, language, innerMax)
-	if err != nil {
-		// Fallback: sliding window, no references.
-		return chunkFallbackTokens(filePath, content, language, budget, maxTokens), nil, nil
-	}
-	if len(chunks) == 0 {
+	if err != nil || len(chunks) == 0 {
+		// Tree-sitter declined (no grammar, parse failure, minified input) or
+		// produced nothing. Either way the fallback runs here, where the
+		// budget is known, rather than inside the tree-sitter path where it
+		// is not.
 		return chunkFallbackTokens(filePath, content, language, budget, maxTokens), nil, nil
 	}
 	return boundTokens(chunks, budget, maxTokens), refs, nil
@@ -551,6 +552,17 @@ func boundTokens(chunks []Chunk, budget tokenizer.Budget, maxTokens int) []Chunk
 // `block` ones, which is much more useful for semantic search. If the
 // extractor returns nil (no symbols found), we fall through to the universal
 // sliding-window strategy so the file content is still indexed.
+// errUseFallback tells the caller that the tree-sitter path declined this
+// file and the fallback chunker must run instead.
+//
+// It exists because chunkWithTreesitter used to CALL chunkFallback itself and
+// return the result as success. That made the caller's fallback branch
+// unreachable — which is exactly how a token-aware fallback shipped as dead
+// code: no-grammar, minified, parse-failure and empty-AST files all came back
+// as byte windows wearing a success return, and no budget ever reached them.
+// The decision belongs to whoever knows whether a token budget is in play.
+var errUseFallback = errors.New("chunker: tree-sitter declined, use fallback")
+
 func chunkFallback(filePath, content, language string) []Chunk {
 	if language == "bash" {
 		if c := bashRegexChunks(filePath, content); len(c) > 0 {
@@ -584,6 +596,16 @@ func chunkFallbackTokens(filePath, content, language string, budget tokenizer.Bu
 	// One chunk, then let the token splitter cut it — same code path, same
 	// guarantees (pieces are substrings, none over budget, line numbers
 	// tracked) as every other over-budget chunk in this package.
+	//
+	// Note this drops the byte window's 500-byte overlap. That overlap existed
+	// so a match spanning a window boundary would still be found in one of the
+	// two windows, and nothing replaces it here: pieces are contiguous. The
+	// trade is deliberate for now — overlap has to be expressed in tokens to
+	// coexist with a token budget (size pieces at budget minus overlap, then
+	// extend each start back into the previous piece), which is a change worth
+	// making on its own rather than smuggling into a correctness fix. The
+	// tree-sitter path has never overlapped, so this makes the two paths
+	// consistent rather than making the fallback worse than its neighbours.
 	whole := Chunk{
 		Content:   content,
 		ChunkType: "block",
@@ -642,11 +664,11 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	registryMu.RUnlock()
 
 	if !ok {
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	if nodeKinds == nil {
 		// Grammar exists but we don't have node definitions → sliding window.
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	if looksMinified(filePath, content, language) {
 		// Minified/bundled sources are the parser's pathological case: a
@@ -654,7 +676,7 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 		// instance to its memory cap, and forces a pool recycle — all to
 		// produce AST chunks with near-zero semantic-search value. Skip
 		// straight to the sliding window.
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 
 	// Build flat target → kind map.
@@ -672,10 +694,10 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 		// fall back to sliding window so the file is still indexed.
 		slog.Warn("chunker: wasm parse failed, falling back to sliding window",
 			"path", filePath, "language", language, "err", err)
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	if len(nodes) == 0 {
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	tree := buildFlatTree(nodes)
 
@@ -717,7 +739,7 @@ func chunkWithTreesitter(filePath, content, language string, maxSize int) ([]Chu
 	}
 
 	if len(finalChunks) == 0 {
-		return chunkFallback(filePath, content, language), nil, nil
+		return nil, nil, errUseFallback
 	}
 	return finalChunks, refs, nil
 }

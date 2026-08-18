@@ -578,34 +578,57 @@ func (c *Counter) splitNormalized(s string, budget int) (offsets []int, total in
 // re-counted — but the search converges in a handful of probes because
 // bytes-per-token is near-constant within a homogeneous run.
 func (c *Counter) splitInside(piece string, budget int) []int {
+	// Candidate cut positions are rune starts, enumerated once. The search
+	// then runs over INDICES into that list rather than over byte offsets.
+	//
+	// The byte-offset version of this loop deadlocked: it aligned a midpoint
+	// to a rune start by decrementing, and when alignment pulled the midpoint
+	// below lo, the next lo = mid+1 did not advance, so the (lo, hi) pair
+	// repeated forever. Any run of multi-byte runes long enough to exceed the
+	// budget reached it — a box-drawing comment separator is enough, and that
+	// hung the indexing worker with no error and no progress. Searching over
+	// rune indices removes the failure rather than guarding it: every
+	// candidate is a valid boundary by construction, so no alignment step
+	// exists to misbehave.
+	starts := make([]int, 0, len(piece)/2+2)
+	for i := 0; i < len(piece); {
+		starts = append(starts, i)
+		_, w := utf8.DecodeRuneInString(piece[i:])
+		if w <= 0 {
+			w = 1
+		}
+		i += w
+	}
+	starts = append(starts, len(piece))
+
 	var cuts []int
-	start := 0
-	for start < len(piece) {
-		if c.Count(piece[start:]) <= budget {
+	si := 0
+	for si < len(starts)-1 {
+		if c.Count(piece[starts[si]:]) <= budget {
 			break
 		}
-		lo, hi := start+1, len(piece)
-		best := start + 1
+		// Largest j > si whose prefix still fits.
+		lo, hi, best := si+1, len(starts)-1, -1
 		for lo <= hi {
 			mid := (lo + hi) / 2
-			for mid > start && mid < len(piece) && !utf8.RuneStart(piece[mid]) {
-				mid--
-			}
-			if mid <= start {
-				break
-			}
-			if c.Count(piece[start:mid]) <= budget {
+			if c.Count(piece[starts[si]:starts[mid]]) <= budget {
 				best = mid
 				lo = mid + 1
 			} else {
 				hi = mid - 1
 			}
 		}
-		if best >= len(piece) {
+		if best < 0 {
+			// Even one rune exceeds the budget. Emit it anyway: refusing to
+			// advance is the deadlock this rewrite exists to remove, and a
+			// budget smaller than a single token is the caller's problem.
+			best = si + 1
+		}
+		if starts[best] >= len(piece) {
 			break
 		}
-		cuts = append(cuts, best)
-		start = best
+		cuts = append(cuts, starts[best])
+		si = best
 	}
 	return cuts
 }

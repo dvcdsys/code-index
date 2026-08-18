@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/dvcdsys/code-index/server/internal/tokenizer"
+	"github.com/dvcdsys/code-index/server/internal/tokenizer/bpecount"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -683,5 +685,48 @@ func TestOperatorOverrideWinsOverExactCap(t *testing.T) {
 	p := &Provider{cfg: Config{Model: "voyage-code-3", MaxTokensPerRequest: 42_000}}
 	if got := p.maxTokensPerBatch(); got != 42_000 {
 		t.Errorf("batch cap = %d, want the operator's 42000", got)
+	}
+}
+
+// TestSplitForInputUsesTokenBoundaries exercises the provider-level split with
+// a tokenizer loaded — the branch that keeps a large-but-legal chunk out of the
+// byte-window-and-average path. It needs the real tokenizer.json, so it skips
+// on a clean checkout like the other fixture-backed tests.
+func TestSplitForInputUsesTokenBoundaries(t *testing.T) {
+	const tokPath = "../../../../../loadtests/bench/voyage-code-3.tokenizer.json"
+	if _, err := os.Stat(tokPath); err != nil {
+		t.Skip("tokenizer.json not present")
+	}
+	c, err := bpecount.Load(tokPath)
+	if err != nil {
+		t.Fatalf("load tokenizer: %v", err)
+	}
+	p := &Provider{cfg: Config{Model: "voyage-code-3"}, counter: c}
+
+	// Comfortably over the old 30 KB byte cap, comfortably under the model's
+	// 32K-token window: byte-windowing would split and average this, token
+	// counting must pass it through whole.
+	big := strings.Repeat("func handler(w http.ResponseWriter) { defer r.Body.Close() }\n", 700)
+	if n := p.CountTokens(big); n >= p.MaxInputTokens() {
+		t.Fatalf("fixture is %d tokens, needs to be under %d", n, p.MaxInputTokens())
+	}
+	if got := p.splitForInput(big, 30_000); len(got) != 1 {
+		t.Errorf("input of %d bytes / %d tokens split into %d windows; a token-sized "+
+			"input must pass through whole", len(big), p.CountTokens(big), len(got))
+	}
+
+	// Past the window: must split, and every piece must fit.
+	huge := strings.Repeat("x := compute(alpha, beta, gamma) // annotate the result\n", 40_000)
+	pieces := p.splitForInput(huge, 30_000)
+	if len(pieces) < 2 {
+		t.Fatalf("input of %d tokens was not split", p.CountTokens(huge))
+	}
+	for i, piece := range pieces {
+		if n := p.CountTokens(piece); n > p.MaxInputTokens() {
+			t.Errorf("piece %d is %d tokens, over the %d-token window", i, n, p.MaxInputTokens())
+		}
+	}
+	if strings.Join(pieces, "") != huge {
+		t.Error("pieces do not reconstruct the input")
 	}
 }

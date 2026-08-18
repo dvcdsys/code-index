@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 // tokenizerPath is the real voyage-code-3 tokenizer.json. The tests that need
@@ -321,6 +323,52 @@ func TestRejectsForeignPipeline(t *testing.T) {
 	} {
 		if _, err := LoadBytes([]byte(doc)); err == nil {
 			t.Errorf("%s: expected a load error, got none", name)
+		}
+	}
+}
+
+// TestMultibyteRunsTerminate covers runs of multi-byte runes long enough to
+// exceed the budget as a single pre-token — a box-drawing comment separator,
+// an arrow run, a run of combining marks.
+//
+// The byte-offset binary search this replaced aligned its midpoint to a rune
+// start by DECREMENTING, so when alignment pulled the midpoint below lo, the
+// next lo = mid+1 did not advance and the search spun forever. It took no
+// error path and produced no output: the indexing worker simply stopped. All
+// three inputs below hung at budgets 5 and 50.
+func TestMultibyteRunsTerminate(t *testing.T) {
+	c := load(t)
+	inputs := map[string]string{
+		"box drawing separator": "// " + strings.Repeat("\u2500", 400) + "\n",
+		"arrow run":             strings.Repeat("\u2192", 400),
+		"combining marks":       strings.Repeat("\u0301", 50),
+		"composition exclusion": strings.Repeat("\u0958", 2000),
+	}
+	for _, budget := range []int{5, 50} {
+		for name, in := range inputs {
+			done := make(chan struct{})
+			var offs []int
+			go func(s string, b int) {
+				offs, _ = c.SplitPoints(s, b)
+				close(done)
+			}(in, budget)
+
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s at budget %d: SplitPoints did not return", name, budget)
+			}
+
+			prev := 0
+			for _, off := range append(offs, len(in)) {
+				if off > len(in) || off < prev {
+					t.Fatalf("%s: offset %d out of range (len %d, prev %d)", name, off, len(in), prev)
+				}
+				if !utf8.ValidString(in[prev:off]) {
+					t.Errorf("%s: piece [%d:%d] is not valid UTF-8 — cut mid-rune", name, prev, off)
+				}
+				prev = off
+			}
 		}
 	}
 }
