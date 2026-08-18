@@ -241,6 +241,38 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 		d.recordFailure(ctx, g, fmt.Errorf("clone: %w", err))
 		return err
 	}
+	if result.RecloneReason != "" {
+		d.Logger.Info("repojobs: checkout discarded and re-cloned",
+			"project", g.ProjectPath, "reason", result.RecloneReason)
+	}
+
+	// Compaction runs OUTSIDE the write-locked clone section above:
+	// MaybeCompact serialises all compactions on a global gate (their
+	// transient heap is ~3× the repo snapshot), and taking that gate while
+	// holding this repo's write lock would stall this repo's readers behind
+	// every other repo's compaction. MaybeCompact re-takes the write lock
+	// itself just for the store mutation. A compaction failure never fails
+	// the job — the checkout is still exactly what the update left behind,
+	// and the trigger re-fires on the next update.
+	//
+	// The protect list keeps two unreferenced commits alive across the
+	// rewrite: the indexed diff base, and the pre-fetch HEAD — the latter is
+	// the TargetSHA of an index job that may still be queued from a previous
+	// clone cycle.
+	compactLock := func(f func() error) error { return f() }
+	if d.RepoLocks != nil {
+		compactLock = func(f func() error) error { return d.RepoLocks.WithWrite(hash, f) }
+	}
+	if c, cerr := repocloner.MaybeCompact(ctx, cloneDir, compactLock, g.IndexedSHA, result.PrevHeadSHA); cerr != nil {
+		d.Logger.Warn("repojobs: compaction failed; checkout kept as-is",
+			"project", g.ProjectPath, "err", cerr)
+	} else if c != nil {
+		d.Logger.Info("repojobs: checkout object store compacted",
+			"project", g.ProjectPath,
+			"bytes_before", c.ObjectsBefore, "bytes_after", c.ObjectsAfter,
+			"packs_deleted", c.PacksDeleted, "tag_refs_dropped", c.TagRefsDropped,
+			"objects", c.Reachable, "ms", c.Duration.Milliseconds())
+	}
 
 	if err := d.GitRepos.SetClone(ctx, g.ProjectPath, result.HeadSHA, ""); err != nil {
 		d.Logger.Warn("repojobs: set last_sha failed", "project", g.ProjectPath, "err", err)
