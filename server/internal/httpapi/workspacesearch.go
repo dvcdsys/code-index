@@ -480,7 +480,7 @@ func (s *Server) reportSearchTimings(workspaceID, query string, p *searchPhases,
 // line up when read by eye, which is the only way anyone reads them.
 var timingFields = []string{
 	"wall_ms", "embed_ms", "resolve_ms", "stale_fts_ms", "fanout_ms",
-	"dense_sum_ms", "dense_max_ms", "bm25_sum_ms", "bm25_max_ms",
+	"dense_sum_ms", "dense_max_ms", "bm25_ms",
 	"fuse_ms", "projects_scanned", "projects_returned", "projects_in_panel",
 }
 
@@ -612,17 +612,27 @@ func (s *Server) detectStaleFTSRepos(ctx context.Context, projectPaths []string)
 	return out
 }
 
-// fanOutHybrid runs dense + BM25 in parallel per project, fuses each
-// project's two ranked lists via RRF, and returns the per-project
-// aggregates the candidacy step needs. Bounded by NumCPU goroutines
-// across the workspace; each project is one slot regardless of
-// whether it issues one or two sub-queries.
+// fanOutHybrid runs the dense scan per project and BM25 once for the
+// whole workspace, fuses each project's two ranked lists via RRF, and
+// returns the per-project aggregates the candidacy step needs. Bounded
+// by NumCPU goroutines; the BM25 query takes one of those slots and runs
+// alongside the dense scans rather than before them.
 //
-// Per-project failures: a BM25-side error is logged but does not mark
-// the project as failed (FTS5 might not be populated yet for a
-// pre-existing install; dense still works). A dense-side error is
-// surfaced via failed_repos and dense_signal is left at 0 — the
-// project can still be retained if BM25 alone is strong.
+// BM25 used to be per-project too, which is the expensive way to ask.
+// FTS5 evaluates MATCH over the whole server's chunks_fts and filters by
+// project afterwards, so N projects meant N evaluations of the same
+// global match — and, measured on a 43-project workspace, 78-80% of the
+// fan-out's total work plus an order-of-magnitude slowdown from the
+// queries contending with each other over one index. See
+// chunksfts.SearchProjects.
+//
+// Failures: a BM25-side error is logged but fails nothing (FTS5 might
+// not be populated yet for a pre-existing install; dense still works).
+// It is now one error for the workspace rather than one per project —
+// the blast radius grew, which is the cost of asking once, and the
+// fallback is the same one a pre-FTS install already relies on. A
+// dense-side error is surfaced via failed_repos and dense_signal is left
+// at 0 — the project can still be retained if BM25 alone is strong.
 func (s *Server) fanOutHybrid(
 	ctx context.Context,
 	workspaceID string,
@@ -643,14 +653,36 @@ func (s *Server) fanOutHybrid(
 	results := make([]projectHits, len(projectPaths))
 	failures := make([]workspaceSearchFailedRepoPayload, len(projectPaths))
 	failed := make([]bool, len(projectPaths))
+	denseHits := make([][]workspaceSearchChunkPayload, len(projectPaths))
 	var mu sync.Mutex
+
+	// One BM25 query for the whole workspace, concurrent with the dense
+	// scans. Errors are swallowed on purpose: bm25ByProject stays nil and
+	// every project falls back to dense-only, which is what a pre-FTS
+	// install does anyway.
+	var bm25ByProject map[string][]chunksfts.Hit
+	g.Go(func() error {
+		bm25Start := time.Now()
+		hits, berr := chunksfts.SearchProjects(gctx, s.Deps.DB, projectPaths, rawQuery, workspaceSearchBM25Limit)
+		phases.bm25 = time.Since(bm25Start)
+		if berr != nil {
+			s.Deps.Logger.Warn("workspaces search: bm25 query failed",
+				"workspace_id", workspaceID,
+				"projects", len(projectPaths),
+				"err", berr)
+			return nil
+		}
+		mu.Lock()
+		bm25ByProject = hits
+		mu.Unlock()
+		return nil
+	})
 
 	for i, pp := range projectPaths {
 		i, pp := i, pp
 		g.Go(func() error {
 			var (
 				denseRes []workspaceSearchChunkPayload
-				bm25Res  []workspaceSearchChunkPayload
 				denseErr error
 			)
 
@@ -682,39 +714,6 @@ func (s *Server) fanOutHybrid(
 				}
 			}
 
-			bm25Start := time.Now()
-			rawBM25, berr := chunksfts.SearchProject(gctx, s.Deps.DB, pp, rawQuery, workspaceSearchBM25Limit)
-			phases.addBM25(time.Since(bm25Start))
-			if berr != nil {
-				s.Deps.Logger.Warn("workspaces search: bm25 query failed",
-					"workspace_id", workspaceID,
-					"project_path", pp,
-					"err", berr)
-			} else {
-				bm25Res = make([]workspaceSearchChunkPayload, 0, len(rawBM25))
-				for _, h := range rawBM25 {
-					bm25Res = append(bm25Res, workspaceSearchChunkPayload{
-						ProjectPath: pp,
-						FilePath:    h.FilePath,
-						StartLine:   h.StartLine,
-						EndLine:     h.EndLine,
-						SymbolName:  h.SymbolName,
-						Language:    h.Language,
-						// Score field carries the dense cosine for the
-						// merged chunk; for BM25-only hits we leave it
-						// at 0 (BM25 score is on a different scale and
-						// would mislead a client reading "score" as
-						// cosine).
-						Score:   0,
-						Content: h.Content,
-					})
-				}
-			}
-
-			fused := fuseRRF(denseRes, bm25Res)
-			denseSig := meanTopN(denseScoresOf(denseRes), workspaceSearchTopNPerProject)
-			bm25Sig := meanTopN(bm25ScoresOf(rawBM25), workspaceSearchTopNPerProject)
-
 			mu.Lock()
 			if denseErr != nil {
 				failures[i] = workspaceSearchFailedRepoPayload{
@@ -723,18 +722,45 @@ func (s *Server) fanOutHybrid(
 				}
 				failed[i] = true
 			}
-			results[i] = projectHits{
-				ProjectPath: pp,
-				FusedChunks: fused,
-				DenseSignal: float32(denseSig),
-				BM25Signal:  float32(bm25Sig),
-			}
+			denseHits[i] = denseRes
 			mu.Unlock()
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
 		return nil, nil, err
+	}
+
+	// Fusion moved out of the goroutines with the BM25 query: it needs both
+	// sides, and it is arithmetic over at most a hundred chunks per project.
+	// Measured across the whole 43-project fan-out it was under a
+	// millisecond, so there is nothing to gain by parallelising it and a
+	// simpler read to be had by not.
+	for i, pp := range projectPaths {
+		rawBM25 := bm25ByProject[pp]
+		bm25Res := make([]workspaceSearchChunkPayload, 0, len(rawBM25))
+		for _, h := range rawBM25 {
+			bm25Res = append(bm25Res, workspaceSearchChunkPayload{
+				ProjectPath: pp,
+				FilePath:    h.FilePath,
+				StartLine:   h.StartLine,
+				EndLine:     h.EndLine,
+				SymbolName:  h.SymbolName,
+				Language:    h.Language,
+				// Score field carries the dense cosine for the merged
+				// chunk; for BM25-only hits we leave it at 0 (BM25 score
+				// is on a different scale and would mislead a client
+				// reading "score" as cosine).
+				Score:   0,
+				Content: h.Content,
+			})
+		}
+		results[i] = projectHits{
+			ProjectPath: pp,
+			FusedChunks: fuseRRF(denseHits[i], bm25Res),
+			DenseSignal: float32(meanTopN(denseScoresOf(denseHits[i]), workspaceSearchTopNPerProject)),
+			BM25Signal:  float32(meanTopN(bm25ScoresOf(rawBM25), workspaceSearchTopNPerProject)),
+		}
 	}
 	failedOut := make([]workspaceSearchFailedRepoPayload, 0)
 	for i, f := range failed {

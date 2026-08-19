@@ -61,10 +61,15 @@ type searchPhases struct {
 	fanOut   time.Duration
 	fuse     time.Duration
 
+	// bm25 is a single duration, not a sum and a max, because there is a
+	// single query: one workspace-wide FTS5 statement partitioned per
+	// project. It ran per project once, and the sum/max split existed to
+	// separate "work done" from "waited for" across those. With one query
+	// they are the same number.
+	bm25 time.Duration
+
 	denseSum atomic.Int64 // nanoseconds
 	denseMax atomic.Int64
-	bm25Sum  atomic.Int64
-	bm25Max  atomic.Int64
 }
 
 // addDense records one project's dense-side latency. Includes the vector
@@ -77,9 +82,6 @@ type searchPhases struct {
 // meant to explain. It does mean a slow failure can own the max, which is why
 // the fan-out logs its own warning per failed project.
 func (p *searchPhases) addDense(d time.Duration) { addSumMax(&p.denseSum, &p.denseMax, d) }
-
-// addBM25 records one project's BM25-side latency.
-func (p *searchPhases) addBM25(d time.Duration) { addSumMax(&p.bm25Sum, &p.bm25Max, d) }
 
 func addSumMax(sum, max *atomic.Int64, d time.Duration) {
 	n := d.Nanoseconds()
@@ -117,8 +119,7 @@ func (p *searchPhases) payload(wall time.Duration, scanned, returned, panel int)
 		"fanout_ms":         ms(p.fanOut),
 		"dense_sum_ms":      msn(p.denseSum.Load()),
 		"dense_max_ms":      msn(p.denseMax.Load()),
-		"bm25_sum_ms":       msn(p.bm25Sum.Load()),
-		"bm25_max_ms":       msn(p.bm25Max.Load()),
+		"bm25_ms":           ms(p.bm25),
 		"fuse_ms":           ms(p.fuse),
 		"projects_scanned":  scanned,
 		"projects_returned": returned,
