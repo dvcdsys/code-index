@@ -1198,6 +1198,22 @@ func TestWorkspaceSearch_ReportsPhaseTimings(t *testing.T) {
 			t.Errorf("%s_max_ms (%d) exceeds %s_sum_ms (%d)", phase, max, phase, sum)
 		}
 	}
+	assertCounterOrder(t, num)
+}
+
+// assertCounterOrder pins the one relationship the three project counters must
+// always satisfy. reportSearchTimings takes them as three consecutive ints —
+// scanned, returned, panel — which is exactly the signature where a
+// transposition compiles, produces plausible-looking numbers, and is invisible
+// until someone reasons from the ratio. The panel is a cap on what survived,
+// and what survived is a subset of what was searched.
+func assertCounterOrder(t *testing.T, num func(string) int64) {
+	t.Helper()
+	scanned, returned, panel := num("projects_scanned"), num("projects_returned"), num("projects_in_panel")
+	if !(panel <= returned && returned <= scanned) {
+		t.Errorf("counters out of order: projects_in_panel=%d, projects_returned=%d, projects_scanned=%d "+
+			"(want panel <= returned <= scanned)", panel, returned, scanned)
+	}
 }
 
 // TestWorkspaceSearch_NoTimingsWithoutASearch is the other half: an empty
@@ -1410,6 +1426,7 @@ func TestWorkspaceSearch_ReturnedCountIgnoresThePanelCap(t *testing.T) {
 		t.Errorf("projects_in_panel = %d — expected the default top_projects "+
 			"cap to bite with %d relevant repos", panel, repos)
 	}
+	assertCounterOrder(t, num)
 }
 
 // TestWorkspaceSearch_LogsSlowQueriesThatSearchedNothing covers the early
