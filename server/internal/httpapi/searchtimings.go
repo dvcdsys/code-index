@@ -1,0 +1,107 @@
+package httpapi
+
+import (
+	"sync/atomic"
+	"time"
+)
+
+// ---------------------------------------------------------------------------
+// Where a workspace query spent its time.
+//
+// This exists because the alternative is arithmetic. The dense scan, the BM25
+// query and the fan-out's parallel speedup were each measured separately on the
+// load-test fixture and multiplied together to guess at a 10.5 s query — a
+// budget that happened to close, which is not the same as being right. Two
+// optimisations were about to be built on that guess.
+//
+// The numbers are cheap: a handful of time.Now() calls per project and two
+// atomics, against a query that reads gigabytes. So they are always COLLECTED.
+// What they are not is always reported:
+//
+//   - the log line is emitted only for a query slower than slowWorkspaceQuery.
+//     A breakdown printed for every query is noise nobody reads, and the
+//     server already logs one http_request line per request with the wall
+//     time in it, so the routine case is covered. A threshold keeps the
+//     property that matters — nobody has to have switched anything on before
+//     the slow query happened;
+//   - the response object is attached only when the caller asks for it with
+//     ?timings=true. In a response it is a debugging aid, not API surface.
+//
+// ---------------------------------------------------------------------------
+
+// slowWorkspaceQuery is the line above which a query is worth a log entry of
+// its own. Workspace search is a fan-out over every project in the workspace
+// and is expected to take a while; on the load-test fixture (45 repos, 1.9M
+// chunks) the median is ~10 s, and even a small workspace on a warm cache is
+// hundreds of milliseconds. Two seconds is therefore not "slow" in the sense
+// of "wrong" — it is the point past which the breakdown starts being worth
+// storing, and it is low enough that a regression on a small workspace still
+// trips it.
+//
+// A var rather than a const only so the test can exercise both sides of the
+// threshold without sleeping for two seconds. Nothing at runtime writes it.
+var slowWorkspaceQuery = 2 * time.Second
+
+// searchPhases accumulates one workspace query's timings.
+//
+// The fan-out phases keep a SUM and a MAX, and both are needed: the sum is how
+// much work the query did, the max is how long the user waited for the slowest
+// project. With perfect parallelism the wall time is the max; with none it is
+// the sum. Measured on the fixture, eight concurrent project searches ran 3.4x
+// faster than the same eight in sequence — so the truth is between the two
+// numbers, and reporting only one of them hides which.
+type searchPhases struct {
+	embed    time.Duration
+	staleFTS time.Duration
+	fanOut   time.Duration
+	fuse     time.Duration
+
+	denseSum atomic.Int64 // nanoseconds
+	denseMax atomic.Int64
+	bm25Sum  atomic.Int64
+	bm25Max  atomic.Int64
+}
+
+// addDense records one project's dense-side latency. Includes the vector
+// store's own hydration of the winning rows — the two are not separable from
+// out here, and hydration is bounded by the result limit rather than by the
+// collection size, so it is not what a scan-side change would move.
+func (p *searchPhases) addDense(d time.Duration) { addSumMax(&p.denseSum, &p.denseMax, d) }
+
+// addBM25 records one project's BM25-side latency.
+func (p *searchPhases) addBM25(d time.Duration) { addSumMax(&p.bm25Sum, &p.bm25Max, d) }
+
+func addSumMax(sum, max *atomic.Int64, d time.Duration) {
+	n := d.Nanoseconds()
+	sum.Add(n)
+	for {
+		cur := max.Load()
+		if n <= cur || max.CompareAndSwap(cur, n) {
+			return
+		}
+	}
+}
+
+// payload renders the timings for the response and for the log line.
+//
+// scanned vs returned is the ratio that decides whether routing the fan-out is
+// worth building: the query does full dense and BM25 work on every project in
+// the workspace and then thresholds the answer down. If those two numbers are
+// far apart, most of the work was thrown away after it was paid for.
+func (p *searchPhases) payload(wall time.Duration, scanned, returned int) map[string]any {
+	ms := func(d time.Duration) int64 { return d.Milliseconds() }
+	msn := func(n int64) int64 { return time.Duration(n).Milliseconds() }
+	return map[string]any{
+		"wall_ms":           ms(wall),
+		"embed_ms":          ms(p.embed),
+		"stale_fts_ms":      ms(p.staleFTS),
+		"fanout_ms":         ms(p.fanOut),
+		"dense_sum_ms":      msn(p.denseSum.Load()),
+		"dense_max_ms":      msn(p.denseMax.Load()),
+		"bm25_sum_ms":       msn(p.bm25Sum.Load()),
+		"bm25_max_ms":       msn(p.bm25Max.Load()),
+		"fuse_ms":           ms(p.fuse),
+		"projects_scanned":  scanned,
+		"projects_returned": returned,
+	}
+}

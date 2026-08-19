@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -160,7 +161,14 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 	// explicitly.
 	minScore := clampFloat32(params.MinScore, 0.4, 0, 1)
 
+	// Always measured, conditionally reported — see searchtimings.go.
+	started := time.Now()
+	var phases searchPhases
+	wantTimings := params.Timings != nil && *params.Timings
+
+	embedStart := time.Now()
 	queryEmbedding, err := s.Deps.EmbeddingSvc.EmbedQuery(r.Context(), params.Q)
+	phases.embed = time.Since(embedStart)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "could not embed query: "+err.Error())
 		return
@@ -233,6 +241,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 			nil,
 			nil,
 			nil,
+			nil,
 		))
 		return
 	}
@@ -263,6 +272,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 			pendingRepos,
 			nil,
 			nil,
+			nil,
 		))
 		return
 	}
@@ -275,13 +285,19 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 	// reindex — otherwise the operator sees no observable difference
 	// from the pre-hybrid algorithm and assumes the change didn't
 	// take effect.
+	staleStart := time.Now()
 	staleRepos := s.detectStaleFTSRepos(r.Context(), projectPaths)
+	phases.staleFTS = time.Since(staleStart)
 
-	hits, failedRepos, err := s.fanOutHybrid(r.Context(), id, projectPaths, params.Q, queryEmbedding, minScore)
+	fanOutStart := time.Now()
+	hits, failedRepos, err := s.fanOutHybrid(r.Context(), id, projectPaths, params.Q, queryEmbedding, minScore, &phases)
+	phases.fanOut = time.Since(fanOutStart)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "fan-out search failed: "+err.Error())
 		return
 	}
+
+	fuseStart := time.Now()
 
 	// Per-query min-max normalization on each signal independently,
 	// then α-blend. Both signals are >=0; using raw/max instead of
@@ -329,6 +345,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		}
 		surviving = append(surviving, ph)
 	}
+	phases.fuse = time.Since(fuseStart)
 
 	if len(surviving) == 0 {
 		status := "empty"
@@ -342,6 +359,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 			pendingRepos,
 			failedRepos,
 			staleRepos,
+			s.reportSearchTimings(id, params.Q, &phases, started, len(projectPaths), 0, wantTimings),
 		))
 		return
 	}
@@ -416,7 +434,42 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		pendingRepos,
 		failedRepos,
 		staleRepos,
+		s.reportSearchTimings(id, params.Q, &phases, started, len(projectPaths), len(projectPayloads), wantTimings),
 	))
+}
+
+// reportSearchTimings logs the phase breakdown if the query was slow, and
+// returns it for the response if the caller asked for it.
+//
+// Both gates are deliberate; see searchtimings.go. The breakdown itself is
+// always computed because it costs a map allocation — the decision here is
+// only about where it goes.
+func (s *Server) reportSearchTimings(workspaceID, query string, p *searchPhases,
+	started time.Time, scanned, returned int, requested bool) map[string]any {
+
+	wall := time.Since(started)
+	t := p.payload(wall, scanned, returned)
+
+	if wall >= slowWorkspaceQuery {
+		fields := []any{"workspace_id", workspaceID, "query_len", len(query)}
+		for _, k := range timingFields {
+			fields = append(fields, k, t[k])
+		}
+		s.Deps.Logger.Info("slow workspace search", fields...)
+	}
+
+	if !requested {
+		return nil
+	}
+	return t
+}
+
+// timingFields fixes the order of the log line's fields so successive lines
+// line up when read by eye, which is the only way anyone reads them.
+var timingFields = []string{
+	"wall_ms", "embed_ms", "stale_fts_ms", "fanout_ms",
+	"dense_sum_ms", "dense_max_ms", "bm25_sum_ms", "bm25_max_ms",
+	"fuse_ms", "projects_scanned", "projects_returned",
 }
 
 // interleaveByRank returns up to `limit` chunks by walking the surviving
@@ -485,11 +538,15 @@ func workspaceSearchResponse(
 	pending []workspaceSearchPendingRepoPayload,
 	failed []workspaceSearchFailedRepoPayload,
 	stale []workspaceSearchStaleFTSRepoPayload,
+	timings map[string]any,
 ) map[string]any {
 	out := map[string]any{
 		"status":   status,
 		"projects": projects,
 		"chunks":   chunks,
+	}
+	if timings != nil {
+		out["timings"] = timings
 	}
 	if len(pending) > 0 {
 		out["pending_repos"] = pending
@@ -561,6 +618,7 @@ func (s *Server) fanOutHybrid(
 	rawQuery string,
 	queryEmbedding []float32,
 	minScore float32,
+	phases *searchPhases,
 ) ([]projectHits, []workspaceSearchFailedRepoPayload, error) {
 	concurrency := runtime.NumCPU()
 	if concurrency < 1 {
@@ -584,7 +642,9 @@ func (s *Server) fanOutHybrid(
 				denseErr error
 			)
 
+			denseStart := time.Now()
 			rawDense, derr := s.Deps.VectorStore.Search(gctx, pp, queryEmbedding, workspaceSearchPerProjectLimit, nil)
+			phases.addDense(time.Since(denseStart))
 			if derr != nil {
 				denseErr = derr
 				s.Deps.Logger.Warn("workspaces search: dense query failed",
@@ -610,7 +670,9 @@ func (s *Server) fanOutHybrid(
 				}
 			}
 
+			bm25Start := time.Now()
 			rawBM25, berr := chunksfts.SearchProject(gctx, s.Deps.DB, pp, rawQuery, workspaceSearchBM25Limit)
+			phases.addBM25(time.Since(bm25Start))
 			if berr != nil {
 				s.Deps.Logger.Warn("workspaces search: bm25 query failed",
 					"workspace_id", workspaceID,
