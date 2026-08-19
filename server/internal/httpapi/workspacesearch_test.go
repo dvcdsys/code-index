@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -1185,6 +1186,9 @@ func TestWorkspaceSearch_ReportsPhaseTimings(t *testing.T) {
 	if got := num("projects_returned"); got != 1 {
 		t.Errorf("projects_returned = %d, want 1 — only the near repo clears the threshold", got)
 	}
+	if got := num("projects_in_panel"); got != 1 {
+		t.Errorf("projects_in_panel = %d, want 1", got)
+	}
 	// The max of a phase cannot exceed its sum, whatever the machine was
 	// doing at the time. This is the one relationship worth pinning: it
 	// catches a sum and a max wired to the wrong accumulator, which would
@@ -1330,5 +1334,120 @@ func TestWorkspaceSearch_LogsOnlySlowQueries(t *testing.T) {
 	}
 	if _, present := raw["timings"]; present {
 		t.Errorf("a slow query attached timings to a response that did not ask: %v", raw["timings"])
+	}
+}
+
+// TestWorkspaceSearch_ReturnedCountIgnoresThePanelCap is the regression test
+// for the counter these timings exist to feed.
+//
+// projects_scanned:projects_returned is meant to say how much of the fan-out's
+// work was discarded — the premise of routing the fan-out at all. Counting the
+// projects the caller was SHOWN instead pegs that ratio to top_projects
+// (default 10), so a workspace where 12 repos are relevant and one where 40
+// are would both report the same ratio, and both would report it unchanged if
+// the threshold stopped rejecting anything at all. The number the caller saw
+// is a real but different question, and gets its own field.
+func TestWorkspaceSearch_ReturnedCountIgnoresThePanelCap(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	query := l2([]float32{1, 0, 0, 0})
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: query})
+	wsID := createWS(t, router, "panelcap")
+
+	// More relevant repos than the panel holds. Every one is a near-exact
+	// match, so none of them can be dropped by the relevance threshold and
+	// the only thing that can shrink the count is the cap.
+	const repos = 14
+	for i := 0; i < repos; i++ {
+		seedRepoWithChunks(t, d, vs, wsID,
+			fmt.Sprintf("github.com/o/r%02d@main", i),
+			[]vectorstore.Chunk{
+				{Content: "near", FilePath: "n.go", StartLine: 1, EndLine: 9,
+					ChunkType: "function", SymbolName: "N", Language: "go"},
+			},
+			[][]float32{l2([]float32{1.0, float32(i) / 1000, 0.0, 0.0})},
+		)
+	}
+
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=near&timings=true", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Projects []map[string]any       `json:"projects"`
+		Timings  map[string]json.Number `json:"timings"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	num := func(k string) int64 {
+		n, err := body.Timings[k].Int64()
+		if err != nil {
+			t.Fatalf("%s is not an integer: %v", k, err)
+		}
+		return n
+	}
+
+	if got := num("projects_scanned"); got != repos {
+		t.Errorf("projects_scanned = %d, want %d", got, repos)
+	}
+	if got := num("projects_returned"); got != repos {
+		t.Errorf("projects_returned = %d, want %d — every repo clears the "+
+			"threshold, so this must not be capped by top_projects", got, repos)
+	}
+	// The panel is capped, and its counter has to agree with the array the
+	// caller actually received.
+	panel := num("projects_in_panel")
+	if panel != int64(len(body.Projects)) {
+		t.Errorf("projects_in_panel = %d but the response carries %d projects",
+			panel, len(body.Projects))
+	}
+	if panel >= repos {
+		t.Errorf("projects_in_panel = %d — expected the default top_projects "+
+			"cap to bite with %d relevant repos", panel, repos)
+	}
+}
+
+// TestWorkspaceSearch_LogsSlowQueriesThatSearchedNothing covers the early
+// returns. A workspace with no queryable project never reaches the fan-out,
+// but the query embedding has already been paid for by then — and a hung
+// embedding provider is exactly the failure the slow-query line exists to
+// catch. Silence on those paths would hide the one phase that ran.
+func TestWorkspaceSearch_LogsSlowQueriesThatSearchedNothing(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	var logs bytes.Buffer
+	router := newSearchRouterWithLogger(t, d, vs,
+		fixedEmbedder{q: l2([]float32{1, 0, 0, 0})},
+		slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	wsID := createWS(t, router, "emptyslow")
+
+	restore := slowWorkspaceQuery
+	slowWorkspaceQuery = 0
+	t.Cleanup(func() { slowWorkspaceQuery = restore })
+
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=anything&timings=true", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(logs.String(), "slow workspace search") {
+		t.Errorf("an early return skipped the slow-query line:\n%s", logs.String())
+	}
+	// And the response still carries nothing, because nothing was searched —
+	// even though this caller did ask for timings.
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := raw["timings"]; present {
+		t.Errorf("a search that never ran reported timings: %v", raw["timings"])
 	}
 }
