@@ -2630,6 +2630,20 @@ paths:
             minimum: 0
             maximum: 1
             default: 0.4
+        - name: timings
+          in: query
+          required: false
+          description: |
+            Attach a per-phase breakdown of where the query spent its
+            time (see WorkspaceSearchTimings). Diagnostic, not API
+            surface: it exists so a slow workspace query can be taken
+            apart, and it is off unless asked for. The server logs the
+            same breakdown by itself whenever a query is slow, so
+            catching a regression does not depend on someone having
+            passed this flag at the right moment.
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
           description: Search results
@@ -6531,6 +6545,93 @@ components:
             under the new schema.
           items:
             $ref: "#/components/schemas/WorkspaceSearchStaleFTSRepo"
+        timings:
+          $ref: "#/components/schemas/WorkspaceSearchTimings"
+
+    WorkspaceSearchTimings:
+      type: object
+      description: |
+        Where this query spent its time, in milliseconds. Returned only
+        when the request passes `timings=true` AND the query actually ran
+        a search — a workspace with no queryable project reports nothing
+        rather than a block of zeroes that would read as "instant".
+
+        The fan-out phases report a sum AND a max, and both are needed: the
+        sum is how much work the query did across every project, the max is
+        how long it waited for the slowest one. With perfect parallelism the
+        wall time is the max; with none it is the sum; in practice it is
+        between them, and one number alone cannot say which.
+
+        `projects_scanned` versus `projects_returned` is the ratio that says
+        how much of the work was discarded: the fan-out runs dense and BM25
+        over every project in the workspace and then thresholds the answer
+        down to the relevant ones. `projects_in_panel` is a separate,
+        smaller question — how many of those the caller was actually shown,
+        after the `top_projects` cap.
+
+        The named phases do not sum to `wall_ms`. The remainder is the
+        workspace visibility check, assembling the projects panel, the
+        round-robin interleave and writing the response — all in memory and,
+        on the load-test fixture, ~19 ms of ~9,900 ms.
+      properties:
+        wall_ms:
+          type: integer
+          description: The whole handler, from its first line to its last.
+        embed_ms:
+          type: integer
+          description: Round-trip to the embedding provider for the query text.
+        resolve_ms:
+          type: integer
+          description: |
+            Loading the workspace's project memberships and applying the
+            per-user access filter. Separate from the rest because it is the
+            one pre-fan-out step that grows with how many projects the
+            caller can see, rather than with the workspace.
+        stale_fts_ms:
+          type: integer
+          description: The pre-fan-out probe for repos with no BM25 mirror.
+        fanout_ms:
+          type: integer
+          description: Wall time of the parallel per-project phase.
+        dense_sum_ms:
+          type: integer
+          description: |
+            Vector-store search summed across projects, including hydration
+            of each project's winning rows, and including projects whose
+            query failed — the time was spent either way, and omitting it
+            would put the sums permanently below the wall time they explain.
+        dense_max_ms:
+          type: integer
+          description: |
+            The slowest single project's dense search. May belong to a
+            project whose query failed; the fan-out logs a warning of its
+            own for those.
+        bm25_sum_ms:
+          type: integer
+          description: |
+            FTS5/BM25 search summed across projects, on the same terms as
+            dense_sum_ms.
+        bm25_max_ms:
+          type: integer
+          description: The slowest single project's BM25 search.
+        fuse_ms:
+          type: integer
+          description: Normalisation, candidacy blending and thresholding.
+        projects_scanned:
+          type: integer
+          description: Projects the fan-out searched.
+        projects_returned:
+          type: integer
+          description: |
+            Projects that survived the relevance threshold — NOT the number
+            the caller was shown. Capping this at `top_projects` would peg
+            the scanned:returned ratio to a request parameter instead of
+            measuring how much of the fan-out's work was discarded.
+        projects_in_panel:
+          type: integer
+          description: |
+            Projects present in the response's `projects` array, i.e.
+            `min(projects_returned, top_projects)`.
 
     WorkspaceSearchPendingRepo:
       type: object

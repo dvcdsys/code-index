@@ -1,13 +1,17 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +47,15 @@ func (e fixedEmbedder) Ready(_ context.Context) error { return nil }
 // controls.
 func newSearchRouter(t *testing.T, d *sql.DB, vs *vectorstore.Store, emb fixedEmbedder) http.Handler {
 	t.Helper()
+	return newSearchRouterWithLogger(t, d, vs, emb, nil)
+}
+
+// newSearchRouterWithLogger is newSearchRouter with the logger under the
+// test's control, for the tests that assert on what got logged. A nil logger
+// keeps the router's own default.
+func newSearchRouterWithLogger(t *testing.T, d *sql.DB, vs *vectorstore.Store,
+	emb fixedEmbedder, logger *slog.Logger) http.Handler {
+	t.Helper()
 	t.Setenv("CIX_SECRET_KEY", "")
 	t.Setenv("CIX_SECRET_KEYFILE", "")
 	sec, err := secrets.Open(secrets.OpenOptions{DataDir: t.TempDir(), AllowGenerate: true})
@@ -51,6 +64,7 @@ func newSearchRouter(t *testing.T, d *sql.DB, vs *vectorstore.Store, emb fixedEm
 	}
 	return NewRouter(Deps{
 		DB:                d,
+		Logger:            logger,
 		AuthDisabled:      true,
 		Users:             seedlessUsers(d),
 		Sessions:          seedlessSessions(d),
@@ -1099,5 +1113,358 @@ func TestWorkspaceSearch_DefaultMinScoreIs04(t *testing.T) {
 	if len(openResp.Projects) != 2 {
 		t.Fatalf("min_score=0: expected both projects to survive, got %d (%+v)",
 			len(openResp.Projects), openResp.Projects)
+	}
+}
+
+// TestWorkspaceSearch_ReportsPhaseTimings covers the diagnostic added because
+// the previous round of optimisation work was steered by arithmetic across
+// separate measurements rather than by a number taken inside the handler.
+//
+// It asserts SHAPE, not values. Wall-clock in CI is noise — an assertion that
+// dense_sum_ms is under some bound would fail on a loaded runner and teach
+// everyone to ignore it. What can be asserted is that every field is present
+// when the caller asks for the breakdown, and that the two counters describe
+// the fan-out the request actually performed.
+func TestWorkspaceSearch_ReportsPhaseTimings(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	query := l2([]float32{1, 0, 0, 0})
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: query})
+	wsID := createWS(t, router, "timings")
+
+	// Two projects, one of which cannot clear the relevance threshold, so
+	// projects_scanned and projects_returned are different numbers. Their
+	// ratio is the whole reason the counters exist: it says how much of the
+	// fan-out's work was discarded after it was paid for.
+	seedRepoWithChunks(t, d, vs, wsID, "github.com/o/near@main",
+		[]vectorstore.Chunk{
+			{Content: "near", FilePath: "n.go", StartLine: 1, EndLine: 9,
+				ChunkType: "function", SymbolName: "N", Language: "go"},
+		},
+		[][]float32{l2([]float32{1.0, 0.0, 0.0, 0.0})},
+	)
+	seedRepoWithChunks(t, d, vs, wsID, "github.com/o/far@main",
+		[]vectorstore.Chunk{
+			{Content: "far", FilePath: "f.go", StartLine: 1, EndLine: 9,
+				ChunkType: "function", SymbolName: "F", Language: "go"},
+		},
+		[][]float32{l2([]float32{0.0, 0.0, 0.0, 1.0})},
+	)
+
+	rr := doJSON(t, router, http.MethodGet, "/api/v1/workspaces/"+wsID+"/search?q=near&timings=true", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Timings map[string]json.Number `json:"timings"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Timings == nil {
+		t.Fatal("no timings on a response that asked for them and ran a search")
+	}
+	for _, field := range timingFields {
+		if _, ok := body.Timings[field]; !ok {
+			t.Errorf("timings is missing %q: %v", field, body.Timings)
+		}
+	}
+
+	num := func(k string) int64 {
+		n, err := body.Timings[k].Int64()
+		if err != nil {
+			t.Fatalf("%s is not an integer: %v", k, err)
+		}
+		return n
+	}
+	if got := num("projects_scanned"); got != 2 {
+		t.Errorf("projects_scanned = %d, want 2 — the fan-out searched both repos", got)
+	}
+	if got := num("projects_returned"); got != 1 {
+		t.Errorf("projects_returned = %d, want 1 — only the near repo clears the threshold", got)
+	}
+	if got := num("projects_in_panel"); got != 1 {
+		t.Errorf("projects_in_panel = %d, want 1", got)
+	}
+	// The max of a phase cannot exceed its sum, whatever the machine was
+	// doing at the time. This is the one relationship worth pinning: it
+	// catches a sum and a max wired to the wrong accumulator, which would
+	// otherwise look plausible in every log line.
+	for _, phase := range []string{"dense", "bm25"} {
+		if sum, max := num(phase+"_sum_ms"), num(phase+"_max_ms"); max > sum {
+			t.Errorf("%s_max_ms (%d) exceeds %s_sum_ms (%d)", phase, max, phase, sum)
+		}
+	}
+	assertCounterOrder(t, num)
+}
+
+// assertCounterOrder pins the one relationship the three project counters must
+// always satisfy. reportSearchTimings takes them as three consecutive ints —
+// scanned, returned, panel — which is exactly the signature where a
+// transposition compiles, produces plausible-looking numbers, and is invisible
+// until someone reasons from the ratio. The panel is a cap on what survived,
+// and what survived is a subset of what was searched.
+func assertCounterOrder(t *testing.T, num func(string) int64) {
+	t.Helper()
+	scanned, returned, panel := num("projects_scanned"), num("projects_returned"), num("projects_in_panel")
+	if !(panel <= returned && returned <= scanned) {
+		t.Errorf("counters out of order: projects_in_panel=%d, projects_returned=%d, projects_scanned=%d "+
+			"(want panel <= returned <= scanned)", panel, returned, scanned)
+	}
+}
+
+// TestWorkspaceSearch_NoTimingsWithoutASearch is the other half: an empty
+// workspace never reaches the fan-out, and reporting zeroes for phases that
+// did not run would read as "the search was instant" to whoever is reading
+// them. It asks for timings explicitly, so a pass means the search gate held,
+// not merely that the opt-in gate did.
+func TestWorkspaceSearch_NoTimingsWithoutASearch(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: l2([]float32{1, 0, 0, 0})})
+	wsID := createWS(t, router, "notimings")
+
+	rr := doJSON(t, router, http.MethodGet, "/api/v1/workspaces/"+wsID+"/search?q=anything&timings=true", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := raw["timings"]; present {
+		t.Errorf("empty workspace reported timings: %v", raw["timings"])
+	}
+}
+
+// TestWorkspaceSearch_TimingsAreOptIn pins the half of the contract the
+// opt-in exists for. The breakdown is a debugging aid; every caller that did
+// not ask for it — the CLI, the MCP tools, the dashboard — must get the same
+// response shape it got before the diagnostic was added.
+func TestWorkspaceSearch_TimingsAreOptIn(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	query := l2([]float32{1, 0, 0, 0})
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: query})
+	wsID := createWS(t, router, "optin")
+	seedRepoWithChunks(t, d, vs, wsID, "github.com/o/near@main",
+		[]vectorstore.Chunk{
+			{Content: "near", FilePath: "n.go", StartLine: 1, EndLine: 9,
+				ChunkType: "function", SymbolName: "N", Language: "go"},
+		},
+		[][]float32{l2([]float32{1.0, 0.0, 0.0, 0.0})},
+	)
+
+	for _, q := range []string{"", "&timings=false", "&timings=0"} {
+		rr := doJSON(t, router, http.MethodGet,
+			"/api/v1/workspaces/"+wsID+"/search?q=near"+q, nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%q: expected 200, got %d (%s)", q, rr.Code, rr.Body.String())
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("%q: decode: %v", q, err)
+		}
+		if _, present := raw["timings"]; present {
+			t.Errorf("%q: timings attached without being asked for: %v", q, raw["timings"])
+		}
+		// The search itself must still have happened.
+		if chunks, ok := raw["chunks"].([]any); !ok || len(chunks) == 0 {
+			t.Errorf("%q: no chunks — the request did not actually search: %v", q, raw["chunks"])
+		}
+	}
+}
+
+// TestWorkspaceSearch_LogsOnlySlowQueries covers the other gate, the one that
+// decides how much this diagnostic costs in production. The server already
+// logs an http_request line per request; a second line per workspace query
+// would be noise on every query to catch the rare slow one. The threshold is
+// what buys the property that matters — nobody has to have switched anything
+// on before the slow query happens.
+//
+// Both directions are asserted from one logger, because a test that only
+// proves silence would still pass if the line were deleted outright.
+func TestWorkspaceSearch_LogsOnlySlowQueries(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	var logs bytes.Buffer
+	router := newSearchRouterWithLogger(t, d, vs,
+		fixedEmbedder{q: l2([]float32{1, 0, 0, 0})},
+		slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	wsID := createWS(t, router, "slowlog")
+	seedRepoWithChunks(t, d, vs, wsID, "github.com/o/near@main",
+		[]vectorstore.Chunk{
+			{Content: "near", FilePath: "n.go", StartLine: 1, EndLine: 9,
+				ChunkType: "function", SymbolName: "N", Language: "go"},
+		},
+		[][]float32{l2([]float32{1.0, 0.0, 0.0, 0.0})},
+	)
+
+	// A four-chunk in-memory workspace is nowhere near two seconds.
+	doJSON(t, router, http.MethodGet, "/api/v1/workspaces/"+wsID+"/search?q=near", nil)
+	if strings.Contains(logs.String(), "slow workspace search") {
+		t.Errorf("a fast query wrote a slow-query line:\n%s", logs.String())
+	}
+
+	// Same query, threshold dropped so every query counts as slow.
+	restore := slowWorkspaceQuery
+	slowWorkspaceQuery = 0
+	t.Cleanup(func() { slowWorkspaceQuery = restore })
+
+	logs.Reset()
+	rr := doJSON(t, router, http.MethodGet, "/api/v1/workspaces/"+wsID+"/search?q=near", nil)
+	line := ""
+	for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(l, "slow workspace search") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("a slow query wrote no line:\n%s", logs.String())
+	}
+	// The line is the whole artefact — if it omits a phase, the phase is
+	// invisible in production no matter how carefully it was measured.
+	for _, field := range append([]string{"workspace_id", "query_len"}, timingFields...) {
+		if !strings.Contains(line, `"`+field+`"`) {
+			t.Errorf("slow-query line is missing %q: %s", field, line)
+		}
+	}
+	// The two gates are independent: crossing the log threshold must not
+	// start attaching the block to responses nobody asked for.
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := raw["timings"]; present {
+		t.Errorf("a slow query attached timings to a response that did not ask: %v", raw["timings"])
+	}
+}
+
+// TestWorkspaceSearch_ReturnedCountIgnoresThePanelCap is the regression test
+// for the counter these timings exist to feed.
+//
+// projects_scanned:projects_returned is meant to say how much of the fan-out's
+// work was discarded — the premise of routing the fan-out at all. Counting the
+// projects the caller was SHOWN instead pegs that ratio to top_projects
+// (default 10), so a workspace where 12 repos are relevant and one where 40
+// are would both report the same ratio, and both would report it unchanged if
+// the threshold stopped rejecting anything at all. The number the caller saw
+// is a real but different question, and gets its own field.
+func TestWorkspaceSearch_ReturnedCountIgnoresThePanelCap(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	query := l2([]float32{1, 0, 0, 0})
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: query})
+	wsID := createWS(t, router, "panelcap")
+
+	// More relevant repos than the panel holds. Every one is a near-exact
+	// match, so none of them can be dropped by the relevance threshold and
+	// the only thing that can shrink the count is the cap.
+	const repos = 14
+	for i := 0; i < repos; i++ {
+		seedRepoWithChunks(t, d, vs, wsID,
+			fmt.Sprintf("github.com/o/r%02d@main", i),
+			[]vectorstore.Chunk{
+				{Content: "near", FilePath: "n.go", StartLine: 1, EndLine: 9,
+					ChunkType: "function", SymbolName: "N", Language: "go"},
+			},
+			[][]float32{l2([]float32{1.0, float32(i) / 1000, 0.0, 0.0})},
+		)
+	}
+
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=near&timings=true", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Projects []map[string]any       `json:"projects"`
+		Timings  map[string]json.Number `json:"timings"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	num := func(k string) int64 {
+		n, err := body.Timings[k].Int64()
+		if err != nil {
+			t.Fatalf("%s is not an integer: %v", k, err)
+		}
+		return n
+	}
+
+	if got := num("projects_scanned"); got != repos {
+		t.Errorf("projects_scanned = %d, want %d", got, repos)
+	}
+	if got := num("projects_returned"); got != repos {
+		t.Errorf("projects_returned = %d, want %d — every repo clears the "+
+			"threshold, so this must not be capped by top_projects", got, repos)
+	}
+	// The panel is capped, and its counter has to agree with the array the
+	// caller actually received.
+	panel := num("projects_in_panel")
+	if panel != int64(len(body.Projects)) {
+		t.Errorf("projects_in_panel = %d but the response carries %d projects",
+			panel, len(body.Projects))
+	}
+	if panel >= repos {
+		t.Errorf("projects_in_panel = %d — expected the default top_projects "+
+			"cap to bite with %d relevant repos", panel, repos)
+	}
+	assertCounterOrder(t, num)
+}
+
+// TestWorkspaceSearch_LogsSlowQueriesThatSearchedNothing covers the early
+// returns. A workspace with no queryable project never reaches the fan-out,
+// but the query embedding has already been paid for by then — and a hung
+// embedding provider is exactly the failure the slow-query line exists to
+// catch. Silence on those paths would hide the one phase that ran.
+func TestWorkspaceSearch_LogsSlowQueriesThatSearchedNothing(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	var logs bytes.Buffer
+	router := newSearchRouterWithLogger(t, d, vs,
+		fixedEmbedder{q: l2([]float32{1, 0, 0, 0})},
+		slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	wsID := createWS(t, router, "emptyslow")
+
+	restore := slowWorkspaceQuery
+	slowWorkspaceQuery = 0
+	t.Cleanup(func() { slowWorkspaceQuery = restore })
+
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=anything&timings=true", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(logs.String(), "slow workspace search") {
+		t.Errorf("an early return skipped the slow-query line:\n%s", logs.String())
+	}
+	// And the response still carries nothing, because nothing was searched —
+	// even though this caller did ask for timings.
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := raw["timings"]; present {
+		t.Errorf("a search that never ran reported timings: %v", raw["timings"])
 	}
 }
