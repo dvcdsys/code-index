@@ -313,6 +313,25 @@ func (s *Store) importCollection(ctx context.Context, dir, name string) (int, er
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM collections WHERE name = ?`, name).Scan(&collID); err != nil {
 		return 0, err
 	}
+	// No compact scan copy is written here, deliberately: the import is already
+	// the slowest thing a boot can do, and the background backfill that runs
+	// right after it (see startQ8Backfill) converts the result at a duty cycle
+	// that leaves the server usable. Until then those collections search the
+	// float32 way, which is what they did before that table existed.
+	//
+	// But "the import creates the collection, so nothing marked it complete"
+	// is only true when the collection is NEW. INSERT OR IGNORE also succeeds
+	// against a collection this binary created and flagged earlier — an
+	// operator pointing CIX_CHROMA_PERSIST_DIR at a legacy tree after indexing
+	// the same project live reaches exactly that, because migration_state is
+	// keyed on the legacy collection name and has never seen it. Imported docs
+	// would then have no compact rows inside a collection whose flag says it
+	// is complete, and the backfill skips flagged collections: permanently
+	// invisible to search. So the flag comes off here, unconditionally.
+	if err := clearQ8Ready(ctx, tx, collID); err != nil {
+		return 0, err
+	}
+	s.forgetQ8(collID)
 	vecStmt, err := tx.PrepareContext(ctx, upsertVectorSQL)
 	if err != nil {
 		return 0, err

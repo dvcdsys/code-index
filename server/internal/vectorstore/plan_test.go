@@ -74,3 +74,33 @@ func TestScanUsesCollectionIndex(t *testing.T) {
 		t.Errorf("delete-by-file plan does not use idx_vec_coll_file:\n%s", plan)
 	}
 }
+
+// TestQ8ScanUsesCollectionIndex is TestScanUsesCollectionIndex for the table a
+// search actually walks. Same guarantee for the same reason — idx_q8_coll's
+// keys are (collection_id, rowid), so the walk stays proportional to the
+// collection and yields its rows in table order — and it matters more here,
+// because this is the plan every search takes.
+func TestQ8ScanUsesCollectionIndex(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	chunks, embs := makeChunks(20, "a.go", "go")
+	if err := s.UpsertChunks(ctx, "/q8plan", chunks, embs); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	plan := queryPlan(t, s, scanQ8SQL, 1)
+	if !strings.Contains(plan, "idx_q8_coll") {
+		t.Errorf("compact scan plan does not use idx_q8_coll:\n%s", plan)
+	}
+	if strings.Contains(plan, "SCAN vectors_q8\n") || strings.HasSuffix(plan, "SCAN vectors_q8") {
+		t.Errorf("compact scan plan falls back to a full table scan:\n%s", plan)
+	}
+
+	// The language filter must not change the driving index: it is an extra
+	// test on rows the index already visits, not a reason to pick a different
+	// one.
+	plan = queryPlan(t, s, scanQ8SQL+" AND language = ?", 1, "go")
+	if !strings.Contains(plan, "idx_q8_coll") {
+		t.Errorf("filtered compact scan plan does not use idx_q8_coll:\n%s", plan)
+	}
+}

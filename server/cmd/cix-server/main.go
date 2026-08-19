@@ -411,6 +411,7 @@ func run() (restart bool, err error) {
 			Dir:             cfg.VectorDirFor(comps),
 			LegacyChromaDir: cfg.ChromaDirFor(comps),
 			MMapBytes:       cfg.VectorMMapSize,
+			ScanQuant:       cfg.VectorScanQuantEnabled,
 			Logger:          logger,
 		})
 	}

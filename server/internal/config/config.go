@@ -55,7 +55,19 @@ type Config struct {
 	// 0 (the default) leaves it off. Env: CIX_VECTOR_MMAP_SIZE. It buys
 	// roughly 40% lower search latency and costs resident memory: every
 	// connection maps the database file and mapped pages count in RSS.
-	VectorMMapSize          int64
+	VectorMMapSize int64
+	// VectorScanQuantEnabled controls the compact int8 copy the vector store
+	// scans instead of the float32 originals. Env: CIX_VECTOR_SCAN_QUANT,
+	// default true.
+	//
+	// It exists because turning it on costs disk before it saves time: the
+	// copy is about a quarter of the float32 bytes, added to a store that may
+	// already be the largest thing on the volume, and it is built by a
+	// background pass over every existing vector. An operator who is short of
+	// disk, or who wants to isolate a search-quality question from the
+	// approximation, needs a way to say no. Off means every collection keeps
+	// using the exact float32 scan — correct, and as slow as it was before.
+	VectorScanQuantEnabled  bool
 	SQLitePath              string
 	MaxFileSize             int
 	ExcludedDirs            []string
@@ -309,6 +321,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.VectorMMapSize = int64(vecMMap)
+
+	scanQuant, err := getenvBool("CIX_VECTOR_SCAN_QUANT", true)
+	if err != nil {
+		return nil, err
+	}
+	c.VectorScanQuantEnabled = scanQuant
 
 	authOff, err := getenvBool("CIX_AUTH_DISABLED", false)
 	if err != nil {

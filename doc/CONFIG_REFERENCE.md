@@ -37,6 +37,7 @@ the DB.
 | `CIX_CHROMA_PERSIST_DIR` | `/data/chroma` | Legacy chromem-go store. Read on startup for the one-time import into the SQLite vector store, then left untouched as the rollback path. See [VECTORSTORE.md](VECTORSTORE.md). |
 | `CIX_VECTORS_DIR` | sibling of `CIX_CHROMA_PERSIST_DIR` (`/data/vectors`) | Vector store directory: one SQLite database per embedding namespace. |
 | `CIX_VECTOR_MMAP_SIZE` | `0` (off) | `PRAGMA mmap_size` for the vector store, in bytes. Roughly 40% lower search latency in exchange for resident memory — mapped database pages count in RSS. |
+| `CIX_VECTOR_SCAN_QUANT` | `true` | Scan a compact int8 copy of each vector instead of the float32 original, rescoring the shortlist against the originals. Every score returned is the exact cosine; which documents reach the shortlist is an approximation, measured at recall 1.000 against exact search (see `doc/VECTORSTORE.md`). 3.4x fewer bytes read per query at 2048 dimensions, in exchange for roughly a quarter more disk. Set `false` if the volume cannot take it; existing copies are then ignored, and writes remove the copies of rows they touch so re-enabling rebuilds instead of trusting stale data. |
 | `CIX_GGUF_CACHE_DIR` | `/data/models` | Where downloaded GGUF files live. |
 | `CIX_PUBLIC_URL` | — | Externally-reachable URL used to build GitHub webhook delivery URLs. Empty disables webhook URL display. |
 
