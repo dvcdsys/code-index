@@ -223,13 +223,6 @@ func less(a, b candidate) bool {
 	return a.docID < b.docID
 }
 
-// scanPayloadBytes is how many bytes of embedding a scan of one row has to
-// read at the given dimension. One byte per component, because the scan reads
-// the int8 copy; the layout tests divide the pages actually read by this to
-// separate "the representation is large" from "the packing is wasteful",
-// which are different problems with different fixes.
-func scanPayloadBytes(dim int) int { return dim }
-
 // ---------------------------------------------------------------------------
 // int8 quantisation
 //
@@ -249,11 +242,16 @@ func scanPayloadBytes(dim int) int { return dim }
 // What this loses, measured against exact float32 ranking over 50 real
 // query-side embeddings on the fixture's largest collection (60k vectors of
 // ziglang/zig, voyage-code-3 @2048): recall@10 = 0.994 from the int8 ranking
-// alone. Rescoring the shortlist on the float32 originals brings it to 1.000
+// alone. Rescoring the shortlist on the float32 originals brought it to 1.000
 // at k=10 and k=20 — the approximation misorders near-ties, it does not lose
-// the documents, so re-reading a few dozen exact vectors recovers every one.
+// the documents, so re-reading a few dozen exact vectors recovered every one.
 // That is why the float32 blob stays on disk: it is no longer read by the
-// scan, only by the rescore, and the rescore is what makes the answer exact.
+// scan, only by the rescore.
+//
+// Note what that does and does not promise. The SCORES are exact — they come
+// from the float32 vectors either way. The SET is an approximation measured at
+// zero error here, not proved at zero in general; see q8Shortlist for the
+// boundary case it cannot rule out.
 // ---------------------------------------------------------------------------
 
 // int8Max is the quantisation range. -128 is deliberately excluded: keeping

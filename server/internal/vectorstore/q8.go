@@ -3,6 +3,7 @@ package vectorstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -34,6 +35,29 @@ import (
 //
 // Nothing sets the flag optimistically, and nothing reads q8 without it.
 // ---------------------------------------------------------------------------
+
+// backfillQ8SQL writes one converted vector, and is deliberately weaker than
+// the upsert the write path uses.
+//
+// The backfill reads a batch, quantises it, and writes it in a separate
+// transaction. Anything can commit in that gap — the file watcher reindexing a
+// saved file, an admin deleting a project — so the write has to be harmless
+// against both, without taking a lock that would make the watcher wait on a
+// background job. Two clauses do that:
+//
+//   - WHERE EXISTS: a doc deleted in the gap is not resurrected. Without it the
+//     backfill would reinsert compact rows whose float32 originals are gone —
+//     rows that DeleteByFile can never clean up afterwards, because its
+//     subquery finds doc_ids through `vectors`. Every later scan would
+//     shortlist them and every rescore would silently drop them, which reads
+//     as a search returning fewer results for no stated reason.
+//   - DO NOTHING: a doc re-embedded in the gap keeps the compact row upsertBatch
+//     wrote from its NEW embedding, instead of being overwritten by this batch's
+//     quantisation of the old one. The backfill only ever fills gaps; it is
+//     never the more recent writer.
+const backfillQ8SQL = `INSERT INTO vectors_q8 (collection_id, doc_id, language, scale, embedding)
+  SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM vectors WHERE collection_id = ? AND doc_id = ?)
+  ON CONFLICT(collection_id, doc_id) DO NOTHING`
 
 // q8BackfillBatch is how many vectors one backfill transaction converts.
 //
@@ -96,6 +120,24 @@ func clearQ8Ready(ctx context.Context, tx *sql.Tx, collID int64) error {
 	return nil
 }
 
+// clearCollectionQ8Ready withdraws a collection's completion flag and forgets
+// the cached answer, so the very next search falls back to the exact scan.
+func (s *Store) clearCollectionQ8Ready(ctx context.Context, collID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+	if err := clearQ8Ready(ctx, tx, collID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.forgetQ8(collID)
+	return nil
+}
+
 // q8Ready reports whether the scan may read vectors_q8 for this collection.
 //
 // Cached in memory because it is consulted on every search and the answer only
@@ -106,20 +148,24 @@ func (s *Store) q8Ready(ctx context.Context, collID int64) bool {
 		return false
 	}
 	s.q8Mu.Lock()
-	ready, known := s.q8State[collID]
+	_, ready := s.q8State[collID]
 	s.q8Mu.Unlock()
-	if known && ready {
+	if ready {
 		return true
 	}
 
+	// Only positives are cached, and presence IS the answer — there is no
+	// stored false to accidentally honour. A collection that is not ready yet
+	// may become ready at any moment (the backfill is running), so a negative
+	// has to be re-asked; a positive never reverts without going through
+	// forgetQ8.
 	var one int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT 1 FROM q8_state WHERE collection_id = ?`, collID).Scan(&one)
 	switch {
 	case err == nil:
-		ready = true
-	case err == sql.ErrNoRows:
-		ready = false
+	case errors.Is(err, sql.ErrNoRows):
+		return false
 	default:
 		// A probe that errors must not upgrade the scan: falling back to the
 		// float32 path answers the query correctly.
@@ -127,9 +173,9 @@ func (s *Store) q8Ready(ctx context.Context, collID int64) bool {
 		return false
 	}
 	s.q8Mu.Lock()
-	s.q8State[collID] = ready
+	s.q8State[collID] = true
 	s.q8Mu.Unlock()
-	return ready
+	return true
 }
 
 // forgetQ8 drops a collection's cached readiness (after a delete). The next
@@ -220,6 +266,7 @@ func (s *Store) backfillQ8(ctx context.Context) error {
 		"db", s.dbPath, "collections", len(pending))
 
 	var converted int64
+	var failed int
 	for _, collID := range pending {
 		n, err := s.backfillCollection(ctx, collID)
 		converted += n
@@ -227,12 +274,22 @@ func (s *Store) backfillQ8(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("collection %d: %w", collID, err)
+			// One collection's failure must not cost the other forty-two.
+			// The realistic cause is a collection deleted out from under the
+			// walk — an admin removing a project, or the orphan sweep — which
+			// makes the next insert fail its foreign key. Aborting there would
+			// leave every collection after it on the float32 scan until
+			// somebody restarted the server, and the only trace would be one
+			// warn line.
+			failed++
+			s.logger.Warn("vectorstore: could not build the compact scan index for a collection",
+				"db", s.dbPath, "collection_id", collID, "err", err)
+			continue
 		}
 	}
 	s.logger.Warn("vectorstore: compact scan index built",
-		"db", s.dbPath, "collections", len(pending), "vectors", converted,
-		"took", time.Since(started).Round(time.Second))
+		"db", s.dbPath, "collections", len(pending)-failed, "failed", failed,
+		"vectors", converted, "took", time.Since(started).Round(time.Second))
 	return nil
 }
 
@@ -245,6 +302,9 @@ func (s *Store) pendingQ8Bytes(ctx context.Context) (int64, error) {
 	}
 	defer s.release()
 	var n int64
+	// LENGTH(embedding)/4 is the compact row's blob length derived from the
+	// float32 one — same arithmetic as sizeExprQ8, from the only table that
+	// has the rows yet.
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(LENGTH(embedding)/4 + LENGTH(doc_id) + LENGTH(language) + 16), 0)
 		  FROM vectors
@@ -259,7 +319,7 @@ func (s *Store) pendingQ8Bytes(ctx context.Context) (int64, error) {
 // incomplete.
 func (s *Store) backfillCollection(ctx context.Context, collID int64) (int64, error) {
 	var (
-		after     string
+		after     int64
 		converted int64
 	)
 	for {
@@ -288,15 +348,27 @@ func (s *Store) backfillCollection(ctx context.Context, collID int64) (int64, er
 	}
 }
 
-// backfillBatch converts up to q8BackfillBatch vectors whose doc_id sorts
-// after `after`, and returns how many it converted and the last doc_id it saw.
+// backfillBatch converts up to q8BackfillBatch vectors whose rowid is above
+// `after`, and returns how many it converted and the last rowid it saw.
 //
-// Keyset pagination rather than OFFSET: the walk must resume where it stopped
-// without re-reading everything before it, and doc_ids are unique within a
-// collection, which makes them a total order to page over.
-func (s *Store) backfillBatch(ctx context.Context, collID int64, after string) (int64, string, error) {
+// Keyset pagination rather than OFFSET, so resuming does not re-read
+// everything before the cursor. On ROWID and idx_vec_coll rather than on
+// doc_id: `vectors` is a rowid table whose composite primary key is a separate
+// index, so paging in doc_id order would look up ~9 kB rows scattered across
+// the collection's whole rowid span — the same 1.8x that made scanSQL pick
+// idx_vec_coll over idx_vec_coll_file (see sqlite.go). Rows inserted ahead of
+// the cursor while the walk runs need no special handling: upsertBatch writes
+// their compact copy itself.
+//
+// The batch does NOT hold a lock across its read and its write, and does not
+// need to. Two statement-level rules make the gap between them harmless:
+// the insert is conditional on the vectors row still existing, so a delete
+// that commits in the gap cannot be undone; and it never overwrites an
+// existing compact row, so an upsert that commits in the gap keeps its own
+// fresher quantisation instead of being clobbered by this one's stale copy.
+func (s *Store) backfillBatch(ctx context.Context, collID int64, after int64) (int64, int64, error) {
 	if !s.acquire() {
-		return 0, "", ErrClosed
+		return 0, 0, ErrClosed
 	}
 	defer s.release()
 
@@ -314,21 +386,22 @@ func (s *Store) backfillBatch(ctx context.Context, collID int64, after string) (
 	// and the thing most likely to want that lock is the file watcher
 	// reindexing a file someone just saved.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT doc_id, language, embedding FROM vectors
-		 WHERE collection_id = ? AND doc_id > ?
-		 ORDER BY doc_id LIMIT ?`, collID, after, q8BackfillBatch)
+		SELECT rowid, doc_id, language, embedding FROM vectors INDEXED BY idx_vec_coll
+		 WHERE collection_id = ? AND rowid > ?
+		 ORDER BY rowid LIMIT ?`, collID, after, q8BackfillBatch)
 	if err != nil {
-		return 0, "", fmt.Errorf("read vectors: %w", err)
+		return 0, 0, fmt.Errorf("read vectors: %w", err)
 	}
 	var scratch []float32
 	for rows.Next() {
 		var (
+			rowID           int64
 			docID, language string
 			raw             sql.RawBytes
 		)
-		if err := rows.Scan(&docID, &language, &raw); err != nil {
+		if err := rows.Scan(&rowID, &docID, &language, &raw); err != nil {
 			rows.Close()
-			return 0, "", fmt.Errorf("scan vector: %w", err)
+			return 0, 0, fmt.Errorf("scan vector: %w", err)
 		}
 		var vec []float32
 		vec, scratch = blobFloats(raw, scratch)
@@ -336,51 +409,40 @@ func (s *Store) backfillBatch(ctx context.Context, collID int64, after string) (
 		// RawBytes it was derived from.
 		blob, scale := quantizeInt8(vec)
 		batch = append(batch, q8Row{docID: docID, language: language, scale: scale, blob: blob})
-		last = docID
+		last = rowID
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, "", fmt.Errorf("read vectors: %w", err)
+		return 0, 0, fmt.Errorf("read vectors: %w", err)
 	}
 	rows.Close()
 	if len(batch) == 0 {
-		// The collection is fully converted. Marking it here — rather than
-		// after the loop in the caller — keeps "the data is complete" and "the
-		// flag says so" in the same transaction as the query that proved it.
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return 0, "", err
-		}
-		defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
-		if err := markQ8Ready(ctx, tx, collID); err != nil {
-			return 0, "", err
-		}
-		if err := tx.Commit(); err != nil {
-			return 0, "", err
-		}
-		s.q8Mu.Lock()
-		s.q8State[collID] = true
-		s.q8Mu.Unlock()
-		return 0, last, nil
+		// The cursor ran off the end: every row this collection had when the
+		// walk started now has a compact copy, and every row written since got
+		// one from upsertBatch. Completeness does not rest on this statement
+		// being in the same transaction as anything — it rests on the two
+		// insert rules above, which hold whatever commits in between.
+		return 0, last, s.markCollectionQ8Ready(ctx, collID)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, "", err
+		return 0, 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
-	stmt, err := tx.PrepareContext(ctx, upsertQ8SQL)
+	stmt, err := tx.PrepareContext(ctx, backfillQ8SQL)
 	if err != nil {
-		return 0, "", err
+		return 0, 0, err
 	}
 	defer stmt.Close()
 	for _, r := range batch {
-		if _, err := stmt.ExecContext(ctx, collID, r.docID, r.language, r.scale, r.blob); err != nil {
-			return 0, "", fmt.Errorf("write q8 row: %w", err)
+		if _, err := stmt.ExecContext(ctx, collID, r.docID, r.language, r.scale, r.blob,
+			collID, r.docID); err != nil {
+			return 0, 0, fmt.Errorf("write q8 row: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, "", err
+		return 0, 0, err
 	}
 	return int64(len(batch)), last, nil
 }

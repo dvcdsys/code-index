@@ -121,10 +121,12 @@ const idleConnTimeout = 30 * time.Second
 // costs speed, never answers, which is what lets the backfill run in the
 // background while searches fall back to the float32 scan.
 //
-// `q8_state` records that a collection's q8 rows are complete, and at which
-// dimension. Without it, "is this collection ready" would be a COUNT(*) over
-// both tables on every query — the same mistake that made the stale-FTS probe
-// cost 53 ms per workspace search.
+// `q8_state` records that a collection's q8 rows are complete. Without it,
+// "is this collection ready" would be a COUNT(*) over both tables on every
+// query — the same mistake that made the stale-FTS probe cost 53 ms per
+// workspace search. It carries no dimension: the scan compares each row's blob
+// length against the query's own, so a row left by a different model is
+// skipped per row rather than gated per collection.
 //
 // Two indexes, and the difference between them matters:
 //

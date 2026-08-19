@@ -92,8 +92,18 @@ SELECT c.name, COALESCE(SUM(LENGTH(vc.content) + LENGTH(vc.doc_id)), 0)
 // bytes and it is real disk, so leaving it out would make the Resources screen
 // under-report the store by ~25% — the same kind of quiet mismatch the WAL
 // high-water mark used to cause.
+// sizeExprQ8 is the compact copy's per-row logical byte count, in the same
+// shape as sizeExprVectors and pasted in no more places than it is.
+//
+// Reading it walks the compact table's leaf pages — about a fifth of what the
+// same question costs over `vectors`, and behind the maintenance service's TTL
+// cache either way, so it is answered rarely. If that stops being true, the
+// cheap replacement is recording the total at backfill completion rather than
+// making the aggregate faster.
+const sizeExprQ8 = `LENGTH(q.embedding) + LENGTH(q.doc_id) + LENGTH(q.language) + 16`
+
 const q8SizeSQL = `
-SELECT c.name, COALESCE(SUM(LENGTH(q.embedding) + LENGTH(q.doc_id) + LENGTH(q.language) + 16), 0)
+SELECT c.name, COALESCE(SUM(` + sizeExprQ8 + `), 0)
   FROM collections c
   LEFT JOIN vectors_q8 q ON q.collection_id = c.id
  GROUP BY c.id`
@@ -193,8 +203,8 @@ func (s *Store) CollectionSizeBytes(projectPath string) (int64, bool) {
 		return 0, false
 	}
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(LENGTH(embedding) + LENGTH(doc_id) + LENGTH(language) + 16), 0)
-		  FROM vectors_q8 WHERE collection_id = ?`, collID).Scan(&q8Bytes); err != nil {
+		SELECT COALESCE(SUM(`+sizeExprQ8+`), 0)
+		  FROM vectors_q8 q WHERE q.collection_id = ?`, collID).Scan(&q8Bytes); err != nil {
 		return 0, false
 	}
 	return vecBytes + contentBytes + q8Bytes, true

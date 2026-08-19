@@ -19,6 +19,18 @@ import (
 // of scanners rather than spawn a hundred threads and a hundred page caches.
 var scanSlots = make(chan struct{}, max(2, runtime.NumCPU()))
 
+// acquireScanSlot takes one of the process-wide scan slots, returning the
+// release function. A cancelled context gives up the wait rather than the
+// query: a caller that has already gone away must not hold a scanner.
+func acquireScanSlot(ctx context.Context) (func(), error) {
+	select {
+	case scanSlots <- struct{}{}:
+		return func() { <-scanSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // scanSQL streams one collection.
 //
 // INDEXED BY is not an optimisation hint, it is a guarantee, and the choice of
@@ -166,6 +178,16 @@ func (s *Store) Search(ctx context.Context, projectPath string, queryEmbedding [
 // 4x for larger k. The cost of a wider shortlist is one float32 row each —
 // 9 kB — against a scan that just read thousands of times that, which is why
 // the floor is generous rather than tight.
+//
+// A fixed width cannot be exact in the worst case, and it is worth stating
+// which case that is: topK rejects boundary ties strictly, so a collection
+// holding more than `shortlist` documents within one quantisation step of each
+// other — a file vendored a hundred times, the near-duplicate clusters
+// q8Corpus models — truncates the tie in scan order, and the rescore cannot
+// recover a document that never reached it. Extending the shortlist to
+// swallow ties at the boundary would close it. No corpus measured so far has
+// needed that, and the documentation says "measured 1.000", not "exact",
+// because of it.
 func q8Shortlist(limit int) int {
 	if n := 4 * limit; n > 64 {
 		return n
@@ -201,6 +223,15 @@ func q8Filterable(where map[string]string) bool {
 func (s *Store) rank(ctx context.Context, collID int64, q []float32, limit int,
 	where map[string]string, clauses []string, args []any) ([]candidate, error) {
 
+	if !q8Filterable(where) {
+		// Correct, and quietly ~3.4x more expensive per vector. Said out loud
+		// because the way this gets slow is a new filter key appearing in the
+		// HTTP layer: nothing breaks, nothing errors, large collections just
+		// go back to reading 9 kB per vector. TestQ8FilterableCoversEveryFilter
+		// is the compile-time half of the same guard.
+		s.logger.Debug("vectorstore: filter not supported by the compact scan, using the exact one",
+			"collection_id", collID, "filter_keys", len(where))
+	}
 	if q8Filterable(where) && s.q8Ready(ctx, collID) {
 		shortlist, err := s.scanQ8(ctx, collID, q, q8Shortlist(limit), where)
 		if err != nil {
@@ -226,12 +257,11 @@ func (s *Store) rank(ctx context.Context, collID int64, q []float32, limit int,
 
 // scan streams the collection past the dot product, keeping the top K.
 func (s *Store) scan(ctx context.Context, query string, args []any, q []float32, k int) (*topK, error) {
-	select {
-	case scanSlots <- struct{}{}:
-		defer func() { <-scanSlots }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	release, err := acquireScanSlot(ctx)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -240,18 +270,35 @@ func (s *Store) scan(ctx context.Context, query string, args []any, q []float32,
 	defer rows.Close()
 
 	top := newTopK(k)
+	if err := streamExact(rows, q, top); err != nil {
+		return nil, err
+	}
+	return top, nil
+}
+
+// streamExact drives (doc_id, embedding) rows past the exact dot product and
+// keeps the top K. Shared by the float32 scan and by the rescore, which are
+// the same loop over the same columns with different WHERE clauses — and the
+// float32 decoding protocol is exactly the kind of thing that rots when it
+// exists in two places.
+//
+// Both columns are read as RawBytes, which is the whole point: the driver
+// hands back a view of its own buffer, valid only until the next Next(). The
+// embedding is consumed immediately by the dot product, and the doc_id becomes
+// a Go string only for a row that actually enters the heap — K allocations
+// over a scan instead of one per row, which at 1.9M rows per workspace query
+// is the difference between a few thousand strings and sixty megabytes of
+// garbage.
+func streamExact(rows *sql.Rows, q []float32, top *topK) error {
 	var (
-		docID   string
+		docID   sql.RawBytes
 		raw     sql.RawBytes
 		scratch []float32
 	)
 	dim := len(q)
 	for rows.Next() {
-		// RawBytes avoids a copy of every embedding; it is only valid until
-		// the next Next(), which is fine because the dot product consumes it
-		// immediately.
 		if err := rows.Scan(&docID, &raw); err != nil {
-			return nil, err
+			return err
 		}
 		if len(raw)/4 != dim {
 			// A row from a different embedding model (namespaces are supposed
@@ -264,10 +311,10 @@ func (s *Store) scan(ctx context.Context, query string, args []any, q []float32,
 		vec, scratch = blobFloats(raw, scratch)
 		score := dot(q, vec)
 		if top.qualifies(score) {
-			top.add(candidate{docID: docID, score: score})
+			top.add(candidate{docID: string(docID), score: score})
 		}
 	}
-	return top, rows.Err()
+	return rows.Err()
 }
 
 // scanQ8 streams the compact copy and returns the shortlist in approximate
@@ -279,20 +326,25 @@ func (s *Store) scan(ctx context.Context, query string, args []any, q []float32,
 // to choose 64 documents out of 350,000 and not good enough to be shown as a
 // similarity.
 func (s *Store) scanQ8(ctx context.Context, collID int64, q []float32, n int, where map[string]string) ([]candidate, error) {
-	select {
-	case scanSlots <- struct{}{}:
-		defer func() { <-scanSlots }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	release, err := acquireScanSlot(ctx)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
 	// The query is quantised the same way the stored vectors were, and its
 	// scale is constant across the scan, so it cancels out of every
 	// comparison. Only the per-row scale has to be applied.
-	qq, qScale := quantizeInt8(q)
-	if qScale == 0 {
-		return nil, nil
-	}
+	//
+	// A zero query (scale 0, every component 0) is NOT short-circuited here.
+	// It scores every row 0, the heap fills with the first rows it sees, and
+	// the caller gets `limit` results at score 0 — which is exactly what the
+	// float32 scan does with the same input. Returning nothing instead would
+	// be more defensible in isolation and wrong in context: the two paths are
+	// chosen per collection, so a workspace fan-out would answer the same
+	// broken query with hits from the collections still on float32 and
+	// silence from the converted ones.
+	qq, _ := quantizeInt8(q)
 
 	query := scanQ8SQL
 	args := []any{collID}
@@ -314,7 +366,7 @@ func (s *Store) scanQ8(ctx context.Context, collID int64, q []float32, n int, wh
 
 	top := newTopK(n)
 	var (
-		docID string
+		docID sql.RawBytes
 		scale float64
 		raw   sql.RawBytes
 	)
@@ -329,9 +381,10 @@ func (s *Store) scanQ8(ctx context.Context, collID int64, q []float32, n int, wh
 		}
 		score := float32(scale) * float32(dotInt8(raw, qq))
 		if top.qualifies(score) {
-			// raw aliases the driver's buffer, docID does not — Scan copies
-			// into a string. Nothing kept here outlives this iteration.
-			top.add(candidate{docID: docID, score: score})
+			// Both columns alias the driver's buffer until the next Next();
+			// the string is materialised only for a row that survives. See
+			// streamExact for why that matters at this row count.
+			top.add(candidate{docID: string(docID), score: score})
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -344,54 +397,44 @@ func (s *Store) scanQ8(ctx context.Context, collID int64, q []float32, n int, wh
 // returns the true top `limit`.
 //
 // This is what makes the compact scan lossless in practice: measured against
-// exact search over 50 real queries, the shortlist contains every document of
-// the exact top-K, and rescoring restores the order the approximation blurred
-// (see q8Shortlist for the table).
+// exact search over 50 real queries, the shortlist contained every document of
+// the exact top-K, and rescoring restored the order the approximation blurred
+// (see q8Shortlist for the table, and for the boundary case a fixed shortlist
+// width cannot rule out).
 func (s *Store) rescore(ctx context.Context, collID int64, q []float32, shortlist []candidate, limit int) ([]candidate, error) {
 	top := newTopK(limit)
-	dim := len(q)
-	var scratch []float32
-
 	for start := 0; start < len(shortlist); start += hydrateBatch {
 		batch := shortlist[start:min(start+hydrateBatch, len(shortlist))]
-		placeholders := make([]string, len(batch))
-		args := make([]any, 0, len(batch)+1)
-		args = append(args, collID)
-		for i, c := range batch {
-			placeholders[i] = "?"
-			args = append(args, c.docID)
-		}
-		rows, err := s.db.QueryContext(ctx,
-			fmt.Sprintf(rescoreSQL, strings.Join(placeholders, ",")), args...)
+		query, args := docIDInList(rescoreSQL, collID, batch)
+		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("rescore: %w", err)
 		}
-		for rows.Next() {
-			var (
-				docID string
-				raw   sql.RawBytes
-			)
-			if err := rows.Scan(&docID, &raw); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("rescore: %w", err)
-			}
-			if len(raw)/4 != dim {
-				continue
-			}
-			var vec []float32
-			vec, scratch = blobFloats(raw, scratch)
-			score := dot(q, vec)
-			if top.qualifies(score) {
-				top.add(candidate{docID: docID, score: score})
-			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
+		err = streamExact(rows, q, top)
+		rows.Close()
+		if err != nil {
 			return nil, fmt.Errorf("rescore: %w", err)
 		}
-		rows.Close()
 	}
 	return top.sorted(), nil
+}
+
+// docIDInList fills a %s-templated IN-list with one placeholder per candidate
+// and returns the statement with its arguments, collection first.
+//
+// Shared by the rescore and the hydrate because they ask the same question of
+// the same key — "these doc_ids, in this collection" — and both are already
+// chunked by hydrateBatch so neither can exceed SQLite's bound-parameter
+// ceiling.
+func docIDInList(tmpl string, collID int64, batch []candidate) (string, []any) {
+	placeholders := make([]string, len(batch))
+	args := make([]any, 0, len(batch)+1)
+	args = append(args, collID)
+	for i, c := range batch {
+		placeholders[i] = "?"
+		args = append(args, c.docID)
+	}
+	return fmt.Sprintf(tmpl, strings.Join(placeholders, ",")), args
 }
 
 // hydrateBatch bounds the IN-list so a caller asking for an enormous limit
@@ -428,14 +471,8 @@ func (s *Store) hydrate(ctx context.Context, collID int64, best []candidate) ([]
 
 // hydrateInto reads one batch of winners into dst.
 func (s *Store) hydrateInto(ctx context.Context, collID int64, batch []candidate, dst map[string]SearchResult) error {
-	placeholders := make([]string, len(batch))
-	args := make([]any, 0, len(batch)+1)
-	args = append(args, collID)
-	for i, c := range batch {
-		placeholders[i] = "?"
-		args = append(args, c.docID)
-	}
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(hydrateSQL, strings.Join(placeholders, ",")), args...)
+	query, args := docIDInList(hydrateSQL, collID, batch)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("vectorstore search hydrate: %w", err)
 	}

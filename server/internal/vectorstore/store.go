@@ -79,9 +79,12 @@ type Options struct {
 	// and every connection maps the file.
 	MMapBytes int64
 	// ScanQuant enables the compact int8 copy that searches scan instead of
-	// the float32 originals (see q8.go). Writes maintain it either way once
-	// it exists; this only governs whether missing copies get built and
-	// whether the scan is allowed to read them.
+	// the float32 originals (see q8.go). It governs the whole lifecycle, not
+	// just reading: with it off, the scan takes the float32 path, the backfill
+	// does not run, and writes DELETE the compact rows of the docs they touch
+	// and withdraw the collection's completion flag. That last part is what
+	// makes the switch safe to flip back — leaving rows behind under a live
+	// flag would mean searching a copy that no longer matches the vectors.
 	//
 	// The zero value is false so that a caller constructing Options by hand —
 	// every test, every tool — gets the plain float32 behaviour unless it asks
@@ -285,8 +288,15 @@ func (s *Store) ensureCollection(ctx context.Context, name string) (int64, error
 		// makes every collection this binary creates exempt from the backfill:
 		// upsertBatch writes both tables in one transaction from now on, so
 		// the property holds by construction. See q8.go.
+		//
+		// Logged, not returned: this flag is a performance hint, and its own
+		// transaction can lose a race for the write lock. Failing the caller
+		// would abort a whole indexing batch over a row whose absence costs
+		// nothing but a slower scan — and the absence self-heals, because the
+		// backfill sets the flag on the next open.
 		if err := s.markCollectionQ8Ready(ctx, id); err != nil {
-			return 0, err
+			s.logger.Warn("vectorstore: could not mark a new collection for the compact scan",
+				"collection", name, "err", err)
 		}
 	}
 	return id, nil
@@ -319,6 +329,10 @@ const upsertQ8SQL = `INSERT INTO vectors_q8 (collection_id, doc_id, language, sc
   VALUES (?,?,?,?,?)
   ON CONFLICT(collection_id, doc_id) DO UPDATE SET
     language=excluded.language, scale=excluded.scale, embedding=excluded.embedding`
+
+// deleteQ8DocSQL removes one doc's compact copy. Used by the write path when
+// the copy is switched off — see upsertBatch for why not writing is not enough.
+const deleteQ8DocSQL = `DELETE FROM vectors_q8 WHERE collection_id = ? AND doc_id = ?`
 
 // ErrCollectionDeleted reports that the collection an upsert was writing into
 // was deleted while the write was in flight — see UpsertChunks.
@@ -382,6 +396,20 @@ func (s *Store) UpsertChunks(ctx context.Context, projectPath string, chunks []C
 		return err
 	}
 
+	// With the compact copy switched off, everything written below leaves it
+	// stale — so the completion flag comes off BEFORE the first byte lands,
+	// not after the last. Ordered that way because the failure it prevents is
+	// a crash mid-write with the flag still set: a collection that says it is
+	// complete while missing whatever the interrupted run had already written.
+	// Each batch also deletes the compact rows of the docs it touches, so a
+	// re-enable rebuilds from the float32 side rather than trusting a copy
+	// that was left behind.
+	if !s.scanQuant {
+		if err := s.clearCollectionQ8Ready(ctx, collID); err != nil {
+			return err
+		}
+	}
+
 	for start := 0; start < len(chunks); start += upsertBatchSize {
 		end := min(start+upsertBatchSize, len(chunks))
 		if err := s.upsertBatch(ctx, collID, chunks[start:end], embeddings[start:end], start); err != nil {
@@ -416,27 +444,23 @@ func (s *Store) upsertBatch(ctx context.Context, collID int64, chunks []Chunk, e
 		return err
 	}
 	defer contentStmt.Close()
-	// With the compact copy switched off, this batch would leave it stale —
-	// so the completion flag comes off with it, in the same transaction. The
-	// rows already there are harmless (nothing reads them without the flag)
-	// and the backfill overwrites them if the knob is turned back on. Without
-	// this, disabling the copy for one indexing run and re-enabling it later
-	// would leave a collection marked complete and missing everything written
-	// in between — which shows up as search silently returning less.
-	if !s.scanQuant {
-		if err := clearQ8Ready(ctx, tx, collID); err != nil {
-			return err
-		}
-		s.forgetQ8(collID)
-	}
+	// One statement per doc either way: write the compact copy, or delete it.
+	// Deleting matters as much as writing. A doc re-embedded while the copy is
+	// off would otherwise keep the compact row of its PREVIOUS embedding, and
+	// the backfill deliberately never overwrites an existing compact row (see
+	// backfillQ8SQL) — so re-enabling the knob would seal that stale row in
+	// behind a completion flag, and searches would score the doc with a vector
+	// it no longer has.
 	var q8Stmt *sql.Stmt
 	if s.scanQuant {
 		q8Stmt, err = tx.PrepareContext(ctx, upsertQ8SQL)
-		if err != nil {
-			return err
-		}
-		defer q8Stmt.Close()
+	} else {
+		q8Stmt, err = tx.PrepareContext(ctx, deleteQ8DocSQL)
 	}
+	if err != nil {
+		return err
+	}
+	defer q8Stmt.Close()
 
 	for i, c := range chunks {
 		emb := embeddings[i]
@@ -451,11 +475,13 @@ func (s *Store) upsertBatch(ctx context.Context, collID int64, chunks []Chunk, e
 		if _, err := contentStmt.ExecContext(ctx, collID, id, c.Content); err != nil {
 			return err
 		}
-		if q8Stmt != nil {
+		if s.scanQuant {
 			q8, scale := quantizeInt8(emb)
 			if _, err := q8Stmt.ExecContext(ctx, collID, id, c.Language, scale, q8); err != nil {
 				return err
 			}
+		} else if _, err := q8Stmt.ExecContext(ctx, collID, id); err != nil {
+			return err
 		}
 	}
 	return tx.Commit()

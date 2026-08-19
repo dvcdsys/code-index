@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -525,5 +526,257 @@ func TestScanQuantOffThenOn(t *testing.T) {
 	if want := exactTopK(allChunks, allEmbs, q, 10, ""); strings.Join(resultKeys(got), ",") != strings.Join(want, ",") {
 		t.Errorf("rows written while the compact copy was off are missing from search\n got: %v\nwant: %v",
 			resultKeys(got), want)
+	}
+}
+
+// TestQ8FilterableCoversEveryFilter is a canary, not an invariant.
+//
+// The compact copy carries one metadata column, so exactly one `where` key can
+// be answered from it and every other key silently costs 3.4x more bytes per
+// vector. That trade is fine as long as somebody chose it. What this catches is
+// nobody choosing: a new filterable column added to whereColumns, wired through
+// the HTTP layer, and never considered here — after which large collections
+// quietly go back to the float32 scan whenever that filter is used.
+//
+// If this fails, the fix is a decision, not a rubber stamp: either add the
+// column to vectors_q8 and to scanQ8, or add it to the list below with a note
+// saying the fallback is acceptable for it.
+func TestQ8FilterableCoversEveryFilter(t *testing.T) {
+	fast := map[string]bool{"language": true}
+
+	for key := range whereColumns {
+		got := q8Filterable(map[string]string{key: "x"})
+		if got != fast[key] {
+			t.Errorf("q8Filterable(%q) = %v, want %v — a filter column changed and "+
+				"nobody decided whether the compact scan should carry it", key, got, fast[key])
+		}
+	}
+
+	// An unknown key with an empty value is dropped by buildWhere (chromem
+	// parity: "" == ""), so it must not disqualify the fast path either.
+	if !q8Filterable(map[string]string{"nonsense": ""}) {
+		t.Error("an unknown key with an empty value should not force the exact scan")
+	}
+	// An unknown key with a value matches nothing at all; Search short-circuits
+	// before either scan, so which path it would have taken is moot — but it
+	// must not be reported as fast-path-able.
+	if q8Filterable(map[string]string{"nonsense": "x"}) {
+		t.Error("an unknown key with a value should not be treated as compact-scannable")
+	}
+}
+
+// currentQ8Mismatches returns the doc_ids whose compact row disagrees with the
+// float32 vector it is supposed to be derived from, plus the count of compact
+// rows with no float32 row at all.
+//
+// Both are invisible in normal operation, which is why they are worth asserting
+// directly. An orphan is shortlisted by every scan and dropped by every
+// rescore, so it costs a result slot and says nothing. A stale row scores its
+// document with a vector the document no longer has — it does not disappear,
+// it ranks wrong.
+func currentQ8Mismatches(t *testing.T, s *Store) (stale []string, orphans int) {
+	t.Helper()
+	rows, err := s.db.Query(`
+		SELECT q.doc_id, q.scale, q.embedding, v.embedding
+		  FROM vectors_q8 q
+		  LEFT JOIN vectors v ON v.collection_id = q.collection_id AND v.doc_id = q.doc_id`)
+	if err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			docID    string
+			scale    float64
+			q8, f32b []byte
+		)
+		if err := rows.Scan(&docID, &scale, &q8, &f32b); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if f32b == nil {
+			orphans++
+			continue
+		}
+		vec, _ := blobFloats(f32b, nil)
+		wantBlob, wantScale := quantizeInt8(vec)
+		if float32(scale) != wantScale || string(q8) != string(wantBlob) {
+			stale = append(stale, docID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	return stale, orphans
+}
+
+// TestBackfillSurvivesConcurrentWrites is the regression for the gap between
+// the backfill's read and its write.
+//
+// The backfill reads a batch of float32 vectors, quantises them in Go, and
+// writes the results in a separate transaction. It deliberately holds no lock
+// across that gap — the file watcher reindexing a file somebody just saved must
+// not queue behind a background job — so anything can commit in between, and on
+// the load-test fixture the gap is open for 245 seconds of live server.
+//
+// Two things go wrong without the WHERE EXISTS and DO NOTHING clauses in
+// backfillQ8SQL, and neither surfaces as an error:
+//
+//   - a document deleted in the gap gets its compact row reinserted, and
+//     nothing can ever remove it again — DeleteByFile finds doc_ids through
+//     `vectors`, where the row no longer is;
+//   - a document re-embedded in the gap has its fresh compact row overwritten
+//     by this batch's quantisation of the embedding it just replaced.
+//
+// The assertions are invariants rather than an expected interleaving, so this
+// test can only fail for a real reason, whatever the scheduler does.
+func TestBackfillSurvivesConcurrentWrites(t *testing.T) {
+	const (
+		dim   = 256
+		files = 40
+		per   = 50
+	)
+	ctx := context.Background()
+	s := openStore(t)
+
+	r := rand.New(rand.NewSource(17))
+	writeFile := func(file string, seed int64) {
+		fr := rand.New(rand.NewSource(seed))
+		chunks := make([]Chunk, per)
+		embs := make([][]float32, per)
+		for i := range chunks {
+			chunks[i] = Chunk{
+				Content: fmt.Sprintf("%s chunk %d", file, i), FilePath: file,
+				StartLine: i*10 + 1, EndLine: i*10 + 9,
+				ChunkType: "function", SymbolName: fmt.Sprintf("S%03d", i), Language: "go",
+			}
+			embs[i] = randNorm(fr, dim)
+		}
+		if err := s.UpsertChunks(ctx, "/race", chunks, embs); err != nil {
+			t.Errorf("upsert %s: %v", file, err)
+		}
+	}
+	for i := 0; i < files; i++ {
+		writeFile(fmt.Sprintf("src/f%02d.go", i), int64(i))
+	}
+	_ = r
+
+	// Back to what an older binary would have left: float32 only.
+	stripQ8(t, s)
+
+	collID, ok, err := s.collectionID(ctx, collectionName("/race"))
+	if err != nil || !ok {
+		t.Fatalf("collection id: %v ok=%v", err, ok)
+	}
+
+	// The backfill walks the collection while the watcher churns it.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := s.backfillCollection(ctx, collID); err != nil {
+			t.Errorf("backfill: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < files; i += 2 {
+			file := fmt.Sprintf("src/f%02d.go", i)
+			if i%4 == 0 {
+				// Deleted for good — the case that produces orphans.
+				if err := s.DeleteByFile(ctx, "/race", file); err != nil {
+					t.Errorf("delete %s: %v", file, err)
+				}
+				continue
+			}
+			// Re-embedded with different vectors — the case that produces
+			// stale rows. A different seed means every chunk's embedding, and
+			// therefore its quantisation, changes.
+			writeFile(file, int64(1000+i))
+		}
+	}()
+	wg.Wait()
+
+	stale, orphans := currentQ8Mismatches(t, s)
+	if orphans != 0 {
+		t.Errorf("%d compact rows survive with no vector behind them; "+
+			"nothing can delete these — DeleteByFile looks up doc_ids through `vectors`", orphans)
+	}
+	if len(stale) != 0 {
+		t.Errorf("%d compact rows hold the quantisation of a replaced embedding, e.g. %q; "+
+			"these documents are scored with vectors they no longer have", len(stale), stale[0])
+	}
+
+	// And the collection must still be searchable, by whichever path it ended
+	// up on — a race that leaves it correct but permanently unconverted would
+	// pass the assertions above and still be a bug worth seeing.
+	q := randNorm(rand.New(rand.NewSource(5)), dim)
+	if _, err := s.Search(ctx, "/race", q, 10, nil); err != nil {
+		t.Fatalf("search after the race: %v", err)
+	}
+}
+
+// TestBackfillNeverResurrectsOrOverwrites pins the two SQL clauses the test
+// above depends on, without needing a race to expose them. If backfillQ8SQL is
+// ever simplified back to a plain upsert, this fails deterministically and says
+// which half went missing.
+func TestBackfillNeverResurrectsOrOverwrites(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	chunks, embs := q8Corpus(t, s, "/rules", 4, 64)
+	collID, ok, err := s.collectionID(ctx, collectionName("/rules"))
+	if err != nil || !ok {
+		t.Fatalf("collection id: %v ok=%v", err, ok)
+	}
+	var docID string
+	if err := s.db.QueryRow(
+		`SELECT doc_id FROM vectors WHERE collection_id = ? LIMIT 1`, collID).Scan(&docID); err != nil {
+		t.Fatal(err)
+	}
+	_ = chunks
+	_ = embs
+
+	exec := func(docID string, scale float64, blob []byte) {
+		t.Helper()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+		if _, err := tx.ExecContext(ctx, backfillQ8SQL,
+			collID, docID, "go", scale, blob, collID, docID); err != nil {
+			t.Fatalf("backfill insert: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// DO NOTHING: an existing compact row is the fresher one and must survive.
+	var before float64
+	if err := s.db.QueryRow(
+		`SELECT scale FROM vectors_q8 WHERE collection_id = ? AND doc_id = ?`,
+		collID, docID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	exec(docID, before+1, []byte{1, 2, 3})
+	var after float64
+	if err := s.db.QueryRow(
+		`SELECT scale FROM vectors_q8 WHERE collection_id = ? AND doc_id = ?`,
+		collID, docID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Errorf("backfill overwrote a compact row written by the upsert path (scale %v -> %v)", before, after)
+	}
+
+	// WHERE EXISTS: a doc with no vector must not gain one.
+	exec("ghost-doc-id", 0.5, []byte{9})
+	var ghosts int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM vectors_q8 WHERE doc_id = 'ghost-doc-id'`).Scan(&ghosts); err != nil {
+		t.Fatal(err)
+	}
+	if ghosts != 0 {
+		t.Error("backfill inserted a compact row for a document that has no vector")
 	}
 }

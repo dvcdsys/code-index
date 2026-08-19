@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -40,9 +41,10 @@ func scanPages(t *testing.T, s *Store, table string) (leaf, overflow, rows int64
 	return leaf, overflow, rows
 }
 
-// scanTable is the table scanSQL/scanQ8SQL walks. Derived from the SQL rather
-// than hardcoded, so a future change of scan source cannot leave these tests
-// measuring a table nobody reads.
+// scanTable is the table a search walks, and TestLayoutMeasuresTheScannedTable
+// checks that scanQ8SQL still names it — otherwise a change of scan source
+// would leave every measurement below pointed at a table nobody reads, and the
+// numbers would keep passing while meaning nothing.
 const scanTable = "vectors_q8"
 
 // fillDim writes n rows of dimension dim into one collection.
@@ -108,7 +110,9 @@ func TestScanPackingEfficiency(t *testing.T) {
 
 			leaf, overflow, rows := scanPages(t, s, scanTable)
 			perVec := float64((leaf+overflow)*pageSize) / float64(rows)
-			payload := float64(scanPayloadBytes(dim))
+			// One byte per component: what the scan reads, against what it
+			// reads it for.
+			payload := float64(dim)
 			ratio := perVec / payload
 
 			t.Logf("dim=%d rows=%d leaf=%d overflow=%d  %.0f B/vector  %.2fx payload",
@@ -153,5 +157,14 @@ func TestScanBytesPerVectorBudget(t *testing.T) {
 			"a 1.9M-vector workspace query moves %.1f GB instead of %.1f GB",
 			perVec, dim, maxBytesPerVector,
 			perVec*1.9e6/1e9, float64(maxBytesPerVector)*1.9e6/1e9)
+	}
+}
+
+// TestLayoutMeasuresTheScannedTable keeps the two constants honest. dbstat is
+// asked about a table by name, and a name is exactly the kind of thing that
+// survives a refactor that moved the data somewhere else.
+func TestLayoutMeasuresTheScannedTable(t *testing.T) {
+	if !strings.Contains(scanQ8SQL, " "+scanTable+" ") {
+		t.Fatalf("the scan reads a table other than %q:\n%s", scanTable, scanQ8SQL)
 	}
 }

@@ -205,10 +205,21 @@ real query-side embeddings, recall of the exact float32 top-K:
 | 200 | 1.000 | 1.000 |
 
 Without rescoring at all the int8 ranking alone gives 0.994 at both k — the
-quantisation misorders near-ties, it does not lose the documents, which is
-exactly why re-reading a few dozen exact vectors recovers all of them.
+quantisation misorders near-ties, it does not lose the documents, which is why
+re-reading a few dozen exact vectors recovered every one of them here.
 `q8Shortlist` therefore uses a floor of 64 and 4x the limit above it. Scan CPU
 in the same run: 127 ms per query float32, 42 ms int8 (3.0x).
+
+Two different guarantees, worth keeping apart. **Scores are exact by
+construction**: every number a caller sees is the cosine against the float32
+vector, computed by the rescore. **The result set is an approximation** whose
+error was measured at zero on this corpus and is not proved at zero in general
+— the shortlist is a fixed size and `topK` rejects boundary ties strictly, so a
+collection holding more than `shortlist` documents inside one quantisation step
+of each other (a file vendored a hundred times, say) can truncate a tie in scan
+order, and the rescore cannot recover a document that was never shortlisted.
+Widening the shortlist to swallow boundary ties would close that; it has not
+been needed on any corpus measured so far.
 
 Scores returned to callers are always the exact cosine, never the int8
 estimate. That is load-bearing beyond cosmetics: `min_score` thresholds on it,
