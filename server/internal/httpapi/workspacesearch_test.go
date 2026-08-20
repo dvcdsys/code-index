@@ -1192,11 +1192,25 @@ func TestWorkspaceSearch_ReportsPhaseTimings(t *testing.T) {
 	// The max of a phase cannot exceed its sum, whatever the machine was
 	// doing at the time. This is the one relationship worth pinning: it
 	// catches a sum and a max wired to the wrong accumulator, which would
-	// otherwise look plausible in every log line.
-	for _, phase := range []string{"dense", "bm25"} {
-		if sum, max := num(phase+"_sum_ms"), num(phase+"_max_ms"); max > sum {
-			t.Errorf("%s_max_ms (%d) exceeds %s_sum_ms (%d)", phase, max, phase, sum)
-		}
+	// otherwise look plausible in every log line. Only dense is split this
+	// way — BM25 is a single workspace-wide query, so it reports one
+	// number.
+	if sum, max := num("dense_sum_ms"), num("dense_max_ms"); max > sum {
+		t.Errorf("dense_max_ms (%d) exceeds dense_sum_ms (%d)", max, sum)
+	}
+	// bm25_ms is a plain field assigned in exactly one place. Drop that
+	// assignment and payload() still emits "bm25_ms": 0, the presence loop
+	// above still passes, and every log line reads as though BM25 were free —
+	// which is the number that pointed at an 18.6 s query the day this landed.
+	//
+	// Be clear about what this does and does not buy: a phase inside the
+	// fan-out cannot outlast it, so a timer around the wrong span is caught.
+	// A DROPPED assignment is not — 0 <= fanout holds — and it cannot be,
+	// because an in-memory corpus legitimately rounds to 0 ms and "> 0" would
+	// be flaky. That gap is real; the alternative is a flaky test, which is
+	// worse than an honest partial one.
+	if bm, fan := num("bm25_ms"), num("fanout_ms"); bm > fan {
+		t.Errorf("bm25_ms (%d) exceeds fanout_ms (%d)", bm, fan)
 	}
 	assertCounterOrder(t, num)
 }
@@ -1466,5 +1480,267 @@ func TestWorkspaceSearch_LogsSlowQueriesThatSearchedNothing(t *testing.T) {
 	}
 	if _, present := raw["timings"]; present {
 		t.Errorf("a search that never ran reported timings: %v", raw["timings"])
+	}
+}
+
+// TestWorkspaceSearch_BM25HitsStayInTheirOwnProject is the handler-level guard
+// on the partition. BM25 is now one workspace-wide query whose rows are split
+// back out per project; a mis-keyed split would hand one repo another repo's
+// hits, and the symptom would be a plausible-looking result set rather than an
+// error. The dense side cannot mask it here: only one repo is near the query
+// vector, so any BM25-driven repo in the panel had to come from the split.
+func TestWorkspaceSearch_BM25HitsStayInTheirOwnProject(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	query := l2([]float32{1, 0, 0, 0})
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: query})
+	wsID := createWS(t, router, "partition")
+
+	// Three repos, each with a literal token only it contains, so BM25's
+	// answer per repo is unambiguous and checkable.
+	repos := []struct{ path, token, file string }{
+		{"github.com/o/alpha@main", "ZZALPHAZZ", "a.go"},
+		{"github.com/o/beta@main", "ZZBETAZZ", "b.go"},
+		{"github.com/o/gamma@main", "ZZGAMMAZZ", "c.go"},
+	}
+	for i, r := range repos {
+		seedRepoWithChunks(t, d, vs, wsID, r.path,
+			[]vectorstore.Chunk{
+				{Content: "func handle() { /* " + r.token + " */ }", FilePath: r.file,
+					StartLine: 1, EndLine: 9, ChunkType: "function",
+					SymbolName: "handle", Language: "go"},
+			},
+			// Only alpha is anywhere near the query vector.
+			[][]float32{l2([]float32{1.0, float32(i), 0.0, 0.0})},
+		)
+	}
+
+	// Ask for beta's token. Beta must be the repo carrying the hit.
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=ZZBETAZZ&min_score=0", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Projects []struct {
+			ProjectPath string  `json:"project_path"`
+			BM25Score   float64 `json:"bm25_score"`
+		} `json:"projects"`
+		Chunks []struct {
+			ProjectPath string `json:"project_path"`
+			FilePath    string `json:"file_path"`
+		} `json:"chunks"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var betaBM25, otherBM25 float64
+	for _, p := range body.Projects {
+		if p.ProjectPath == "github.com/o/beta@main" {
+			betaBM25 = p.BM25Score
+			continue
+		}
+		if p.BM25Score > otherBM25 {
+			otherBM25 = p.BM25Score
+		}
+	}
+	if betaBM25 <= 0 {
+		t.Errorf("beta has bm25_score %v — its own token did not reach it: %+v", betaBM25, body.Projects)
+	}
+	if otherBM25 != 0 {
+		t.Errorf("a repo that contains none of the query's tokens has bm25_score %v — "+
+			"the partition leaked: %+v", otherBM25, body.Projects)
+	}
+	for _, c := range body.Chunks {
+		if c.FilePath == "b.go" && c.ProjectPath != "github.com/o/beta@main" {
+			t.Errorf("beta's chunk is attributed to %s", c.ProjectPath)
+		}
+	}
+}
+
+// TestWorkspaceSearch_SurvivesBM25Failure covers the blast radius this change
+// creates. BM25 used to fail per project; now one failing query costs every
+// project its sparse signal at once. The fallback has to be the same one a
+// pre-FTS install already lives with — dense-only results, no failed_repos,
+// no 500 — because the alternative is that one broken table takes down
+// workspace search entirely.
+func TestWorkspaceSearch_SurvivesBM25Failure(t *testing.T) {
+	d, err := dbOpenMemory(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	vs := openTestVectorStore(t)
+	query := l2([]float32{1, 0, 0, 0})
+	router := newSearchRouter(t, d, vs, fixedEmbedder{q: query})
+	wsID := createWS(t, router, "nofts")
+	seedRepoWithChunks(t, d, vs, wsID, "github.com/o/near@main",
+		[]vectorstore.Chunk{
+			{Content: "func handle() {}", FilePath: "n.go", StartLine: 1, EndLine: 9,
+				ChunkType: "function", SymbolName: "handle", Language: "go"},
+		},
+		[][]float32{l2([]float32{1.0, 0.0, 0.0, 0.0})},
+	)
+
+	// Break only the FTS side. chunks_meta survives, so the stale-FTS probe
+	// still answers and the repo is not reported as needing a reindex — the
+	// failure is the query, not the data.
+	if _, err := d.Exec(`DROP TABLE chunks_fts`); err != nil {
+		t.Fatalf("drop chunks_fts: %v", err)
+	}
+
+	rr := doJSON(t, router, http.MethodGet,
+		"/api/v1/workspaces/"+wsID+"/search?q=handle", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 despite the BM25 failure, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Status   string `json:"status"`
+		Projects []struct {
+			ProjectPath string  `json:"project_path"`
+			BM25Score   float64 `json:"bm25_score"`
+			DenseScore  float64 `json:"dense_score"`
+		} `json:"projects"`
+		Chunks      []map[string]any `json:"chunks"`
+		FailedRepos []map[string]any `json:"failed_repos"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Chunks) == 0 {
+		t.Errorf("no chunks — dense should still answer with BM25 broken: %s", rr.Body.String())
+	}
+	if len(body.FailedRepos) != 0 {
+		t.Errorf("a BM25 failure marked repos as failed: %v", body.FailedRepos)
+	}
+	if len(body.Projects) != 1 {
+		t.Fatalf("expected the one repo in the panel, got %+v", body.Projects)
+	}
+	if body.Projects[0].BM25Score != 0 {
+		t.Errorf("bm25_score is %v with no FTS table at all", body.Projects[0].BM25Score)
+	}
+	if body.Projects[0].DenseScore <= 0 {
+		t.Errorf("dense_score is %v — the dense side should be unaffected", body.Projects[0].DenseScore)
+	}
+}
+
+// TestFuseRRF_IsDeterministicAcrossTiedChunks pins the total order in fuseRRF.
+//
+// The function builds its output by ranging over a map, and Go randomises map
+// iteration on purpose. Sorting by RRF alone leaves chunks with equal scores in
+// whatever order the map happened to yield, and sort.SliceStable then preserves
+// that randomness faithfully. Equal RRF is the common case, not a corner one: a
+// chunk found only by dense at rank r and a chunk found only by BM25 at rank r
+// score identically by construction.
+//
+// The symptom was invisible from the projects panel — project scores do not
+// depend on chunk order, so the panel looked stable while rank 0 of the chunk
+// list changed between consecutive calls on the same process and binary.
+//
+// Repeats matter here: with N tied entries a single run has a 1/N! chance of
+// looking sorted by accident, so one call proves nothing.
+func TestFuseRRF_IsDeterministicAcrossTiedChunks(t *testing.T) {
+	mk := func(project, file string, line int) workspaceSearchChunkPayload {
+		return workspaceSearchChunkPayload{
+			ProjectPath: project, FilePath: file,
+			StartLine: line, EndLine: line + 5,
+		}
+	}
+	// Disjoint lists of the same length: every dense chunk at rank r ties
+	// exactly with the BM25 chunk at rank r, so every pair is a tie.
+	var dense, bm25 []workspaceSearchChunkPayload
+	for i := 0; i < 12; i++ {
+		dense = append(dense, mk("p", fmt.Sprintf("d%02d.go", i), 1+i*10))
+		bm25 = append(bm25, mk("p", fmt.Sprintf("b%02d.go", i), 1+i*10))
+	}
+
+	first := fuseRRF(dense, bm25)
+	if len(first) != len(dense)+len(bm25) {
+		t.Fatalf("expected %d fused chunks, got %d", len(dense)+len(bm25), len(first))
+	}
+	for run := 0; run < 20; run++ {
+		got := fuseRRF(dense, bm25)
+		for i := range got {
+			if got[i] != first[i] {
+				t.Fatalf("run %d differs at rank %d: %s/%d vs %s/%d — fusion is "+
+					"not deterministic across tied chunks",
+					run, i, got[i].FilePath, got[i].StartLine,
+					first[i].FilePath, first[i].StartLine)
+			}
+		}
+	}
+
+	// And the ordering must still be by RRF first: a chunk in BOTH lists
+	// outranks any chunk in only one, whatever its key sorts like.
+	both := mk("p", "zzz_last_alphabetically.go", 999)
+	withShared := fuseRRF(append([]workspaceSearchChunkPayload{both}, dense...),
+		append([]workspaceSearchChunkPayload{both}, bm25...))
+	if withShared[0] != both {
+		t.Errorf("the chunk present in both lists is not first: got %s", withShared[0].FilePath)
+	}
+}
+
+// TestSortPanel_OrdersOnRawCandidacyNotTheRoundedCopy covers the last place in
+// this handler where an arbitrary tiebreak decided user-visible output.
+//
+// project_score ships rounded to four decimals. Sorting THAT value invents ties
+// between projects that are not actually tied, and the caller truncates to
+// top_projects right afterwards — so the invented tie decides which repo is
+// shown and which is dropped entirely. Before this, the winner was whichever
+// project came first in workspace membership order (added_at DESC), i.e.
+// insertion history.
+//
+// The two projects here differ by 5e-6 in candidacy: far below round4's
+// resolution, so both display as 0.5000, and the input order is deliberately
+// the reverse of the correct one. Naming the stronger project last
+// alphabetically is what makes this test able to tell "sorted on the raw value"
+// apart from "fell back to the path tiebreak" — both alternatives would put
+// "aaa" first.
+func TestSortPanel_OrdersOnRawCandidacyNotTheRoundedCopy(t *testing.T) {
+	surviving := []projectHits{
+		{ProjectPath: "github.com/o/aaa@main", Candidacy: 0.4999950},
+		{ProjectPath: "github.com/o/zzz@main", Candidacy: 0.5000000},
+	}
+	if round4(surviving[0].Candidacy) != round4(surviving[1].Candidacy) {
+		t.Fatalf("test premise broken: %v and %v do not round to the same value",
+			round4(surviving[0].Candidacy), round4(surviving[1].Candidacy))
+	}
+
+	sortPanel(surviving)
+	if surviving[0].ProjectPath != "github.com/o/zzz@main" {
+		t.Errorf("panel led with %s — the stronger project lost to a tie that "+
+			"only exists after rounding", surviving[0].ProjectPath)
+	}
+}
+
+// TestSortPanel_BreaksGenuineTiesByPath is the other half: when the candidacy
+// really is equal, the order still has to be a function of the query rather
+// than of the order projects happened to arrive in.
+func TestSortPanel_BreaksGenuineTiesByPath(t *testing.T) {
+	mk := func(paths ...string) []projectHits {
+		out := make([]projectHits, 0, len(paths))
+		for _, p := range paths {
+			out = append(out, projectHits{ProjectPath: p, Candidacy: 0.5})
+		}
+		return out
+	}
+	want := []string{"github.com/o/aaa@main", "github.com/o/mmm@main", "github.com/o/zzz@main"}
+	for _, input := range [][]string{
+		{"github.com/o/zzz@main", "github.com/o/mmm@main", "github.com/o/aaa@main"},
+		{"github.com/o/mmm@main", "github.com/o/aaa@main", "github.com/o/zzz@main"},
+		{"github.com/o/aaa@main", "github.com/o/mmm@main", "github.com/o/zzz@main"},
+	} {
+		got := mk(input...)
+		sortPanel(got)
+		for i := range want {
+			if got[i].ProjectPath != want[i] {
+				t.Errorf("input %v -> position %d is %s, want %s",
+					input, i, got[i].ProjectPath, want[i])
+				break
+			}
+		}
 	}
 }

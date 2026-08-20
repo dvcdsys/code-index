@@ -6606,14 +6606,16 @@ components:
             The slowest single project's dense search. May belong to a
             project whose query failed; the fan-out logs a warning of its
             own for those.
-        bm25_sum_ms:
+        bm25_ms:
           type: integer
           description: |
-            FTS5/BM25 search summed across projects, on the same terms as
-            dense_sum_ms.
-        bm25_max_ms:
-          type: integer
-          description: The slowest single project's BM25 search.
+            The workspace's BM25 search. One FTS5 statement covering every
+            project, partitioned per project by a window function — not a
+            sum over projects, which is why it has no matching `_max`
+            field. `MATCH` is evaluated over the whole server's index
+            whatever the scope, so asking once per project repeated the
+            same global work N times and the N queries contended over one
+            index on top of that.
         fuse_ms:
           type: integer
           description: Normalisation, candidacy blending and thresholding.
