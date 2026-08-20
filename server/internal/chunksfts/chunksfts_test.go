@@ -477,3 +477,87 @@ func TestSearchProjects_EmptyInputs(t *testing.T) {
 		t.Errorf("no projects: got %v, %v; want nil, nil", got, err)
 	}
 }
+
+// TestSearchProjects_FetchesPayloadAfterTheTrim pins the query PLAN, which is
+// the only place this bug can live: every equivalence test in this file passes
+// against the slow form too, because the two forms return the same rows.
+//
+// Carrying file_path/content through the CTE makes SQLite materialise them for
+// every globally-matched row before ROW_NUMBER trims — and FTS5 evaluates MATCH
+// over the whole server's index, so the match set has nothing to do with how
+// many rows come back. Measured on the load-test corpus: 15.1 s against 2.8 s
+// on a 263k-row match, and 29.6 s on a 624k-row one, which was slower than the
+// per-project queries the partitioned form replaced.
+//
+// FTS5 reports a rowid-equality lookup as "0:=" and a MATCH scan as "0:M...".
+// The rank-first form does both — scan to match, point lookups for survivors.
+// The payload-in-CTE form only ever scans.
+func TestSearchProjects_FetchesPayloadAfterTheTrim(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCorpus(t, d, []string{"p1", "p2"})
+
+	plan := explain(t, ctx, d, workspaceRankQuery(placeholders(2)),
+		`"retry" OR "backoff"`, "p1", "p2", 3)
+	if !strings.Contains(plan, "VIRTUAL TABLE INDEX 0:=") {
+		t.Errorf("chunks_fts is not looked up by rowid — the payload is being "+
+			"carried through the window sorter again:\n%s", plan)
+	}
+}
+
+// TestExplainDistinguishesTheTwoQueryShapes is the mutation check for the test
+// above, kept in the tree rather than run by hand: it builds the slow form and
+// asserts the plan assertion would REJECT it. Without this, a change to how
+// SQLite reports plans could turn the guard into a tautology that passes on
+// everything, and nothing would say so.
+func TestExplainDistinguishesTheTwoQueryShapes(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCorpus(t, d, []string{"p1", "p2"})
+
+	slow := `
+		WITH hits AS (
+		  SELECT cm.project_path AS pp, cm.rowid AS rid,
+		         cm.file_path, cm.start_line, cm.end_line,
+		         cm.chunk_type, cm.symbol_name, cm.language,
+		         cf.content, bm25(chunks_fts) AS bm
+		    FROM chunks_fts cf
+		    JOIN chunks_meta cm ON cm.rowid = cf.rowid
+		   WHERE chunks_fts MATCH ? AND cm.project_path IN (?,?)
+		)
+		SELECT pp, file_path, start_line, end_line,
+		       chunk_type, symbol_name, language, content, bm
+		  FROM (SELECT *, ROW_NUMBER() OVER (
+		                    PARTITION BY pp ORDER BY bm ASC, rid ASC) AS rn
+		          FROM hits)
+		 WHERE rn <= ?
+		 ORDER BY pp, rn`
+
+	plan := explain(t, ctx, d, slow, `"retry" OR "backoff"`, "p1", "p2", 3)
+	if strings.Contains(plan, "VIRTUAL TABLE INDEX 0:=") {
+		t.Errorf("the payload-in-CTE form reports a rowid lookup, so the plan "+
+			"assertion no longer distinguishes the two shapes:\n%s", plan)
+	}
+}
+
+func explain(t *testing.T, ctx context.Context, d *sql.DB, query string, args ...any) string {
+	t.Helper()
+	rows, err := d.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var a, b, c int
+		var detail string
+		if err := rows.Scan(&a, &b, &c, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		plan.WriteString(detail + "\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate plan: %v", err)
+	}
+	return plan.String()
+}

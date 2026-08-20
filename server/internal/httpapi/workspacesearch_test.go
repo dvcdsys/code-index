@@ -1198,6 +1198,20 @@ func TestWorkspaceSearch_ReportsPhaseTimings(t *testing.T) {
 	if sum, max := num("dense_sum_ms"), num("dense_max_ms"); max > sum {
 		t.Errorf("dense_max_ms (%d) exceeds dense_sum_ms (%d)", max, sum)
 	}
+	// bm25_ms is a plain field assigned in exactly one place. Drop that
+	// assignment and payload() still emits "bm25_ms": 0, the presence loop
+	// above still passes, and every log line reads as though BM25 were free —
+	// which is the number that pointed at an 18.6 s query the day this landed.
+	//
+	// Be clear about what this does and does not buy: a phase inside the
+	// fan-out cannot outlast it, so a timer around the wrong span is caught.
+	// A DROPPED assignment is not — 0 <= fanout holds — and it cannot be,
+	// because an in-memory corpus legitimately rounds to 0 ms and "> 0" would
+	// be flaky. That gap is real; the alternative is a flaky test, which is
+	// worse than an honest partial one.
+	if bm, fan := num("bm25_ms"), num("fanout_ms"); bm > fan {
+		t.Errorf("bm25_ms (%d) exceeds fanout_ms (%d)", bm, fan)
+	}
 	assertCounterOrder(t, num)
 }
 

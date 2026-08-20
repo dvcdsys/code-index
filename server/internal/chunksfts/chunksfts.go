@@ -200,9 +200,24 @@ func DeleteByProject(ctx context.Context, db *sql.DB, projectPath string) error 
 // Empty or all-tokens-too-short queries return a nil slice without
 // hitting the DB — there is nothing to match.
 //
-// For more than one project use SearchProjects: this query costs about
-// the same whichever project it is restricted to, so running it once per
-// project is the expensive way to ask.
+// NOTE: nothing in production calls this any more — workspace search asks
+// SearchProjects for every project at once, and a single-project workspace
+// goes through the same path. It is kept for two reasons, both worth more
+// than the ~40 lines it costs:
+//
+//  1. it is the independent oracle for SearchProjects. The two are
+//     structurally different statements that must return byte-identical
+//     rankings, because the per-project BM25 signal feeds project candidacy
+//     in workspace search — a divergence would silently re-rank the projects
+//     panel with no error and no failed_repos.
+//     TestSearchProjects_MatchesPerProjectQueries is that check, and it is
+//     only worth anything while this stays a separate implementation.
+//     Collapsing it into SearchProjects([]string{p}) would make the test
+//     compare a function to itself;
+//  2. it is the fallback if a single-project regression ever shows up in the
+//     partitioned form.
+//
+// Do not delete it as unused.
 func SearchProject(ctx context.Context, db *sql.DB, projectPath, query string, limit int) ([]Hit, error) {
 	if limit <= 0 {
 		limit = 20
@@ -307,16 +322,49 @@ func searchProjectsBatchInto(ctx context.Context, db *sql.DB, projectPaths []str
 	}
 	args = append(args, perProject)
 
-	// Rank on the cheap columns, then fetch the payload for the rows that
-	// survived. The obvious form — selecting file_path, content and the rest
-	// inside the CTE — makes SQLite materialise all of it for EVERY matched
-	// row before ROW_NUMBER trims to `perProject` per project, and the match
-	// set is the whole server's index. On the load-test fixture a four-common-
-	// word query matched 263,515 rows to return 2,300: carrying the payload
-	// through cost 15.1 s against 2.8 s for this form, and a 624k-row match
-	// cost 29.6 s — worse than the 46 per-project queries this replaced. The
-	// rowid round-trip is the cheap half of the trade.
-	q := fmt.Sprintf(`
+	rows, err := db.QueryContext(ctx, workspaceRankQuery(placeholders(len(projectPaths))), args...)
+	if err != nil {
+		return fmt.Errorf("chunks_fts workspace search: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pp string
+		h, err := scanRankedHit(rows, &pp)
+		if err != nil {
+			return err
+		}
+		dst[pp] = append(dst[pp], h)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate chunks_fts: %w", err)
+	}
+	return nil
+}
+
+// workspaceRankQuery builds the partitioned statement for a placeholder list.
+//
+// Split out so the test that pins the query PLAN builds the same string this
+// does. A copy in the test would drift, and drifting is the entire failure
+// mode being guarded against.
+//
+// Rank on the cheap columns, then fetch the payload for the rows that
+// survived. The obvious form — selecting file_path, content and the rest
+// inside the CTE — makes SQLite materialise all of it for EVERY matched
+// row before ROW_NUMBER trims to `perProject` per project, and the match
+// set is the whole server's index. On the load-test fixture a four-common-
+// word query matched 263,515 rows to return 2,300: carrying the payload
+// through cost 15.1 s against 2.8 s for this form, and a 624k-row match
+// cost 29.6 s — worse than the 46 per-project queries this replaced. The
+// rowid round-trip is the cheap half of the trade.
+//
+// Those numbers came from a bench harness that is NOT in this repository:
+// /loadtests/ is gitignored, corpus and tools alike. To recreate it, time
+// this statement against a corpus with a large match set alongside the
+// same statement with the payload columns moved into `hits` — the gap only
+// appears when the match set is orders of magnitude larger than the result.
+// TestSearchProjects_FetchesPayloadAfterTheTrim is the in-repo guard.
+func workspaceRankQuery(ph string) string {
+	return fmt.Sprintf(`
 		WITH hits AS (
 		  SELECT cm.project_path AS pp, cm.rowid AS rid, bm25(chunks_fts) AS bm
 		    FROM chunks_fts cf
@@ -334,49 +382,31 @@ func searchProjectsBatchInto(ctx context.Context, db *sql.DB, projectPaths []str
 		  JOIN chunks_meta cm ON cm.rowid = r.rid
 		  JOIN chunks_fts cf ON cf.rowid = r.rid
 		 WHERE r.rn <= ?
-		 ORDER BY r.pp, r.rn`, placeholders(len(projectPaths)))
-
-	rows, err := db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return fmt.Errorf("chunks_fts workspace search: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			pp string
-			h  Hit
-		)
-		var (
-			chunkT   sql.NullString
-			symName  sql.NullString
-			language sql.NullString
-			bm       float64
-		)
-		if err := rows.Scan(&pp, &h.FilePath, &h.StartLine, &h.EndLine,
-			&chunkT, &symName, &language, &h.Content, &bm); err != nil {
-			return fmt.Errorf("scan chunks_fts row: %w", err)
-		}
-		h.ChunkType = chunkT.String
-		h.SymbolName = symName.String
-		h.Language = language.String
-		h.Score = -bm
-		dst[pp] = append(dst[pp], h)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate chunks_fts: %w", err)
-	}
-	return nil
+		 ORDER BY r.pp, r.rn`, ph)
 }
 
+// placeholders builds "?,?,?" for an IN list. n is always >= 1: SearchProjects
+// returns early on an empty slice and the batching loop never produces an empty
+// batch. There is deliberately no n == 0 branch — an empty list used to render
+// as IN (NULL), which matches nothing and is indistinguishable from "nothing
+// matched". A syntax error from IN () is the better failure: it is loud, and it
+// happens at the call that is wrong.
 func placeholders(n int) string {
-	if n <= 0 {
-		return "NULL"
-	}
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
 // scanHit reads one single-project ranking row.
-func scanHit(rows *sql.Rows) (Hit, error) {
+func scanHit(rows *sql.Rows) (Hit, error) { return scanRankedHit(rows, nil) }
+
+// scanRankedHit reads one ranking row, optionally preceded by a project_path
+// column (pass nil for the single-project query, which does not select one).
+//
+// Both queries share this because they must produce byte-identical Hits and
+// their only structural difference is that leading column. Two hand-written
+// scans agreeing is exactly the kind of thing that stays true until it
+// quietly does not — and the equivalence test compares the two paths against
+// EACH OTHER, so a mistake made symmetrically in both would pass.
+func scanRankedHit(rows *sql.Rows, pp *string) (Hit, error) {
 	var (
 		h        Hit
 		chunkT   sql.NullString
@@ -384,8 +414,12 @@ func scanHit(rows *sql.Rows) (Hit, error) {
 		language sql.NullString
 		bm       float64
 	)
-	if err := rows.Scan(&h.FilePath, &h.StartLine, &h.EndLine,
-		&chunkT, &symName, &language, &h.Content, &bm); err != nil {
+	dest := []any{&h.FilePath, &h.StartLine, &h.EndLine,
+		&chunkT, &symName, &language, &h.Content, &bm}
+	if pp != nil {
+		dest = append([]any{pp}, dest...)
+	}
+	if err := rows.Scan(dest...); err != nil {
 		return Hit{}, fmt.Errorf("scan chunks_fts row: %w", err)
 	}
 	h.ChunkType = chunkT.String

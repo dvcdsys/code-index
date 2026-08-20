@@ -672,9 +672,12 @@ func (s *Server) fanOutHybrid(
 				"err", berr)
 			return nil
 		}
-		mu.Lock()
+		// No lock: this is the only writer, and every reader runs after
+		// g.Wait(), which is the happens-before. A mutex here would be
+		// decoration that reads like protection — the next person needing
+		// these hits INSIDE the fan-out would see a locked write, assume the
+		// map was safe to touch concurrently, and add a real race.
 		bm25ByProject = hits
-		mu.Unlock()
 		return nil
 	})
 
@@ -761,6 +764,13 @@ func (s *Server) fanOutHybrid(
 			DenseSignal: float32(meanTopN(denseScoresOf(denseHits[i]), workspaceSearchTopNPerProject)),
 			BM25Signal:  float32(meanTopN(bm25ScoresOf(rawBM25), workspaceSearchTopNPerProject)),
 		}
+		// Release this project's dense half now. Fusion used to happen inside
+		// each goroutine, which freed both inputs as it went; doing it here
+		// would otherwise keep every project's dense hits, every project's
+		// BM25 hits and every project's fused copies alive at once — three
+		// sets of chunk payloads for the whole workspace rather than one
+		// project's worth at a time.
+		denseHits[i] = nil
 	}
 	failedOut := make([]workspaceSearchFailedRepoPayload, 0)
 	for i, f := range failed {

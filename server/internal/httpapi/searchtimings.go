@@ -48,12 +48,15 @@ var slowWorkspaceQuery = 2 * time.Second
 
 // searchPhases accumulates one workspace query's timings.
 //
-// The fan-out phases keep a SUM and a MAX, and both are needed: the sum is how
+// The DENSE phase keeps a SUM and a MAX, and both are needed: the sum is how
 // much work the query did, the max is how long the user waited for the slowest
 // project. With perfect parallelism the wall time is the max; with none it is
 // the sum. Measured on the fixture, eight concurrent project searches ran 3.4x
 // faster than the same eight in sequence — so the truth is between the two
 // numbers, and reporting only one of them hides which.
+//
+// BM25 no longer has that shape: it is one workspace-wide statement, so it
+// reports a single duration. See the bm25 field below.
 type searchPhases struct {
 	embed    time.Duration
 	resolve  time.Duration
