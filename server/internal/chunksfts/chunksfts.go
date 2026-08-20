@@ -307,23 +307,34 @@ func searchProjectsBatchInto(ctx context.Context, db *sql.DB, projectPaths []str
 	}
 	args = append(args, perProject)
 
+	// Rank on the cheap columns, then fetch the payload for the rows that
+	// survived. The obvious form — selecting file_path, content and the rest
+	// inside the CTE — makes SQLite materialise all of it for EVERY matched
+	// row before ROW_NUMBER trims to `perProject` per project, and the match
+	// set is the whole server's index. On the load-test fixture a four-common-
+	// word query matched 263,515 rows to return 2,300: carrying the payload
+	// through cost 15.1 s against 2.8 s for this form, and a 624k-row match
+	// cost 29.6 s — worse than the 46 per-project queries this replaced. The
+	// rowid round-trip is the cheap half of the trade.
 	q := fmt.Sprintf(`
 		WITH hits AS (
-		  SELECT cm.project_path AS pp, cm.rowid AS rid,
-		         cm.file_path, cm.start_line, cm.end_line,
-		         cm.chunk_type, cm.symbol_name, cm.language,
-		         cf.content, bm25(chunks_fts) AS bm
+		  SELECT cm.project_path AS pp, cm.rowid AS rid, bm25(chunks_fts) AS bm
 		    FROM chunks_fts cf
 		    JOIN chunks_meta cm ON cm.rowid = cf.rowid
 		   WHERE chunks_fts MATCH ? AND cm.project_path IN (%s)
+		),
+		ranked AS (
+		  SELECT pp, rid, bm,
+		         ROW_NUMBER() OVER (PARTITION BY pp ORDER BY bm ASC, rid ASC) AS rn
+		    FROM hits
 		)
-		SELECT pp, file_path, start_line, end_line,
-		       chunk_type, symbol_name, language, content, bm
-		  FROM (SELECT *, ROW_NUMBER() OVER (
-		                    PARTITION BY pp ORDER BY bm ASC, rid ASC) AS rn
-		          FROM hits)
-		 WHERE rn <= ?
-		 ORDER BY pp, rn`, placeholders(len(projectPaths)))
+		SELECT r.pp, cm.file_path, cm.start_line, cm.end_line,
+		       cm.chunk_type, cm.symbol_name, cm.language, cf.content, r.bm
+		  FROM ranked r
+		  JOIN chunks_meta cm ON cm.rowid = r.rid
+		  JOIN chunks_fts cf ON cf.rowid = r.rid
+		 WHERE r.rn <= ?
+		 ORDER BY r.pp, r.rn`, placeholders(len(projectPaths)))
 
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
