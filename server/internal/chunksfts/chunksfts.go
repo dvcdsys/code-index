@@ -414,11 +414,16 @@ func scanRankedHit(rows *sql.Rows, pp *string) (Hit, error) {
 		language sql.NullString
 		bm       float64
 	)
-	dest := []any{&h.FilePath, &h.StartLine, &h.EndLine,
-		&chunkT, &symName, &language, &h.Content, &bm}
+	// Built in one allocation rather than prepending to a finished slice: the
+	// workspace query returns up to len(projects) * perProject rows — ~2,150
+	// on the 43-project load-test fixture — and this runs per row, inside the
+	// path the rest of this change exists to speed up.
+	dest := make([]any, 0, 9)
 	if pp != nil {
-		dest = append([]any{pp}, dest...)
+		dest = append(dest, pp)
 	}
+	dest = append(dest, &h.FilePath, &h.StartLine, &h.EndLine,
+		&chunkT, &symName, &language, &h.Content, &bm)
 	if err := rows.Scan(dest...); err != nil {
 		return Hit{}, fmt.Errorf("scan chunks_fts row: %w", err)
 	}

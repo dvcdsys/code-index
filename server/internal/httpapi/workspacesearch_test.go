@@ -1682,3 +1682,65 @@ func TestFuseRRF_IsDeterministicAcrossTiedChunks(t *testing.T) {
 		t.Errorf("the chunk present in both lists is not first: got %s", withShared[0].FilePath)
 	}
 }
+
+// TestSortPanel_OrdersOnRawCandidacyNotTheRoundedCopy covers the last place in
+// this handler where an arbitrary tiebreak decided user-visible output.
+//
+// project_score ships rounded to four decimals. Sorting THAT value invents ties
+// between projects that are not actually tied, and the caller truncates to
+// top_projects right afterwards — so the invented tie decides which repo is
+// shown and which is dropped entirely. Before this, the winner was whichever
+// project came first in workspace membership order (added_at DESC), i.e.
+// insertion history.
+//
+// The two projects here differ by 5e-6 in candidacy: far below round4's
+// resolution, so both display as 0.5000, and the input order is deliberately
+// the reverse of the correct one. Naming the stronger project last
+// alphabetically is what makes this test able to tell "sorted on the raw value"
+// apart from "fell back to the path tiebreak" — both alternatives would put
+// "aaa" first.
+func TestSortPanel_OrdersOnRawCandidacyNotTheRoundedCopy(t *testing.T) {
+	surviving := []projectHits{
+		{ProjectPath: "github.com/o/aaa@main", Candidacy: 0.4999950},
+		{ProjectPath: "github.com/o/zzz@main", Candidacy: 0.5000000},
+	}
+	if round4(surviving[0].Candidacy) != round4(surviving[1].Candidacy) {
+		t.Fatalf("test premise broken: %v and %v do not round to the same value",
+			round4(surviving[0].Candidacy), round4(surviving[1].Candidacy))
+	}
+
+	sortPanel(surviving)
+	if surviving[0].ProjectPath != "github.com/o/zzz@main" {
+		t.Errorf("panel led with %s — the stronger project lost to a tie that "+
+			"only exists after rounding", surviving[0].ProjectPath)
+	}
+}
+
+// TestSortPanel_BreaksGenuineTiesByPath is the other half: when the candidacy
+// really is equal, the order still has to be a function of the query rather
+// than of the order projects happened to arrive in.
+func TestSortPanel_BreaksGenuineTiesByPath(t *testing.T) {
+	mk := func(paths ...string) []projectHits {
+		out := make([]projectHits, 0, len(paths))
+		for _, p := range paths {
+			out = append(out, projectHits{ProjectPath: p, Candidacy: 0.5})
+		}
+		return out
+	}
+	want := []string{"github.com/o/aaa@main", "github.com/o/mmm@main", "github.com/o/zzz@main"}
+	for _, input := range [][]string{
+		{"github.com/o/zzz@main", "github.com/o/mmm@main", "github.com/o/aaa@main"},
+		{"github.com/o/mmm@main", "github.com/o/aaa@main", "github.com/o/zzz@main"},
+		{"github.com/o/aaa@main", "github.com/o/mmm@main", "github.com/o/zzz@main"},
+	} {
+		got := mk(input...)
+		sortPanel(got)
+		for i := range want {
+			if got[i].ProjectPath != want[i] {
+				t.Errorf("input %v -> position %d is %s, want %s",
+					input, i, got[i].ProjectPath, want[i])
+				break
+			}
+		}
+	}
+}

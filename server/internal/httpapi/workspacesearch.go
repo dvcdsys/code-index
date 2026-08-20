@@ -387,8 +387,18 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		}
 	}
 
-	projectPayloads := make([]workspaceSearchProjectPayload, 0, len(surviving))
-	for _, ph := range surviving {
+	sortPanel(surviving)
+	// `panel` reslices, it does not shrink `surviving` — projects_returned
+	// counts what cleared the relevance threshold, and capping that at
+	// top_projects is exactly the bug fixed in d511513. The test for it caught
+	// this line the first time it was written the other way round.
+	panel := surviving
+	if len(panel) > topProjects {
+		panel = panel[:topProjects]
+	}
+
+	projectPayloads := make([]workspaceSearchProjectPayload, 0, len(panel))
+	for _, ph := range panel {
 		projectPayloads = append(projectPayloads, workspaceSearchProjectPayload{
 			ProjectPath:  ph.ProjectPath,
 			Label:        projectLabel(ph.ProjectPath),
@@ -399,29 +409,12 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		})
 	}
 
-	sort.SliceStable(projectPayloads, func(i, j int) bool {
-		return projectPayloads[i].ProjectScore > projectPayloads[j].ProjectScore
-	})
-	if len(projectPayloads) > topProjects {
-		projectPayloads = projectPayloads[:topProjects]
-	}
-
-	// Restrict the interleave to projects that survived the panel
-	// truncation. Otherwise a workspace with > top_projects surviving
-	// repos can surface chunks whose project_path is absent from
-	// projects[] — agents lose access to bm25_score/dense_score and
-	// the response looks inconsistent. Filter to the panel before
-	// round-robin.
-	panelSet := make(map[string]struct{}, len(projectPayloads))
-	for _, p := range projectPayloads {
-		panelSet[p.ProjectPath] = struct{}{}
-	}
-	panelSurviving := make([]projectHits, 0, len(projectPayloads))
-	for _, ph := range surviving {
-		if _, ok := panelSet[ph.ProjectPath]; ok {
-			panelSurviving = append(panelSurviving, ph)
-		}
-	}
+	// The interleave is restricted to the panel. Otherwise a workspace with
+	// more than top_projects surviving repos can surface chunks whose
+	// project_path is absent from projects[] — agents lose access to
+	// bm25_score/dense_score and the response looks inconsistent. `panel` is
+	// already exactly that set, in the same order, so the set-membership
+	// filter this used to do is no longer needed.
 
 	// Round-robin across surviving projects so rank-1 from each
 	// project lands in the first N slots, then rank-2, etc. This
@@ -429,7 +422,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 	// before any repo's tail entries appear — matches the project-
 	// picker use case where the user wants to see each project's
 	// most-relevant hit before diving into the dominant repo's tail.
-	merged := interleaveByRank(panelSurviving, topChunks)
+	merged := interleaveByRank(panel, topChunks)
 
 	status := "ok"
 	if len(merged) == 0 {
@@ -484,6 +477,28 @@ var timingFields = []string{
 	"fuse_ms", "projects_scanned", "projects_returned", "projects_in_panel",
 }
 
+// sortPanel orders the projects panel, best first.
+//
+// On the RAW candidacy, not on the rounded copy that goes out in the JSON.
+// round4 manufactures ties — 0.71234 and 0.71236 both become 0.7123 — and the
+// caller truncates to top_projects immediately afterwards, so a tie decides
+// which of two repos the caller sees at all. Sorting the rounded value handed
+// that decision to whatever order the projects happened to arrive in, which is
+// workspace membership order (added_at DESC): the panel became a function of
+// insertion history rather than of the query.
+//
+// ProjectPath breaks a genuine tie, so the result is a total order. Split out
+// from the handler so the property can be tested on a constructed slice
+// instead of through timestamps that a test cannot control.
+func sortPanel(surviving []projectHits) {
+	sort.Slice(surviving, func(i, j int) bool {
+		if surviving[i].Candidacy != surviving[j].Candidacy {
+			return surviving[i].Candidacy > surviving[j].Candidacy
+		}
+		return surviving[i].ProjectPath < surviving[j].ProjectPath
+	})
+}
+
 // interleaveByRank returns up to `limit` chunks by walking the surviving
 // projects round-robin — rank-1 from every project before any rank-2,
 // then rank-2, and so on. Projects are visited in candidacy-desc order
@@ -505,10 +520,6 @@ func interleaveByRank(projects []projectHits, limit int) []workspaceSearchChunkP
 	})
 
 	out := make([]workspaceSearchChunkPayload, 0, limit)
-	dedupKey := func(c workspaceSearchChunkPayload) string {
-		return c.ProjectPath + "|" + c.FilePath + "|" +
-			strconv.Itoa(c.StartLine) + "-" + strconv.Itoa(c.EndLine)
-	}
 	seen := make(map[string]struct{}, limit)
 	// rank index walks 0,1,2,... ; we stop when no project has a
 	// chunk at this rank (every list exhausted).
@@ -522,7 +533,7 @@ func interleaveByRank(projects []projectHits, limit int) []workspaceSearchChunkP
 			if c.ProjectPath == "" {
 				c.ProjectPath = p.ProjectPath
 			}
-			k := dedupKey(c)
+			k := chunkKey(c)
 			if _, ok := seen[k]; ok {
 				continue
 			}
@@ -764,12 +775,14 @@ func (s *Server) fanOutHybrid(
 			DenseSignal: float32(meanTopN(denseScoresOf(denseHits[i]), workspaceSearchTopNPerProject)),
 			BM25Signal:  float32(meanTopN(bm25ScoresOf(rawBM25), workspaceSearchTopNPerProject)),
 		}
-		// Release this project's dense half now. Fusion used to happen inside
-		// each goroutine, which freed both inputs as it went; doing it here
-		// would otherwise keep every project's dense hits, every project's
-		// BM25 hits and every project's fused copies alive at once — three
-		// sets of chunk payloads for the whole workspace rather than one
-		// project's worth at a time.
+		// Release this project's dense slice now that both fuseRRF and
+		// denseScoresOf have consumed it. To be accurate about what this
+		// buys: fuseRRF returns the UNION of both lists, so the Content
+		// strings stay reachable through results[i].FusedChunks either way —
+		// what goes is the backing array of ~50 payload structs per project,
+		// a few KB, not the chunk text. Free, correctly ordered, and worth
+		// keeping; just not the workspace-wide retention fix an earlier
+		// version of this comment claimed.
 		denseHits[i] = nil
 	}
 	failedOut := make([]workspaceSearchFailedRepoPayload, 0)
@@ -779,6 +792,17 @@ func (s *Server) fanOutHybrid(
 		}
 	}
 	return results, failedOut, nil
+}
+
+// chunkKey is chunk identity: the same span of the same file in the same
+// project. Shared by fusion and by the round-robin interleave's dedup, and
+// since fusion started using it as a sort tiebreak it decides ORDER as well as
+// identity — so the two callers agreeing is no longer merely tidy. Two copies
+// of this expression drifting would make the fusion tiebreak and the interleave
+// dedup disagree with no error anywhere.
+func chunkKey(c workspaceSearchChunkPayload) string {
+	return c.ProjectPath + "|" + c.FilePath + "|" +
+		strconv.Itoa(c.StartLine) + "-" + strconv.Itoa(c.EndLine)
 }
 
 // fuseRRF returns chunks ranked by Reciprocal Rank Fusion over the two
@@ -793,19 +817,16 @@ func (s *Server) fanOutHybrid(
 func fuseRRF(dense, bm25 []workspaceSearchChunkPayload) []workspaceSearchChunkPayload {
 	type entry struct {
 		c   workspaceSearchChunkPayload
+		k   string
 		rrf float64
-	}
-	key := func(c workspaceSearchChunkPayload) string {
-		return c.ProjectPath + "|" + c.FilePath + "|" +
-			strconv.Itoa(c.StartLine) + "-" + strconv.Itoa(c.EndLine)
 	}
 	byKey := make(map[string]*entry)
 	for rank, c := range dense {
-		k := key(c)
+		k := chunkKey(c)
 		byKey[k] = &entry{c: c, rrf: 1.0 / float64(rrfK+rank+1)}
 	}
 	for rank, c := range bm25 {
-		k := key(c)
+		k := chunkKey(c)
 		add := 1.0 / float64(rrfK+rank+1)
 		if e, ok := byKey[k]; ok {
 			e.rrf += add
@@ -814,7 +835,8 @@ func fuseRRF(dense, bm25 []workspaceSearchChunkPayload) []workspaceSearchChunkPa
 		byKey[k] = &entry{c: c, rrf: add}
 	}
 	out := make([]entry, 0, len(byKey))
-	for _, e := range byKey {
+	for k, e := range byKey {
+		e.k = k
 		out = append(out, *e)
 	}
 	// The tiebreak is load-bearing, not tidiness. `out` is built by ranging
@@ -834,7 +856,7 @@ func fuseRRF(dense, bm25 []workspaceSearchChunkPayload) []workspaceSearchChunkPa
 		if out[i].rrf != out[j].rrf {
 			return out[i].rrf > out[j].rrf
 		}
-		return key(out[i].c) < key(out[j].c)
+		return out[i].k < out[j].k
 	})
 	chunks := make([]workspaceSearchChunkPayload, len(out))
 	for i, e := range out {
