@@ -817,8 +817,24 @@ func fuseRRF(dense, bm25 []workspaceSearchChunkPayload) []workspaceSearchChunkPa
 	for _, e := range byKey {
 		out = append(out, *e)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].rrf > out[j].rrf
+	// The tiebreak is load-bearing, not tidiness. `out` is built by ranging
+	// over a map, and Go randomises map iteration order deliberately — so
+	// without a total order here, chunks with equal RRF come back in a
+	// different order on every call, and SliceStable faithfully preserves that
+	// randomness. Equal RRF is not a corner case: a chunk found only by dense
+	// at rank r and a chunk found only by BM25 at the same rank r score
+	// identically by construction, which happens in most queries.
+	//
+	// Observed on the load-test fixture before this line existed: the same
+	// query, same process, same binary, returned a different chunk at rank 0
+	// between consecutive calls. Project scores were unaffected — they do not
+	// depend on chunk order — so the panel looked stable while the results
+	// underneath it moved.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].rrf != out[j].rrf {
+			return out[i].rrf > out[j].rrf
+		}
+		return key(out[i].c) < key(out[j].c)
 	})
 	chunks := make([]workspaceSearchChunkPayload, len(out))
 	for i, e := range out {

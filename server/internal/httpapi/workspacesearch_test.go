@@ -1626,3 +1626,59 @@ func TestWorkspaceSearch_SurvivesBM25Failure(t *testing.T) {
 		t.Errorf("dense_score is %v — the dense side should be unaffected", body.Projects[0].DenseScore)
 	}
 }
+
+// TestFuseRRF_IsDeterministicAcrossTiedChunks pins the total order in fuseRRF.
+//
+// The function builds its output by ranging over a map, and Go randomises map
+// iteration on purpose. Sorting by RRF alone leaves chunks with equal scores in
+// whatever order the map happened to yield, and sort.SliceStable then preserves
+// that randomness faithfully. Equal RRF is the common case, not a corner one: a
+// chunk found only by dense at rank r and a chunk found only by BM25 at rank r
+// score identically by construction.
+//
+// The symptom was invisible from the projects panel — project scores do not
+// depend on chunk order, so the panel looked stable while rank 0 of the chunk
+// list changed between consecutive calls on the same process and binary.
+//
+// Repeats matter here: with N tied entries a single run has a 1/N! chance of
+// looking sorted by accident, so one call proves nothing.
+func TestFuseRRF_IsDeterministicAcrossTiedChunks(t *testing.T) {
+	mk := func(project, file string, line int) workspaceSearchChunkPayload {
+		return workspaceSearchChunkPayload{
+			ProjectPath: project, FilePath: file,
+			StartLine: line, EndLine: line + 5,
+		}
+	}
+	// Disjoint lists of the same length: every dense chunk at rank r ties
+	// exactly with the BM25 chunk at rank r, so every pair is a tie.
+	var dense, bm25 []workspaceSearchChunkPayload
+	for i := 0; i < 12; i++ {
+		dense = append(dense, mk("p", fmt.Sprintf("d%02d.go", i), 1+i*10))
+		bm25 = append(bm25, mk("p", fmt.Sprintf("b%02d.go", i), 1+i*10))
+	}
+
+	first := fuseRRF(dense, bm25)
+	if len(first) != len(dense)+len(bm25) {
+		t.Fatalf("expected %d fused chunks, got %d", len(dense)+len(bm25), len(first))
+	}
+	for run := 0; run < 20; run++ {
+		got := fuseRRF(dense, bm25)
+		for i := range got {
+			if got[i] != first[i] {
+				t.Fatalf("run %d differs at rank %d: %s/%d vs %s/%d — fusion is "+
+					"not deterministic across tied chunks",
+					run, i, got[i].FilePath, got[i].StartLine,
+					first[i].FilePath, first[i].StartLine)
+			}
+		}
+	}
+
+	// And the ordering must still be by RRF first: a chunk in BOTH lists
+	// outranks any chunk in only one, whatever its key sorts like.
+	both := mk("p", "zzz_last_alphabetically.go", 999)
+	withShared := fuseRRF(append([]workspaceSearchChunkPayload{both}, dense...),
+		append([]workspaceSearchChunkPayload{both}, bm25...))
+	if withShared[0] != both {
+		t.Errorf("the chunk present in both lists is not first: got %s", withShared[0].FilePath)
+	}
+}
