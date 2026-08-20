@@ -375,12 +375,17 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	// Build the projects panel + the flat chunk list. Per-project cap
-	// is applied to each project's fused chunk list so one dominant
-	// repo can't take every slot in the round-robin interleave below;
-	// the projects panel sees every surviving project (its num_hits
-	// reflects the post-cap count so the UI doesn't dangle a "10
-	// hits" badge against a chunk list with 5 entries).
+	// Build the projects panel + the flat chunk list. The per-project cap is
+	// applied to each project's fused chunk list so one dominant repo can't
+	// take every slot in the round-robin interleave below. num_hits reflects
+	// the post-cap count, so the UI doesn't dangle a "10 hits" badge against a
+	// chunk list with 5 entries.
+	//
+	// The panel itself is capped at top_projects further down.
+	// projects_returned is NOT, and must not be — it counts what cleared the
+	// relevance threshold, and capping it turns the scanned:returned ratio
+	// into a measurement of a request parameter. That has been re-broken once
+	// already while refactoring these very lines.
 	for i := range surviving {
 		if len(surviving[i].FusedChunks) > workspaceSearchPerProjChunkCap {
 			surviving[i].FusedChunks = surviving[i].FusedChunks[:workspaceSearchPerProjChunkCap]
