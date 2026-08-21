@@ -93,3 +93,6 @@ server/internal/httpapi/dashboard/dist/*
 portainer_mcp/
 portainer-mcp*
 tools.yaml
+
+# Local load-test corpus + throwaway server instance (never committed)
+/loadtests/

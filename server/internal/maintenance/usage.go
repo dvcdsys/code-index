@@ -23,7 +23,12 @@ type DiskUsage struct {
 	Exists bool   `json:"exists"`
 	// UsedBytes is omitted rather than zeroed when the tree could not be
 	// walked, so "unreadable" and "empty" stay distinguishable.
-	UsedBytes    *int64 `json:"used_bytes,omitempty"`
+	UsedBytes *int64 `json:"used_bytes,omitempty"`
+	// Partial marks a UsedBytes that undercounts: some entries could not be
+	// read and were skipped. Without this flag a single root-owned checkout
+	// makes the row show a confident wrong number — exactly what an
+	// operator chasing disk growth must not rule out.
+	Partial      bool   `json:"partial,omitempty"`
 	FSTotalBytes *int64 `json:"fs_total_bytes,omitempty"`
 	FSFreeBytes  *int64 `json:"fs_free_bytes,omitempty"`
 }
@@ -125,27 +130,32 @@ func (s *Service) computeUsage(ctx context.Context) Usage {
 	// pre-migration gob files are reported (and reclaimed) through the
 	// abandoned-namespace category instead.
 	if cfg.VectorsDir != "" {
-		out.Disks = append(out.Disks, walkedDisk(ctx, DiskChroma, "Vector store", cfg.VectorsDir))
+		out.Disks = append(out.Disks, s.walkedDisk(ctx, DiskChroma, "Vector store", cfg.VectorsDir))
 	} else if cfg.ChromaPersistDir != "" {
-		out.Disks = append(out.Disks, walkedDisk(ctx, DiskChroma, "Vector store", cfg.ChromaPersistDir))
+		out.Disks = append(out.Disks, s.walkedDisk(ctx, DiskChroma, "Vector store", cfg.ChromaPersistDir))
 	}
 	if root := s.reposRoot(); root != "" {
-		out.Disks = append(out.Disks, walkedDisk(ctx, DiskRepos, "Cloned repositories", root))
+		out.Disks = append(out.Disks, s.walkedDisk(ctx, DiskRepos, "Cloned repositories", root))
 	}
 	if dir := s.activeGGUFCacheDir(); dir != "" {
-		out.Disks = append(out.Disks, walkedDisk(ctx, DiskGGUF, "Model cache", dir))
+		out.Disks = append(out.Disks, s.walkedDisk(ctx, DiskGGUF, "Model cache", dir))
 	}
 
 	return out
 }
 
-func walkedDisk(ctx context.Context, id, label, path string) DiskUsage {
+func (s *Service) walkedDisk(ctx context.Context, id, label, path string) DiskUsage {
 	d := DiskUsage{ID: id, Label: label, Path: path}
 	if _, err := os.Stat(path); err == nil {
 		d.Exists = true
 		if !ctxDone(ctx) {
-			if n, ok := DirSizeBytes(ctx, path); ok {
+			if n, skipped, ok := dirSizeDetail(ctx, path); ok {
 				d.UsedBytes = &n
+				if skipped > 0 {
+					d.Partial = true
+					s.d.Logger.Warn("maintenance: disk usage undercounts — entries were unreadable",
+						"disk", id, "path", path, "skipped_entries", skipped)
+				}
 			}
 		}
 	}

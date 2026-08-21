@@ -20,6 +20,7 @@ import (
 	// provider purely by kind string — these imports are the wiring.
 	_ "github.com/dvcdsys/code-index/server/internal/embeddings/provider/openai"
 	_ "github.com/dvcdsys/code-index/server/internal/embeddings/provider/voyage"
+	"github.com/dvcdsys/code-index/server/internal/tokenizer"
 )
 
 // Service is the public embeddings API used by handlers and the indexer.
@@ -455,6 +456,31 @@ func (s *Service) Status() provider.Status {
 		st.InFlight = q.InFlight()
 	}
 	return st
+}
+
+// TokenBudget returns the active provider as a token budget when it can
+// count tokens, and nil otherwise. The chunker uses it to size chunks in the
+// model's own unit; nil keeps it on the byte heuristic.
+//
+// Snapshotted under the read lock like CurrentKind, because a provider swap
+// mid-file would otherwise mix two models' limits inside one chunk set.
+func (s *Service) TokenBudget() tokenizer.Budget {
+	// A typed-nil *Service still satisfies the capability interface the
+	// indexer asserts on, so the guard is not decoration: without it the
+	// first indexed file panics inside RLock.
+	if s == nil || s.disabled {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.current == nil {
+		return nil
+	}
+	b, ok := s.current.(tokenizer.Budget)
+	if !ok {
+		return nil
+	}
+	return b
 }
 
 // CurrentKind reports the kind of the active provider, or "" when

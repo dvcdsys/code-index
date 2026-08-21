@@ -78,6 +78,20 @@ type Options struct {
 	// mapped database pages are clean and reclaimable, but they count in RSS
 	// and every connection maps the file.
 	MMapBytes int64
+	// ScanQuant enables the compact int8 copy that searches scan instead of
+	// the float32 originals (see q8.go). It governs the whole lifecycle, not
+	// just reading: with it off, the scan takes the float32 path, the backfill
+	// does not run, and writes DELETE the compact rows of the docs they touch
+	// and withdraw the collection's completion flag. That last part is what
+	// makes the switch safe to flip back — leaving rows behind under a live
+	// flag would mean searching a copy that no longer matches the vectors.
+	//
+	// The zero value is false so that a caller constructing Options by hand —
+	// every test, every tool — gets the plain float32 behaviour unless it asks
+	// otherwise. Open() is the exception: it is the convenience form and turns
+	// it on, because a store opened with defaults should behave like the
+	// server's.
+	ScanQuant bool
 	// Logger receives migration progress. Defaults to a discarding logger.
 	Logger *slog.Logger
 }
@@ -105,6 +119,19 @@ type Store struct {
 	// only invalidation needed is on delete.
 	collMu  sync.Mutex
 	collIDs map[string]int64
+
+	// q8Mu guards q8State, a cache of collection id -> "the compact scan copy
+	// is complete". See q8.go; the entry only ever flips one way, so a cached
+	// true is permanent and a cached false is re-probed.
+	q8Mu    sync.Mutex
+	q8State map[int64]bool
+	// scanQuant mirrors Options.ScanQuant.
+	scanQuant bool
+
+	// stopBG cancels background work (the q8 backfill) on Close. The
+	// goroutines also go through acquire(), so cancelling is about not doing
+	// pointless work rather than about safety.
+	stopBG context.CancelFunc
 }
 
 // ErrClosed is returned by every method once Close has run.
@@ -113,7 +140,7 @@ var ErrClosed = errors.New("vectorstore: store is closed")
 // Open opens (creating if needed) a vector store in the namespace directory
 // dir, with no legacy import. Kept as the simple form used by tests and tools.
 func Open(dir string) (*Store, error) {
-	return OpenWith(Options{Dir: dir})
+	return OpenWith(Options{Dir: dir, ScanQuant: true})
 }
 
 // OpenWith opens a vector store and, when o.LegacyChromaDir holds a chromem-go
@@ -139,6 +166,8 @@ func OpenWith(o Options) (*Store, error) {
 		legacyDir: strings.TrimSuffix(filepath.Clean(o.LegacyChromaDir), string(os.PathSeparator)),
 		logger:    logger,
 		collIDs:   map[string]int64{},
+		q8State:   map[int64]bool{},
+		scanQuant: o.ScanQuant,
 	}
 	if o.LegacyChromaDir == "" {
 		s.legacyDir = ""
@@ -146,6 +175,11 @@ func OpenWith(o Options) (*Store, error) {
 	if err := s.importLegacyChromem(context.Background()); err != nil {
 		db.Close()
 		return nil, err
+	}
+	bgCtx, stopBG := context.WithCancel(context.Background())
+	s.stopBG = stopBG
+	if s.scanQuant {
+		s.startQ8Backfill(bgCtx)
 	}
 	return s, nil
 }
@@ -155,6 +189,9 @@ func OpenWith(o Options) (*Store, error) {
 func (s *Store) Close() error {
 	if s == nil {
 		return nil
+	}
+	if s.stopBG != nil {
+		s.stopBG()
 	}
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
@@ -230,7 +267,12 @@ func (s *Store) ensureCollection(ctx context.Context, name string) (int64, error
 	if id, ok, err := s.collectionID(ctx, name); err != nil || ok {
 		return id, err
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO collections(name) VALUES(?)`, name); err != nil {
+	res, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO collections(name) VALUES(?)`, name)
+	if err != nil {
+		return 0, fmt.Errorf("vectorstore: create collection %q: %w", name, err)
+	}
+	created, err := res.RowsAffected()
+	if err != nil {
 		return 0, fmt.Errorf("vectorstore: create collection %q: %w", name, err)
 	}
 	id, ok, err := s.collectionID(ctx, name)
@@ -239,6 +281,23 @@ func (s *Store) ensureCollection(ctx context.Context, name string) (int64, error
 	}
 	if !ok {
 		return 0, fmt.Errorf("vectorstore: collection %q vanished after insert", name)
+	}
+	if created > 0 && s.scanQuant {
+		// A collection that has just been created has no vectors, so its
+		// (empty) q8 side already matches it. Recording that here is what
+		// makes every collection this binary creates exempt from the backfill:
+		// upsertBatch writes both tables in one transaction from now on, so
+		// the property holds by construction. See q8.go.
+		//
+		// Logged, not returned: this flag is a performance hint, and its own
+		// transaction can lose a race for the write lock. Failing the caller
+		// would abort a whole indexing batch over a row whose absence costs
+		// nothing but a slower scan — and the absence self-heals, because the
+		// backfill sets the flag on the next open.
+		if err := s.markCollectionQ8Ready(ctx, id); err != nil {
+			s.logger.Warn("vectorstore: could not mark a new collection for the compact scan",
+				"collection", name, "err", err)
+		}
 	}
 	return id, nil
 }
@@ -261,6 +320,19 @@ const upsertVectorSQL = `INSERT INTO vectors
 const upsertContentSQL = `INSERT INTO vector_contents (collection_id, doc_id, content)
   VALUES (?,?,?)
   ON CONFLICT(collection_id, doc_id) DO UPDATE SET content=excluded.content`
+
+// upsertQ8SQL writes the scan copy in the same transaction as the vector it is
+// derived from. Same transaction, not a later pass: a q8 row that disagrees
+// with its float32 original would shortlist the wrong documents silently, and
+// the only cheap way to guarantee they agree is to make them atomic.
+const upsertQ8SQL = `INSERT INTO vectors_q8 (collection_id, doc_id, language, scale, embedding)
+  VALUES (?,?,?,?,?)
+  ON CONFLICT(collection_id, doc_id) DO UPDATE SET
+    language=excluded.language, scale=excluded.scale, embedding=excluded.embedding`
+
+// deleteQ8DocSQL removes one doc's compact copy. Used by the write path when
+// the copy is switched off — see upsertBatch for why not writing is not enough.
+const deleteQ8DocSQL = `DELETE FROM vectors_q8 WHERE collection_id = ? AND doc_id = ?`
 
 // ErrCollectionDeleted reports that the collection an upsert was writing into
 // was deleted while the write was in flight — see UpsertChunks.
@@ -324,6 +396,20 @@ func (s *Store) UpsertChunks(ctx context.Context, projectPath string, chunks []C
 		return err
 	}
 
+	// With the compact copy switched off, everything written below leaves it
+	// stale — so the completion flag comes off BEFORE the first byte lands,
+	// not after the last. Ordered that way because the failure it prevents is
+	// a crash mid-write with the flag still set: a collection that says it is
+	// complete while missing whatever the interrupted run had already written.
+	// Each batch also deletes the compact rows of the docs it touches, so a
+	// re-enable rebuilds from the float32 side rather than trusting a copy
+	// that was left behind.
+	if !s.scanQuant {
+		if err := s.clearCollectionQ8Ready(ctx, collID); err != nil {
+			return err
+		}
+	}
+
 	for start := 0; start < len(chunks); start += upsertBatchSize {
 		end := min(start+upsertBatchSize, len(chunks))
 		if err := s.upsertBatch(ctx, collID, chunks[start:end], embeddings[start:end], start); err != nil {
@@ -358,6 +444,23 @@ func (s *Store) upsertBatch(ctx context.Context, collID int64, chunks []Chunk, e
 		return err
 	}
 	defer contentStmt.Close()
+	// One statement per doc either way: write the compact copy, or delete it.
+	// Deleting matters as much as writing. A doc re-embedded while the copy is
+	// off would otherwise keep the compact row of its PREVIOUS embedding, and
+	// the backfill deliberately never overwrites an existing compact row (see
+	// backfillQ8SQL) — so re-enabling the knob would seal that stale row in
+	// behind a completion flag, and searches would score the doc with a vector
+	// it no longer has.
+	var q8Stmt *sql.Stmt
+	if s.scanQuant {
+		q8Stmt, err = tx.PrepareContext(ctx, upsertQ8SQL)
+	} else {
+		q8Stmt, err = tx.PrepareContext(ctx, deleteQ8DocSQL)
+	}
+	if err != nil {
+		return err
+	}
+	defer q8Stmt.Close()
 
 	for i, c := range chunks {
 		emb := embeddings[i]
@@ -370,6 +473,14 @@ func (s *Store) upsertBatch(ctx context.Context, collID int64, chunks []Chunk, e
 			return err
 		}
 		if _, err := contentStmt.ExecContext(ctx, collID, id, c.Content); err != nil {
+			return err
+		}
+		if s.scanQuant {
+			q8, scale := quantizeInt8(emb)
+			if _, err := q8Stmt.ExecContext(ctx, collID, id, c.Language, scale, q8); err != nil {
+				return err
+			}
+		} else if _, err := q8Stmt.ExecContext(ctx, collID, id); err != nil {
 			return err
 		}
 	}
@@ -401,6 +512,16 @@ func (s *Store) DeleteByFile(ctx context.Context, projectPath, filePath string) 
 			SELECT doc_id FROM vectors WHERE collection_id = ? AND file_path = ?)`,
 		collID, collID, filePath); err != nil {
 		return fmt.Errorf("vectorstore delete contents for %q: %w", filePath, err)
+	}
+	// Before the vectors themselves: the subquery reads file_path from
+	// `vectors`, so deleting there first would leave every q8 row of that file
+	// behind, and an orphan q8 row is a document the scan keeps shortlisting
+	// and the rescore can no longer score.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vectors_q8
+		WHERE collection_id = ? AND doc_id IN (
+			SELECT doc_id FROM vectors WHERE collection_id = ? AND file_path = ?)`,
+		collID, collID, filePath); err != nil {
+		return fmt.Errorf("vectorstore delete q8 for %q: %w", filePath, err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM vectors WHERE collection_id = ? AND file_path = ?`, collID, filePath); err != nil {

@@ -84,10 +84,11 @@ const idleConnTimeout = 30 * time.Second
 
 // schemaSQL is the whole schema. Two tables, deliberately.
 //
-// `vectors` holds only what a scan reads: the metadata columns the `where`
-// filter can constrain and the embedding itself. A row is ~3.2 kB, which fits
-// inside an 8 KiB table-leaf cell (the local-payload limit is usable-35), so
-// the scan reads two rows per page and never follows an overflow chain.
+// `vectors` holds the authoritative float32 embedding and the metadata columns
+// the `where` filter can constrain. At 768 dimensions a row is ~3.2 kB and fits
+// inside an 8 KiB table-leaf cell (the local-payload limit is usable-35); at
+// 2048 it is ~8.2 kB and does not, so every row spills into an overflow page.
+// That is why the scan no longer reads this table — see `vectors_q8` below.
 //
 // `vector_contents` holds the chunk text. It is stored (duplicating chunks_fts
 // on disk) so SearchResult.Content behaves identically with no cross-database
@@ -97,6 +98,35 @@ const idleConnTimeout = 30 * time.Second
 // row local and spills the REST — including the embedding — into an overflow
 // chain. That would roughly double the pages a scan touches. Content is read
 // only for the K winners, so it costs one extra btree lookup per result.
+//
+// `vectors_q8` is what a search actually scans: the same vectors at one byte
+// per component, plus the per-vector scale that undoes the quantisation and
+// the one metadata column a search can filter on in practice (language — see
+// fetchVectorResults, the only caller that passes a filter). It exists because
+// the paragraph above stopped being true once models grew past 1024
+// dimensions: a 2048-dim float32 row is 8.2 kB, which does NOT fit an 8 KiB
+// leaf cell, so `vectors` is now exactly the overflow-chain layout that
+// splitting out the content was meant to avoid. Measured with dbstat on 400
+// rows, per vector read by a full scan:
+//
+//	 768 float32   4096 B   two rows per leaf page
+//	1024 float32   8192 B   one row per leaf page, half of it air
+//	2048 float32   9216 B   leaf slice plus a whole overflow page
+//	2048 int8      2731 B   three rows per leaf page, no overflow
+//
+// The float32 blob stays in `vectors` and stays authoritative: the scan reads
+// q8 to pick a shortlist, then rescores that shortlist against the exact
+// vectors, which is what keeps the final ranking identical (see vector.go for
+// the recall measurement). q8 rows are therefore derived data — losing them
+// costs speed, never answers, which is what lets the backfill run in the
+// background while searches fall back to the float32 scan.
+//
+// `q8_state` records that a collection's q8 rows are complete. Without it,
+// "is this collection ready" would be a COUNT(*) over both tables on every
+// query — the same mistake that made the stale-FTS probe cost 53 ms per
+// workspace search. It carries no dimension: the scan compares each row's blob
+// length against the query's own, so a row left by a different model is
+// skipped per row rather than gated per collection.
 //
 // Two indexes, and the difference between them matters:
 //
@@ -155,6 +185,19 @@ CREATE TABLE IF NOT EXISTS vectors (
 );
 CREATE INDEX IF NOT EXISTS idx_vec_coll ON vectors(collection_id);
 CREATE INDEX IF NOT EXISTS idx_vec_coll_file ON vectors(collection_id, file_path);
+CREATE TABLE IF NOT EXISTS vectors_q8 (
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+  doc_id        TEXT NOT NULL,
+  language      TEXT NOT NULL DEFAULT '',
+  scale         REAL NOT NULL,
+  embedding     BLOB NOT NULL,
+  PRIMARY KEY (collection_id, doc_id)
+);
+CREATE INDEX IF NOT EXISTS idx_q8_coll ON vectors_q8(collection_id);
+CREATE TABLE IF NOT EXISTS q8_state (
+  collection_id INTEGER PRIMARY KEY REFERENCES collections(id) ON DELETE CASCADE,
+  built_at      TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS vector_contents (
   collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
   doc_id        TEXT NOT NULL,

@@ -36,6 +36,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
+	"github.com/dvcdsys/code-index/server/internal/tokenizer/bpecount"
 )
 
 // voyageBatchTooLargeRegex matches Voyage's per-batch token-limit
@@ -159,6 +160,15 @@ type Config struct {
 	// all in-flight + recent requests). 0 = no throttling.
 	RateLimitTPM int `json:"rate_limit_tpm,omitempty"`
 
+	// TokenizerPath points at the model's tokenizer.json (the file
+	// Voyage publishes at huggingface.co/voyageai/<model>). When set and
+	// loadable, token counts become EXACT and the per-batch cap rises to
+	// exactTokensPerBatch — the 40K of headroom the byte heuristic needed
+	// is headroom against the heuristic, not against Voyage. When empty or
+	// unreadable the provider logs once and falls back to estimateTokens,
+	// so a missing file degrades throughput, never correctness.
+	TokenizerPath string `json:"tokenizer_path,omitempty"`
+
 	// MaxInputsPerRequest overrides defaultMaxBatchSize. 0 = use
 	// the default (128, safe for voyage-code-*). Operators running
 	// only voyage-3* may bump this to 1000 for fewer round-trips.
@@ -189,7 +199,13 @@ func (c *Config) maxBatchSize() int {
 	return defaultMaxBatchSize
 }
 
-// maxTokensPerBatch returns the effective per-POST token cap.
+// maxTokensPerBatch returns the cap implied by config alone — the operator's
+// override, or the conservative byte-heuristic default.
+//
+// Callers on the hot path want (*Provider).maxTokensPerBatch instead, which
+// also knows whether a tokenizer is loaded. Two same-named methods one on
+// Config and one on Provider is how the batch log came to report 80K while
+// packing used 115K, so this one is only for the Provider method to build on.
 func (c *Config) maxTokensPerBatch() int {
 	if c.MaxTokensPerRequest > 0 {
 		return c.MaxTokensPerRequest
@@ -266,6 +282,10 @@ type Provider struct {
 	// budget is a sliding minute and bursting saves nothing.
 	reqLimiter *rate.Limiter
 
+	// counter is the model's real tokenizer, or nil when no tokenizer.json
+	// was configured or it failed to load. Safe for concurrent use.
+	counter *bpecount.Counter
+
 	// tokenLimiter caps tokens-per-minute when cfg.RateLimitTPM > 0.
 	// Burst is set to maxTokensPerBatch so a single full-budget POST
 	// can pass even when the bucket is otherwise empty (we'd just
@@ -294,6 +314,19 @@ func New(cfg Config, secrets provider.SecretLookup, logger *slog.Logger) *Provid
 		secrets: secrets,
 		http:    &http.Client{Timeout: 60 * time.Second},
 	}
+	if cfg.TokenizerPath != "" {
+		c, err := bpecount.Load(cfg.TokenizerPath)
+		if err != nil {
+			// Not fatal: the byte heuristic still works. Loud because the
+			// operator asked for exact counts and is not getting them.
+			logger.Warn("voyage: tokenizer load failed, falling back to byte estimate",
+				"path", cfg.TokenizerPath, "err", err)
+		} else {
+			p.counter = c
+			logger.Info("voyage: exact token counting enabled", "path", cfg.TokenizerPath)
+		}
+	}
+
 	// Convert RPM/TPM to per-second token-bucket rates. burst on the
 	// request bucket is 1 (one request worth of "credit"); burst on
 	// the token bucket equals one full POST so we don't deadlock a
@@ -302,7 +335,7 @@ func New(cfg Config, secrets provider.SecretLookup, logger *slog.Logger) *Provid
 		p.reqLimiter = rate.NewLimiter(rate.Limit(float64(cfg.RateLimitRPM)/60.0), 1)
 	}
 	if cfg.RateLimitTPM > 0 {
-		p.tokenLimiter = rate.NewLimiter(rate.Limit(float64(cfg.RateLimitTPM)/60.0), cfg.maxTokensPerBatch())
+		p.tokenLimiter = rate.NewLimiter(rate.Limit(float64(cfg.RateLimitTPM)/60.0), p.maxTokensPerBatch())
 	}
 	return p
 }
@@ -402,6 +435,38 @@ func (p *Provider) EmbedDocuments(ctx context.Context, texts []string) ([][]floa
 // such chunk, but oversize chunks are rare on well-chunked
 // indexes — the indexer should already be cutting at function /
 // class boundaries.
+// splitForInput cuts one input down to what the model can read.
+//
+// With a tokenizer, the question "does this fit" has an exact answer, so the
+// byte cap is not consulted at all: an input under the model's context window
+// goes through whole, however many bytes it is, and one over it is cut on real
+// token boundaries. Without a tokenizer we are back to guessing, and the byte
+// cap is the guess.
+//
+// This matters because the chunker now sizes in tokens. Its bound and the
+// provider's byte cap are different units: at CIX_MAX_CHUNK_TOKENS=20000 —
+// legal, well inside the 32K window — chunks of 40-80 KB are ordinary, and
+// every one of them used to be byte-windowed here and have its window vectors
+// averaged into a single vector representing neither half. The averaging path
+// now only runs where it is genuinely needed: no tokenizer, no exact answer.
+func (p *Provider) splitForInput(text string, maxBytes int) []string {
+	if p.counter == nil {
+		return splitOversizeInput(text, maxBytes)
+	}
+	limit := p.MaxInputTokens()
+	offsets, total := p.counter.SplitPoints(text, limit)
+	if total <= limit || len(offsets) == 0 {
+		return []string{text}
+	}
+	out := make([]string, 0, len(offsets)+1)
+	prev := 0
+	for _, off := range offsets {
+		out = append(out, text[prev:off])
+		prev = off
+	}
+	return append(out, text[prev:])
+}
+
 func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputType string) ([][]float32, error) {
 	maxIn := p.cfg.maxInputBytes()
 
@@ -411,7 +476,7 @@ func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputTyp
 	var expanded []string
 	totalSplits := 0
 	for i, t := range texts {
-		windows := splitOversizeInput(t, maxIn)
+		windows := p.splitForInput(t, maxIn)
 		spans[i] = span{start: len(expanded), length: len(windows)}
 		expanded = append(expanded, windows...)
 		if len(windows) > 1 {
@@ -419,23 +484,35 @@ func (p *Provider) embedAndAverage(ctx context.Context, texts []string, inputTyp
 		}
 	}
 	if totalSplits > 0 {
-		p.logger.Info("voyage: oversize inputs split into byte-windows",
-			"original_inputs", len(texts),
-			"total_windows", len(expanded),
-			"split_windows", totalSplits,
-			"max_input_bytes", maxIn,
-		)
+		// Report the unit the split actually used: with a tokenizer the cut is
+		// on token boundaries against the model's context, and logging a byte
+		// cap there sends whoever reads this to the wrong knob.
+		if p.counter != nil {
+			p.logger.Info("voyage: oversize inputs split on token boundaries",
+				"original_inputs", len(texts),
+				"total_windows", len(expanded),
+				"split_windows", totalSplits,
+				"max_input_tokens", p.MaxInputTokens(),
+			)
+		} else {
+			p.logger.Info("voyage: oversize inputs split into byte-windows",
+				"original_inputs", len(texts),
+				"total_windows", len(expanded),
+				"split_windows", totalSplits,
+				"max_input_bytes", maxIn,
+			)
+		}
 	}
 
 	// Phase 2: batch + POST as before, on the expanded slice.
-	batches := planBatches(expanded, p.cfg.maxBatchSize(), p.cfg.maxTokensPerBatch())
+	batches := planBatches(expanded, p.cfg.maxBatchSize(), p.maxTokensPerBatch(), p.CountTokens)
 	if len(batches) > 1 {
 		p.logger.Info("voyage: splitting batch",
 			"model", p.cfg.Model,
 			"total_inputs", len(expanded),
 			"sub_batches", len(batches),
 			"limit_inputs", p.cfg.maxBatchSize(),
-			"limit_tokens", p.cfg.maxTokensPerBatch(),
+			"limit_tokens", p.maxTokensPerBatch(),
 		)
 	}
 	allVecs := make([][]float32, 0, len(expanded))
@@ -561,7 +638,10 @@ func (p *Provider) embedWithAdaptiveSplit(ctx context.Context, texts []string, i
 // operator can override them via the admin form when their tier or
 // chosen model allows a higher cap (e.g. voyage-3-large at 1000
 // inputs/POST instead of 128).
-func planBatches(texts []string, maxInputs, maxTokens int) [][]string {
+func planBatches(texts []string, maxInputs, maxTokens int, count func(string) int) [][]string {
+	if count == nil {
+		count = estimateTokens
+	}
 	if len(texts) == 0 {
 		return nil
 	}
@@ -569,7 +649,7 @@ func planBatches(texts []string, maxInputs, maxTokens int) [][]string {
 	var current []string
 	currentTokens := 0
 	for _, t := range texts {
-		est := estimateTokens(t)
+		est := count(t)
 		// Close the current batch when adding this text would exceed
 		// either limit (and the batch already has something to send).
 		if len(current) > 0 && (len(current) >= maxInputs || currentTokens+est > maxTokens) {
@@ -586,9 +666,12 @@ func planBatches(texts []string, maxInputs, maxTokens int) [][]string {
 	return batches
 }
 
-// estimateTokens returns a conservative upper bound on the token cost
-// of one text, in Voyage's tokenizer. Uses byte-length divided by a
-// chars-per-token heuristic; see bytesPerToken doc for rationale.
+// estimateTokens is the FALLBACK used only when no tokenizer.json is
+// loaded. Measured against Voyage's own usage.total_tokens on 20k real
+// chunks it overestimates by 1.94x on average — which wastes round-trips
+// — while still undercounting 0.5% of chunks, worst case -41%. That is
+// the wrong error in both directions, and it is why loading the real
+// tokenizer is worth the 7 MB: see Provider.countTokens.
 func estimateTokens(s string) int {
 	return len(s) / bytesPerToken
 }
@@ -783,4 +866,91 @@ func dequantize(raw json.RawMessage, dtype string) ([]float32, error) {
 
 func (p *Provider) apiKey() (string, bool) {
 	return provider.ResolveAPIKey(p.secrets, p.cfg.APIKeyEnv)
+}
+
+// ---------- tokenizer.Budget ----------
+//
+// Implemented on Provider so the chunker can be handed the live provider and
+// stay ignorant of which model is active: only the provider knows whether
+// tokens come from a real BPE table, from llama-server's /tokenize, or from a
+// byte guess.
+
+// exactTokensPerBatch is the per-POST cap once counts are exact.
+//
+// The 80K default exists to survive the byte heuristic's ~43% undercount
+// against Voyage's 120K hard limit. With the real tokenizer the count is the
+// count — measured against usage.total_tokens it is never below what Voyage
+// bills — so the headroom collapses to a margin for Voyage-side accounting
+// drift rather than for our own error.
+const exactTokensPerBatch = 115_000
+
+// modelContextTokens is the per-input context window, per model. It is a table
+// rather than a constant because the factory's own enum offers voyage-code-2,
+// whose window is 16K — half of what the rest of the list takes. Treating that
+// as 32K would let the chunker build inputs the model cannot read, and with
+// truncation enabled Voyage would silently drop the tail.
+//
+// Unknown models fall back to the conservative 16K: undershooting costs an
+// unnecessary split, overshooting costs silent data loss.
+var modelContextTokens = map[string]int{
+	"voyage-code-3":  32_000,
+	"voyage-3-large": 32_000,
+	"voyage-3":       32_000,
+	"voyage-3-lite":  32_000,
+	"voyage-code-2":  16_000,
+}
+
+const fallbackContextTokens = 16_000
+
+// maxTokensPerBatch is the provider-level cap: an explicit operator override
+// wins, then the exact-counting cap, then the conservative byte-heuristic one.
+func (p *Provider) maxTokensPerBatch() int {
+	if p.cfg.MaxTokensPerRequest > 0 {
+		return p.cfg.maxTokensPerBatch()
+	}
+	if p.counter != nil {
+		return exactTokensPerBatch
+	}
+	return p.cfg.maxTokensPerBatch()
+}
+
+// MaxInputTokens reports the model's context window for a single input.
+func (p *Provider) MaxInputTokens() int {
+	if n, ok := modelContextTokens[p.cfg.Model]; ok {
+		return n
+	}
+	return fallbackContextTokens
+}
+
+// ExactCounts reports whether CountTokens/SplitPoints are exact rather than
+// estimated. False means no tokenizer.json was loaded.
+func (p *Provider) ExactCounts() bool { return p.counter != nil }
+
+// CountTokens returns the token cost of s. Allocation-free on the exact path;
+// this is the hot one — it runs for every chunk that gets embedded.
+func (p *Provider) CountTokens(s string) int {
+	if p.counter != nil {
+		return p.counter.Count(s)
+	}
+	return estimateTokens(s)
+}
+
+// SplitPoints returns byte offsets at which s must be cut so no piece exceeds
+// budget tokens, and s's total token count.
+//
+// Exact when a tokenizer is loaded: cuts land on pre-token boundaries, where
+// BPE merges never reach across, so the pieces provably add up to the whole.
+// Without a tokenizer it degrades to rune-aligned byte windows — the old
+// behaviour, kept only so a caller that ignores ExactCounts still gets
+// something it can send. Check ExactCounts before trusting these.
+func (p *Provider) SplitPoints(s string, budget int) ([]int, int) {
+	if p.counter == nil {
+		// No tokenizer: there are no token boundaries to report. Returning
+		// byte windows here would be the old behaviour wearing the new
+		// interface's clothes, and callers check ExactCounts() precisely so
+		// they can avoid it. splitForInput still byte-windows internally
+		// where that is genuinely all we have.
+		return nil, estimateTokens(s)
+	}
+	return p.counter.SplitPoints(s, budget)
 }
