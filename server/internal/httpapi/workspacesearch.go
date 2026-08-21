@@ -96,8 +96,10 @@ type workspaceSearchStaleFTSRepoPayload struct {
 }
 
 // projectHits is the per-project intermediate state accumulated across
-// the parallel fan-out. Dense and BM25 sides arrive separately and are
-// fused inside the goroutine before being collected.
+// the parallel fan-out. Dense and BM25 sides arrive separately and are fused
+// AFTER the fan-out, in the serial loop below g.Wait() — fusion needs both
+// sides, so it cannot live in either goroutine. See the comment above that
+// loop for why parallelising it buys nothing.
 type projectHits struct {
 	ProjectPath string
 	// FusedChunks are the per-project chunks ranked by RRF over the
@@ -110,6 +112,13 @@ type projectHits struct {
 	// (positive, unbounded — SQLite's bm25() flipped via -bm25 at
 	// the chunksfts boundary). Normalized into candidacy via
 	// per-query min-max before being blended.
+	//
+	// Computed on the RAW BM25 list, not on FusedChunks beside it. The two
+	// fields are scored at different layers: the chunk list a caller sees has
+	// been through RRF, where the dense side gets an equal vote, while the
+	// projects panel ranks on this number alone. So anything that moves BM25
+	// moves the panel directly and the chunk list only after fusion has had a
+	// say — worth knowing before reading a panel reorder as a ranking change.
 	BM25Signal float32
 	// Candidacy is the α-blended, per-query-normalized score the
 	// projects panel ranks by; recomputed after every project's
@@ -119,10 +128,10 @@ type projectHits struct {
 
 // WorkspaceSearch — GET /api/v1/workspaces/{id}/search.
 //
-// Hybrid BM25+dense fan-out. Each project runs two queries in
-// parallel: dense (vector-store cosine) and sparse (SQLite FTS5 BM25 over
-// chunks_fts). Per project, the two ranked lists are fused via
-// Reciprocal Rank Fusion. Across projects, an α-blended candidacy
+// Hybrid BM25+dense fan-out. Dense (vector-store cosine) runs once per
+// project, concurrently; sparse is ONE FTS5 BM25 query over chunks_fts for the
+// whole workspace, partitioned per project by the caller. Per project, the two
+// ranked lists are fused via Reciprocal Rank Fusion. Across projects, an α-blended candidacy
 // score (with per-query min-max normalization on both signals) plus
 // a relative threshold (`candidacy ≥ best × 0.4`) keeps the result
 // set focused on repos that actually share vocabulary or semantics

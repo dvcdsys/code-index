@@ -44,18 +44,15 @@ export default function SearchPage() {
   const queryParam = params.get('q') ?? '';
   const [draft, setDraft] = useState(queryParam);
 
-  // Debounce input → URL after 250ms idle; Enter commits immediately.
-  useEffect(() => {
-    const id = setTimeout(() => {
-      if (draft === queryParam) return;
-      const next = new URLSearchParams(params);
-      if (draft.trim()) next.set('q', draft);
-      else next.delete('q');
-      setParams(next, { replace: true });
-    }, 250);
-    return () => clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft]);
+  // Typing changes `draft` and nothing else. The query in the URL — which is
+  // what actually runs a search — moves only on submit.
+  //
+  // This used to debounce draft into the URL after 250ms idle. That is the
+  // usual pattern and it is wrong here: a semantic search embeds the query
+  // through the configured provider, so every pause while typing spent a real
+  // API call and a full fan-out to answer a half-written question. "retry with
+  // exponential backoff" typed at a normal pace fires on "retry", "retry with",
+  // "retry with expo" — three searches nobody asked for and one they did.
 
   // Follow the URL when it changes from outside (a pasted link, back button).
   useEffect(() => {
@@ -172,7 +169,11 @@ function Results({
     );
   }
   if (query.trim().length < 2) {
-    return <Empty title="Type a query">At least two characters, then results appear here.</Empty>;
+    return (
+      <Empty title="Type a query">
+        At least two characters, then press Enter to search.
+      </Empty>
+    );
   }
   switch (mode) {
     case 'semantic':

@@ -13,7 +13,7 @@ export function SearchBar({
 }: {
   value: string;
   onChange: (v: string) => void;
-  /** Fired on Enter — bypasses the debounce and commits immediately. */
+  /** Fired on Enter. This is the ONLY thing that runs a search — typing does not. */
   onSubmit?: (v: string) => void;
   placeholder?: string;
   className?: string;
