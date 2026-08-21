@@ -256,11 +256,20 @@ func SearchProject(ctx context.Context, db *sql.DB, projectPath, query string, l
 	return out, nil
 }
 
-// searchProjectsBatch caps how many project_path values go into one IN
-// list, and payloadFetchBatch does the same for the rowid list of the
-// second statement. SQLite's default bound-variable ceiling is 999; 500
-// leaves room for the query parameter and matches the batch size the
-// vector store already uses for its own IN lists.
+// searchProjectsBatch caps how many project_path values go into one IN list,
+// and payloadFetchBatch does the same for the rowid list of the second
+// statement.
+//
+// 500 is NOT a headroom number. Measured through this driver, `rowid IN (...)`
+// takes 32,766 placeholders and fails at 32,767 — SQLite raised
+// SQLITE_MAX_VARIABLE_NUMBER from 999 to 32,766 in 3.32.0 and modernc tracks a
+// recent upstream, so the ceiling is two orders of magnitude away and neither
+// constant is anywhere near it. The reason for 500 is consistency: it is
+// hydrateBatch (internal/vectorstore/search.go), the batch size the vector
+// store already uses for its own IN lists, and one number for both is worth
+// more than a tuned one for each. Raising it would want a measurement, and
+// 43 x 50 = 2,150 rowids in five statements is nothing against a multi-second
+// BM25 scan, so there is nothing to gain by measuring.
 const (
 	searchProjectsBatch = 500
 	payloadFetchBatch   = 500
