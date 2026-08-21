@@ -480,20 +480,6 @@ func TestSearchProjects_EmptyInputs(t *testing.T) {
 	}
 }
 
-// TestSearchProjects_FetchesPayloadAfterTheTrim pins the query PLAN, which is
-// the only place this bug can live: every equivalence test in this file passes
-// against the slow form too, because the two forms return the same rows.
-//
-// Carrying file_path/content through the CTE makes SQLite materialise them for
-// every globally-matched row before ROW_NUMBER trims — and FTS5 evaluates MATCH
-// over the whole server's index, so the match set has nothing to do with how
-// many rows come back. Measured on the load-test corpus: 15.1 s against 2.8 s
-// on a 263k-row match, and 29.6 s on a 624k-row one, which was slower than the
-// per-project queries the partitioned form replaced.
-//
-// FTS5 reports a rowid-equality lookup as "0:=" and a MATCH scan as "0:M...".
-// The rank-first form does both — scan to match, point lookups for survivors.
-// The payload-in-CTE form only ever scans.
 // TestSearchProjects_ScanDoesNotSortTheMatchSet pins the reason the ranking
 // moved out of SQL. The window form has to sort every matched row to find N
 // per project; on the load-test fixture that is up to 1.29 million rows to
@@ -562,6 +548,98 @@ func TestSearchProjects_FetchesPayloadByRowid(t *testing.T) {
 	if strings.Contains(plan, "VIRTUAL TABLE INDEX 0:M") {
 		t.Errorf("the payload fetch is running a MATCH scan:\n%s", plan)
 	}
+}
+
+// TestFetchPayload_SpansTheBatchBoundary covers the rowid IN-list batching.
+//
+// TestSearchProjects_SpansTheBatchBoundary cannot reach it, and the reason is a
+// coincidence of the two constants being equal: that test seeds one hit per
+// project, so the rowid list is at most searchProjectsBatch long and the
+// payload loop runs exactly once however many projects there are. Production is
+// 43 projects x 50 hits = five batches, so without this the path that always
+// runs in production would be the one nothing covers.
+func TestFetchPayload_SpansTheBatchBoundary(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	const n = payloadFetchBatch + 7
+	chunks := make([]Chunk, 0, n)
+	for i := 0; i < n; i++ {
+		chunks = append(chunks, Chunk{
+			Content:   "func retryWithBackoff() {}",
+			FilePath:  "a.go",
+			StartLine: 1 + i*10, EndLine: 5 + i*10,
+			Language: "go",
+		})
+	}
+	upsert(t, d, "proj", "a.go", chunks)
+
+	got, err := SearchProjects(ctx, d, []string{"proj"}, "retry", n)
+	if err != nil {
+		t.Fatalf("SearchProjects: %v", err)
+	}
+	if len(got["proj"]) != n {
+		t.Errorf("got %d hits, want %d — a payload batch was dropped",
+			len(got["proj"]), n)
+	}
+}
+
+// TestCollectHits covers what splitting one statement into two actually
+// changed: a chunk can disappear between the ranking scan and the payload
+// fetch. Racing a real delete against a live query is not worth building, so
+// the seam is tested directly — a payload map with rows deliberately left out
+// is exactly the state that race produces.
+func TestCollectHits(t *testing.T) {
+	rows := []rankedRow{{rid: 7, bm: -9}, {rid: 8, bm: -5}, {rid: 9, bm: -1}}
+	full := map[int64]Hit{
+		7: {FilePath: "a.go"}, 8: {FilePath: "b.go"}, 9: {FilePath: "c.go"},
+	}
+
+	t.Run("all present", func(t *testing.T) {
+		dst := map[string][]Hit{}
+		collectHits(map[string][]rankedRow{"p": rows}, full, dst)
+		got := dst["p"]
+		if len(got) != 3 {
+			t.Fatalf("got %d hits, want 3", len(got))
+		}
+		for i, want := range []struct {
+			file  string
+			score float64
+		}{{"a.go", 9}, {"b.go", 5}, {"c.go", 1}} {
+			if got[i].FilePath != want.file || got[i].Score != want.score {
+				t.Errorf("rank %d: got %s/%v, want %s/%v",
+					i, got[i].FilePath, got[i].Score, want.file, want.score)
+			}
+		}
+	})
+
+	t.Run("one row vanished", func(t *testing.T) {
+		partial := map[int64]Hit{7: full[7], 9: full[9]}
+		dst := map[string][]Hit{}
+		collectHits(map[string][]rankedRow{"p": rows}, partial, dst)
+		got := dst["p"]
+		if len(got) != 2 {
+			t.Fatalf("got %d hits, want 2", len(got))
+		}
+		if got[0].FilePath != "a.go" || got[1].FilePath != "c.go" {
+			t.Errorf("got %s,%s — the surviving rows lost their rank order",
+				got[0].FilePath, got[1].FilePath)
+		}
+		if got[0].Score != 9 || got[1].Score != 1 {
+			t.Errorf("got scores %v,%v — a dropped row shifted the scores",
+				got[0].Score, got[1].Score)
+		}
+	})
+
+	t.Run("every row vanished", func(t *testing.T) {
+		dst := map[string][]Hit{}
+		collectHits(map[string][]rankedRow{"p": rows}, map[int64]Hit{}, dst)
+		if _, present := dst["p"]; present {
+			t.Errorf("a project whose every survivor vanished is present with "+
+				"%d hits; this package's contract is that it is absent",
+				len(dst["p"]))
+		}
+	})
 }
 
 // TestTopHits_MatchesAFullSort is the property test for the bounded heap that

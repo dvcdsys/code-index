@@ -282,19 +282,22 @@ const (
 // fan-out's total work, and each query slowed from ~400 ms standalone to
 // as much as 7 s when 43 of them ran against the index at once.
 //
-// The window function does the partitioning SQLite would otherwise make
-// us do with N queries: rank within each project, keep the top rows of
-// each.
+// The per-project trim is a bounded heap in Go, not a window function in
+// SQL: a window has to sort the ENTIRE match set to find N rows per
+// project, and the match set here is the whole server's index. See
+// workspaceScanQuery for why that is the dominant cost and what it
+// measured.
 //
-// Both forms order by (bm ASC, rowid ASC). The rowid is defensive, not a
-// fix for an observed bug: bm25 ties are the norm rather than the
-// exception in a trigram index over real code — in this package's own
-// test corpus 14 of 16 hits share a score with another hit — and today
-// SQLite happens to return tied rows in rowid order for both the LIMIT
-// and the window form, so they agree without being told to. That is
-// unspecified behaviour of the sorter. Naming the tiebreak makes the
-// agreement a property of the queries instead of a coincidence that a
-// future planner is free to break.
+// Both paths order by (bm ASC, rowid ASC) — the per-project query in its
+// ORDER BY, the workspace path in rankedRow.betterThan. The rowid is
+// defensive, not a fix for an observed bug: bm25 ties are the norm rather
+// than the exception in a trigram index over real code — in this package's
+// own test corpus 14 of 16 hits share a score with another hit — and today
+// SQLite happens to return tied rows in rowid order for the LIMIT form, so
+// the two would agree without being told to. That is unspecified behaviour
+// of the sorter. Naming the tiebreak on BOTH sides makes the agreement a
+// property of the code instead of a coincidence a future planner is free
+// to break.
 func SearchProjects(ctx context.Context, db *sql.DB, projectPaths []string, query string, perProject int) (map[string][]Hit, error) {
 	if perProject <= 0 {
 		perProject = 20
@@ -360,21 +363,48 @@ func searchProjectsBatchInto(ctx context.Context, db *sql.DB, projectPaths []str
 			rids = append(rids, r.rid)
 		}
 	}
+	// Sorted because rids was built by ranging a map, so without this the IN
+	// lists — and therefore the batch boundaries — differ between two runs of
+	// the same query. The results do not (payload is keyed by rowid and each
+	// project is assembled in rank order), but a statement whose bound
+	// parameters come out of Go's map iteration cannot be compared plan-to-plan
+	// between runs, which is exactly what someone timing this will want to do.
+	// Ascending rowids also probe both B-trees in order rather than at random.
+	// Not measured as a speedup; the reason to do it is the determinism.
+	sort.Slice(rids, func(i, j int) bool { return rids[i] < rids[j] })
+
 	payload, err := fetchPayload(ctx, db, rids)
 	if err != nil {
 		return err
 	}
+	collectHits(ranked, payload, dst)
+	return nil
+}
+
+// collectHits pairs each project's ranked rows with the payload fetched for
+// them, and writes the projects that still have hits into dst.
+//
+// A row whose chunk vanished between the ranking scan and the payload fetch is
+// dropped. Two statements cannot be atomic the way the one they replaced was,
+// and a hit fewer is the right answer for a chunk that no longer exists;
+// erroring would fail a whole workspace search because one file happened to be
+// getting reindexed. A project that loses ALL of its survivors that way is left
+// out of dst entirely, because this package's contract is that a project with
+// no match is absent rather than present with an empty slice.
+//
+// What makes the split safe is not in this package: a rowid can only go
+// MISSING, never come back pointing at a different chunk. chunks_meta.rowid is
+// INTEGER PRIMARY KEY AUTOINCREMENT (internal/db/schema.go), so SQLite never
+// re-issues a rowid after a delete. Drop the AUTOINCREMENT and a reindex could
+// hand project B's chunk back under project A's score, with no error and
+// nothing in failed_repos — at which point this needs cm.project_path in the
+// payload SELECT and a check against the ranked row.
+func collectHits(ranked map[string][]rankedRow, payload map[int64]Hit, dst map[string][]Hit) {
 	for pp, rows := range ranked {
 		hits := make([]Hit, 0, len(rows))
 		for _, r := range rows {
 			h, ok := payload[r.rid]
 			if !ok {
-				// The row was deleted between the ranking scan and the
-				// payload fetch — a reindex of that file landed in between.
-				// Two statements cannot be atomic the way one was, and a
-				// hit fewer is the right answer for a chunk that no longer
-				// exists. Erroring would fail a whole workspace search
-				// because one file was being rewritten.
 				continue
 			}
 			h.Score = -r.bm
@@ -384,7 +414,6 @@ func searchProjectsBatchInto(ctx context.Context, db *sql.DB, projectPaths []str
 			dst[pp] = hits
 		}
 	}
-	return nil
 }
 
 // rankedRow is a matched chunk before its payload is fetched: the two columns
