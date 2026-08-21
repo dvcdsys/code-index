@@ -357,9 +357,9 @@ func searchProjectsBatchInto(ctx context.Context, db *sql.DB, projectPaths []str
 	ranked := make(map[string][]rankedRow, len(tops))
 	var rids []int64
 	for pp, t := range tops {
-		rows := t.sorted()
-		ranked[pp] = rows
-		for _, r := range rows {
+		ordered := t.sorted()
+		ranked[pp] = ordered
+		for _, r := range ordered {
 			rids = append(rids, r.rid)
 		}
 	}

@@ -433,10 +433,14 @@ func TestSearchProjects_DoesNotPrefixMatchProjectPaths(t *testing.T) {
 	}
 }
 
-// TestSearchProjects_SpansTheBatchBoundary checks the IN-list batching. The
-// map is filled across several statements, so a batch that overwrote instead
-// of appending, or that dropped its last slice, would only show up above the
-// batch size.
+// TestSearchProjects_SpansTheBatchBoundary checks the project IN-list batching.
+// dst is filled across several statements and each project is written to
+// exactly once — a batch that replaced the map instead of adding to it, or that
+// dropped its last slice, would only show up above the batch size.
+//
+// It does NOT reach the rowid batching inside fetchPayload; one hit per project
+// keeps that list at exactly searchProjectsBatch. See
+// TestFetchPayload_SpansTheBatchBoundary.
 func TestSearchProjects_SpansTheBatchBoundary(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
