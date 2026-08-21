@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
+	"sort"
 	"strings"
 	"testing"
 
@@ -431,10 +433,14 @@ func TestSearchProjects_DoesNotPrefixMatchProjectPaths(t *testing.T) {
 	}
 }
 
-// TestSearchProjects_SpansTheBatchBoundary checks the IN-list batching. The
-// map is filled across several statements, so a batch that overwrote instead
-// of appending, or that dropped its last slice, would only show up above the
-// batch size.
+// TestSearchProjects_SpansTheBatchBoundary checks the project IN-list batching.
+// dst is filled across several statements and each project is written to
+// exactly once — a batch that replaced the map instead of adding to it, or that
+// dropped its last slice, would only show up above the batch size.
+//
+// It does NOT reach the rowid batching inside fetchPayload; one hit per project
+// keeps that list at exactly searchProjectsBatch. See
+// TestFetchPayload_SpansTheBatchBoundary.
 func TestSearchProjects_SpansTheBatchBoundary(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
@@ -478,65 +484,333 @@ func TestSearchProjects_EmptyInputs(t *testing.T) {
 	}
 }
 
-// TestSearchProjects_FetchesPayloadAfterTheTrim pins the query PLAN, which is
-// the only place this bug can live: every equivalence test in this file passes
-// against the slow form too, because the two forms return the same rows.
-//
-// Carrying file_path/content through the CTE makes SQLite materialise them for
-// every globally-matched row before ROW_NUMBER trims — and FTS5 evaluates MATCH
-// over the whole server's index, so the match set has nothing to do with how
-// many rows come back. Measured on the load-test corpus: 15.1 s against 2.8 s
-// on a 263k-row match, and 29.6 s on a 624k-row one, which was slower than the
-// per-project queries the partitioned form replaced.
-//
-// FTS5 reports a rowid-equality lookup as "0:=" and a MATCH scan as "0:M...".
-// The rank-first form does both — scan to match, point lookups for survivors.
-// The payload-in-CTE form only ever scans.
-func TestSearchProjects_FetchesPayloadAfterTheTrim(t *testing.T) {
+// TestSearchProjects_ScanDoesNotSortTheMatchSet pins the reason the ranking
+// moved out of SQL. The window form has to sort every matched row to find N
+// per project; on the load-test fixture that is up to 1.29 million rows to
+// keep 2,300. The scan query must stay a plain scan — no sorter of any kind.
+func TestSearchProjects_ScanDoesNotSortTheMatchSet(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 	seedCorpus(t, d, []string{"p1", "p2"})
 
-	plan := explain(t, ctx, d, workspaceRankQuery(placeholders(2)),
-		`"retry" OR "backoff"`, "p1", "p2", 3)
-	if !strings.Contains(plan, "VIRTUAL TABLE INDEX 0:=") {
-		t.Errorf("chunks_fts is not looked up by rowid — the payload is being "+
-			"carried through the window sorter again:\n%s", plan)
+	plan := explain(t, ctx, d, workspaceScanQuery(placeholders(2)),
+		`"retry" OR "backoff"`, "p1", "p2")
+	if strings.Contains(plan, "TEMP B-TREE") {
+		t.Errorf("the ranking scan sorts the whole match set again:\n%s", plan)
 	}
 }
 
-// TestExplainDistinguishesTheTwoQueryShapes is the mutation check for the test
-// above, kept in the tree rather than run by hand: it builds the slow form and
-// asserts the plan assertion would REJECT it. Without this, a change to how
-// SQLite reports plans could turn the guard into a tautology that passes on
-// everything, and nothing would say so.
-func TestExplainDistinguishesTheTwoQueryShapes(t *testing.T) {
+// TestExplainRejectsTheSortingForms is the mutation check for the test above,
+// kept in the tree rather than run by hand: it builds forms that DO sort the
+// match set and asserts the assertion above would reject each one. Without
+// this, a change in how SQLite reports plans could turn the guard into a
+// tautology that passes on everything, and nothing would say so.
+//
+// Two shapes, not one. The window form is what this PR deleted; a plain
+// ORDER BY added back to the scan is the regression far more likely to
+// actually happen, and a guard is worth exactly what it rejects.
+func TestExplainRejectsTheSortingForms(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()
 	seedCorpus(t, d, []string{"p1", "p2"})
 
-	slow := `
+	window := `
 		WITH hits AS (
-		  SELECT cm.project_path AS pp, cm.rowid AS rid,
-		         cm.file_path, cm.start_line, cm.end_line,
-		         cm.chunk_type, cm.symbol_name, cm.language,
-		         cf.content, bm25(chunks_fts) AS bm
+		  SELECT cm.project_path AS pp, cm.rowid AS rid, bm25(chunks_fts) AS bm
 		    FROM chunks_fts cf
 		    JOIN chunks_meta cm ON cm.rowid = cf.rowid
 		   WHERE chunks_fts MATCH ? AND cm.project_path IN (?,?)
+		),
+		ranked AS (
+		  SELECT pp, rid, bm,
+		         ROW_NUMBER() OVER (PARTITION BY pp ORDER BY bm ASC, rid ASC) AS rn
+		    FROM hits
 		)
-		SELECT pp, file_path, start_line, end_line,
-		       chunk_type, symbol_name, language, content, bm
-		  FROM (SELECT *, ROW_NUMBER() OVER (
-		                    PARTITION BY pp ORDER BY bm ASC, rid ASC) AS rn
-		          FROM hits)
-		 WHERE rn <= ?
-		 ORDER BY pp, rn`
+		SELECT r.pp, cm.file_path, r.bm
+		  FROM ranked r
+		  JOIN chunks_meta cm ON cm.rowid = r.rid
+		 WHERE r.rn <= ?`
 
-	plan := explain(t, ctx, d, slow, `"retry" OR "backoff"`, "p1", "p2", 3)
-	if strings.Contains(plan, "VIRTUAL TABLE INDEX 0:=") {
-		t.Errorf("the payload-in-CTE form reports a rowid lookup, so the plan "+
-			"assertion no longer distinguishes the two shapes:\n%s", plan)
+	for _, tc := range []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{
+			name:  "the window form this replaced",
+			query: window,
+			args:  []any{`"retry" OR "backoff"`, "p1", "p2", 3},
+		},
+		{
+			// Written out rather than derived from workspaceScanQuery: this
+			// subtest is a claim about how SQLite REPORTS a sort, not about
+			// production code, and appending to the real statement made it
+			// fail for the wrong reason whenever that statement was itself
+			// mutated to sort.
+			name: "an ORDER BY added back to the scan",
+			query: `
+				SELECT cm.project_path, cm.rowid, bm25(chunks_fts)
+				  FROM chunks_fts cf
+				  JOIN chunks_meta cm ON cm.rowid = cf.rowid
+				 WHERE chunks_fts MATCH ? AND cm.project_path IN (?,?)
+				 ORDER BY bm25(chunks_fts)`,
+			args: []any{`"retry" OR "backoff"`, "p1", "p2"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := explain(t, ctx, d, tc.query, tc.args...)
+			if !strings.Contains(plan, "TEMP B-TREE") {
+				t.Errorf("this form no longer reports a sorter, so the plan "+
+					"assertion no longer distinguishes it:\n%s", plan)
+			}
+		})
+	}
+}
+
+// TestSearchProjects_FetchesPayloadByRowid guards the second half of the same
+// lesson: file_path and content are fetched for the rows that survived, by
+// rowid, and never carried through the scan.
+//
+// The assertion is on the WHOLE FTS5 idxStr, not a prefix of it. FTS5 packs its
+// plan into one string: "0:=" is a bare rowid lookup, and a MATCH adds an "M"
+// plus the matched column, so a payload fetch that ALSO matched reports
+// "0:=M3" — which still contains "0:=" and does not contain "0:M". The first
+// version of this test asserted on those two prefixes and therefore passed on
+// exactly the merge it existed to catch. Found in review of #266, not by the
+// suite, which is the whole argument for the companion test below.
+func TestSearchProjects_FetchesPayloadByRowid(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCorpus(t, d, []string{"p1", "p2"})
+
+	idxs := ftsIndexes(explain(t, ctx, d, payloadQuery(placeholders(2)), 1, 2))
+	if len(idxs) == 0 {
+		t.Fatal("the payload fetch does not touch chunks_fts at all")
+	}
+	for _, idx := range idxs {
+		if idx != "0:=" {
+			t.Errorf(`chunks_fts is not a plain rowid lookup in the payload `+
+				`fetch: idxStr %q ("=" is the rowid constraint; an "M" means a `+
+				`MATCH crept back in)`, idx)
+		}
+	}
+}
+
+// ftsIndexes returns every FTS5 idxStr in a query plan, whole. The planner
+// prints it as "... VIRTUAL TABLE INDEX <idxStr>" at the end of the line.
+func ftsIndexes(plan string) []string {
+	var out []string
+	for _, line := range strings.Split(plan, "\n") {
+		if _, idx, ok := strings.Cut(line, "VIRTUAL TABLE INDEX "); ok {
+			out = append(out, strings.TrimSpace(idx))
+		}
+	}
+	return out
+}
+
+// TestExplainRejectsThePayloadShapes is the mutation check for the test above,
+// kept in the tree rather than run by hand: it builds the shapes that test
+// exists to reject and asserts it would reject them.
+//
+// The MATCH case is not hypothetical. The prefix-matching version of the guard
+// let it straight through, and nothing in the suite said so.
+func TestExplainRejectsThePayloadShapes(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	seedCorpus(t, d, []string{"p1", "p2"})
+
+	for _, tc := range []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{
+			name: "the two statements merged back together",
+			query: `
+				SELECT cm.rowid, cm.file_path, cf.content
+				  FROM chunks_meta cm
+				  JOIN chunks_fts cf ON cf.rowid = cm.rowid
+				 WHERE chunks_fts MATCH ? AND cm.rowid IN (?,?)`,
+			args: []any{`"retry" OR "backoff"`, 1, 2},
+		},
+		{
+			name: "a join FTS5 cannot serve by rowid",
+			query: `
+				SELECT cm.rowid, cm.file_path, cf.content
+				  FROM chunks_meta cm
+				  JOIN chunks_fts cf ON cf.rowid + 0 = cm.rowid
+				 WHERE cm.rowid IN (?,?)`,
+			args: []any{1, 2},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := explain(t, ctx, d, tc.query, tc.args...)
+			for _, idx := range ftsIndexes(plan) {
+				if idx != "0:=" {
+					return
+				}
+			}
+			t.Errorf("this shape reports a plain rowid lookup, so the payload "+
+				"guard no longer distinguishes it:\n%s", plan)
+		})
+	}
+}
+
+// TestFetchPayload_SpansTheBatchBoundary covers the rowid IN-list batching.
+//
+// TestSearchProjects_SpansTheBatchBoundary cannot reach it, and the reason is a
+// coincidence of the two constants being equal: that test seeds one hit per
+// project, so the rowid list is at most searchProjectsBatch long and the
+// payload loop runs exactly once however many projects there are. Production is
+// 43 projects x 50 hits = five batches, so without this the path that always
+// runs in production would be the one nothing covers.
+func TestFetchPayload_SpansTheBatchBoundary(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	const n = payloadFetchBatch + 7
+	chunks := make([]Chunk, 0, n)
+	for i := 0; i < n; i++ {
+		chunks = append(chunks, Chunk{
+			Content:   "func retryWithBackoff() {}",
+			FilePath:  "a.go",
+			StartLine: 1 + i*10, EndLine: 5 + i*10,
+			Language: "go",
+		})
+	}
+	upsert(t, d, "proj", "a.go", chunks)
+
+	got, err := SearchProjects(ctx, d, []string{"proj"}, "retry", n)
+	if err != nil {
+		t.Fatalf("SearchProjects: %v", err)
+	}
+	if len(got["proj"]) != n {
+		t.Errorf("got %d hits, want %d — a payload batch was dropped",
+			len(got["proj"]), n)
+	}
+}
+
+// TestCollectHits covers what splitting one statement into two actually
+// changed: a chunk can disappear between the ranking scan and the payload
+// fetch. Racing a real delete against a live query is not worth building, so
+// the seam is tested directly — a payload map with rows deliberately left out
+// is exactly the state that race produces.
+func TestCollectHits(t *testing.T) {
+	rows := []rankedRow{{rid: 7, bm: -9}, {rid: 8, bm: -5}, {rid: 9, bm: -1}}
+	full := map[int64]Hit{
+		7: {FilePath: "a.go"}, 8: {FilePath: "b.go"}, 9: {FilePath: "c.go"},
+	}
+
+	t.Run("all present", func(t *testing.T) {
+		dst := map[string][]Hit{}
+		collectHits(map[string][]rankedRow{"p": rows}, full, dst)
+		got := dst["p"]
+		if len(got) != 3 {
+			t.Fatalf("got %d hits, want 3", len(got))
+		}
+		for i, want := range []struct {
+			file  string
+			score float64
+		}{{"a.go", 9}, {"b.go", 5}, {"c.go", 1}} {
+			if got[i].FilePath != want.file || got[i].Score != want.score {
+				t.Errorf("rank %d: got %s/%v, want %s/%v",
+					i, got[i].FilePath, got[i].Score, want.file, want.score)
+			}
+		}
+	})
+
+	t.Run("one row vanished", func(t *testing.T) {
+		partial := map[int64]Hit{7: full[7], 9: full[9]}
+		dst := map[string][]Hit{}
+		collectHits(map[string][]rankedRow{"p": rows}, partial, dst)
+		got := dst["p"]
+		if len(got) != 2 {
+			t.Fatalf("got %d hits, want 2", len(got))
+		}
+		if got[0].FilePath != "a.go" || got[1].FilePath != "c.go" {
+			t.Errorf("got %s,%s — the surviving rows lost their rank order",
+				got[0].FilePath, got[1].FilePath)
+		}
+		if got[0].Score != 9 || got[1].Score != 1 {
+			t.Errorf("got scores %v,%v — a dropped row shifted the scores",
+				got[0].Score, got[1].Score)
+		}
+	})
+
+	t.Run("every row vanished", func(t *testing.T) {
+		dst := map[string][]Hit{}
+		collectHits(map[string][]rankedRow{"p": rows}, map[int64]Hit{}, dst)
+		if _, present := dst["p"]; present {
+			t.Errorf("a project whose every survivor vanished is present with "+
+				"%d hits; this package's contract is that it is absent",
+				len(dst["p"]))
+		}
+	})
+}
+
+// TestTopHits_MatchesAFullSort is the property test for the bounded heap that
+// replaced SQLite's window function.
+//
+// The scores are drawn from a deliberately tiny set so that most rows tie:
+// in a trigram index over real code most hits share a score with another hit,
+// which makes the (score, rowid) tiebreak the part most likely to be wrong and
+// least likely to be noticed. Rows are offered in a shuffled order, because an
+// implementation that quietly depended on arrival order would still pass if
+// they arrived sorted.
+func TestTopHits_MatchesAFullSort(t *testing.T) {
+	for _, n := range []int{1, 3, 50} {
+		for seed := int64(1); seed <= 20; seed++ {
+			rng := rand.New(rand.NewSource(seed))
+			rows := make([]rankedRow, 0, 500)
+			for i := 0; i < 500; i++ {
+				rows = append(rows, rankedRow{
+					rid: int64(rng.Intn(1 << 20)),
+					bm:  -float64(rng.Intn(8)),
+				})
+			}
+			seen := map[int64]bool{}
+			uniq := rows[:0]
+			for _, r := range rows {
+				if !seen[r.rid] {
+					seen[r.rid] = true
+					uniq = append(uniq, r)
+				}
+			}
+			rows = uniq
+
+			top := &topHits{n: n}
+			for _, r := range rows {
+				top.offer(r)
+			}
+			got := top.sorted()
+
+			want := append([]rankedRow(nil), rows...)
+			sort.Slice(want, func(i, j int) bool { return want[i].betterThan(want[j]) })
+			if len(want) > n {
+				want = want[:n]
+			}
+			if len(got) != len(want) {
+				t.Fatalf("n=%d seed=%d: kept %d rows, a full sort keeps %d",
+					n, seed, len(got), len(want))
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("n=%d seed=%d: rank %d is %+v, a full sort puts %+v there",
+						n, seed, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}
+
+// TestTopHits_ZeroLimitKeepsNothing pins the guard in offer. perProject is
+// clamped to a positive number by SearchProjects, so this is about the heap
+// being safe on its own terms rather than about a reachable call.
+func TestTopHits_ZeroLimitKeepsNothing(t *testing.T) {
+	top := &topHits{n: 0}
+	top.offer(rankedRow{rid: 1, bm: -9})
+	if got := top.sorted(); len(got) != 0 {
+		t.Errorf("n=0 kept %d rows", len(got))
 	}
 }
 
