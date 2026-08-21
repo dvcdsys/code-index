@@ -28,6 +28,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -256,10 +257,14 @@ func SearchProject(ctx context.Context, db *sql.DB, projectPath, query string, l
 }
 
 // searchProjectsBatch caps how many project_path values go into one IN
-// list. SQLite's default bound-variable ceiling is 999; 500 leaves room
-// for the query and limit parameters and matches the batch size the
+// list, and payloadFetchBatch does the same for the rowid list of the
+// second statement. SQLite's default bound-variable ceiling is 999; 500
+// leaves room for the query parameter and matches the batch size the
 // vector store already uses for its own IN lists.
-const searchProjectsBatch = 500
+const (
+	searchProjectsBatch = 500
+	payloadFetchBatch   = 500
+)
 
 // SearchProjects answers the same question as SearchProject for many
 // projects at once, returning each project's top `perProject` hits keyed
@@ -315,74 +320,244 @@ func SearchProjects(ctx context.Context, db *sql.DB, projectPaths []string, quer
 func searchProjectsBatchInto(ctx context.Context, db *sql.DB, projectPaths []string,
 	fts5Q string, perProject int, dst map[string][]Hit) error {
 
-	args := make([]any, 0, len(projectPaths)+2)
+	args := make([]any, 0, len(projectPaths)+1)
 	args = append(args, fts5Q)
 	for _, pp := range projectPaths {
 		args = append(args, pp)
 	}
-	args = append(args, perProject)
 
-	rows, err := db.QueryContext(ctx, workspaceRankQuery(placeholders(len(projectPaths))), args...)
+	rows, err := db.QueryContext(ctx, workspaceScanQuery(placeholders(len(projectPaths))), args...)
 	if err != nil {
 		return fmt.Errorf("chunks_fts workspace search: %w", err)
 	}
-	defer rows.Close()
+	tops := make(map[string]*topHits, len(projectPaths))
 	for rows.Next() {
 		var pp string
-		h, err := scanRankedHit(rows, &pp)
-		if err != nil {
-			return err
+		var r rankedRow
+		if err := rows.Scan(&pp, &r.rid, &r.bm); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan chunks_fts ranking row: %w", err)
 		}
-		dst[pp] = append(dst[pp], h)
+		t := tops[pp]
+		if t == nil {
+			t = &topHits{n: perProject}
+			tops[pp] = t
+		}
+		t.offer(r)
 	}
-	if err := rows.Err(); err != nil {
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
 		return fmt.Errorf("iterate chunks_fts: %w", err)
+	}
+
+	ranked := make(map[string][]rankedRow, len(tops))
+	var rids []int64
+	for pp, t := range tops {
+		rows := t.sorted()
+		ranked[pp] = rows
+		for _, r := range rows {
+			rids = append(rids, r.rid)
+		}
+	}
+	payload, err := fetchPayload(ctx, db, rids)
+	if err != nil {
+		return err
+	}
+	for pp, rows := range ranked {
+		hits := make([]Hit, 0, len(rows))
+		for _, r := range rows {
+			h, ok := payload[r.rid]
+			if !ok {
+				// The row was deleted between the ranking scan and the
+				// payload fetch — a reindex of that file landed in between.
+				// Two statements cannot be atomic the way one was, and a
+				// hit fewer is the right answer for a chunk that no longer
+				// exists. Erroring would fail a whole workspace search
+				// because one file was being rewritten.
+				continue
+			}
+			h.Score = -r.bm
+			hits = append(hits, h)
+		}
+		if len(hits) > 0 {
+			dst[pp] = hits
+		}
 	}
 	return nil
 }
 
-// workspaceRankQuery builds the partitioned statement for a placeholder list.
+// rankedRow is a matched chunk before its payload is fetched: the two columns
+// the ranking needs and nothing else.
+type rankedRow struct {
+	rid int64
+	bm  float64
+}
+
+// betterThan orders rows the way the per-project query's
+// ORDER BY bm ASC, rowid ASC does. SQLite gives more-negative bm25 to better
+// matches, so smaller wins; ties break on the lower rowid. The tiebreak is not
+// cosmetic — in a trigram index over real code most hits share a score with
+// another hit, and without it the surviving set would depend on the order the
+// scan happened to visit rows in.
+func (r rankedRow) betterThan(o rankedRow) bool {
+	if r.bm != o.bm {
+		return r.bm < o.bm
+	}
+	return r.rid < o.rid
+}
+
+// topHits keeps the best n rows seen for one project.
 //
-// Split out so the test that pins the query PLAN builds the same string this
-// does. A copy in the test would drift, and drifting is the entire failure
-// mode being guarded against.
+// h is a max-heap on `betterThan`: h[0] is the WORST row kept, which is the
+// one a new row has to beat. That makes the common case — a row that does not
+// make the cut — a single comparison, which is the whole point of doing this
+// here instead of in SQL. See workspaceScanQuery for why.
+type topHits struct {
+	n int
+	h []rankedRow
+}
+
+func (t *topHits) offer(r rankedRow) {
+	if t.n <= 0 {
+		return
+	}
+	if len(t.h) < t.n {
+		t.h = append(t.h, r)
+		t.up(len(t.h) - 1)
+		return
+	}
+	if t.h[0].betterThan(r) {
+		return
+	}
+	t.h[0] = r
+	t.down(0)
+}
+
+// sorted returns the kept rows best-first, leaving the heap unusable.
+func (t *topHits) sorted() []rankedRow {
+	out := t.h
+	sort.Slice(out, func(i, j int) bool { return out[i].betterThan(out[j]) })
+	t.h = nil
+	return out
+}
+
+func (t *topHits) up(i int) {
+	for i > 0 {
+		p := (i - 1) / 2
+		if !t.h[p].betterThan(t.h[i]) {
+			return
+		}
+		t.h[p], t.h[i] = t.h[i], t.h[p]
+		i = p
+	}
+}
+
+func (t *topHits) down(i int) {
+	for {
+		worst := i
+		for _, c := range [2]int{2*i + 1, 2*i + 2} {
+			if c < len(t.h) && t.h[worst].betterThan(t.h[c]) {
+				worst = c
+			}
+		}
+		if worst == i {
+			return
+		}
+		t.h[i], t.h[worst] = t.h[worst], t.h[i]
+		i = worst
+	}
+}
+
+// fetchPayload reads the chunk columns for the rows that survived ranking.
+func fetchPayload(ctx context.Context, db *sql.DB, rids []int64) (map[int64]Hit, error) {
+	out := make(map[int64]Hit, len(rids))
+	for start := 0; start < len(rids); start += payloadFetchBatch {
+		end := start + payloadFetchBatch
+		if end > len(rids) {
+			end = len(rids)
+		}
+		batch := rids[start:end]
+		args := make([]any, len(batch))
+		for i, rid := range batch {
+			args[i] = rid
+		}
+		rows, err := db.QueryContext(ctx, payloadQuery(placeholders(len(batch))), args...)
+		if err != nil {
+			return nil, fmt.Errorf("chunks_fts payload fetch: %w", err)
+		}
+		for rows.Next() {
+			var rid int64
+			var h Hit
+			var chunkT, symName, language sql.NullString
+			if err := rows.Scan(&rid, &h.FilePath, &h.StartLine, &h.EndLine,
+				&chunkT, &symName, &language, &h.Content); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan chunks_fts payload row: %w", err)
+			}
+			h.ChunkType = chunkT.String
+			h.SymbolName = symName.String
+			h.Language = language.String
+			out[rid] = h
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("iterate chunks_fts payload: %w", err)
+		}
+	}
+	return out, nil
+}
+
+// workspaceScanQuery streams every matched row's project, rowid and BM25
+// score. It deliberately does no ordering and no trimming: the caller keeps a
+// bounded per-project heap as the rows go past.
 //
-// Rank on the cheap columns, then fetch the payload for the rows that
-// survived. The obvious form — selecting file_path, content and the rest
-// inside the CTE — makes SQLite materialise all of it for EVERY matched
-// row before ROW_NUMBER trims to `perProject` per project, and the match
-// set is the whole server's index. On the load-test fixture a four-common-
-// word query matched 263,515 rows to return 2,300: carrying the payload
-// through cost 15.1 s against 2.8 s for this form, and a 624k-row match
-// cost 29.6 s — worse than the 46 per-project queries this replaced. The
-// rowid round-trip is the cheap half of the trade.
+// The obvious form asks SQLite for the answer directly, with
+// ROW_NUMBER() OVER (PARTITION BY project_path ORDER BY bm) and rn <= N. That
+// is correct and it is what this shipped first, but a window function has to
+// sort the ENTIRE match set to find N rows per project, and the match set here
+// is the whole server's index: the trigram tokenizer makes a common short word
+// match a quarter of the corpus, because "and" occurs inside command, handler,
+// standard and random. On the load-test fixture a six-term query matched
+// 623,913 rows to keep 2,300, and a six-term query with the word "test" in it
+// matched 1,288,739. Sorting those to keep fifty per project is the single
+// largest cost in the statement.
 //
-// Those numbers came from a bench harness that is NOT in this repository:
-// /loadtests/ is gitignored, corpus and tools alike. To recreate it, time
-// this statement against a corpus with a large match set alongside the
-// same statement with the payload columns moved into `hits` — the gap only
-// appears when the match set is orders of magnitude larger than the result.
-// TestSearchProjects_FetchesPayloadAfterTheTrim is the in-repo guard.
-func workspaceRankQuery(ph string) string {
+// A bounded heap looks at each row once and rejects most of them in one
+// comparison. Measured on that fixture, window form vs heap: 144 ms vs 119 ms
+// on a 21k match set, 2,466 vs 1,455 on 624k, 5,216 vs 3,014 on 1.29M. It wins
+// at every size, and it wins by more as the match set grows.
+//
+// The result is IDENTICAL, not merely close — same rows, same order. That is
+// what TestSearchProjects_MatchesPerProjectQueries checks, against the
+// per-project statement as the oracle.
+//
+// Those timings came from a bench harness that is NOT in this repository:
+// /loadtests/ is gitignored, corpus and tools alike. To recreate it, time this
+// statement plus the Go-side heap against the same statement wrapped in the
+// window form, over a corpus whose match set is orders of magnitude larger
+// than the result.
+func workspaceScanQuery(ph string) string {
 	return fmt.Sprintf(`
-		WITH hits AS (
-		  SELECT cm.project_path AS pp, cm.rowid AS rid, bm25(chunks_fts) AS bm
-		    FROM chunks_fts cf
-		    JOIN chunks_meta cm ON cm.rowid = cf.rowid
-		   WHERE chunks_fts MATCH ? AND cm.project_path IN (%s)
-		),
-		ranked AS (
-		  SELECT pp, rid, bm,
-		         ROW_NUMBER() OVER (PARTITION BY pp ORDER BY bm ASC, rid ASC) AS rn
-		    FROM hits
-		)
-		SELECT r.pp, cm.file_path, cm.start_line, cm.end_line,
-		       cm.chunk_type, cm.symbol_name, cm.language, cf.content, r.bm
-		  FROM ranked r
-		  JOIN chunks_meta cm ON cm.rowid = r.rid
-		  JOIN chunks_fts cf ON cf.rowid = r.rid
-		 WHERE r.rn <= ?
-		 ORDER BY r.pp, r.rn`, ph)
+		SELECT cm.project_path, cm.rowid, bm25(chunks_fts)
+		  FROM chunks_fts cf
+		  JOIN chunks_meta cm ON cm.rowid = cf.rowid
+		 WHERE chunks_fts MATCH ? AND cm.project_path IN (%s)`, ph)
+}
+
+// payloadQuery fetches the chunk columns for rows that already survived
+// ranking. Keeping the payload out of the scan matters for the same reason the
+// ranking is not done in SQL: carrying file_path and content through a
+// 600k-row scan materialises them for every match to return a couple of
+// thousand. Both halves of that lesson cost a shipped regression to learn.
+func payloadQuery(ph string) string {
+	return fmt.Sprintf(`
+		SELECT cm.rowid, cm.file_path, cm.start_line, cm.end_line,
+		       cm.chunk_type, cm.symbol_name, cm.language, cf.content
+		  FROM chunks_meta cm
+		  JOIN chunks_fts cf ON cf.rowid = cm.rowid
+		 WHERE cm.rowid IN (%s)`, ph)
 }
 
 // placeholders builds "?,?,?" for an IN list. n is always >= 1: SearchProjects
@@ -395,18 +570,15 @@ func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
-// scanHit reads one single-project ranking row.
-func scanHit(rows *sql.Rows) (Hit, error) { return scanRankedHit(rows, nil) }
-
-// scanRankedHit reads one ranking row, optionally preceded by a project_path
-// column (pass nil for the single-project query, which does not select one).
+// scanHit reads one row of the single-project ranking query.
 //
-// Both queries share this because they must produce byte-identical Hits and
-// their only structural difference is that leading column. Two hand-written
-// scans agreeing is exactly the kind of thing that stays true until it
-// quietly does not — and the equivalence test compares the two paths against
-// EACH OTHER, so a mistake made symmetrically in both would pass.
-func scanRankedHit(rows *sql.Rows, pp *string) (Hit, error) {
+// The workspace query no longer shares this: it scans (project, rowid, score)
+// and fetches the payload separately, so the two paths now build a Hit in two
+// different places. They must still produce byte-identical Hits —
+// TestSearchProjects_MatchesPerProjectQueries compares them — and a mistake
+// made symmetrically in both would pass that test, so keep the two column
+// lists side by side when editing either.
+func scanHit(rows *sql.Rows) (Hit, error) {
 	var (
 		h        Hit
 		chunkT   sql.NullString
@@ -414,17 +586,8 @@ func scanRankedHit(rows *sql.Rows, pp *string) (Hit, error) {
 		language sql.NullString
 		bm       float64
 	)
-	// Built in one allocation rather than prepending to a finished slice: the
-	// workspace query returns up to len(projects) * perProject rows — ~2,150
-	// on the 43-project load-test fixture — and this runs per row, inside the
-	// path the rest of this change exists to speed up.
-	dest := make([]any, 0, 9)
-	if pp != nil {
-		dest = append(dest, pp)
-	}
-	dest = append(dest, &h.FilePath, &h.StartLine, &h.EndLine,
-		&chunkT, &symName, &language, &h.Content, &bm)
-	if err := rows.Scan(dest...); err != nil {
+	if err := rows.Scan(&h.FilePath, &h.StartLine, &h.EndLine,
+		&chunkT, &symName, &language, &h.Content, &bm); err != nil {
 		return Hit{}, fmt.Errorf("scan chunks_fts row: %w", err)
 	}
 	h.ChunkType = chunkT.String
