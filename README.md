@@ -287,7 +287,7 @@ docker compose down -v          # stop AND wipe data + models (destructive)
 
 | Doc | Purpose |
 |---|---|
-| [`doc/CLI_REFERENCE.md`](doc/CLI_REFERENCE.md) | Full CLI command surface + per-project config (`.cixignore`, `.cixconfig.yaml`) |
+| [`doc/CLI_REFERENCE.md`](doc/CLI_REFERENCE.md) | Full CLI command surface + per-project config (`.cixignore`, `.cixconfig.yaml`) — honoured by the server for cloned repos too |
 | [`doc/CLI_CONFIG.md`](doc/CLI_CONFIG.md) | Everything the CLI lets you configure (servers, defaults, output) |
 | [`doc/DASHBOARD.md`](doc/DASHBOARD.md) | Dashboard pages, authentication, authorization model, drift indicator |
 | [`doc/MACOS_APP.md`](doc/MACOS_APP.md) | The macOS menu bar app — install, first run, updates, uninstall |
@@ -344,7 +344,8 @@ projects and teams that make it possible:
   SQLite for project metadata, symbols, the FTS5/BM25 mirror, and (since
   v0.13.0) the vectors themselves.
 - [go-git](https://github.com/go-git/go-git) — server-side repository
-  cloning for workspaces.
+  cloning for workspaces, and the gitignore engine the server walker uses to
+  honour `.gitignore` / `.cixignore` in cloned repos.
 
 **Server & API**
 - [chi](https://github.com/go-chi/chi) — HTTP router.
@@ -373,8 +374,9 @@ projects and teams that make it possible:
   [validator](https://github.com/go-playground/validator) checking what
   lands there.
 - [go-gitignore](https://github.com/sabhiram/go-gitignore) — `.cixignore`
-  and `.gitignore` matching, so the watcher and the indexer agree with git
-  about what is source.
+  and `.gitignore` matching in the CLI, so the watcher and the indexer agree
+  with git about what is source. (The server walker uses go-git's own
+  gitignore package instead — see above.)
 
 **Dashboard (web UI)**
 - [React](https://react.dev/) + [Vite](https://vitejs.dev/) — the embedded

@@ -507,3 +507,231 @@ func fileHashes(t *testing.T, d *sql.DB, projectPath string) map[string]string {
 	}
 	return out
 }
+
+// chunkCount reports how many indexed chunks a project holds for one file.
+// file_hashes alone would not prove the prune reached the searchable stores;
+// chunks_meta is the row-level shadow FinishIndexing has to clear alongside
+// the vectors and symbols.
+func chunkCount(t *testing.T, d *sql.DB, projectPath, filePath string) int {
+	t.Helper()
+	var n int
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM chunks_meta WHERE project_path = ? AND file_path = ?`,
+		projectPath, filePath,
+	).Scan(&n); err != nil {
+		t.Fatalf("count chunks_meta for %s: %v", filePath, err)
+	}
+	return n
+}
+
+// TestIndexDir_Reconcile_PrunesNewlyIgnored is the acceptance test for
+// issue #274: a .cixignore committed to a repo that is ALREADY indexed must
+// remove the files it now covers, not merely stop adding new ones.
+func TestIndexDir_Reconcile_PrunesNewlyIgnored(t *testing.T) {
+	d, idx := newIndexerForTest(t)
+	seedProjectForTest(t, d, "proj")
+
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"keep.go":  "package keep\n\nfunc Keep() {}\n",
+		"gen/a.go": "package gen\n\nfunc GenA() {}\n",
+	})
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("round1 reconcile: %v", err)
+	}
+	round1 := fileHashes(t, d, "proj")
+	if _, ok := round1["gen/a.go"]; !ok {
+		t.Fatal("round1: gen/a.go should have been indexed before the rule existed")
+	}
+	if chunkCount(t, d, "proj", "gen/a.go") == 0 {
+		t.Fatal("round1: gen/a.go produced no chunks, test cannot prove the prune")
+	}
+
+	// The user commits a .cixignore covering gen/ and pushes.
+	writeTree(t, root, map[string]string{".cixignore": "gen/\n"})
+
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("round2 reconcile: %v", err)
+	}
+	round2 := fileHashes(t, d, "proj")
+
+	if _, ok := round2["gen/a.go"]; ok {
+		t.Error("gen/a.go still in file_hashes; the new .cixignore rule was not applied retroactively")
+	}
+	if n := chunkCount(t, d, "proj", "gen/a.go"); n != 0 {
+		t.Errorf("gen/a.go still has %d chunks; FinishIndexing did not prune the searchable rows", n)
+	}
+	// Everything outside the rule must survive untouched — a prune that
+	// re-embeds the rest would be correct but ruinously expensive.
+	if round2["keep.go"] != round1["keep.go"] {
+		t.Error("keep.go hash changed; the prune should not have disturbed it")
+	}
+}
+
+func TestIndexDir_Full_SkipsIgnored(t *testing.T) {
+	d, idx := newIndexerForTest(t)
+	seedProjectForTest(t, d, "proj")
+
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".gitignore":    "*.gen.go\n",
+		".cixignore":    "fixtures/\n",
+		"keep.go":       "package keep\n",
+		"api.gen.go":    "package api\n",
+		"fixtures/f.go": "package fixtures\n",
+	})
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, true, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("IndexDir(full): %v", err)
+	}
+
+	hashes := fileHashes(t, d, "proj")
+	if _, ok := hashes["keep.go"]; !ok {
+		t.Error("keep.go missing; the ignore rules over-matched")
+	}
+	for _, p := range []string{"api.gen.go", "fixtures/f.go"} {
+		if _, ok := hashes[p]; ok {
+			t.Errorf("%s was indexed despite the ignore rules", p)
+		}
+	}
+	// The ignore files themselves have no detectable language, so they never
+	// reach the index — no explicit skip needed for them.
+	for _, p := range []string{".gitignore", ".cixignore"} {
+		if _, ok := hashes[p]; ok {
+			t.Errorf("%s should not be indexed", p)
+		}
+	}
+}
+
+// The incremental driver never walks directories, so a path that a new rule
+// covers has to be deleted explicitly — otherwise its chunks survive until
+// some unrelated reconcile happens to run.
+func TestIndexDir_Incremental_DeletesNewlyIgnored(t *testing.T) {
+	d, idx := newIndexerForTest(t)
+	seedProjectForTest(t, d, "proj")
+
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"keep.go":  "package keep\n\nfunc Keep() {}\n",
+		"gen/a.go": "package gen\n\nfunc GenA() {}\n",
+	})
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, true, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("round1 full: %v", err)
+	}
+	if chunkCount(t, d, "proj", "gen/a.go") == 0 {
+		t.Fatal("round1: gen/a.go produced no chunks")
+	}
+
+	// A push that edits gen/a.go and adds the rule that now covers it.
+	writeTree(t, root, map[string]string{
+		".cixignore": "gen/\n",
+		"gen/a.go":   "package gen\n\nfunc GenA() { _ = 1 }\n",
+	})
+	cs := &repocloner.ChangeSet{Modified: []string{"gen/a.go"}, Added: []string{".cixignore"}}
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, cs, DefaultFilter(), nil); err != nil {
+		t.Fatalf("IndexDir(incremental): %v", err)
+	}
+
+	hashes := fileHashes(t, d, "proj")
+	if _, ok := hashes["gen/a.go"]; ok {
+		t.Error("gen/a.go still in file_hashes; incremental skipped it instead of deleting it")
+	}
+	if n := chunkCount(t, d, "proj", "gen/a.go"); n != 0 {
+		t.Errorf("gen/a.go still has %d chunks after the incremental pass", n)
+	}
+	if _, ok := hashes["keep.go"]; !ok {
+		t.Error("keep.go disappeared; the incremental prune over-reached")
+	}
+}
+
+// Deleting a path that was never indexed must be a no-op, not an error — the
+// common case when a rule is added at the same time as the files it covers.
+func TestIndexDir_Incremental_IgnoredNewPathIsHarmless(t *testing.T) {
+	d, idx := newIndexerForTest(t)
+	seedProjectForTest(t, d, "proj")
+
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"keep.go": "package keep\n"})
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, true, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("round1 full: %v", err)
+	}
+
+	writeTree(t, root, map[string]string{
+		".cixignore": "gen/\n",
+		"gen/new.go": "package gen\n",
+	})
+	cs := &repocloner.ChangeSet{Added: []string{".cixignore", "gen/new.go"}}
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, cs, DefaultFilter(), nil); err != nil {
+		t.Fatalf("IndexDir(incremental): %v", err)
+	}
+
+	hashes := fileHashes(t, d, "proj")
+	if _, ok := hashes["gen/new.go"]; ok {
+		t.Error("gen/new.go was indexed despite the rule added in the same push")
+	}
+	if _, ok := hashes["keep.go"]; !ok {
+		t.Error("keep.go disappeared")
+	}
+}
+
+// Ignore rules must not disturb the resume skip: a reconcile after adding a
+// rule re-embeds nothing that the rule does not cover.
+func TestIndexDir_Reconcile_IgnoreDoesNotForceReembed(t *testing.T) {
+	emb := &countingEmbedder{dim: 8}
+	d, idx := newIndexerForTestEmb(t, emb)
+	seedProjectForTest(t, d, "proj")
+
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"a.go":     "package a\n",
+		"b.go":     "package b\n",
+		"gen/c.go": "package gen\n",
+	})
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("round1 reconcile: %v", err)
+	}
+
+	writeTree(t, root, map[string]string{".cixignore": "gen/\n"})
+	emb.calls = 0
+
+	if _, _, err := IndexDir(context.Background(), idx, "proj", root, false, nil, DefaultFilter(), nil); err != nil {
+		t.Fatalf("round2 reconcile: %v", err)
+	}
+	if emb.calls != 0 {
+		t.Errorf("round2 embedded %d files; adding an ignore rule must only delete, never re-embed", emb.calls)
+	}
+	if _, ok := fileHashes(t, d, "proj")["gen/c.go"]; ok {
+		t.Error("gen/c.go survived the reconcile")
+	}
+}
+
+// shouldSkipDir has to consult the ignore rules too, and it has to ask about
+// a DIRECTORY: go-git enforces a "build/" pattern's dirOnly flag only on the
+// last path segment, so asking as a file would silently fail to prune.
+func TestShouldSkipDir_IgnoreRules(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{".cixignore": "fixtures/\nsrc/gen/\n"})
+	f := filterFor(t, root)
+
+	cases := map[string]bool{
+		"fixtures": true,
+		"src":      false,
+		"pkg":      false,
+	}
+	for name, want := range cases {
+		if got := f.shouldSkipDir(filepath.Join(root, name), root, name); got != want {
+			t.Errorf("shouldSkipDir(%q) = %v, want %v", name, got, want)
+		}
+	}
+	// A nested pattern must prune only at its own depth.
+	nested := filepath.Join(root, "src", "gen")
+	if !f.shouldSkipDir(nested, root, "gen") {
+		t.Error("src/gen should be pruned by the src/gen/ rule")
+	}
+	if f.shouldSkipDir(filepath.Join(root, "other", "gen"), root, "gen") {
+		t.Error("other/gen must not be pruned by an src/-anchored rule")
+	}
+	// The hardcoded exclude list still applies alongside the rules.
+	if !f.shouldSkipDir(filepath.Join(root, "node_modules"), root, "node_modules") {
+		t.Error("DefaultFilter exclusions regressed")
+	}
+}

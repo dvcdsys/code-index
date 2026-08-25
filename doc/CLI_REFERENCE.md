@@ -158,6 +158,45 @@ Nested `.cixignore` files work like nested `.gitignore`. The file watcher
 automatically triggers a full reindex when `.cixignore` is created,
 modified, or deleted.
 
+Two pattern shapes are matched differently from `git check-ignore`, in both the
+CLI and the server:
+
+- The allowlist idiom (`*`, then `!*/`, then `!*.go`) excludes only top-level
+  files — `!*/` re-includes everything nested, not just directories. Write the
+  exclusions positively instead.
+- `[!abc]` is read as the literal set `{!, a, b, c}`, not as a negation
+  (Go's `filepath.Match` spells that `[^abc]`), so it excludes `a.txt` where
+  git would keep it. Avoid character classes here.
+
+#### GitHub-backed projects
+
+Both files are honoured for repos the **server** clones and indexes, not just
+for local projects the CLI walks — commit a `.cixignore` and it takes effect
+on the next sync. When a push touches any `.gitignore` or `.cixignore`, that
+sync upgrades itself from an incremental pass to a full reconcile, so files a
+new rule now covers are *removed* from the index rather than merely left
+alone. Removing a rule works the same way in reverse.
+
+Two differences from the local case are worth knowing:
+
+- **`.gitignore` barely does anything on a cloned repo, by design.** A clone
+  checks out exactly the tracked files, and git never applies ignore rules to
+  files it already tracks. So the only files a `.gitignore` excludes
+  server-side are ones the repo tracks *despite* its own rule — a committed
+  `bin/deploy.sh` under a `bin/` rule, say. Use `.cixignore` for anything you
+  actually want excluded.
+- **`.cixignore` beats `.gitignore` on ties.** `!keep.log` in `.cixignore`
+  re-includes a file that `*.log` in `.gitignore` excluded. The CLI resolves
+  the two files independently and cannot do this.
+
+Repos indexed before server-side support shipped are cleaned up gradually —
+the first push that touches an ignore file reconciles them. To force it now,
+use **Reindex** in the dashboard (`POST /api/v1/projects/{hash}/reindex?full=true`).
+
+Ignore rules govern **indexing**, not file serving: `cix file` and `cix tree`
+read the server's checkout directly and will still return an ignored path.
+Don't treat `.cixignore` as an access control.
+
 ### `.cixconfig.yaml` — project-level settings
 
 Place in the project root:
@@ -172,3 +211,6 @@ submodule paths from indexing. No git binary required — the file is parsed
 directly. Useful for Foundry/Forge dependencies, vendored submodules, or any
 repo where submodules contain thousands of files you don't want indexed. The
 watcher triggers a full reindex when this file changes.
+
+This one is CLI-only: the server clones without `--recurse-submodules`, so a
+cloned repo's submodule directories are empty and there is nothing to exclude.

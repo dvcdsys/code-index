@@ -300,37 +300,9 @@ func handleClone(ctx context.Context, d Deps, job jobs.Job) error {
 		return nil
 	}
 
-	// Mode determination. The decision tree errs on the side of full
-	// because full is always correct (just slower); incremental is
-	// only correct when every precondition holds.
-	mode := ModeIncremental
-	reason := "tree-diff"
-	switch {
-	case p.ForceFull:
-		// Operator explicitly asked for a full wipe + rebuild
-		// (POST /reindex?full=true). This is the only non-model-change
-		// path that discards existing vectors — everything else resumes.
-		mode, reason = ModeFull, "force-full"
-	case g.IndexedSHA == "":
-		// First index, OR a prior run that crashed / was force-stopped
-		// before writing indexed_sha. Reconcile (not wipe) so recovery
-		// resumes from whatever file_hashes already holds instead of
-		// re-embedding the whole repo from zero. On a genuinely first
-		// index file_hashes is empty, so reconcile embeds everything —
-		// same result, no wipe.
-		mode, reason = ModeReconcile, "first-or-resume"
-	case result.Changes == nil:
-		// Either no PrevIndexedSHA was effective (handled above) or
-		// tree.Diff failed (old commit not in objects). Walk everything,
-		// but reconcile still skips unchanged files by hash.
-		mode, reason = ModeReconcile, "no-changeset"
-	case d.Indexer != nil && d.Indexer.EmbeddingModel() != "" &&
-		d.Indexer.EmbeddingModel() != projectIndexedWithModel(ctx, d.DB, g.ProjectPath):
-		// Embedding model changed since the last index — the stored
-		// vectors are no longer comparable to fresh queries. Force a
-		// full wipe so the whole index uses the current model.
-		mode, reason = ModeFull, "model-change"
-	}
+	modelChanged := d.Indexer != nil && d.Indexer.EmbeddingModel() != "" &&
+		d.Indexer.EmbeddingModel() != projectIndexedWithModel(ctx, d.DB, g.ProjectPath)
+	mode, reason := decideMode(p.ForceFull, g.IndexedSHA, result.Changes, modelChanged)
 
 	if err := setProjectStatus(ctx, d.DB, g.ProjectPath, "indexing"); err != nil {
 		d.Logger.Warn("repojobs: set status indexing failed", "project", g.ProjectPath, "err", err)
@@ -479,6 +451,79 @@ func handleIndex(ctx context.Context, d Deps, job jobs.Job) error {
 	// next poll is scheduled relative to "now" (end of indexing).
 	d.reschedulePoll(ctx, g)
 	return nil
+}
+
+// decideMode picks the index mode for one clone cycle. Extracted from
+// handleClone as a pure function: handleClone needs a live git remote, so it
+// has no unit test, and every branch here is a rule that gets revisited.
+//
+// The decision tree errs on the side of full because full is always correct
+// (just slower); incremental is only correct when every precondition holds.
+// Order is priority order — the first matching case wins.
+func decideMode(forceFull bool, indexedSHA string, changes *repocloner.ChangeSet, modelChanged bool) (mode, reason string) {
+	switch {
+	case forceFull:
+		// Operator explicitly asked for a full wipe + rebuild
+		// (POST /reindex?full=true). This is the only non-model-change
+		// path that discards existing vectors — everything else resumes.
+		return ModeFull, "force-full"
+	case indexedSHA == "":
+		// First index, OR a prior run that crashed / was force-stopped
+		// before writing indexed_sha. Reconcile (not wipe) so recovery
+		// resumes from whatever file_hashes already holds instead of
+		// re-embedding the whole repo from zero. On a genuinely first
+		// index file_hashes is empty, so reconcile embeds everything —
+		// same result, no wipe.
+		return ModeReconcile, "first-or-resume"
+	case changes == nil:
+		// Either no PrevIndexedSHA was effective (handled above) or
+		// tree.Diff failed (old commit not in objects). Walk everything,
+		// but reconcile still skips unchanged files by hash.
+		return ModeReconcile, "no-changeset"
+	case modelChanged:
+		// Embedding model changed since the last index — the stored
+		// vectors are no longer comparable to fresh queries. Force a
+		// full wipe so the whole index uses the current model.
+		return ModeFull, "model-change"
+	case changesTouchIgnoreFile(changes):
+		// An ignore file moved, so the set of indexable paths changed in a
+		// way the tree diff cannot express: the files a new rule now covers
+		// were not themselves touched by this push, so incremental would
+		// never revisit them and their chunks would linger forever. Reconcile
+		// walks the whole tree and hands everything it no longer accepts to
+		// FinishIndexing's delete pass — which is also how the un-ignore
+		// direction (a rule being removed) gets its files back. Deliberately
+		// last: every case above already walks or wipes the whole tree.
+		return ModeReconcile, "ignore-rules-changed"
+	}
+	return ModeIncremental, "tree-diff"
+}
+
+// changesTouchIgnoreFile reports whether a tree diff adds, edits or removes an
+// ignore file that could actually change an indexing decision — nested ones
+// included, since those govern their own subtree.
+//
+// Ignore files under an excluded directory do not count: the pattern collector
+// never descends into node_modules, vendor, .git and friends, so a push
+// touching vendor/foo/.gitignore would otherwise force a whole-tree reconcile
+// that cannot change a single decision.
+func changesTouchIgnoreFile(cs *repocloner.ChangeSet) bool {
+	if cs == nil {
+		return false
+	}
+	excluded := repoindexer.DefaultFilter().ExcludeDirs
+	for _, group := range [][]string{cs.Modified, cs.Added, cs.Deleted} {
+		for _, rel := range group {
+			if !repoindexer.IsIgnoreFile(rel) {
+				continue
+			}
+			if repoindexer.UnderExcludedDir(rel, excluded) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // projectIndexedWithModel reads projects.indexed_with_model for one

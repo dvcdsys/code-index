@@ -197,6 +197,89 @@ is non-fatal — the response includes `auto_registered: false` and an
 operator-facing note explaining the specific reason (missing scope,
 network error, etc.).
 
+## Excluding files from a cloned repo
+
+The server walker honours `.gitignore` and `.cixignore` in the repos it
+clones, merged and nested the way git does. Commit a `.cixignore` and it
+applies on the next sync — nothing to configure on the server. Two pattern
+shapes behave differently from git; see [Known limits](#known-limits) below.
+
+```gitignore
+# .cixignore at the repo root
+testdata/fixtures/
+docs/generated/
+*.pb.go
+```
+
+**What `.gitignore` does here is narrower than you might expect.** A clone
+checks out exactly the tracked files, and git does not apply ignore rules to
+files it already tracks. So the only thing a `.gitignore` excludes on the
+server is a file the repo tracks *despite* its own rule — a committed
+`bin/deploy.sh` under a `bin/` rule. Everything else it would have caught was
+never in the checkout to begin with. `.cixignore` is the knob that actually
+does work here.
+
+Where the two collide, `.cixignore` wins: it is loaded second and the last
+matching pattern decides, so `!keep.log` re-includes what `*.log` excluded.
+
+One gotcha inherited from git: a `!` rule cannot rescue a file whose parent
+directory is already excluded. `docs/*` followed by `!docs/api/keep.md` still
+excludes that file, because `docs/api` was excluded first. Re-include the
+directory too — `!docs/api/` — and the file comes back.
+
+### Known limits
+
+Two pattern shapes are matched differently from `git check-ignore`. Both come
+from the underlying matcher, both affect the CLI in the same way, and both were
+verified against a real repo.
+
+- **The allowlist idiom does not work below the top level.** Writing `*`, then
+  `!*/`, then `!*.go` excludes only top-level files: `!*/` re-includes
+  everything nested, not just directories, so `sub/notes.txt` and
+  `a/b/c/deep.txt` stay indexed. Write the exclusions positively instead —
+  `vendor/`, `testdata/`, `*.min.js`.
+- **`[!abc]` is read as a literal set, not a negation.** The matcher uses Go's
+  `filepath.Match`, which spells negation `[^abc]`. So `[!abc].txt` excludes
+  `a.txt` (which git keeps) and keeps `d.txt` (which git excludes). The first
+  direction is the one that bites: a tracked source file silently missing from
+  search. Avoid character classes in ignore files; a plain glob is unambiguous.
+
+### How a rule change reaches the index
+
+A normal push is indexed incrementally — only the paths in the diff are
+touched. That is not enough for a rule change, because the files a new rule
+covers usually were not themselves modified by that push. So when a push
+touches **any** `.gitignore` or `.cixignore`, the sync upgrades itself to a
+full reconcile: the whole tree is walked, unchanged files are skipped by
+content hash (nothing is re-embedded), and everything the rules now exclude is
+deleted from the vectors, symbols, BM25 mirror and file hashes. Removing a
+rule takes the same path, which is how the excluded files come back.
+
+You can see which mode a sync chose in the server log:
+
+```
+repojobs: clone done, enqueueing index  mode=reconcile reason=ignore-rules-changed
+```
+
+Repos that were indexed before this shipped are cleaned up gradually — the
+first push touching an ignore file reconciles them, as does any reconcile that
+happens for other reasons (first index, crash recovery, an embedding-model
+change). Nothing reindexes on upgrade. To force it for one repo now, hit
+**Reindex** in the dashboard or
+`POST /api/v1/projects/{hash}/reindex?full=true`.
+
+### What this does not do
+
+Ignore rules control **indexing**, not file serving. `cix file` and `cix tree`
+read the server's checkout directly and will happily return a path that
+`.cixignore` excludes from search. Do not use `.cixignore` as access control —
+if the content must not be readable, it must not be in the repo the server
+clones.
+
+`.cixconfig.yaml`'s `ignore.submodules` is CLI-only. The server clones without
+`--recurse-submodules`, so submodule directories are empty in the checkout and
+there is nothing to exclude.
+
 ## Background workers
 
 A single in-process worker pool drains a SQLite-backed queue (`jobs`
