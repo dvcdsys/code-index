@@ -49,11 +49,19 @@ func collectIgnorePatterns(ctx context.Context, rootDir string, excludeDirs []st
 // the given repo-relative paths, by descending the ancestor chains of those
 // paths instead of the whole tree.
 //
-// This is exact rather than approximate: a pattern's domain is the directory
-// its file sits in, and Match returns NoMatch for any path that does not start
-// with that domain, so an ignore file outside a path's ancestor chain can
-// never change the answer for it. The incremental driver only ever asks about
-// the paths in its change set, which is why it can afford this.
+// This is exact rather than approximate, and it takes both halves of the
+// argument. Domain: a pattern's domain is the directory its file sits in, and
+// Match returns NoMatch for any path that does not start with that domain, so
+// an ignore file outside a path's ancestor chain can never change the answer
+// for it. Ordering: the restricted list is a strict subsequence of the full
+// one — same pre-order walk, subtrees skipped rather than reordered — and the
+// dropped patterns cannot match the queried paths, so go-git's last-match-wins
+// lands on the same pattern either way. Progressive pruning agrees too, since
+// a directory's prune decision depends only on patterns whose domain is one of
+// its own ancestors, and those are collected in both modes.
+//
+// The incremental driver only ever asks about the paths in its change set,
+// which is why it can afford this.
 //
 // It matters because the full walk is O(directories) while a push is usually
 // O(3 files): on a repo with thousands of directories the unrestricted
@@ -144,7 +152,11 @@ func collectIgnoreDir(ctx context.Context, dir string, domain []string, excluded
 		}
 		// Unlike an unlistable directory, a listed-but-unreadable ignore file
 		// IS fatal: the walk can still descend here, so proceeding would index
-		// files a rule we know exists was meant to exclude.
+		// files a rule we know exists was meant to exclude. Consequence worth
+		// recognising rather than guarding against — the job retries, so a
+		// PERMANENTLY unreadable ignore file parks the repo in a failing loop
+		// with "collect ignore patterns:" in last_error. Unreachable in
+		// practice, since the server wrote these files into its own clone dir.
 		patterns, err := readIgnoreFile(filepath.Join(dir, name), domain)
 		if err != nil {
 			return err
