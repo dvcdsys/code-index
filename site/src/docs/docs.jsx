@@ -266,7 +266,7 @@ cix search "main entry point" --exclude vendor --exclude bench/fixtures
 echo "vendor/"             >> .cixignore
 echo "bench/fixtures/"     >> .cixignore
 cix reindex --full`}</CodeBlock>
-            <p><code>.cixignore</code> follows <code>.gitignore</code> syntax exactly (it is read by the CLI's file discovery, alongside your <code>.gitignore</code>). A <code>.cixconfig.yaml</code> with <code>ignore:&nbsp;submodules:&nbsp;true</code> additionally excludes all git submodule paths.</p>
+            <p><code>.cixignore</code> follows <code>.gitignore</code> syntax exactly, and both files are read alongside each other &mdash; by the CLI for local projects, and by the server for GitHub-backed ones, so a committed <code>.cixignore</code> takes effect on the next sync. A push that touches either file upgrades that sync to a full reconcile, which is what lets a new rule <i>remove</i> already-indexed files instead of just skipping them from then on. Note that a clone only ever contains tracked files and git does not apply ignore rules to those, so on a server-side repo <code>.gitignore</code> excludes almost nothing &mdash; reach for <code>.cixignore</code>. A <code>.cixconfig.yaml</code> with <code>ignore:&nbsp;submodules:&nbsp;true</code> additionally excludes all git submodule paths (CLI only &mdash; server clones have no submodules checked out).</p>
           </Section>
 
           <Section id="config" title="Configuration" eyebrow="Environment">
