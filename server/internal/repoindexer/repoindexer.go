@@ -29,9 +29,12 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/indexer"
@@ -112,6 +115,14 @@ type FileFilter struct {
 	// SkipBinaries, when true (default), drops files whose first 512
 	// bytes contain a NUL — a cheap-and-cheerful proxy for "not text".
 	SkipBinaries bool
+
+	// ignore holds the repo's own .gitignore/.cixignore rules. Built by
+	// IndexDir from the tree it is about to walk rather than supplied by the
+	// caller, so a future call site cannot forget to populate it and silently
+	// regress back to indexing everything. Nil for a repo with no ignore
+	// files — and note it is a nil INTERFACE, so every read must go through
+	// ignored() rather than calling Match directly.
+	ignore gitignore.Matcher
 }
 
 // DefaultFilter returns a sensible default ruleset. Mirrors the CLI's
@@ -173,6 +184,29 @@ func IndexDir(
 	walkAll := changes == nil
 	reconcile := walkAll && !wipe
 
+	// Collect the repo's ignore rules before either driver starts. This has to
+	// happen up front rather than during the walk because the incremental
+	// driver never traverses directories — it works from an explicit path list
+	// — so there is no traversal for a per-directory matcher stack to ride on.
+	// That same property lets the incremental case read only the ancestor
+	// chains of its change set instead of the whole tree, which keeps a
+	// three-file push from paying an O(directories) cost inside the repo read
+	// lock. Left nil when the repo has no ignore files, which keeps ignored()
+	// on its fast path.
+	var patterns []gitignore.Pattern
+	var perr error
+	if walkAll {
+		patterns, perr = collectIgnorePatterns(ctx, rootDir, filter.ExcludeDirs, logger)
+	} else {
+		patterns, perr = collectIgnorePatternsFor(ctx, rootDir, filter.ExcludeDirs, logger, changes.Modified, changes.Added)
+	}
+	if perr != nil {
+		return 0, 0, fmt.Errorf("collect ignore patterns: %w", perr)
+	}
+	if len(patterns) > 0 {
+		filter.ignore = gitignore.NewMatcher(patterns)
+	}
+
 	runID, storedHashes, err := idx.BeginIndexing(ctx, projectPath, wipe)
 	if err != nil {
 		return 0, 0, fmt.Errorf("begin indexing: %w", err)
@@ -210,6 +244,9 @@ func IndexDir(
 	if reconcile {
 		seen = make(map[string]struct{}, len(storedHashes))
 	}
+	// ignoredDeletes collects incremental-mode paths that the ignore rules now
+	// exclude, so FinishIndexing can reclaim whatever they left in the index.
+	var ignoredDeletes []string
 
 	flush := func() error {
 		if len(batch) == 0 {
@@ -311,15 +348,29 @@ func IndexDir(
 		// file or a path under vendor/, considerFile silently skips both.
 		// Modified and Added are processed identically; the indexer's
 		// per-file replace semantics make the prior state irrelevant.
-		for _, rel := range changes.Modified {
+		considerChanged := func(rel string) error {
 			totalFiles++
-			if err := considerFile(rel); err != nil {
+			// A path the ignore rules now cover has to be REMOVED, not merely
+			// skipped: it may already be in the index from before the rule
+			// existed, and unlike reconcile — which rebuilds `seen` from the
+			// whole tree — this driver has no other way to notice. Letting
+			// considerFile drop it would leave the stale chunks behind
+			// forever. Deliberately narrow to ignore rejections: considerFile
+			// also drops files for size, binary content and unknown language,
+			// and pruning on those is a separate behaviour change.
+			if filter.ignoredWithParents(rel) {
+				ignoredDeletes = append(ignoredDeletes, rel)
+				return nil
+			}
+			return considerFile(rel)
+		}
+		for _, rel := range changes.Modified {
+			if err := considerChanged(rel); err != nil {
 				return totalAccepted, totalChunks, err
 			}
 		}
 		for _, rel := range changes.Added {
-			totalFiles++
-			if err := considerFile(rel); err != nil {
+			if err := considerChanged(rel); err != nil {
 				return totalAccepted, totalChunks, err
 			}
 		}
@@ -343,6 +394,12 @@ func IndexDir(
 			"skipped_unchanged", skipped, "deleted", len(deletedPaths))
 	case !walkAll:
 		deletedPaths = changes.Deleted
+		if len(ignoredDeletes) > 0 {
+			// Fresh slice — changes.Deleted belongs to the caller's payload.
+			deletedPaths = append(append([]string{}, changes.Deleted...), ignoredDeletes...)
+			logger.Info("repoindexer: pruning newly ignored paths",
+				"project", projectPath, "count", len(ignoredDeletes))
+		}
 	}
 	if _, _, _, ferr := idx.FinishIndexing(ctx, projectPath, runID, deletedPaths, totalFiles); ferr != nil {
 		return totalAccepted, totalChunks, fmt.Errorf("finish indexing: %w", ferr)
@@ -402,20 +459,105 @@ func (f FileFilter) shouldSkipDir(absPath, rootDir, name string) bool {
 			return true
 		}
 	}
-	return false
+	if f.ignore == nil {
+		// Skip the filepath.Rel allocation for the common repo that has no
+		// ignore files at all; this runs once per directory in the walk.
+		return false
+	}
+	rel, err := filepath.Rel(rootDir, absPath)
+	if err != nil {
+		return false
+	}
+	return f.ignored(filepath.ToSlash(rel), true)
 }
 
-// shouldSkipPath returns true when any component of the slash-separated
-// relative path matches an ExcludeDirs entry. Used by the incremental
-// driver, which receives explicit per-file paths (no WalkDir, so
-// shouldSkipDir's "prune the subtree" trick doesn't apply). Matching is
-// case-insensitive to mirror shouldSkipDir.
+// ignored reports whether a repo-relative path is excluded by the
+// .gitignore/.cixignore rules collected for this run.
+//
+// gitignore.Matcher wants the path already split into segments and compares
+// each pattern's domain against the leading ones, which is why a pattern from
+// sub/.cixignore can never match a path outside sub/ — and why one flat
+// matcher works for both the walk and the incremental driver.
+//
+// isDir is load-bearing: "build/" is a dirOnly pattern, and go-git enforces
+// dirOnly only on the LAST segment, so passing false for an actual directory
+// would fail to prune it while still catching the files inside one by one.
+func (f FileFilter) ignored(relPath string, isDir bool) bool {
+	segs := f.ignoreSegments(relPath)
+	if segs == nil {
+		return false
+	}
+	return f.ignore.Match(segs, isDir)
+}
+
+// ignoreSegments normalises a repo-relative path into the segment slice
+// gitignore.Matcher expects, or nil when there is nothing to ask about.
+//
+// The empty case is load-bearing rather than defensive: path.Clean("") is ".",
+// strings.Split("", "/") is [""], and filepath.Match("*", "") is true — so
+// without this guard a bare "*" pattern would match the repo root, prune it,
+// and index nothing at all.
+func (f FileFilter) ignoreSegments(relPath string) []string {
+	if f.ignore == nil {
+		return nil
+	}
+	clean := strings.Trim(path.Clean(relPath), "/")
+	if clean == "" || clean == "." {
+		return nil
+	}
+	return strings.Split(clean, "/")
+}
+
+// ignoredWithParents is ignored() plus git's rule that a file under an excluded
+// directory cannot be re-included by a later "!" pattern.
+//
+// The walk gets that rule for free: shouldSkipDir prunes the directory and the
+// files inside are never visited. The incremental driver has no traversal, so
+// it has to test the ancestor chain explicitly — otherwise the two drivers
+// disagree about the same repo, and a file that incremental indexes would be
+// deleted again by the next reconcile, flapping forever.
+func (f FileFilter) ignoredWithParents(relPath string) bool {
+	segs := f.ignoreSegments(relPath)
+	if segs == nil {
+		return false
+	}
+	for i := 1; i < len(segs); i++ {
+		if f.ignore.Match(segs[:i], true) {
+			return true
+		}
+	}
+	return f.ignore.Match(segs, false)
+}
+
+// shouldSkipPath returns true when a file should be left out of the index:
+// when any component of the slash-separated relative path matches an
+// ExcludeDirs entry (case-insensitively, mirroring shouldSkipDir), or when
+// the ignore rules cover it. Called for every file in both drivers via
+// considerFile — in walk mode the directory-level cases were already pruned,
+// so what lands here is the file-level patterns.
 func (f FileFilter) shouldSkipPath(relPath string) bool {
 	if relPath == "" {
 		return false
 	}
+	if UnderExcludedDir(relPath, f.ExcludeDirs) {
+		return true
+	}
+	return f.ignored(relPath, false)
+}
+
+// UnderExcludedDir reports whether any component of a slash-separated
+// repo-relative path matches an excluded directory name, case-insensitively.
+//
+// Exported because the job layer needs the same test: the pattern collector
+// never descends into these directories, so an ignore file inside one changes
+// no indexing decision and must not trigger a whole-tree reconcile. One
+// definition keeps that from drifting away from what the walk actually does.
+func UnderExcludedDir(relPath string, excludeDirs []string) bool {
+	if relPath == "" {
+		return false
+	}
 	for _, seg := range strings.Split(relPath, "/") {
-		for _, ex := range f.ExcludeDirs {
+		for _, ex := range excludeDirs {
 			if strings.EqualFold(seg, ex) {
 				return true
 			}
