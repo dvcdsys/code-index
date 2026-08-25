@@ -500,17 +500,27 @@ func decideMode(forceFull bool, indexedSHA string, changes *repocloner.ChangeSet
 }
 
 // changesTouchIgnoreFile reports whether a tree diff adds, edits or removes an
-// ignore file anywhere in the repo — nested ones included, since those govern
-// their own subtree.
+// ignore file that could actually change an indexing decision — nested ones
+// included, since those govern their own subtree.
+//
+// Ignore files under an excluded directory do not count: the pattern collector
+// never descends into node_modules, vendor, .git and friends, so a push
+// touching vendor/foo/.gitignore would otherwise force a whole-tree reconcile
+// that cannot change a single decision.
 func changesTouchIgnoreFile(cs *repocloner.ChangeSet) bool {
 	if cs == nil {
 		return false
 	}
+	excluded := repoindexer.DefaultFilter().ExcludeDirs
 	for _, group := range [][]string{cs.Modified, cs.Added, cs.Deleted} {
 		for _, rel := range group {
-			if repoindexer.IsIgnoreFile(rel) {
-				return true
+			if !repoindexer.IsIgnoreFile(rel) {
+				continue
 			}
+			if repoindexer.UnderExcludedDir(rel, excluded) {
+				continue
+			}
+			return true
 		}
 	}
 	return false

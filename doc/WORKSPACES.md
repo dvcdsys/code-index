@@ -200,8 +200,9 @@ network error, etc.).
 ## Excluding files from a cloned repo
 
 The server walker honours `.gitignore` and `.cixignore` in the repos it
-clones, merged and nested exactly like git does. Commit a `.cixignore` and it
-applies on the next sync — nothing to configure on the server.
+clones, merged and nested the way git does. Commit a `.cixignore` and it
+applies on the next sync — nothing to configure on the server. Two pattern
+shapes behave differently from git; see [Known limits](#known-limits) below.
 
 ```gitignore
 # .cixignore at the repo root
@@ -225,6 +226,23 @@ One gotcha inherited from git: a `!` rule cannot rescue a file whose parent
 directory is already excluded. `docs/*` followed by `!docs/api/keep.md` still
 excludes that file, because `docs/api` was excluded first. Re-include the
 directory too — `!docs/api/` — and the file comes back.
+
+### Known limits
+
+Two pattern shapes are matched differently from `git check-ignore`. Both come
+from the underlying matcher, both affect the CLI in the same way, and both were
+verified against a real repo.
+
+- **The allowlist idiom does not work below the top level.** Writing `*`, then
+  `!*/`, then `!*.go` excludes only top-level files: `!*/` re-includes
+  everything nested, not just directories, so `sub/notes.txt` and
+  `a/b/c/deep.txt` stay indexed. Write the exclusions positively instead —
+  `vendor/`, `testdata/`, `*.min.js`.
+- **`[!abc]` is read as a literal set, not a negation.** The matcher uses Go's
+  `filepath.Match`, which spells negation `[^abc]`. So `[!abc].txt` excludes
+  `a.txt` (which git keeps) and keeps `d.txt` (which git excludes). The first
+  direction is the one that bites: a tracked source file silently missing from
+  search. Avoid character classes in ignore files; a plain glob is unambiguous.
 
 ### How a rule change reaches the index
 

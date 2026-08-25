@@ -158,6 +158,16 @@ Nested `.cixignore` files work like nested `.gitignore`. The file watcher
 automatically triggers a full reindex when `.cixignore` is created,
 modified, or deleted.
 
+Two pattern shapes are matched differently from `git check-ignore`, in both the
+CLI and the server:
+
+- The allowlist idiom (`*`, then `!*/`, then `!*.go`) excludes only top-level
+  files — `!*/` re-includes everything nested, not just directories. Write the
+  exclusions positively instead.
+- `[!abc]` is read as the literal set `{!, a, b, c}`, not as a negation
+  (Go's `filepath.Match` spells that `[^abc]`), so it excludes `a.txt` where
+  git would keep it. Avoid character classes here.
+
 #### GitHub-backed projects
 
 Both files are honoured for repos the **server** clones and indexes, not just

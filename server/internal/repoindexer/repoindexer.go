@@ -181,22 +181,31 @@ func IndexDir(
 		logger = slog.Default()
 	}
 
+	walkAll := changes == nil
+	reconcile := walkAll && !wipe
+
 	// Collect the repo's ignore rules before either driver starts. This has to
 	// happen up front rather than during the walk because the incremental
 	// driver never traverses directories — it works from an explicit path list
 	// — so there is no traversal for a per-directory matcher stack to ride on.
-	// Left nil when the repo has no ignore files, which keeps ignored() on its
-	// fast path.
-	patterns, perr := collectIgnorePatterns(rootDir, filter.ExcludeDirs)
+	// That same property lets the incremental case read only the ancestor
+	// chains of its change set instead of the whole tree, which keeps a
+	// three-file push from paying an O(directories) cost inside the repo read
+	// lock. Left nil when the repo has no ignore files, which keeps ignored()
+	// on its fast path.
+	var patterns []gitignore.Pattern
+	var perr error
+	if walkAll {
+		patterns, perr = collectIgnorePatterns(ctx, rootDir, filter.ExcludeDirs, logger)
+	} else {
+		patterns, perr = collectIgnorePatternsFor(ctx, rootDir, filter.ExcludeDirs, logger, changes.Modified, changes.Added)
+	}
 	if perr != nil {
 		return 0, 0, fmt.Errorf("collect ignore patterns: %w", perr)
 	}
 	if len(patterns) > 0 {
 		filter.ignore = gitignore.NewMatcher(patterns)
 	}
-
-	walkAll := changes == nil
-	reconcile := walkAll && !wipe
 
 	runID, storedHashes, err := idx.BeginIndexing(ctx, projectPath, wipe)
 	if err != nil {
@@ -530,14 +539,31 @@ func (f FileFilter) shouldSkipPath(relPath string) bool {
 	if relPath == "" {
 		return false
 	}
+	if UnderExcludedDir(relPath, f.ExcludeDirs) {
+		return true
+	}
+	return f.ignored(relPath, false)
+}
+
+// UnderExcludedDir reports whether any component of a slash-separated
+// repo-relative path matches an excluded directory name, case-insensitively.
+//
+// Exported because the job layer needs the same test: the pattern collector
+// never descends into these directories, so an ignore file inside one changes
+// no indexing decision and must not trigger a whole-tree reconcile. One
+// definition keeps that from drifting away from what the walk actually does.
+func UnderExcludedDir(relPath string, excludeDirs []string) bool {
+	if relPath == "" {
+		return false
+	}
 	for _, seg := range strings.Split(relPath, "/") {
-		for _, ex := range f.ExcludeDirs {
+		for _, ex := range excludeDirs {
 			if strings.EqualFold(seg, ex) {
 				return true
 			}
 		}
 	}
-	return f.ignored(relPath, false)
+	return false
 }
 
 func looksBinary(b []byte) bool {

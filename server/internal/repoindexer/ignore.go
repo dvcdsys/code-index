@@ -2,7 +2,9 @@ package repoindexer
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -39,13 +41,60 @@ var ignoreFileNames = []string{".gitignore", ".cixignore"}
 // so far is not descended into either, mirroring gitignore.ReadPatterns.
 // Without that, a `.cixignore` inside an already-ignored directory could carry
 // a "!" that resurrects the subtree its parent just excluded.
-func collectIgnorePatterns(rootDir string, excludeDirs []string) ([]gitignore.Pattern, error) {
+func collectIgnorePatterns(ctx context.Context, rootDir string, excludeDirs []string, logger *slog.Logger) ([]gitignore.Pattern, error) {
+	return collectIgnore(ctx, rootDir, excludeDirs, nil, logger)
+}
+
+// collectIgnorePatternsFor collects only the patterns that can possibly affect
+// the given repo-relative paths, by descending the ancestor chains of those
+// paths instead of the whole tree.
+//
+// This is exact rather than approximate: a pattern's domain is the directory
+// its file sits in, and Match returns NoMatch for any path that does not start
+// with that domain, so an ignore file outside a path's ancestor chain can
+// never change the answer for it. The incremental driver only ever asks about
+// the paths in its change set, which is why it can afford this.
+//
+// It matters because the full walk is O(directories) while a push is usually
+// O(3 files): on a repo with thousands of directories the unrestricted
+// collection added a fixed cost to every webhook — inside the repo read lock,
+// so a concurrent clone job waited on it too.
+func collectIgnorePatternsFor(ctx context.Context, rootDir string, excludeDirs []string, logger *slog.Logger, groups ...[]string) ([]gitignore.Pattern, error) {
+	want := ancestorDirSet(groups...)
+	return collectIgnore(ctx, rootDir, excludeDirs, want, logger)
+}
+
+// ancestorDirSet returns every directory that could hold an ignore file
+// affecting one of the given paths, as slash-joined repo-relative keys. The
+// repo root is implicit — collection always starts there.
+func ancestorDirSet(groups ...[]string) map[string]bool {
+	out := make(map[string]bool)
+	for _, group := range groups {
+		for _, rel := range group {
+			dir := path.Dir(path.Clean(rel))
+			for dir != "." && dir != "/" && dir != "" {
+				out[dir] = true
+				dir = path.Dir(dir)
+			}
+		}
+	}
+	return out
+}
+
+// collectIgnore is the shared implementation. want == nil means "the whole
+// tree"; otherwise only directories in the set are descended into. Keeping one
+// walker means the ordering, pruning and parsing rules cannot drift between
+// the two modes.
+func collectIgnore(ctx context.Context, rootDir string, excludeDirs []string, want map[string]bool, logger *slog.Logger) ([]gitignore.Pattern, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	excluded := make(map[string]bool, len(excludeDirs))
 	for _, d := range excludeDirs {
 		excluded[strings.ToLower(d)] = true
 	}
 	var ps []gitignore.Pattern
-	if err := collectIgnoreDir(rootDir, nil, excluded, &ps); err != nil {
+	if err := collectIgnoreDir(ctx, rootDir, nil, excluded, want, logger, &ps); err != nil {
 		return nil, err
 	}
 	return ps, nil
@@ -56,16 +105,21 @@ func collectIgnorePatterns(rootDir string, excludeDirs []string) ([]gitignore.Pa
 // a directory's patterns are always appended before any of its descendants'.
 // Sibling order is irrelevant — disjoint domains cannot match each other's
 // paths.
-func collectIgnoreDir(dir string, domain []string, excluded map[string]bool, ps *[]gitignore.Pattern) error {
+func collectIgnoreDir(ctx context.Context, dir string, domain []string, excluded map[string]bool, want map[string]bool, logger *slog.Logger, ps *[]gitignore.Pattern) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		// A missing root is normal in tests and when a clone failed before
-		// this ran; an unreadable subtree is already tolerated by the index
-		// walk, which logs and skips it. Neither should fail the job.
-		if os.IsNotExist(err) || os.IsPermission(err) {
-			return nil
+		// Log and carry on, exactly as the index walk does for the same class
+		// of problem. A directory we cannot list is a directory the walk
+		// cannot list either, so its subtree is not going to be indexed and
+		// missing its ignore files cannot cause over-indexing. A missing root
+		// is the normal case when a clone failed before this ran.
+		if !os.IsNotExist(err) {
+			logger.Warn("repoindexer: ignore collection skipped", "dir", dir, "err", err)
 		}
-		return fmt.Errorf("read dir %s: %w", dir, err)
+		return nil
 	}
 
 	// This pass runs on every index job, incremental ones included, so the
@@ -88,6 +142,9 @@ func collectIgnoreDir(dir string, domain []string, excluded map[string]bool, ps 
 		if !found {
 			continue
 		}
+		// Unlike an unlistable directory, a listed-but-unreadable ignore file
+		// IS fatal: the walk can still descend here, so proceeding would index
+		// files a rule we know exists was meant to exclude.
 		patterns, err := readIgnoreFile(filepath.Join(dir, name), domain)
 		if err != nil {
 			return err
@@ -109,10 +166,13 @@ func collectIgnoreDir(dir string, domain []string, excluded map[string]bool, ps 
 			continue
 		}
 		child := append(append([]string{}, domain...), name)
+		if want != nil && !want[strings.Join(child, "/")] {
+			continue
+		}
 		if m.Match(child, true) {
 			continue
 		}
-		if err := collectIgnoreDir(filepath.Join(dir, name), child, excluded, ps); err != nil {
+		if err := collectIgnoreDir(ctx, filepath.Join(dir, name), child, excluded, want, logger, ps); err != nil {
 			return err
 		}
 	}

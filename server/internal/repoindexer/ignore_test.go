@@ -1,6 +1,8 @@
 package repoindexer
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -12,7 +14,7 @@ import (
 func filterFor(t *testing.T, root string) FileFilter {
 	t.Helper()
 	f := DefaultFilter()
-	ps, err := collectIgnorePatterns(root, f.ExcludeDirs)
+	ps, err := collectIgnorePatterns(context.Background(), root, f.ExcludeDirs, nil)
 	if err != nil {
 		t.Fatalf("collectIgnorePatterns: %v", err)
 	}
@@ -46,7 +48,7 @@ func TestCollectIgnorePatterns_EmptyTree(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{"main.go": "package main\n"})
 
-	ps, err := collectIgnorePatterns(root, DefaultFilter().ExcludeDirs)
+	ps, err := collectIgnorePatterns(context.Background(), root, DefaultFilter().ExcludeDirs, nil)
 	if err != nil {
 		t.Fatalf("collectIgnorePatterns: %v", err)
 	}
@@ -64,7 +66,7 @@ func TestCollectIgnorePatterns_EmptyTree(t *testing.T) {
 // A clone job that failed before checkout leaves no directory at all; the
 // index walk already tolerates that, so collection must too.
 func TestCollectIgnorePatterns_MissingRoot(t *testing.T) {
-	ps, err := collectIgnorePatterns(filepath.Join(t.TempDir(), "never-cloned"), nil)
+	ps, err := collectIgnorePatterns(context.Background(), filepath.Join(t.TempDir(), "never-cloned"), nil, nil)
 	if err != nil {
 		t.Fatalf("missing root should not be an error, got %v", err)
 	}
@@ -280,7 +282,7 @@ func TestCollectIgnorePatterns_PrunesExcludeDirs(t *testing.T) {
 		"main.go":                 "package main\n",
 	})
 
-	ps, err := collectIgnorePatterns(root, DefaultFilter().ExcludeDirs)
+	ps, err := collectIgnorePatterns(context.Background(), root, DefaultFilter().ExcludeDirs, nil)
 	if err != nil {
 		t.Fatalf("collectIgnorePatterns: %v", err)
 	}
@@ -322,4 +324,201 @@ func TestIsIgnoreFile(t *testing.T) {
 			t.Errorf("IsIgnoreFile(%q) = %v, want %v", in, got, want)
 		}
 	}
+}
+
+// The incremental driver reads only the ancestor chains of its change set, so
+// the pattern set it builds must give the SAME answer as a full collection for
+// every path it asks about — including when unrelated subtrees carry rules
+// that would have been collected by the full walk.
+func TestCollectIgnorePatternsFor_MatchesFullCollection(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".cixignore":      "*.log\n",
+		"a/.gitignore":    "gen/\n",
+		"a/gen/x.go":      "package gen\n",
+		"a/b/.cixignore":  "*.tmp\n",
+		"a/b/keep.go":     "package b\n",
+		"a/b/scratch.tmp": "x\n",
+		// An unrelated subtree whose rules must not change any answer below,
+		// and which the restricted pass has no reason to read at all.
+		"far/away/.cixignore": "!*.log\nkeep.go\n",
+		"far/away/keep.go":    "package away\n",
+	})
+
+	targets := []string{"a/b/keep.go", "a/b/scratch.tmp", "a/gen/x.go", "top.log", "a/b/c/deep.log"}
+
+	full := DefaultFilter()
+	fps, err := collectIgnorePatterns(context.Background(), root, full.ExcludeDirs, nil)
+	if err != nil {
+		t.Fatalf("full collect: %v", err)
+	}
+	if len(fps) > 0 {
+		full.ignore = gitignore.NewMatcher(fps)
+	}
+
+	restricted := DefaultFilter()
+	rps, err := collectIgnorePatternsFor(context.Background(), root, restricted.ExcludeDirs, nil, targets)
+	if err != nil {
+		t.Fatalf("restricted collect: %v", err)
+	}
+	if len(rps) > 0 {
+		restricted.ignore = gitignore.NewMatcher(rps)
+	}
+
+	if len(rps) >= len(fps) {
+		t.Errorf("restricted collection read %d patterns vs %d for the full walk — it is not actually skipping anything", len(rps), len(fps))
+	}
+
+	for _, p := range targets {
+		if got, want := restricted.ignoredWithParents(p), full.ignoredWithParents(p); got != want {
+			t.Errorf("ignoredWithParents(%q): restricted=%v, full=%v", p, got, want)
+		}
+	}
+
+	// Sanity-check that the fixture actually exercises the rules, otherwise
+	// the equivalence above would be vacuously true.
+	if !full.ignoredWithParents("a/b/scratch.tmp") {
+		t.Error("fixture broken: a/b/.cixignore *.tmp should have matched")
+	}
+	if !full.ignoredWithParents("a/gen/x.go") {
+		t.Error("fixture broken: a/.gitignore gen/ should have matched")
+	}
+	if full.ignoredWithParents("a/b/keep.go") {
+		t.Error("fixture broken: a/b/keep.go should survive")
+	}
+}
+
+// ancestorDirSet decides what the restricted pass descends into; an off-by-one
+// there would silently drop a rule.
+func TestAncestorDirSet(t *testing.T) {
+	got := ancestorDirSet([]string{"a/b/c.go", "top.go"}, []string{"a/d/e/f.go"})
+	want := map[string]bool{"a": true, "a/b": true, "a/d": true, "a/d/e": true}
+
+	for k := range want {
+		if !got[k] {
+			t.Errorf("missing ancestor %q", k)
+		}
+	}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("unexpected ancestor %q", k)
+		}
+	}
+	// The repo root is implicit — collection always starts there, and a "."
+	// or "" key would be meaningless as a directory name to descend into.
+	for _, k := range []string{".", "", "/"} {
+		if got[k] {
+			t.Errorf("root must not appear as a key, found %q", k)
+		}
+	}
+}
+
+// A ReadDir failure must not fail the job: a directory the collector cannot
+// list is one the index walk cannot list either, so its subtree is not going
+// to be indexed and missing its rules cannot cause over-indexing.
+func TestCollectIgnorePatterns_UnreadableDirIsSkipped(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".cixignore":      "*.log\n",
+		"locked/inner.go": "package locked\n",
+	})
+	locked := filepath.Join(root, "locked")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Skipf("cannot chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if _, err := os.ReadDir(locked); err == nil {
+		t.Skip("running as a user that ignores directory permissions")
+	}
+
+	ps, err := collectIgnorePatterns(context.Background(), root, DefaultFilter().ExcludeDirs, nil)
+	if err != nil {
+		t.Fatalf("an unlistable directory must not fail collection: %v", err)
+	}
+	if len(ps) != 1 {
+		t.Fatalf("expected the root rule to survive, got %d patterns", len(ps))
+	}
+}
+
+func TestCollectIgnorePatterns_HonoursContextCancellation(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"a/b/c/x.go": "package c\n"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := collectIgnorePatterns(ctx, root, DefaultFilter().ExcludeDirs, nil); err == nil {
+		t.Error("a cancelled context should stop the collection, not walk the whole tree")
+	}
+}
+
+// TestIgnored_KnownDivergencesFromGit pins the two shapes where this matcher
+// disagrees with `git check-ignore`. They are documented rather than fixed,
+// and they are pinned here for two reasons: so the behaviour is discovered by
+// a failing test rather than by a user, and because the two constrain each
+// other. Dropping dirOnly patterns for file queries fixes the allowlist case
+// and breaks the docs/* + !docs/api/ case (docs/api/other.md becomes ignored,
+// where git keeps it), so a real fix needs a matcher that can tell "matches
+// this path" from "matches an ancestor" — not a one-line tweak.
+//
+// Expected values below were taken from `git check-ignore -q --no-index` in a
+// real repository, not from reading the matcher.
+func TestIgnored_KnownDivergencesFromGit(t *testing.T) {
+	t.Run("allowlist idiom under-excludes below depth 1", func(t *testing.T) {
+		root := t.TempDir()
+		writeTree(t, root, map[string]string{".cixignore": "*\n!*/\n!*.go\n"})
+		f := filterFor(t, root)
+
+		// Agrees with git at the top level.
+		if !f.ignoredWithParents("top.txt") {
+			t.Error("top.txt should be excluded")
+		}
+		if f.ignoredWithParents("top.go") {
+			t.Error("top.go should be kept")
+		}
+		if f.ignoredWithParents("sub/x.go") {
+			t.Error("sub/x.go should be kept")
+		}
+		// Diverges below it: git excludes both of these.
+		if f.ignoredWithParents("sub/x.txt") {
+			t.Error("behaviour changed: sub/x.txt is now excluded, which MATCHES git — " +
+				"update the docs in doc/WORKSPACES.md and doc/CLI_REFERENCE.md")
+		}
+		if f.ignoredWithParents("a/b/c/deep.txt") {
+			t.Error("behaviour changed: a/b/c/deep.txt is now excluded, which MATCHES git — " +
+				"update the docs in doc/WORKSPACES.md and doc/CLI_REFERENCE.md")
+		}
+	})
+
+	t.Run("character class negation is a literal set", func(t *testing.T) {
+		root := t.TempDir()
+		writeTree(t, root, map[string]string{".cixignore": "[!abc].txt\n"})
+		f := filterFor(t, root)
+
+		// git keeps a.txt; we drop it. This is the direction that costs a
+		// tracked source file its place in the index.
+		if !f.ignoredWithParents("a.txt") {
+			t.Error("behaviour changed: a.txt is now kept, which MATCHES git — update the docs")
+		}
+		// git drops d.txt; we keep it.
+		if f.ignoredWithParents("d.txt") {
+			t.Error("behaviour changed: d.txt is now excluded, which MATCHES git — update the docs")
+		}
+	})
+
+	t.Run("the shape a naive fix would break", func(t *testing.T) {
+		root := t.TempDir()
+		writeTree(t, root, map[string]string{".cixignore": "docs/*\n!docs/api/\n!docs/api/keep.md\n"})
+		f := filterFor(t, root)
+
+		if !f.ignoredWithParents("docs/other.md") {
+			t.Error("docs/other.md should be excluded")
+		}
+		for _, p := range []string{"docs/api/keep.md", "docs/api/other.md"} {
+			if f.ignoredWithParents(p) {
+				t.Errorf("%s must stay indexed — this is what breaks if dirOnly patterns "+
+					"are dropped for file queries to fix the allowlist idiom", p)
+			}
+		}
+	})
 }

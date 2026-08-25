@@ -72,6 +72,13 @@ func TestChangesTouchIgnoreFile(t *testing.T) {
 		{"root cixignore", &repocloner.ChangeSet{Modified: []string{".cixignore"}}, true},
 		{"root gitignore", &repocloner.ChangeSet{Added: []string{".gitignore"}}, true},
 		{"nested", &repocloner.ChangeSet{Deleted: []string{"a/b/.cixignore"}}, true},
+		// The collector never descends into these, so an ignore file inside
+		// one cannot change any indexing decision — escalating would buy a
+		// whole-tree reconcile for nothing.
+		{"under vendor", &repocloner.ChangeSet{Modified: []string{"vendor/dep/.gitignore"}}, false},
+		{"under node_modules", &repocloner.ChangeSet{Added: []string{"node_modules/pkg/.cixignore"}}, false},
+		{"under .git", &repocloner.ChangeSet{Modified: []string{".git/.gitignore"}}, false},
+		{"excluded and real", &repocloner.ChangeSet{Modified: []string{"vendor/dep/.gitignore", ".cixignore"}}, true},
 		// A file that merely looks like one must not trigger a full walk.
 		{"lookalike", &repocloner.ChangeSet{Modified: []string{"docs/gitignore.md", ".gitignore.bak"}}, false},
 	}
