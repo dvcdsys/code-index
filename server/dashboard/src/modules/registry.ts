@@ -7,6 +7,7 @@ import { LoginLocksModule } from './login-locks';
 import { ManagedTunnelsModule } from './managed-tunnels';
 import { ProjectsModule } from './projects';
 import { SearchModule } from './search';
+import { SearchStatsModule } from './search-stats';
 import { ServerModule } from './server';
 import { SettingsModule } from './settings';
 import { UsersModule } from './users';
@@ -25,6 +26,7 @@ export const MODULES: Module[] = [
   ProjectsModule,
   WorkspacesModule,
   SearchModule,
+  SearchStatsModule,
   ApiKeysModule,
   GithubIntegrationModule,
   ManagedTunnelsModule,
