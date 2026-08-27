@@ -365,6 +365,14 @@ DELETE           /api/v1/workspaces/{id}/projects/{hash}
 GET              /api/v1/workspaces/{id}/search      hybrid BM25 + dense
 GET/POST         /api/v1/workspaces/{id}/shares      DELETE …/shares/{groupId}`}</CodeBlock>
 
+            <h3>Search statistics <Tag t="GroupRead" /></h3>
+            <CodeBlock>{`GET  /api/v1/search-stats                per-project counters, filtered + sorted server-side
+GET  /api/v1/search-stats/series         query counts per 30-minute bucket
+GET  /api/v1/search-stats/settings       is collection on, and what decided that
+PUT  /api/v1/admin/search-stats/settings switch collection on or off (admin)
+POST /api/v1/admin/search-stats/reset    discard every counter (admin)`}</CodeBlock>
+            <p>Collection is <b>off by default</b>. An admin turns it on from the statistics page — effective immediately, no restart — or an operator sets <code>CIX_SEARCH_STATS_ENABLED=true</code> at deploy time to start a fleet collecting. A stored decision outranks the environment, so a redeploy cannot silently undo it.</p>
+
             <h3>Webhooks <Tag t="HMAC" /></h3>
             <CodeBlock>{`POST /api/v1/webhooks/github/{hash}   per-repo HMAC-SHA256 (X-Hub-Signature-256)`}</CodeBlock>
 

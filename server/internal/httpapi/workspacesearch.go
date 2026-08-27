@@ -368,6 +368,7 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 	phases.fuse = time.Since(fuseStart)
 
 	if len(surviving) == 0 {
+		s.recordWorkspaceSearch(projectPaths, nil)
 		status := "empty"
 		if len(failedRepos) > 0 {
 			status = "partial_failure"
@@ -400,6 +401,8 @@ func (s *Server) WorkspaceSearch(w http.ResponseWriter, r *http.Request, id stri
 			surviving[i].FusedChunks = surviving[i].FusedChunks[:workspaceSearchPerProjChunkCap]
 		}
 	}
+
+	s.recordWorkspaceSearch(projectPaths, surviving)
 
 	sortPanel(surviving)
 	// `panel` reslices, it does not shrink `surviving` — projects_returned

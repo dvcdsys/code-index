@@ -21,6 +21,13 @@ export type GroupIdListResponse = components['schemas']['GroupIdListResponse'];
 export type UserWithStats = components['schemas']['UserWithStats'];
 export type ResetUserPasswordRequest = components['schemas']['ResetUserPasswordRequest'];
 export type LoginLock = components['schemas']['LoginLock'];
+
+export type SearchStatsProject = components['schemas']['SearchStatsProject'];
+export type SearchStatsFile = components['schemas']['SearchStatsFile'];
+export type SearchStatsResponse = components['schemas']['SearchStatsResponse'];
+export type SearchStatsSeriesResponse = components['schemas']['SearchStatsSeriesResponse'];
+export type SearchStatsSeriesPoint = components['schemas']['SearchStatsSeriesPoint'];
+export type SearchStatsSettings = components['schemas']['SearchStatsSettings'];
 export type LoginLockListResponse = components['schemas']['LoginLockListResponse'];
 export type ResetLoginLockRequest = components['schemas']['ResetLoginLockRequest'];
 export type Session = components['schemas']['Session'];
