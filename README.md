@@ -298,6 +298,7 @@ docker compose down -v          # stop AND wipe data + models (destructive)
 | [`doc/SEARCH_ALGORITHM.md`](doc/SEARCH_ALGORITHM.md) | How per-project + hybrid workspace search rank results |
 | [`doc/VECTORSTORE.md`](doc/VECTORSTORE.md) | The SQLite vector store — layout, tuning, migration from chromem-go |
 | [`doc/DATABASE_MAINTENANCE.md`](doc/DATABASE_MAINTENANCE.md) | Reclaim, compaction, scheduled maintenance |
+| [`doc/SEARCH_STATISTICS.md`](doc/SEARCH_STATISTICS.md) | Per-project search counters — what is counted, retention, why they live in their own database |
 | [`doc/WEBHOOKS.md`](doc/WEBHOOKS.md) | GitHub webhook lifecycle, modes, HMAC validation |
 | [`doc/POLLING.md`](doc/POLLING.md) | Git polling sync, for repos where a webhook is not an option |
 | [`doc/COWORK_MCP.md`](doc/COWORK_MCP.md) | Using cix from Claude Desktop / Cowork over MCP (`cix mcp install`, multi-server) |

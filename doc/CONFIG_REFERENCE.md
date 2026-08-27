@@ -54,6 +54,21 @@ the DB.
 | `CIX_INDEX_EMBED_BATCH_CHUNKS` | `0` (built-in default) | Chunks per embedding batch during indexing. Also editable at runtime from the dashboard. |
 | `CIX_CHUNK_MAX_CONCURRENT` | `0` (built-in default) | Files chunked in parallel. Also editable at runtime from the dashboard. |
 
+## Search statistics
+
+| Variable | Default | Description |
+|---|---|---|
+| `CIX_SEARCH_STATS_ENABLED` | `true` | Record per-project search counters. `false` records nothing, serves 503 from the statistics endpoints, and never creates the file. |
+
+Counters live in `searchstats.db`, created next to `CIX_SQLITE_PATH` — so a
+deployment that mounts a volume for the system database already covers this one.
+There is no separate path variable, deliberately: the two files have to share a
+volume or the counters vanish on the next container restart.
+
+The file is separate from `projects.db` because search must keep serving while
+the system database is frozen for a compaction, and a counter has no business
+queueing behind the indexer's write lock. See `doc/SEARCH_STATISTICS.md`.
+
 ## llama-server sidecar
 
 | Variable | Default | Description |
