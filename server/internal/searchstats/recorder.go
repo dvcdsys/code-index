@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -104,9 +105,17 @@ type Recorder struct {
 	files        map[fileKey]int64
 	droppedFiles int64
 
-	stop     chan struct{}
-	stopped  chan struct{}
-	stopOnce sync.Once
+	// started is the guard that makes Stop safe on a recorder whose flush loop
+	// was never launched. main.go registers the deferred Stop the moment the
+	// recorder is built, but Start happens hundreds of lines later, after
+	// several checks that can abort the boot — the encryption-key mismatch in
+	// particular exists to fail LOUDLY, and a Stop that blocked here would turn
+	// that message into a silent hang.
+	started   atomic.Bool
+	startOnce sync.Once
+	stop      chan struct{}
+	stopped   chan struct{}
+	stopOnce  sync.Once
 }
 
 // NewRecorder builds a recorder over the given store. It does not start the
@@ -173,11 +182,17 @@ func (r *Recorder) Record(projectPath, kind string, files []string) {
 }
 
 // Start runs the flush loop until ctx is cancelled or Stop is called.
+//
+// Idempotent. A second loop would close r.stopped a second time and panic, so
+// the guard is not merely tidiness.
 func (r *Recorder) Start(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	go r.loop(ctx)
+	r.startOnce.Do(func() {
+		r.started.Store(true)
+		go r.loop(ctx)
+	})
 }
 
 func (r *Recorder) loop(ctx context.Context) {
@@ -215,12 +230,24 @@ func (r *Recorder) finalFlush() {
 	}
 }
 
-// Stop ends the flush loop and waits for the final flush. Idempotent.
+// Stop ends the flush loop and waits for the final flush. Idempotent, and safe
+// on a recorder that was never started.
+//
+// The never-started case is not hypothetical: main.go registers this as a defer
+// as soon as the store opens, and every boot failure between there and Start
+// unwinds through it. Waiting on r.stopped — which only loop() ever closes —
+// would hang the process instead of surfacing the error that caused the abort.
+// So that case drains inline and returns, which also means counters recorded
+// before an aborted boot are not silently dropped.
 func (r *Recorder) Stop() {
 	if r == nil {
 		return
 	}
 	r.stopOnce.Do(func() { close(r.stop) })
+	if !r.started.Load() {
+		r.finalFlush()
+		return
+	}
 	<-r.stopped
 }
 

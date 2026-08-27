@@ -229,16 +229,19 @@ func (s *Server) GetSearchStats(w http.ResponseWriter, r *http.Request, params o
 			LastSeen:      row.LastSeen,
 			TopFiles:      make([]openapi.SearchStatsFile, 0, len(row.TopFiles)),
 		}
-		if p, ok := scope.byPath[row.ProjectPath]; ok {
-			item.Exists = true
-			item.PathHash = p.PathHash
-			item.Name = p.DisplayPath
-			kind := openapi.Local
-			if _, isExternal := scope.external[p.HostPath]; isExternal {
-				kind = openapi.External
-			}
-			item.Kind = &kind
+		// Always present: scope.paths — the only projects the query was allowed
+		// to see — is built from the same pass that fills byPath, so a returned
+		// row cannot name a project this map has never heard of. A project
+		// deleted since is not in either, so its counters simply do not appear;
+		// the prune task's orphan sweep is what eventually removes them.
+		p := scope.byPath[row.ProjectPath]
+		item.PathHash = p.PathHash
+		item.Name = p.DisplayPath
+		kind := openapi.Local
+		if _, isExternal := scope.external[p.HostPath]; isExternal {
+			kind = openapi.External
 		}
+		item.Kind = &kind
 		for _, f := range row.TopFiles {
 			item.TopFiles = append(item.TopFiles, openapi.SearchStatsFile{
 				FilePath: f.FilePath,

@@ -128,12 +128,17 @@ const schemaVersion = 1
 //
 // `bucket` leads the primary key of both window tables. Pruning is
 // `DELETE ... WHERE bucket < ?`, which against this key order is a contiguous
-// range at the front of the btree rather than a full scan; it is the most
-// frequent statement this package runs after the upsert itself. Reading a
-// single project's window scans the retained range instead of seeking
-// straight to it, which is affordable precisely because retention caps that
-// range — idx_buckets_project covers the case anyway for the smaller of the
-// two tables.
+// range at the front of the btree rather than a full scan.
+//
+// That key order is wrong for every READ, though, and both window tables
+// therefore carry a (project_id, bucket) index. Without one, EXPLAIN QUERY PLAN
+// reports `SEARCH ... USING PRIMARY KEY (bucket>?)`: a per-project query walks
+// the whole retained range across every project and filters afterwards.
+// Retention caps how far back that range goes, not how wide it is — and one
+// dashboard render at limit=25 issues about twenty-seven of these (the page,
+// the count/footer wrapper of the same statement, and one top-files query per
+// row), on a thirty-second refresh. search_file_buckets is the larger table by
+// a wide margin, so it is the one that must not be missed.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS projects_seen (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,6 +182,8 @@ CREATE TABLE IF NOT EXISTS search_file_buckets (
   hits       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (bucket, project_id, kind, file_path)
 ) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_file_buckets_project ON search_file_buckets(project_id, bucket);
 `
 
 // PathBeside returns the searchstats database path for a given system
@@ -210,6 +217,9 @@ func Open(path string) (*Store, error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return nil, fmt.Errorf("searchstats: create %s: %w", filepath.Dir(path), err)
 		}
+	}
+	if err := seedReclaimMode(path); err != nil {
+		return nil, err
 	}
 
 	v := url.Values{}
@@ -275,10 +285,56 @@ func Open(path string) (*Store, error) {
 	return &Store{db: sdb, path: path}, nil
 }
 
-// Path is where this store lives on disk. Reported by the resources screen.
-func (s *Store) Path() string { return s.path }
+// seedReclaimMode puts a database this build is CREATING into incremental
+// auto-vacuum mode, and leaves an existing file alone.
+//
+// It needs its own connection, before the pool, because auto_vacuum can only be
+// moved off `none` while the header is unwritten — and setting journal_mode=WAL
+// writes it. The main pool carries journal_mode in its DSN, so a pragma issued
+// there is silently ignored however early it appears in the statement list.
+// This is the same dance internal/db performs for the system database, and for
+// the same reason.
+//
+// The mode matters more here than it does there. The bucket tables are
+// delete-heavy by design, and without a reclaim mode their pages go onto the
+// free list and stay there — the file would only ever grow. That is precisely
+// the free-list inflation this package cites as a reason not to live inside
+// projects.db, so leaving it unfixed here would be an odd place to land.
+// Incremental rather than full so the reclaim happens on Prune's schedule
+// rather than inside every DELETE.
+//
+// An error is not fatal to the caller's intent — the mode is a performance
+// property — but it is returned rather than swallowed, because the only way to
+// reach it is a filesystem problem that Open is about to hit anyway.
+func seedReclaimMode(path string) error {
+	if path == "" || path == ":memory:" {
+		return nil
+	}
+	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+		return nil // an existing database keeps whatever mode it has
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("searchstats: stat %s: %w", path, err)
+	}
 
-// DB exposes the pool for tests.
+	v := url.Values{}
+	v.Add("_pragma", "auto_vacuum(INCREMENTAL)")
+	v.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", busyTimeoutMS))
+	seed, err := sql.Open("sqlite", "file:"+path+"?"+v.Encode())
+	if err != nil {
+		return fmt.Errorf("searchstats: open %s to set its reclaim mode: %w", path, err)
+	}
+	defer seed.Close()
+	seed.SetMaxOpenConns(1)
+	// Setting the journal mode is what forces the header — and with it the
+	// reclaim mode — to disk while the database is still empty.
+	if _, err := seed.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		return fmt.Errorf("searchstats: initialise %s: %w", path, err)
+	}
+	return nil
+}
+
+// DB exposes the pool for tests and for assertions that have to look past the
+// access-scoped read API.
 func (s *Store) DB() *sql.DB { return s.db }
 
 // Close releases the pool.
@@ -287,23 +343,6 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.db.Close()
-}
-
-// FileBytes is the size of the database on disk, WAL included. Zero for an
-// in-memory store, and zero rather than an error when the file cannot be
-// stat'd — this feeds a display, and a missing number there is not worth
-// failing a request over.
-func (s *Store) FileBytes() int64 {
-	if s == nil || s.path == "" || s.path == ":memory:" {
-		return 0
-	}
-	var total int64
-	for _, suffix := range []string{"", "-wal"} {
-		if info, err := os.Stat(s.path + suffix); err == nil {
-			total += info.Size()
-		}
-	}
-	return total
 }
 
 // BucketOf floors a time to the start of its bucket, as a Unix second.
@@ -326,6 +365,19 @@ func (s *Store) Prune(ctx context.Context, now time.Time) (int64, error) {
 		}
 		n, _ := res.RowsAffected()
 		removed += n
+	}
+	// Incremental auto-vacuum puts the emptied pages on the free list; this is
+	// what hands them back to the filesystem. Without it the reclaim mode set
+	// at creation would buy nothing and the file would only ever grow.
+	//
+	// Unbounded on purpose — the pages released here are exactly the ones this
+	// prune just freed, and capping the step would leave a remainder that the
+	// next run has to carry. Not fatal: failing to shrink a statistics file is
+	// not a reason to report the prune as failed when the rows are gone.
+	if removed > 0 {
+		if _, err := s.db.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
+			return removed, fmt.Errorf("searchstats: reclaim pruned pages: %w", err)
+		}
 	}
 	return removed, nil
 }
@@ -366,4 +418,41 @@ func (s *Store) Reset(ctx context.Context) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// ForgetAllExcept discards every project's counters except those named, and
+// reports how many projects it dropped.
+//
+// This is the safety net under Forget. Deleting a project calls Forget from the
+// HTTP handler, best-effort and after the delete has already committed — the two
+// databases have no foreign key between them, so failing the delete over a
+// counter is not on the table. That leaves a hole: if the call fails, or the
+// process dies between the two, the counters survive their project forever,
+// because search_totals is never pruned. The rows are invisible in the API
+// (every read is scoped to projects the caller can see, and a deleted project is
+// in nobody's set), so nothing would ever surface them.
+//
+// Sweeping on the prune schedule closes it: an orphan lives at most until the
+// next run.
+//
+// An EMPTY live set is treated as "don't know" and does nothing. A server with
+// genuinely zero projects does exist, and for it the sweep is technically
+// correct — but so does a caller whose query failed and returned nothing, and
+// between silently wiping every counter and keeping orphans for one more day,
+// the orphans are the better outcome.
+func (s *Store) ForgetAllExcept(ctx context.Context, live []string) (int64, error) {
+	if s == nil || len(live) == 0 {
+		return 0, nil
+	}
+	args := make([]any, 0, len(live))
+	for _, p := range live {
+		args = append(args, p)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM projects_seen WHERE project_path NOT IN (`+placeholders(len(live))+`)`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("searchstats: sweep orphaned projects: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }

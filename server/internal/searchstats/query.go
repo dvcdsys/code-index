@@ -66,8 +66,6 @@ type Query struct {
 	MaxFileHits *int64
 	MinTopFile  *int64
 	MaxTopFile  *int64
-	MinDistinct *int64
-	MaxDistinct *int64
 
 	// TopFiles is how many of each project's most-returned files to attach.
 	TopFiles int
@@ -251,7 +249,6 @@ func (s *Store) ProjectStatsPage(ctx context.Context, q Query, now time.Time) (P
 		{"queries", q.MinQueries, q.MaxQueries},
 		{"file_hits", q.MinFileHits, q.MaxFileHits},
 		{"top_file_hits", q.MinTopFile, q.MaxTopFile},
-		{"distinct_files", q.MinDistinct, q.MaxDistinct},
 	}
 	for _, f := range rangeFilters {
 		if f.min != nil {

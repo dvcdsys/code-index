@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -630,5 +631,177 @@ func TestConcurrentRecordAndFlush(t *testing.T) {
 	}
 	if want := int64(writers * perWriter * 2); fileHits != want {
 		t.Errorf("recorded %d file hits, want %d", fileHits, want)
+	}
+}
+
+// Stop must not block on a recorder whose flush loop was never launched.
+//
+// main.go registers the deferred Stop as soon as the store opens and calls
+// Start hundreds of lines later, with several boot checks in between that can
+// abort — including the encryption-key mismatch, whose whole job is to fail
+// loudly. A Stop that waited on a channel only the loop closes turned every one
+// of those into a silent hang.
+func TestStopWithoutStartDoesNotBlock(t *testing.T) {
+	s := newTestStore(t)
+	r := recorderAt(t, s, fixedNow)
+
+	// Counters buffered before an aborted boot are drained by Stop rather than
+	// dropped, which is why this case flushes inline instead of just returning.
+	r.Record("proj-a", KindSemantic, []string{"a.go"})
+
+	done := make(chan struct{})
+	go func() { r.Stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() on a never-started recorder blocked")
+	}
+
+	page, err := s.ProjectStatsPage(context.Background(), Query{
+		ProjectPaths: []string{"proj-a"},
+	}, fixedNow)
+	if err != nil {
+		t.Fatalf("ProjectStatsPage: %v", err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].Queries != 1 {
+		t.Errorf("rows = %+v, want the buffered counter drained by Stop", page.Rows)
+	}
+}
+
+// Stop is called from a defer and can also be reached by a second path; and
+// Start must not be able to launch two loops, which would close r.stopped twice
+// and panic.
+func TestStartAndStopAreIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	r := recorderAt(t, s, fixedNow)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.Start(ctx)
+	r.Start(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		r.Stop()
+		r.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("repeated Start/Stop blocked")
+	}
+}
+
+// The window tables are delete-heavy, so a database that cannot return pages to
+// the filesystem would only ever grow — the same free-list problem this package
+// cites as a reason not to live inside projects.db.
+func TestFreshDatabaseIsIncrementalAutoVacuum(t *testing.T) {
+	s := newTestStore(t)
+	var mode int
+	if err := s.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		t.Fatalf("read auto_vacuum: %v", err)
+	}
+	if mode != 2 {
+		t.Errorf("auto_vacuum = %d, want 2 (INCREMENTAL) — it can only be set before the header is written", mode)
+	}
+}
+
+// Both window tables must be reachable by project, not just by bucket. The
+// primary keys lead with `bucket` because that is what pruning needs; every
+// read wants the other order, and without an index a per-project query walks the
+// whole retained range across every project.
+func TestWindowReadsUseAProjectIndex(t *testing.T) {
+	s := newTestStore(t)
+	r := recorderAt(t, s, fixedNow)
+	ctx := context.Background()
+	r.Record("proj-a", KindSemantic, []string{"a.go"})
+	if err := r.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	since := BucketOf(fixedNow.Add(-24 * time.Hour))
+
+	for _, c := range []struct{ name, query, wantIndex string }{
+		{
+			"search_file_buckets by project",
+			`SELECT file_path, SUM(hits) FROM search_file_buckets
+			  WHERE project_id = 1 AND bucket >= ? GROUP BY file_path`,
+			"idx_file_buckets_project",
+		},
+		{
+			"search_buckets by project",
+			`SELECT SUM(queries) FROM search_buckets
+			  WHERE project_id = 1 AND bucket >= ? GROUP BY project_id`,
+			"idx_buckets_project",
+		},
+	} {
+		rows, err := s.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+c.query, since)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		var plan string
+		for rows.Next() {
+			var a, b, d int
+			var detail string
+			if err := rows.Scan(&a, &b, &d, &detail); err != nil {
+				rows.Close()
+				t.Fatalf("scan plan: %v", err)
+			}
+			plan += detail + "\n"
+		}
+		rows.Close()
+		if !strings.Contains(plan, c.wantIndex) {
+			t.Errorf("%s did not use %s:\n%s", c.name, c.wantIndex, plan)
+		}
+	}
+}
+
+// Forget is best-effort and runs after a project delete has already committed,
+// so a failed call — or a process that dies between the two — strands counters
+// that no API read can ever surface, in a tier that is never pruned. The sweep
+// is what stops that being permanent.
+func TestForgetAllExceptSweepsOrphans(t *testing.T) {
+	s := newTestStore(t)
+	r := recorderAt(t, s, fixedNow)
+	ctx := context.Background()
+
+	r.Record("live-one", KindSemantic, []string{"a.go"})
+	r.Record("live-two", KindSemantic, []string{"b.go"})
+	r.Record("deleted-long-ago", KindSemantic, []string{"secret.go"})
+	if err := r.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	dropped, err := s.ForgetAllExcept(ctx, []string{"live-one", "live-two"})
+	if err != nil {
+		t.Fatalf("ForgetAllExcept: %v", err)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped %d projects, want 1", dropped)
+	}
+
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM search_file_totals`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("search_file_totals holds %d rows, want 2 — the cascade did not follow the sweep", n)
+	}
+
+	// An empty live set means "don't know", not "nothing is live". A caller
+	// whose query failed must not be able to wipe every counter.
+	dropped, err = s.ForgetAllExcept(ctx, nil)
+	if err != nil {
+		t.Fatalf("ForgetAllExcept(nil): %v", err)
+	}
+	if dropped != 0 {
+		t.Errorf("an empty live set dropped %d projects, want 0", dropped)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects_seen`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("projects_seen holds %d rows after an empty sweep, want 2", n)
 	}
 }

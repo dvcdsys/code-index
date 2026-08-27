@@ -27,7 +27,12 @@ const TaskPrune = "searchstats.prune"
 // helper nobody calls: sessions.GC in this same codebase carries that comment
 // and has no caller anywhere, so expired sessions are never swept. This one is
 // wired in main.go at the same place dbmaint's tasks are.
-func (s *Store) Tasks(logger *slog.Logger) []schedule.Task {
+// LiveProjects reports the project paths that still exist, so the prune task
+// can sweep counters whose project is gone. Supplied by the caller because this
+// package deliberately cannot see the system database.
+type LiveProjects func(ctx context.Context) ([]string, error)
+
+func (s *Store) Tasks(logger *slog.Logger, live LiveProjects) []schedule.Task {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -55,8 +60,38 @@ func (s *Store) Tasks(logger *slog.Logger) []schedule.Task {
 						"rows", removed,
 						"retention_days", int(WindowRetention/(24*time.Hour)))
 				}
-				return nil
+				return s.sweepOrphans(ctx, logger, live)
 			},
 		},
 	}
+}
+
+// sweepOrphans drops counters whose project no longer exists.
+//
+// Failing to enumerate the live projects is NOT an error the task reports. The
+// prune it runs alongside has already succeeded by this point, and turning a
+// transient read of somebody else's database into a red scheduled-task row
+// would misreport which half failed. A warning is the honest signal: the sweep
+// is a safety net, and a net that misses one night still catches the orphan on
+// the next.
+func (s *Store) sweepOrphans(ctx context.Context, logger *slog.Logger, live LiveProjects) error {
+	if live == nil {
+		return nil
+	}
+	paths, err := live(ctx)
+	if err != nil {
+		logger.Warn("could not list live projects — skipping the search-statistics orphan sweep", "err", err)
+		return nil
+	}
+	dropped, err := s.ForgetAllExcept(ctx, paths)
+	if err != nil {
+		return err
+	}
+	if dropped > 0 {
+		// Worth a line rather than silence: reaching here means a project
+		// delete did not discard its counters at the time, which is a bug
+		// somewhere upstream even though this cleaned up after it.
+		logger.Info("swept search statistics for projects that no longer exist", "projects", dropped)
+	}
+	return nil
 }

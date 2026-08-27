@@ -772,7 +772,25 @@ func run() (restart bool, err error) {
 		// Started here rather than at Open so the flush loop's lifetime is the
 		// background context's, like every other periodic goroutine.
 		statsRecorder.Start(bgCtx)
-		for _, t := range statsStore.Tasks(logger) {
+		// The sweep needs the live project list, which lives in the system
+		// database that searchstats deliberately cannot see.
+		liveProjects := func(ctx context.Context) ([]string, error) {
+			rows, err := database.QueryContext(ctx, `SELECT host_path FROM projects`)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+			var out []string
+			for rows.Next() {
+				var p string
+				if err := rows.Scan(&p); err != nil {
+					return nil, err
+				}
+				out = append(out, p)
+			}
+			return out, rows.Err()
+		}
+		for _, t := range statsStore.Tasks(logger, liveProjects) {
 			schedReg.Register(t, nil)
 		}
 	}

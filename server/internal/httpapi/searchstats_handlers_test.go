@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -28,7 +29,7 @@ type statsFixture struct {
 	Recorder *searchstats.Recorder
 }
 
-func newStatsFixture(t *testing.T) *statsFixture {
+func newStatsFixture(t testing.TB) *statsFixture {
 	t.Helper()
 	database, err := apidb.Open(":memory:")
 	if err != nil {
@@ -80,9 +81,9 @@ func newStatsFixture(t *testing.T) *statsFixture {
 
 // seedLocalProject creates an owned local project and records `queries`
 // searches against it, each returning the given files.
-func seedLocalProject(t *testing.T, f *statsFixture, hostPath, ownerID string, queries int, files ...string) string {
+func seedLocalProject(t testing.TB, f *statsFixture, hostPath, ownerID string, queries int, files ...string) string {
 	t.Helper()
-	if _, err := projects.Create(t.Context(), f.Deps.DB, projects.CreateRequest{
+	if _, err := projects.Create(context.Background(), f.Deps.DB, projects.CreateRequest{
 		HostPath: hostPath, OwnerUserID: ownerID,
 	}); err != nil {
 		t.Fatalf("create project %s: %v", hostPath, err)
@@ -90,7 +91,7 @@ func seedLocalProject(t *testing.T, f *statsFixture, hostPath, ownerID string, q
 	for i := 0; i < queries; i++ {
 		f.Recorder.Record(hostPath, searchstats.KindSemantic, files)
 	}
-	if err := f.Recorder.Flush(t.Context()); err != nil {
+	if err := f.Recorder.Flush(context.Background()); err != nil {
 		t.Fatalf("flush recorder: %v", err)
 	}
 	return projects.HashPath(hostPath)
@@ -102,7 +103,6 @@ type statsPayload struct {
 		PathHash      string `json:"path_hash"`
 		Name          string `json:"name"`
 		Kind          string `json:"kind"`
-		Exists        bool   `json:"exists"`
 		Queries       int64  `json:"queries"`
 		Results       int64  `json:"results"`
 		FileHits      int64  `json:"file_hits"`
@@ -244,8 +244,11 @@ func TestSearchStats_RowCarriesProjectIdentityAndTopFiles(t *testing.T) {
 		t.Fatalf("projects = %+v, want 1", p.Projects)
 	}
 	row := p.Projects[0]
-	if !row.Exists || row.PathHash != hash {
-		t.Errorf("row identity = exists:%v hash:%q, want true and %q", row.Exists, row.PathHash, hash)
+	if row.PathHash != hash {
+		t.Errorf("row path_hash = %q, want %q", row.PathHash, hash)
+	}
+	if row.Name != "/tmp/proj" {
+		t.Errorf("row name = %q, want the project's display path", row.Name)
 	}
 	if row.Kind != "local" {
 		t.Errorf("kind = %q, want local", row.Kind)
@@ -472,22 +475,57 @@ func TestSearchStatsSeries_ScopedAndBucketed(t *testing.T) {
 }
 
 // Deleting a project must take its counters with it — otherwise the file paths
-// of a removed repo stay readable in the statistics table.
+// of a removed repo sit in the statistics database forever, since the totals
+// tier is never pruned.
+//
+// The assertion goes to the STORE, not to GET /search-stats. That endpoint is
+// scoped to the projects the caller can see, so a deleted project is absent
+// from it whether or not its counters were discarded — an earlier version of
+// this test asserted through the endpoint and passed with the cleanup call
+// stubbed out entirely.
 func TestSearchStats_ProjectDeleteDiscardsCounters(t *testing.T) {
 	f := newStatsFixture(t)
 	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
 
 	hash := seedLocalProject(t, f, "/tmp/doomed", f.UserID, 3, "a.go")
-	if p := getStats(t, f, adminCookie, ""); len(p.Projects) != 1 {
-		t.Fatalf("before delete: %+v, want one row", p.Projects)
+	seedLocalProject(t, f, "/tmp/survivor", f.UserID, 1, "b.go")
+
+	countRows := func(where string) int {
+		t.Helper()
+		var n int
+		if err := f.Store.DB().QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM projects_seen WHERE project_path = ?`, where).Scan(&n); err != nil {
+			t.Fatalf("count projects_seen: %v", err)
+		}
+		return n
+	}
+	if countRows("/tmp/doomed") != 1 {
+		t.Fatal("the doomed project has no counters to begin with")
 	}
 
 	if rr, body := doReq(t, f.authTestFixture, adminCookie,
 		http.MethodDelete, "/api/v1/projects/"+hash, nil); rr.Code != http.StatusNoContent {
 		t.Fatalf("delete project = %d (%s)", rr.Code, body)
 	}
-	if p := getStats(t, f, adminCookie, ""); len(p.Projects) != 0 {
-		t.Errorf("after delete: %+v, want no rows", p.Projects)
+
+	if n := countRows("/tmp/doomed"); n != 0 {
+		t.Errorf("the deleted project still has %d row(s) in the statistics database", n)
+	}
+	if n := countRows("/tmp/survivor"); n != 1 {
+		t.Errorf("the surviving project lost its counters (%d rows) — the delete was too broad", n)
+	}
+	// The child tables must have gone with it, not just the parent row.
+	for _, table := range []string{
+		"search_totals", "search_file_totals", "search_buckets", "search_file_buckets",
+	} {
+		var n int
+		if err := f.Store.DB().QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if n != 1 {
+			t.Errorf("%s holds %d rows after the delete, want 1 (only the survivor)", table, n)
+		}
 	}
 }
 
@@ -518,6 +556,44 @@ func TestDedupePaths(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("dedupePaths = %v, want %v", got, want)
+		}
+	}
+}
+
+// dedupePaths has two branches; both must agree, including on the boundary
+// where it switches from scanning to hashing.
+func TestDedupePathsBothBranches(t *testing.T) {
+	for _, size := range []int{2, linearDedupeMax, linearDedupeMax + 1, linearDedupeMax * 3} {
+		in := make([]string, 0, size*2)
+		want := make([]string, 0, size)
+		for i := 0; i < size; i++ {
+			p := fmt.Sprintf("pkg/file%d.go", i)
+			in = append(in, p, p) // every path twice
+			want = append(want, p)
+		}
+		in = append(in, "") // and an empty one, which is dropped
+
+		got := dedupePaths(in)
+		if len(got) != len(want) {
+			t.Fatalf("size %d: got %d paths, want %d", size, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("size %d: got %v, want %v", size, got, want)
+			}
+		}
+	}
+}
+
+// The input must survive the call: the callers happen to build throwaway slices
+// today, and an in-place dedupe would be a trap for the next call site.
+func TestDedupePathsDoesNotMutateInput(t *testing.T) {
+	in := []string{"a.go", "b.go", "a.go"}
+	original := append([]string(nil), in...)
+	dedupePaths(in)
+	for i := range original {
+		if in[i] != original[i] {
+			t.Fatalf("input was modified: %v, was %v", in, original)
 		}
 	}
 }
