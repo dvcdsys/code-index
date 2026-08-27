@@ -467,45 +467,6 @@ func run() (restart bool, err error) {
 	// leak for up to 1h past shutdown. m8 fix.
 	defer idx.Shutdown()
 
-	// Search statistics — counters in a database of their own.
-	//
-	// Its own file because search must keep serving while the system database
-	// is frozen for a compaction (httpapi.readOnlyPostSuffixes says so
-	// explicitly) and because a counter has no business queueing behind the
-	// indexer's write lock. See internal/searchstats for the full argument.
-	//
-	// A failure to open it is NOT fatal. These are derived numbers about
-	// traffic that has already been served; refusing to start the server
-	// because a statistics file is unreadable would trade a working index for
-	// a chart. The feature reports itself as unavailable instead.
-	var (
-		statsStore    *searchstats.Store
-		statsRecorder *searchstats.Recorder
-	)
-	if cfg.SearchStatsEnabled {
-		statsPath := searchstats.PathBeside(cfg.SQLitePath)
-		st, serr := searchstats.Open(statsPath)
-		if serr != nil {
-			logger.Warn("search statistics unavailable — continuing without them",
-				"path", statsPath, "err", serr)
-		} else {
-			statsStore = st
-			statsRecorder = searchstats.NewRecorder(st, logger)
-			defer func() {
-				// Stop before Close: Stop drains whatever is still buffered,
-				// and draining into a closed pool would silently discard the
-				// last interval on every clean shutdown.
-				statsRecorder.Stop()
-				if cerr := statsStore.Close(); cerr != nil {
-					logger.Error("search statistics close", "err", cerr)
-				}
-			}()
-			logger.Info("search statistics enabled", "path", statsPath)
-		}
-	} else {
-		logger.Info("search statistics disabled (CIX_SEARCH_STATS_ENABLED=false)")
-	}
-
 	// Dashboard auth services. Built once and shared with the router.
 	usrSvc := users.New(database)
 	sessSvc := sessions.New(database)
@@ -628,6 +589,31 @@ func run() (restart bool, err error) {
 	// in the shutdown branch below.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
+
+	// Search statistics — counters in a database of their own.
+	//
+	// Its own file because search must keep serving while the system database
+	// is frozen for a compaction (httpapi.readOnlyPostSuffixes says so
+	// explicitly) and because a counter has no business queueing behind the
+	// indexer's write lock. See internal/searchstats for the full argument.
+	//
+	// OFF unless somebody asked for it. The resolution order is: an admin's
+	// saved decision, then CIX_SEARCH_STATS_ENABLED, then off — so an operator
+	// can start a fleet with the variable, and an admin who later flips the
+	// switch is not overruled by the next container start.
+	//
+	// The holder opens the database only when enabled, so a server that never
+	// turns the feature on never grows the file.
+	statsSettings := searchstats.NewSettingsStore(database, cfg.SearchStatsEnabled, cfg.SearchStatsEnabledSet)
+	statsHolder := searchstats.NewHolder(bgCtx, searchstats.PathBeside(cfg.SQLitePath), logger)
+	defer func() {
+		// Drains what is buffered before closing — switching off, or shutting
+		// down, is not a request to lose the last interval.
+		if err := statsHolder.Close(); err != nil {
+			logger.Error("search statistics close", "err", err)
+		}
+	}()
+
 	vcSvc := versioncheck.New(versioncheck.Config{
 		Enabled:        cfg.VersionCheckEnabled,
 		Interval:       cfg.VersionCheckInterval,
@@ -768,31 +754,48 @@ func run() (restart bool, err error) {
 		}
 		schedReg.Register(t, envCron)
 	}
-	if statsStore != nil {
-		// Started here rather than at Open so the flush loop's lifetime is the
-		// background context's, like every other periodic goroutine.
-		statsRecorder.Start(bgCtx)
-		// The sweep needs the live project list, which lives in the system
-		// database that searchstats deliberately cannot see.
-		liveProjects := func(ctx context.Context) ([]string, error) {
-			rows, err := database.QueryContext(ctx, `SELECT host_path FROM projects`)
-			if err != nil {
+	// Bring the statistics up if the resolved setting says so. A failure here
+	// is NOT fatal: these are derived numbers about traffic already served, and
+	// refusing to start the server because a statistics file is unreadable
+	// would trade a working index for a chart. The endpoints then report the
+	// feature as off, which is what it is.
+	if resolved, serr := statsSettings.Get(context.Background()); serr != nil {
+		logger.Warn("could not resolve the search-statistics setting — leaving them off", "err", serr)
+	} else if resolved.Enabled {
+		if err := statsHolder.Enable(); err != nil {
+			logger.Warn("search statistics could not be enabled — continuing without them",
+				"path", statsHolder.Path(), "err", err)
+		}
+	} else {
+		logger.Info("search statistics are off", "source", resolved.Source)
+	}
+
+	// The prune + orphan sweep is registered whether or not the feature is
+	// currently on. Its handler reads the holder each run, so switching the
+	// feature on at 10:00 does not mean waiting for a restart to get
+	// maintenance, and switching it off leaves a task that harmlessly does
+	// nothing rather than one that has to be unregistered.
+	//
+	// The sweep needs the live project list, which lives in the system database
+	// that searchstats deliberately cannot see.
+	liveProjects := func(ctx context.Context) ([]string, error) {
+		rows, err := database.QueryContext(ctx, `SELECT host_path FROM projects`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
 				return nil, err
 			}
-			defer rows.Close()
-			var out []string
-			for rows.Next() {
-				var p string
-				if err := rows.Scan(&p); err != nil {
-					return nil, err
-				}
-				out = append(out, p)
-			}
-			return out, rows.Err()
+			out = append(out, p)
 		}
-		for _, t := range statsStore.Tasks(logger, liveProjects) {
-			schedReg.Register(t, nil)
-		}
+		return out, rows.Err()
+	}
+	for _, t := range searchstats.HolderTasks(statsHolder, logger, liveProjects) {
+		schedReg.Register(t, nil)
 	}
 
 	go schedReg.Run(bgCtx)
@@ -804,38 +807,38 @@ func run() (restart bool, err error) {
 			RequestRestart: func() { restartOnce.Do(func() { close(restartCh) }) },
 			Quiesce:        quiesce,
 		},
-		DB:                database,
-		Schedules:         schedReg,
-		ServerVersion:     version,
-		APIVersion:        apiVersion,
-		Backend:           backend,
-		EmbeddingModel:    cfg.EmbeddingModel,
-		Logger:            logger,
-		AuthDisabled:      cfg.AuthDisabled,
-		Users:             usrSvc,
-		Groups:            grpSvc,
-		Sessions:          sessSvc,
-		APIKeys:           akSvc,
-		EmbeddingSvc:      embedSvc,
-		VectorStore:       vsHolder,
-		Indexer:           idx,
-		RuntimeCfg:        rcfg,
-		EmbeddingsCfg:     embedCfgStore,
-		VersionCheck:      vcSvc,
-		Workspaces:        wsSvc,
-		GithubTokens:      ghSvc,
-		GitRepos:          grSvc,
-		WorkspaceProjects: wpSvc,
-		Jobs:              jobsSvc,
-		DataDir:           cfg.WorkspacesDataDir,
-		Cfg:               cfg,
-		RepoLocks:         repoLocks,
-		PublicBaseURL:     cfg.PublicBaseURL,
-		Tunnel:            tunnelMgr,
-		WebhookReconciler: webhookReconciler,
-		TunnelConfig:      tunnelCfgSvc,
-		SearchStats:       statsStore,
-		SearchStatsWrite:  statsRecorder,
+		DB:                  database,
+		Schedules:           schedReg,
+		ServerVersion:       version,
+		APIVersion:          apiVersion,
+		Backend:             backend,
+		EmbeddingModel:      cfg.EmbeddingModel,
+		Logger:              logger,
+		AuthDisabled:        cfg.AuthDisabled,
+		Users:               usrSvc,
+		Groups:              grpSvc,
+		Sessions:            sessSvc,
+		APIKeys:             akSvc,
+		EmbeddingSvc:        embedSvc,
+		VectorStore:         vsHolder,
+		Indexer:             idx,
+		RuntimeCfg:          rcfg,
+		EmbeddingsCfg:       embedCfgStore,
+		VersionCheck:        vcSvc,
+		Workspaces:          wsSvc,
+		GithubTokens:        ghSvc,
+		GitRepos:            grSvc,
+		WorkspaceProjects:   wpSvc,
+		Jobs:                jobsSvc,
+		DataDir:             cfg.WorkspacesDataDir,
+		Cfg:                 cfg,
+		RepoLocks:           repoLocks,
+		PublicBaseURL:       cfg.PublicBaseURL,
+		Tunnel:              tunnelMgr,
+		WebhookReconciler:   webhookReconciler,
+		TunnelConfig:        tunnelCfgSvc,
+		SearchStats:         statsHolder,
+		SearchStatsSettings: statsSettings,
 	})
 
 	srv := &http.Server{

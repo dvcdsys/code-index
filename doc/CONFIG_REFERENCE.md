@@ -58,7 +58,13 @@ the DB.
 
 | Variable | Default | Description |
 |---|---|---|
-| `CIX_SEARCH_STATS_ENABLED` | `true` | Record per-project search counters. `false` records nothing, serves 503 from the statistics endpoints, and never creates the file. |
+| `CIX_SEARCH_STATS_ENABLED` | `false` | Deploy-time starting position for per-project search counters. `true` starts a server collecting from its first boot — for provisioning a fleet. |
+
+Off by default: an upgraded server does not quietly start collecting. An admin
+can also switch it on from the statistics page, which takes effect immediately
+and **outranks this variable from then on** — otherwise the next container start
+carrying the old environment would undo their decision. See
+`doc/SEARCH_STATISTICS.md`.
 
 Counters live in `searchstats.db`, created next to `CIX_SQLITE_PATH` — so a
 deployment that mounts a volume for the system database already covers this one.

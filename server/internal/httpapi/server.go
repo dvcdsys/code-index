@@ -402,10 +402,11 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path open
 // What survives a failure here is a row the statistics endpoint renders with
 // exists=false, which is visible and recoverable rather than silent.
 func (s *Server) forgetSearchStats(r *http.Request, hostPath string) {
-	if s.Deps.SearchStats == nil {
+	store := s.Deps.SearchStats.Store()
+	if store == nil {
 		return
 	}
-	if err := s.Deps.SearchStats.Forget(r.Context(), hostPath); err != nil {
+	if err := store.Forget(r.Context(), hostPath); err != nil {
 		s.Deps.Logger.Warn("delete project: discard search statistics",
 			"project", hostPath, "err", err)
 	}

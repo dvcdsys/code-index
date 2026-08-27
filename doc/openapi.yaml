@@ -1723,6 +1723,61 @@ paths:
         "503":
           description: Search statistics are disabled on this server
 
+  /api/v1/search-stats/settings:
+    get:
+      operationId: getSearchStatsSettings
+      tags: [search-stats]
+      summary: Whether search counters are being recorded
+      description: |
+        Readable by any authenticated user, because the statistics page has to
+        explain why it is empty. Changing it is admin-only.
+
+        `source` says what decided the current state: `database` — an admin used
+        the toggle, and that outranks the environment from then on;
+        `environment` — nobody has decided, and `CIX_SEARCH_STATS_ENABLED` is
+        speaking; `default` — nobody has decided and the variable is unset, so
+        the feature is off.
+      responses:
+        "200":
+          description: The resolved setting
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchStatsSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/admin/search-stats/settings:
+    put:
+      operationId: setSearchStatsSettings
+      tags: [search-stats]
+      summary: Switch search counters on or off (admin only)
+      description: |
+        Takes effect immediately — no restart. Enabling opens the statistics
+        database, creating it on first use; disabling flushes whatever is
+        buffered and closes it, keeping the counters already collected.
+
+        The decision is persisted and outranks `CIX_SEARCH_STATS_ENABLED` from
+        then on, so a redeploy carrying the old environment cannot silently undo
+        it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetSearchStatsSettingsRequest"
+      responses:
+        "200":
+          description: The resolved setting after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchStatsSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /api/v1/admin/search-stats/reset:
     post:
       operationId: resetSearchStats
@@ -3878,6 +3933,30 @@ components:
       properties:
         detail:
           type: string
+
+    SearchStatsSettings:
+      type: object
+      required: [enabled, source]
+      properties:
+        enabled:
+          type: boolean
+        source:
+          type: string
+          enum: [database, environment, default]
+          description: What decided the current state.
+        updated_at:
+          type: string
+          description: When an admin last changed it. Absent unless source is `database`.
+        updated_by:
+          type: string
+          description: Who last changed it. Absent unless source is `database`.
+
+    SetSearchStatsSettingsRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
 
     SearchStatsFile:
       type: object

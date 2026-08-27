@@ -329,11 +329,31 @@ To start over, `POST /admin/search-stats/reset`, or stop the server and delete
 
 ---
 
-## Turning it off
+## Turning it on
 
-`CIX_SEARCH_STATS_ENABLED=false` records nothing, serves 503 from the three
-endpoints, and never creates the file. The dashboard page then explains that the
-feature is switched off rather than showing zeroes.
+**Off by default.** A server that is upgraded does not quietly start collecting;
+somebody has to ask for it. There are two ways to ask, and they are ordered:
 
-A failure to open the database at boot is **not** fatal: the server logs a
-warning and runs without the feature.
+1. **The switch on the statistics page** (admin only). Takes effect immediately —
+   no restart. Enabling opens the database, creating it on first use; disabling
+   flushes whatever is buffered and closes it. The decision is stored.
+2. **`CIX_SEARCH_STATS_ENABLED=true` at deploy time.** This is the starting
+   position for a fleet, for an operator provisioning servers that should
+   collect from their first boot.
+
+**A stored decision outranks the environment.** That ordering is the point: an
+admin who turns collection on in the dashboard must not have it turned off again
+by the next container start carrying the old environment. The environment gives a
+server its starting position; it does not re-assert itself forever.
+
+The page reports which of the three is speaking — `database` (an admin decided,
+and when), `environment` (the variable is set and nobody has overridden it), or
+`default` (nobody has asked, so it is off).
+
+Switching collection off **keeps** what was already collected. The counters are
+still there if it is switched back on; `POST /admin/search-stats/reset` is the
+way to discard them.
+
+A server that never turns the feature on never creates `searchstats.db`. A
+failure to open it is **not** fatal: the server logs a warning, runs without the
+feature, and the page reports it as off.

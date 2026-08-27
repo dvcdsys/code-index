@@ -27,10 +27,13 @@ import (
 // definition and reference searches return one row per match and genuinely
 // repeat paths.
 func (s *Server) recordSearch(projectPath, kind string, files []string) {
-	if s.Deps.SearchStatsWrite == nil || projectPath == "" {
+	if projectPath == "" {
 		return
 	}
-	s.Deps.SearchStatsWrite.Record(projectPath, kind, dedupePaths(files))
+	// One atomic load. Recorder's methods are nil-safe, so a search that races
+	// an administrator switching the feature off is a no-op rather than a
+	// branch here and a panic there.
+	s.Deps.SearchStats.Recorder().Record(projectPath, kind, dedupePaths(files))
 }
 
 // linearDedupeMax is the length below which deduplication scans instead of
@@ -150,7 +153,7 @@ func resultFilePaths[T any](items []T, path func(T) string) []string {
 // load-bearing for projects_returned in WorkspaceSearch, where the comments
 // record that it has been broken once and re-broken during a refactor.
 func (s *Server) recordWorkspaceSearch(searched []string, surviving []projectHits) {
-	if s.Deps.SearchStatsWrite == nil || len(searched) == 0 {
+	if len(searched) == 0 || s.Deps.SearchStats.Recorder() == nil {
 		return
 	}
 	byProject := make(map[string][]string, len(surviving))

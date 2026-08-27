@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -157,9 +158,10 @@ func parseSearchKinds(raw *string) []string {
 
 // GetSearchStats — GET /api/v1/search-stats.
 func (s *Server) GetSearchStats(w http.ResponseWriter, r *http.Request, params openapi.GetSearchStatsParams) {
-	store := s.Deps.SearchStats
+	store := s.Deps.SearchStats.Store()
 	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "search statistics are not enabled on this server")
+		writeError(w, http.StatusServiceUnavailable,
+			"search statistics are switched off on this server")
 		return
 	}
 
@@ -281,9 +283,10 @@ func (s *Server) GetSearchStats(w http.ResponseWriter, r *http.Request, params o
 
 // GetSearchStatsSeries — GET /api/v1/search-stats/series.
 func (s *Server) GetSearchStatsSeries(w http.ResponseWriter, r *http.Request, params openapi.GetSearchStatsSeriesParams) {
-	store := s.Deps.SearchStats
+	store := s.Deps.SearchStats.Store()
 	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "search statistics are not enabled on this server")
+		writeError(w, http.StatusServiceUnavailable,
+			"search statistics are switched off on this server")
 		return
 	}
 
@@ -349,9 +352,10 @@ func (s *Server) ResetSearchStats(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
-	store := s.Deps.SearchStats
+	store := s.Deps.SearchStats.Store()
 	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "search statistics are not enabled on this server")
+		writeError(w, http.StatusServiceUnavailable,
+			"search statistics are switched off on this server")
 		return
 	}
 	if err := store.Reset(r.Context()); err != nil {
@@ -359,4 +363,94 @@ func (s *Server) ResetSearchStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// The on/off switch.
+//
+// Reading it is SelfAuth: the statistics page has to be able to explain why it
+// is empty, and "the feature is off" is not a secret. Changing it is Admin —
+// it is a server-wide decision about what the server collects.
+// ---------------------------------------------------------------------------
+
+func searchStatsSettingsPayload(s searchstats.Settings) openapi.SearchStatsSettings {
+	out := openapi.SearchStatsSettings{
+		Enabled: s.Enabled,
+		Source:  openapi.SearchStatsSettingsSource(s.Source),
+	}
+	if s.UpdatedAt != "" {
+		out.UpdatedAt = &s.UpdatedAt
+	}
+	if s.UpdatedBy != "" {
+		out.UpdatedBy = &s.UpdatedBy
+	}
+	return out
+}
+
+// GetSearchStatsSettings — GET /api/v1/search-stats/settings.
+func (s *Server) GetSearchStatsSettings(w http.ResponseWriter, r *http.Request) {
+	if s.Deps.SearchStatsSettings == nil {
+		// No settings store means the feature was never wired into this router
+		// (tests, and any embedding that leaves it out). Reporting it as off
+		// with no decision behind it is exactly true.
+		writeJSON(w, http.StatusOK, openapi.SearchStatsSettings{
+			Enabled: false, Source: openapi.SearchStatsSettingsSource(searchstats.SourceDefault),
+		})
+		return
+	}
+	cur, err := s.Deps.SearchStatsSettings.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Report what is actually running, not only what is stored. They can differ
+	// for one reason worth surfacing: the database failed to open at boot, so
+	// the setting says on and nothing is being recorded.
+	if s.Deps.SearchStats != nil {
+		cur.Enabled = s.Deps.SearchStats.Enabled()
+	}
+	writeJSON(w, http.StatusOK, searchStatsSettingsPayload(cur))
+}
+
+// SetSearchStatsSettings — PUT /api/v1/admin/search-stats/settings.
+func (s *Server) SetSearchStatsSettings(w http.ResponseWriter, r *http.Request) {
+	ac, ok := s.mustBeAdmin(w, r)
+	if !ok {
+		return
+	}
+	if s.Deps.SearchStatsSettings == nil || s.Deps.SearchStats == nil {
+		writeError(w, http.StatusServiceUnavailable, "search statistics are not configured on this server")
+		return
+	}
+	var body openapi.SetSearchStatsSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid request body")
+		return
+	}
+
+	// Apply BEFORE persisting. If opening the database fails, the stored
+	// setting must not claim the feature is on — an admin who sees the switch
+	// stay off and an error explaining why is better served than one who sees
+	// it flip and nothing happen.
+	if _, err := s.Deps.SearchStats.Set(body.Enabled); err != nil {
+		writeError(w, http.StatusInternalServerError,
+			"could not apply the setting: "+err.Error())
+		return
+	}
+	by := ""
+	if ac != nil && ac.User.Email != "" {
+		by = ac.User.Email
+	}
+	if err := s.Deps.SearchStatsSettings.Set(r.Context(), body.Enabled, by); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	cur, err := s.Deps.SearchStatsSettings.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	cur.Enabled = s.Deps.SearchStats.Enabled()
+	writeJSON(w, http.StatusOK, searchStatsSettingsPayload(cur))
 }

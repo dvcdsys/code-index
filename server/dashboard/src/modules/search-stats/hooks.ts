@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/client';
-import type { SearchStatsResponse, SearchStatsSeriesResponse } from '@/api/types';
+import type {
+  SearchStatsResponse,
+  SearchStatsSeriesResponse,
+  SearchStatsSettings,
+} from '@/api/types';
 
 // Every window the server will serve. `all` reads the cumulative totals; the
 // rest read the 30-minute-bucket tier, which is retained for seven days — so
@@ -170,9 +174,17 @@ function refreshIntervalFor(f: StatsFilters): number {
   return sortsByFile || filtersByFile ? 120_000 : 30_000;
 }
 
-export function useSearchStats(filters: StatsFilters) {
+// `enabled` is the collection switch, not a convenience. While collection is
+// off the server answers 503, and a query left running would spend the page
+// load on two doomed requests plus their retries — and, worse, would sit in an
+// error state afterwards: invalidating on the toggle refetches the settings but
+// leaves an errored table where it was, so the page came back on with an empty
+// table over a database that had rows in it. Not asking is both cheaper and
+// correct, and React Query fires both the moment the flag flips.
+export function useSearchStats(filters: StatsFilters, enabled: boolean) {
   const query = toQuery(filters);
   return useQuery({
+    enabled,
     queryKey: searchStatsKeys.table(query),
     queryFn: ({ signal }) =>
       api.get<SearchStatsResponse>(`/search-stats?${query}`, { signal }),
@@ -186,7 +198,7 @@ export function useSearchStats(filters: StatsFilters) {
   });
 }
 
-export function useSearchStatsSeries(window: StatsWindow, kinds: string[]) {
+export function useSearchStatsSeries(window: StatsWindow, kinds: string[], enabled: boolean) {
   // `all` has no series behind it: the cumulative tier carries no buckets.
   // Fall back to the widest window that does.
   const effective = window === 'all' ? '7d' : window;
@@ -194,6 +206,7 @@ export function useSearchStatsSeries(window: StatsWindow, kinds: string[]) {
   if (kinds.length > 0) q.set('kinds', kinds.join(','));
   const query = q.toString();
   return useQuery({
+    enabled,
     queryKey: searchStatsKeys.series(query),
     queryFn: ({ signal }) =>
       api.get<SearchStatsSeriesResponse>(`/search-stats/series?${query}`, { signal }),
@@ -206,6 +219,27 @@ export function useResetSearchStats() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.post<void>('/admin/search-stats/reset', {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['search-stats'] }),
+  });
+}
+
+// The on/off switch. Read by everyone — the page has to be able to say why it
+// is empty — and written by admins only.
+export function useSearchStatsSettings() {
+  return useQuery({
+    queryKey: ['search-stats', 'settings'] as const,
+    queryFn: ({ signal }) =>
+      api.get<SearchStatsSettings>('/search-stats/settings', { signal }),
+  });
+}
+
+export function useSetSearchStatsSettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (enabled: boolean) =>
+      api.put<SearchStatsSettings>('/admin/search-stats/settings', { enabled }),
+    // Everything on the page depends on this, including whether the other two
+    // queries are worth issuing at all.
     onSuccess: () => qc.invalidateQueries({ queryKey: ['search-stats'] }),
   });
 }

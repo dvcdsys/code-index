@@ -106,7 +106,6 @@ func benchSearch(b *testing.B, corpus int, parallel bool) {
 			d.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 			if !stats {
 				d.SearchStats = nil
-				d.SearchStatsWrite = nil
 			}
 			f.Deps = d
 			f.Router = NewRouter(d)

@@ -162,16 +162,16 @@ type Deps struct {
 	// tests; the config handlers return 503 when absent.
 	TunnelConfig *tunnelcfg.Service
 
-	// SearchStats records and serves per-project search counters. Both may be
-	// nil — in tests, and in any deployment that has switched the feature off —
-	// and every call site is written to tolerate that: Recorder's methods are
-	// nil-safe, and the stats endpoints answer 503 when Store is absent.
-	//
-	// They are separate fields rather than one service because they are used
-	// from opposite directions. The recorder is touched by the search handlers,
-	// which must never block; the store is read by the dashboard, which may.
-	SearchStats      *searchstats.Store
-	SearchStatsWrite *searchstats.Recorder
+	// SearchStats owns the per-project search counters, and can be switched on
+	// and off while the server runs. Nil in tests and in any router built
+	// without the feature; every call site tolerates that, and the endpoints
+	// answer 503 when the holder is absent or currently disabled.
+	SearchStats *searchstats.Holder
+	// SearchStatsSettings persists the admin's on/off decision. It lives in the
+	// system database rather than in searchstats.db, because it has to be
+	// readable while the statistics database is closed — which is exactly the
+	// state it describes.
+	SearchStatsSettings *searchstats.SettingsStore
 }
 
 // NewRouter builds the chi router with middleware and the generated

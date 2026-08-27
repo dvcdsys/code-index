@@ -100,11 +100,19 @@ type Config struct {
 	LlamaCacheRAMMiB  int    // CIX_LLAMA_CACHE_RAM; llama-server host prompt-cache cap in MiB (--cache-ram). 0 = disabled (embeddings get zero prompt reuse; upstream default 8192 caused OOM kills), -1 = unlimited.
 	LlamaStartupSec   int    // CIX_LLAMA_STARTUP_TIMEOUT; readiness probe ceiling in seconds.
 	EmbeddingsEnabled bool   // CIX_EMBEDDINGS_ENABLED; test hook to bypass sidecar entirely.
-	// SearchStatsEnabled turns per-project search counters on. CIX_SEARCH_STATS_ENABLED,
-	// default true. Off means the counters are neither recorded nor served —
-	// the dashboard page reports the feature as disabled rather than showing
-	// zeroes, and the searchstats.db file is never created.
+	// SearchStatsEnabled is the DEPLOY-TIME starting position for per-project
+	// search counters: CIX_SEARCH_STATS_ENABLED, default false.
+	//
+	// It is a starting position and not the setting. Once an admin uses the
+	// toggle on the statistics page, that decision is stored and outranks this
+	// — otherwise the next container start would silently undo it. See
+	// searchstats.SettingsStore.
 	SearchStatsEnabled bool
+	// SearchStatsEnabledSet records whether the variable was present at all.
+	// "Set to false" and "not set" both mean off, but only the first is a
+	// decision, and the dashboard tells them apart so an operator can see
+	// whether anything is speaking for the current state.
+	SearchStatsEnabledSet bool
 
 	// BootstrapGGUFPath, when set, points at a .gguf file outside the cix
 	// cache that should be imported on first boot — atomically copied into
@@ -457,11 +465,14 @@ func Load() (*Config, error) {
 	}
 	c.EmbeddingsEnabled = enabled
 
-	statsEnabled, err := getenvBool("CIX_SEARCH_STATS_ENABLED", true)
+	// Default false: counters are a feature somebody opts into, not something a
+	// server starts collecting because it was upgraded.
+	statsEnabled, err := getenvBool("CIX_SEARCH_STATS_ENABLED", false)
 	if err != nil {
 		return nil, err
 	}
 	c.SearchStatsEnabled = statsEnabled
+	c.SearchStatsEnabledSet = os.Getenv("CIX_SEARCH_STATS_ENABLED") != ""
 
 	c.BootstrapGGUFPath = getenv("CIX_BOOTSTRAP_GGUF_PATH", "")
 

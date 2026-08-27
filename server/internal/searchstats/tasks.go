@@ -32,6 +32,35 @@ const TaskPrune = "searchstats.prune"
 // package deliberately cannot see the system database.
 type LiveProjects func(ctx context.Context) ([]string, error)
 
+// HolderTasks registers the maintenance task against a holder rather than a
+// store, so it survives the feature being switched on and off.
+//
+// The handler resolves the store on every run instead of capturing it. A task
+// bound to whatever was open at boot would stop working the moment an admin
+// toggled the feature, and re-registering on each toggle would mean an admin's
+// saved schedule for it had to be carried across — for a task that is a
+// no-op while the feature is off anyway.
+func HolderTasks(h *Holder, logger *slog.Logger, live LiveProjects) []schedule.Task {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	tasks := (&Store{}).Tasks(logger, live)
+	for i := range tasks {
+		tasks[i].Handler = func(ctx context.Context) error {
+			store := h.Store()
+			if store == nil {
+				return nil // switched off; nothing to maintain
+			}
+			return store.maintain(ctx, logger, live)
+		}
+		// Asked afresh at every resolution rather than captured once, for the
+		// same reason dbmaint asks whether its reclaim still makes sense: the
+		// answer changes under a running server.
+		tasks[i].DefaultEnabled = func() bool { return h.Enabled() }
+	}
+	return tasks
+}
+
 func (s *Store) Tasks(logger *slog.Logger, live LiveProjects) []schedule.Task {
 	if logger == nil {
 		logger = slog.Default()
@@ -51,19 +80,25 @@ func (s *Store) Tasks(logger *slog.Logger, live LiveProjects) []schedule.Task {
 			// on waking rather than never running it at all.
 			CatchUp: true,
 			Handler: func(ctx context.Context) error {
-				removed, err := s.Prune(ctx, time.Now())
-				if err != nil {
-					return err
-				}
-				if removed > 0 {
-					logger.Info("pruned search statistics",
-						"rows", removed,
-						"retention_days", int(WindowRetention/(24*time.Hour)))
-				}
-				return s.sweepOrphans(ctx, logger, live)
+				return s.maintain(ctx, logger, live)
 			},
 		},
 	}
+}
+
+// maintain is one maintenance run: prune the window tier, then sweep counters
+// whose project is gone.
+func (s *Store) maintain(ctx context.Context, logger *slog.Logger, live LiveProjects) error {
+	removed, err := s.Prune(ctx, time.Now())
+	if err != nil {
+		return err
+	}
+	if removed > 0 {
+		logger.Info("pruned search statistics",
+			"rows", removed,
+			"retention_days", int(WindowRetention/(24*time.Hour)))
+	}
+	return s.sweepOrphans(ctx, logger, live)
 }
 
 // sweepOrphans drops counters whose project no longer exists.

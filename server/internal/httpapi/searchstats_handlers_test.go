@@ -25,6 +25,7 @@ import (
 // leaving as the default the rest of the suite exercises.
 type statsFixture struct {
 	*authTestFixture
+	Holder   *searchstats.Holder
 	Store    *searchstats.Store
 	Recorder *searchstats.Recorder
 }
@@ -50,32 +51,35 @@ func newStatsFixture(t testing.TB) *statsFixture {
 		t.Fatalf("seed key: %v", err)
 	}
 
-	store, err := searchstats.Open(filepath.Join(t.TempDir(), searchstats.DBFileName))
-	if err != nil {
-		t.Fatalf("open search stats: %v", err)
+	// Built through the holder, the way production does, so the tests exercise
+	// the same enable path an admin's toggle takes.
+	holder := searchstats.NewHolder(context.Background(),
+		filepath.Join(t.TempDir(), searchstats.DBFileName), nil)
+	if err := holder.Enable(); err != nil {
+		t.Fatalf("enable search stats: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	rec := searchstats.NewRecorder(store, nil)
+	t.Cleanup(func() { _ = holder.Close() })
 
 	deps := Deps{
-		DB:               database,
-		ServerVersion:    "0.0.0-test",
-		APIVersion:       "v1",
-		EmbeddingModel:   "test-model",
-		Users:            usrSvc,
-		Sessions:         sessSvc,
-		APIKeys:          akSvc,
-		Groups:           groups.New(database),
-		Workspaces:       workspaces.New(database),
-		SearchStats:      store,
-		SearchStatsWrite: rec,
+		DB:                  database,
+		ServerVersion:       "0.0.0-test",
+		APIVersion:          "v1",
+		EmbeddingModel:      "test-model",
+		Users:               usrSvc,
+		Sessions:            sessSvc,
+		APIKeys:             akSvc,
+		Groups:              groups.New(database),
+		Workspaces:          workspaces.New(database),
+		SearchStats:         holder,
+		SearchStatsSettings: searchstats.NewSettingsStore(database, true, true),
 	}
 	return &statsFixture{
 		authTestFixture: &authTestFixture{
 			Router: NewRouter(deps), Deps: deps, UserID: u.ID, FullKey: full,
 		},
-		Store:    store,
-		Recorder: rec,
+		Holder:   holder,
+		Store:    holder.Store(),
+		Recorder: holder.Recorder(),
 	}
 }
 
@@ -595,5 +599,131 @@ func TestDedupePathsDoesNotMutateInput(t *testing.T) {
 		if in[i] != original[i] {
 			t.Fatalf("input was modified: %v, was %v", in, original)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The on/off switch.
+// ---------------------------------------------------------------------------
+
+type settingsPayload struct {
+	Enabled   bool   `json:"enabled"`
+	Source    string `json:"source"`
+	UpdatedAt string `json:"updated_at"`
+	UpdatedBy string `json:"updated_by"`
+}
+
+func getSettings(t *testing.T, f *statsFixture, cookie string) settingsPayload {
+	t.Helper()
+	rr, body := doReq(t, f.authTestFixture, cookie, http.MethodGet, "/api/v1/search-stats/settings", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET settings = %d (%s)", rr.Code, body)
+	}
+	var p settingsPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatalf("decode: %v (%s)", err, body)
+	}
+	return p
+}
+
+func TestSearchStatsSettings_ReadableByAnyUserWritableByAdmin(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	userCookie := seedUser(t, f.authTestFixture, adminCookie, "bob@example.com", "bobpass1234")
+
+	// A regular user can read it — the statistics page has to be able to
+	// explain why it is empty.
+	if got := getSettings(t, f, userCookie); !got.Enabled {
+		t.Errorf("user sees enabled=%v, want true", got.Enabled)
+	}
+	// But not change it.
+	if rr, body := doReq(t, f.authTestFixture, userCookie, http.MethodPut,
+		"/api/v1/admin/search-stats/settings", map[string]any{"enabled": false}); rr.Code != http.StatusForbidden {
+		t.Errorf("user PUT = %d, want 403 (%s)", rr.Code, body)
+	}
+	// Unauthenticated reads are refused like everything else.
+	if rr, _ := doReq(t, f.authTestFixture, "", http.MethodGet,
+		"/api/v1/search-stats/settings", nil); rr.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET = %d, want 401", rr.Code)
+	}
+}
+
+// Toggling takes effect immediately: no restart, and the endpoints follow.
+func TestSearchStatsSettings_TogglesLive(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	seedLocalProject(t, f, "/tmp/proj", f.UserID, 3, "a.go")
+
+	if p := getStats(t, f, adminCookie, ""); len(p.Projects) != 1 {
+		t.Fatalf("before the toggle: %+v, want one row", p.Projects)
+	}
+
+	// Off.
+	rr, body := doReq(t, f.authTestFixture, adminCookie, http.MethodPut,
+		"/api/v1/admin/search-stats/settings", map[string]any{"enabled": false})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT off = %d (%s)", rr.Code, body)
+	}
+	var after settingsPayload
+	if err := json.Unmarshal(body, &after); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if after.Enabled {
+		t.Error("response says still enabled after switching off")
+	}
+	if after.Source != "database" {
+		t.Errorf("source = %q, want database — an admin's decision must outrank the environment", after.Source)
+	}
+	if f.Holder.Enabled() {
+		t.Error("holder still reports enabled")
+	}
+	// The read endpoints now decline rather than reporting zeroes.
+	if rr, _ := doReq(t, f.authTestFixture, adminCookie, http.MethodGet,
+		"/api/v1/search-stats", nil); rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET /search-stats while off = %d, want 503", rr.Code)
+	}
+	// And recording is inert — this must not panic on a nil recorder.
+	srv := &Server{Deps: f.Deps}
+	srv.recordSearch("/tmp/proj", searchstats.KindSemantic, []string{"b.go"})
+
+	// Back on: the counters collected before are still there.
+	if rr, body := doReq(t, f.authTestFixture, adminCookie, http.MethodPut,
+		"/api/v1/admin/search-stats/settings", map[string]any{"enabled": true}); rr.Code != http.StatusOK {
+		t.Fatalf("PUT on = %d (%s)", rr.Code, body)
+	}
+	if !f.Holder.Enabled() {
+		t.Fatal("holder did not come back up")
+	}
+	p := getStats(t, f, adminCookie, "")
+	if len(p.Projects) != 1 || p.Projects[0].Queries != 3 {
+		t.Errorf("after switching back on: %+v, want the 3 counters that were collected before", p.Projects)
+	}
+}
+
+// Switching off must not discard what is still buffered.
+func TestSearchStatsSettings_DisableDrainsPendingCounters(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	if _, err := projects.Create(context.Background(), f.Deps.DB, projects.CreateRequest{
+		HostPath: "/tmp/proj", OwnerUserID: f.UserID,
+	}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	// Recorded but deliberately NOT flushed.
+	f.Holder.Recorder().Record("/tmp/proj", searchstats.KindSemantic, []string{"a.go"})
+
+	if rr, body := doReq(t, f.authTestFixture, adminCookie, http.MethodPut,
+		"/api/v1/admin/search-stats/settings", map[string]any{"enabled": false}); rr.Code != http.StatusOK {
+		t.Fatalf("PUT off = %d (%s)", rr.Code, body)
+	}
+	if rr, body := doReq(t, f.authTestFixture, adminCookie, http.MethodPut,
+		"/api/v1/admin/search-stats/settings", map[string]any{"enabled": true}); rr.Code != http.StatusOK {
+		t.Fatalf("PUT on = %d (%s)", rr.Code, body)
+	}
+
+	p := getStats(t, f, adminCookie, "")
+	if len(p.Projects) != 1 || p.Projects[0].Queries != 1 {
+		t.Errorf("after off/on: %+v, want the buffered counter to have been written on the way out", p.Projects)
 	}
 }

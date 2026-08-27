@@ -9,6 +9,7 @@ import { Page, SectionLabel } from '@/ui/page';
 import { SkeletonRows } from '@/ui/skeleton';
 import { TableNote } from '@/ui/table';
 import { ActivityChart } from './components/ActivityChart';
+import { CollectionToggle } from './components/CollectionToggle';
 import { StatsFiltersBar } from './components/StatsFilters';
 import { StatsTable } from './components/StatsTable';
 import {
@@ -16,6 +17,8 @@ import {
   PAGE_SIZE,
   useDebouncedFilters,
   useResetSearchStats,
+  useSearchStatsSettings,
+  useSetSearchStatsSettings,
   useSearchStats,
   useSearchStatsSeries,
   type StatsFilters,
@@ -28,17 +31,23 @@ export default function SearchStatsPage() {
   // The inputs render from `filters` so typing stays instant; the requests go
   // out from the debounced copy.
   const queried = useDebouncedFilters(filters);
-  const { data, error, isLoading } = useSearchStats(queried);
-  const series = useSearchStatsSeries(queried.window, queried.kinds);
+  const settings = useSearchStatsSettings();
+  const setSettings = useSetSearchStatsSettings();
+  // Resolved before the two data queries, which do not run until it is true.
+  const collecting = settings.data?.enabled ?? false;
+
+  const { data, error, isLoading } = useSearchStats(queried, collecting);
+  const series = useSearchStatsSeries(queried.window, queried.kinds, collecting);
   const reset = useResetSearchStats();
 
   const total = data?.total ?? 0;
   useStatusFact(data ? `${total} project${total === 1 ? '' : 's'} searched` : null);
 
-  // The server answers 503 when CIX_SEARCH_STATS_ENABLED is off. That is a
-  // configuration state, not a fault, so it gets its own explanation instead
-  // of the red "could not load" that a real failure earns.
-  const disabled = error instanceof ApiError && error.status === 503;
+  // The server answers 503 when collection is off. That is a configuration
+  // state, not a fault, so it never becomes the red "could not load" a real
+  // failure earns — the toggle above explains it, and the toggle is how it is
+  // changed.
+  const disabled = !collecting || (error instanceof ApiError && error.status === 503);
 
   const onSort = (column: StatsSort) => {
     setFilters((f) =>
@@ -54,7 +63,7 @@ export default function SearchStatsPage() {
       title="Search statistics"
       subtitle="How often each project is searched, and which of its files keep coming back in the results. Counters only — no query text is recorded anywhere."
       action={
-        user?.role === 'admin' && !disabled ? (
+        user?.role === 'admin' && collecting ? (
           <Button
             variant="quietDanger"
             size="sm"
@@ -70,10 +79,23 @@ export default function SearchStatsPage() {
         ) : null
       }
     >
-      {disabled ? (
-        <Empty title="Search statistics are switched off">
-          This server runs with <code>CIX_SEARCH_STATS_ENABLED=false</code>, so no counters are
-          recorded and none are kept. Set it to <code>true</code> and restart to start collecting.
+      {settings.data ? (
+        <CollectionToggle
+          settings={settings.data}
+          canEdit={user?.role === 'admin'}
+          pending={setSettings.isPending}
+          error={setSettings.error}
+          onChange={(next) => setSettings.mutate(next)}
+        />
+      ) : null}
+
+      {settings.isLoading ? (
+        <SkeletonRows rows={3} />
+      ) : disabled ? (
+        <Empty title="Not collecting search statistics">
+          {user?.role === 'admin'
+            ? 'Turn collection on above to start counting. Nothing is recorded until you do, and counters already collected are kept while it is off.'
+            : 'An admin has not turned collection on for this server, so there is nothing to show.'}
         </Empty>
       ) : (
         <>
