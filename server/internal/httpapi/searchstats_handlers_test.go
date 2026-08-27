@@ -607,10 +607,11 @@ func TestDedupePathsDoesNotMutateInput(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type settingsPayload struct {
-	Enabled   bool   `json:"enabled"`
-	Source    string `json:"source"`
-	UpdatedAt string `json:"updated_at"`
-	UpdatedBy string `json:"updated_by"`
+	Enabled           bool   `json:"enabled"`
+	Source            string `json:"source"`
+	UpdatedAt         string `json:"updated_at"`
+	UpdatedBy         string `json:"updated_by"`
+	HasStoredCounters *bool  `json:"has_stored_counters"`
 }
 
 func getSettings(t *testing.T, f *statsFixture, cookie string) settingsPayload {
@@ -760,6 +761,13 @@ func TestSearchStatsSettings_DoesNotLeakTheAdminToRegularUsers(t *testing.T) {
 	if asUser.UpdatedAt != "" {
 		t.Errorf("user sees updated_at=%q — when an admin last administered this server",
 			asUser.UpdatedAt)
+	}
+	if asUser.HasStoredCounters != nil {
+		t.Errorf("user sees has_stored_counters=%v — operator information, and nothing "+
+			"a regular user has a control for", *asUser.HasStoredCounters)
+	}
+	if asAdmin.HasStoredCounters == nil || !*asAdmin.HasStoredCounters {
+		t.Error("admin does not see has_stored_counters — the Clear counters button keys on it")
 	}
 }
 

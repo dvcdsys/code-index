@@ -386,13 +386,20 @@ func (s *Server) ResetSearchStats(w http.ResponseWriter, r *http.Request) {
 // directory of the administrators nobody asked for.
 func searchStatsSettingsPayload(s searchstats.Settings, isAdmin bool, hasCounters bool) openapi.SearchStatsSettings {
 	out := openapi.SearchStatsSettings{
-		Enabled:           s.Enabled,
-		HasStoredCounters: &hasCounters,
-		Source:            openapi.SearchStatsSettingsSource(s.Source),
+		Enabled: s.Enabled,
+		Source:  openapi.SearchStatsSettingsSource(s.Source),
 	}
 	if !isAdmin {
+		// `enabled` and `source` are the whole of why the page is empty, which
+		// is the entire reason this endpoint is readable by everyone. The rest
+		// is operator information: who administers the server, when they last
+		// did, and whether there is a file to dispose of. A regular user has no
+		// control that acts on any of it — the dashboard reads
+		// has_stored_counters only inside admin-gated branches — so sending it
+		// would be widening the endpoint past the justification it was given.
 		return out
 	}
+	out.HasStoredCounters = &hasCounters
 	if s.UpdatedAt != "" {
 		out.UpdatedAt = &s.UpdatedAt
 	}
@@ -408,11 +415,9 @@ func (s *Server) GetSearchStatsSettings(w http.ResponseWriter, r *http.Request) 
 		// No settings store means the feature was never wired into this router
 		// (tests, and any embedding that leaves it out). Reporting it as off
 		// with no decision behind it is exactly true.
-		none := false
 		writeJSON(w, http.StatusOK, openapi.SearchStatsSettings{
-			Enabled:           false,
-			HasStoredCounters: &none,
-			Source:            openapi.SearchStatsSettingsSource(searchstats.SourceDefault),
+			Enabled: false,
+			Source:  openapi.SearchStatsSettingsSource(searchstats.SourceDefault),
 		})
 		return
 	}

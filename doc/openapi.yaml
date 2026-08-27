@@ -3953,6 +3953,11 @@ components:
             on; when it is off, true means counters were collected earlier and
             are still on disk, readable again by switching collection back on
             and discardable at any time via the reset endpoint.
+
+            Sent to admins only. `enabled` and `source` are the whole of why a
+            page is empty, which is why this endpoint is readable by everyone;
+            whether there is a file to dispose of is operator information, and
+            no control a regular user has acts on it.
         source:
           type: string
           enum: [database, environment, default]
