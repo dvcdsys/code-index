@@ -835,54 +835,87 @@ func TestFileAggregateShapesAgree(t *testing.T) {
 	}
 
 	scope := []string{"proj-a", "proj-b", "proj-c"}
-	for _, window := range []time.Duration{0, WindowRetention} {
+	// The windows must include one that actually CUTS. With only {0, retention}
+	// every seeded row falls inside every window, so the bucket predicate is
+	// present but never excludes anything — and deleting it from
+	// fillFileAggregates would change no output, leaving it untested. One hour
+	// drops the rows seeded two hours back.
+	//
+	// Limit 2 against 3 matching projects is the other boundary: it makes the
+	// page a strict SUBSET of the matched set, which is the only shape where
+	// filling the file columns per page can disagree with computing them for
+	// everything.
+	for _, window := range []time.Duration{0, WindowRetention, time.Hour} {
 		for _, kinds := range [][]string{nil, {KindSemantic}} {
-			base := Query{
-				ProjectPaths: scope, Kinds: kinds, Window: window, TopFiles: 0, Limit: 50,
-			}
-			// Sorting by queries takes the cheap path; sorting by a file column
-			// forces the full aggregate. Same rows either way.
-			cheap := base
-			cheap.Sort = SortQueries
-			full := base
-			full.Sort = SortFileHits
-
-			if cheap.needsFileAggregate() {
-				t.Fatal("sorting by queries should not need the full file aggregate")
-			}
-			if !full.needsFileAggregate() {
-				t.Fatal("sorting by file_hits must need the full file aggregate")
-			}
-
-			cheapPage, err := s.ProjectStatsPage(ctx, cheap, fixedNow)
-			if err != nil {
-				t.Fatalf("cheap page: %v", err)
-			}
-			fullPage, err := s.ProjectStatsPage(ctx, full, fixedNow)
-			if err != nil {
-				t.Fatalf("full page: %v", err)
-			}
-
-			label := fmt.Sprintf("window=%v kinds=%v", window, kinds)
-			if cheapPage.Total != fullPage.Total {
-				t.Fatalf("%s: totals differ, %d vs %d", label, cheapPage.Total, fullPage.Total)
-			}
-			byPath := map[string]ProjectStats{}
-			for _, r := range fullPage.Rows {
-				byPath[r.ProjectPath] = r
-			}
-			for _, got := range cheapPage.Rows {
-				want, ok := byPath[got.ProjectPath]
-				if !ok {
-					t.Fatalf("%s: %s missing from the full-aggregate page", label, got.ProjectPath)
+			for _, limit := range []int{50, 2} {
+				base := Query{
+					ProjectPaths: scope, Kinds: kinds, Window: window, TopFiles: 0, Limit: limit,
 				}
-				if got.FileHits != want.FileHits ||
-					got.DistinctFiles != want.DistinctFiles ||
-					got.TopFileHits != want.TopFileHits {
-					t.Errorf("%s: %s file columns differ — cheap(%d,%d,%d) full(%d,%d,%d)",
-						label, got.ProjectPath,
-						got.FileHits, got.DistinctFiles, got.TopFileHits,
-						want.FileHits, want.DistinctFiles, want.TopFileHits)
+				// Sorting by queries takes the cheap path; sorting by a file column
+				// forces the full aggregate. Same rows either way.
+				cheap := base
+				cheap.Sort = SortQueries
+				full := base
+				full.Sort = SortFileHits
+
+				if cheap.needsFileAggregate() {
+					t.Fatal("sorting by queries should not need the full file aggregate")
+				}
+				if !full.needsFileAggregate() {
+					t.Fatal("sorting by file_hits must need the full file aggregate")
+				}
+
+				cheapPage, err := s.ProjectStatsPage(ctx, cheap, fixedNow)
+				if err != nil {
+					t.Fatalf("cheap page: %v", err)
+				}
+				fullPage, err := s.ProjectStatsPage(ctx, full, fixedNow)
+				if err != nil {
+					t.Fatalf("full page: %v", err)
+				}
+
+				label := fmt.Sprintf("window=%v kinds=%v limit=%d", window, kinds, limit)
+				if cheapPage.Total != fullPage.Total {
+					t.Fatalf("%s: totals differ, %d vs %d", label, cheapPage.Total, fullPage.Total)
+				}
+				// The two pages are sorted differently on purpose, so compare by
+				// project rather than by position. Every project the cheap path
+				// returned must carry the same file columns the full aggregate
+				// computed for it.
+				byPath := map[string]ProjectStats{}
+				for _, r := range fullPage.Rows {
+					byPath[r.ProjectPath] = r
+				}
+				// A subset page can legitimately hold projects the other page's
+				// different ordering left off, so build the full picture from an
+				// unpaginated run when the pages are cut short.
+				if limit < 50 {
+					wide := full
+					wide.Limit = 50
+					widePage, werr := s.ProjectStatsPage(ctx, wide, fixedNow)
+					if werr != nil {
+						t.Fatalf("%s: wide page: %v", label, werr)
+					}
+					for _, r := range widePage.Rows {
+						byPath[r.ProjectPath] = r
+					}
+				}
+				if len(cheapPage.Rows) == 0 {
+					t.Fatalf("%s: cheap page returned nothing to compare", label)
+				}
+				for _, got := range cheapPage.Rows {
+					want, ok := byPath[got.ProjectPath]
+					if !ok {
+						t.Fatalf("%s: %s missing from the full-aggregate page", label, got.ProjectPath)
+					}
+					if got.FileHits != want.FileHits ||
+						got.DistinctFiles != want.DistinctFiles ||
+						got.TopFileHits != want.TopFileHits {
+						t.Errorf("%s: %s file columns differ — cheap(%d,%d,%d) full(%d,%d,%d)",
+							label, got.ProjectPath,
+							got.FileHits, got.DistinctFiles, got.TopFileHits,
+							want.FileHits, want.DistinctFiles, want.TopFileHits)
+					}
 				}
 			}
 		}
@@ -923,7 +956,11 @@ func TestFooterTotalsSpanTheFilteredSetNotThePage(t *testing.T) {
 		t.Errorf("footer queries = %d, want 10 (1+2+3+4), not the page's 7", page.TotalQueries)
 	}
 
-	// Paging past the end returns nothing rather than an error.
+	// Paging past the end returns no rows — but must still report how large the
+	// set is. `total` is documented as the count BEFORE limit and offset, and
+	// the dashboard polls every thirty seconds: a set that shrinks under a
+	// reader sitting on the last page would otherwise collapse the pager and
+	// render "nothing recorded" over projects that are still there.
 	empty, err := s.ProjectStatsPage(ctx, Query{
 		ProjectPaths: scope, Sort: SortQueries, Limit: 2, Offset: 99,
 	}, fixedNow)
@@ -932,5 +969,82 @@ func TestFooterTotalsSpanTheFilteredSetNotThePage(t *testing.T) {
 	}
 	if len(empty.Rows) != 0 {
 		t.Errorf("offset past the end returned %d rows", len(empty.Rows))
+	}
+	if empty.Total != 4 {
+		t.Errorf("total past the end = %d, want 4 — it counts what matched, not what was returned", empty.Total)
+	}
+	if empty.TotalQueries != 10 {
+		t.Errorf("footer queries past the end = %d, want 10", empty.TotalQueries)
+	}
+
+	// A filter that genuinely matches nothing is a different answer, and must
+	// not be dressed up with the unfiltered totals.
+	tooHigh := int64(1000)
+	none, err := s.ProjectStatsPage(ctx, Query{
+		ProjectPaths: scope, Sort: SortQueries, Limit: 2, Offset: 99, MinQueries: &tooHigh,
+	}, fixedNow)
+	if err != nil {
+		t.Fatalf("no matches: %v", err)
+	}
+	if none.Total != 0 || none.TotalQueries != 0 {
+		t.Errorf("a filter matching nothing reported total=%d queries=%d, want zeroes",
+			none.Total, none.TotalQueries)
+	}
+}
+
+// needsFileAggregate decides whether the expensive per-project file aggregate
+// runs. If a sort key that reads a file column is ever added without being
+// listed in fileDerivedSorts, the page is built from a stub CTE and the request
+// silently returns zeros in the columns it was sorted by — wrong numbers, no
+// error. This pins the two lists to each other so that cannot happen quietly.
+func TestFileDerivedSortsMatchSortColumns(t *testing.T) {
+	fileColumns := map[string]struct{}{
+		"file_hits": {}, "distinct_files": {}, "top_file_hits": {},
+	}
+	for key, expr := range sortColumns {
+		_, isFileColumn := fileColumns[expr]
+		_, declared := fileDerivedSorts[key]
+		if isFileColumn && !declared {
+			t.Errorf("sort key %q orders by the file column %q but is missing from fileDerivedSorts — "+
+				"requests using it would be served from the stub aggregate", key, expr)
+		}
+		if declared && !isFileColumn {
+			t.Errorf("sort key %q is in fileDerivedSorts but orders by %q, which the per-file "+
+				"aggregate does not produce — it would pay for work it does not use", key, expr)
+		}
+	}
+	for key := range fileDerivedSorts {
+		if _, ok := sortColumns[key]; !ok {
+			t.Errorf("fileDerivedSorts names %q, which is not a valid sort key", key)
+		}
+	}
+}
+
+// Every sort key must resolve against the page query's OUTPUT columns, because
+// the ordering is applied both inside the subquery and on the statement wrapping
+// it, and only the inner scope can see the source tables.
+func TestEverySortKeyRunsAtBothOrderingLevels(t *testing.T) {
+	s := newTestStore(t)
+	r := recorderAt(t, s, fixedNow)
+	ctx := context.Background()
+	r.Record("p1", KindSemantic, []string{"a.go"})
+	r.Record("p2", KindSemantic, []string{"b.go", "c.go"})
+	if err := r.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	for key := range sortColumns {
+		for _, desc := range []bool{false, true} {
+			page, err := s.ProjectStatsPage(ctx, Query{
+				ProjectPaths: []string{"p1", "p2"}, Sort: key, Desc: desc, Limit: 1, TopFiles: 2,
+			}, fixedNow)
+			if err != nil {
+				t.Errorf("sort=%s desc=%v: %v", key, desc, err)
+				continue
+			}
+			if len(page.Rows) != 1 || page.Total != 2 {
+				t.Errorf("sort=%s desc=%v: %d rows / total %d, want 1 and 2",
+					key, desc, len(page.Rows), page.Total)
+			}
+		}
 	}
 }

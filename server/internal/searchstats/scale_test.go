@@ -142,8 +142,9 @@ func TestScalingWithDatabaseSize(t *testing.T) {
 		{"very large", 200, 5000},
 	}
 
-	fmt.Printf("\n%-11s %9s %9s %11s %11s %11s %11s %11s\n",
-		"scale", "projects", "file rows", "db size", "read(all)", "read(win)", "flush", "record")
+	fmt.Printf("\n%-11s %9s %9s %11s %11s %11s %11s %11s %11s\n",
+		"scale", "projects", "file rows", "db size",
+		"read(all)", "read(win)", "read(bySort)", "flush", "record")
 	for _, c := range cases {
 		dir := t.TempDir()
 		path := filepath.Join(dir, DBFileName)
@@ -178,6 +179,21 @@ func TestScalingWithDatabaseSize(t *testing.T) {
 			}
 		})
 
+		// Sorting by a file column is one click away in the dashboard — the
+		// "Top files in results" and "Files" headers are both sortable, and the
+		// filter bar carries a range on the top file. That request cannot be
+		// served from the page alone: it needs every visible project's file
+		// aggregate before it can decide which projects the page holds. Measured
+		// rather than left for the reader to extrapolate, because it is the
+		// expensive path this optimisation deliberately keeps.
+		readBySort := timeIt(5, func() {
+			if _, err := s.ProjectStatsPage(ctx, Query{
+				ProjectPaths: scope, TopFiles: 5, Sort: SortTopFileHits, Desc: true, Limit: 25,
+			}, now); err != nil {
+				t.Fatalf("read by file sort: %v", err)
+			}
+		})
+
 		// The background writer, at this database size.
 		r := NewRecorder(s, nil)
 		r.now = func() time.Time { return now }
@@ -203,9 +219,10 @@ func TestScalingWithDatabaseSize(t *testing.T) {
 			size = info.Size()
 		}
 
-		fmt.Printf("%-11s %9d %9d %10.1fMB %10v %10v %10v %10v\n",
+		fmt.Printf("%-11s %9d %9d %10.1fMB %10v %10v %11v %10v %10v\n",
 			c.label, c.projects, fileRows, float64(size)/(1<<20),
 			readAll.Round(time.Microsecond), readWindow.Round(time.Microsecond),
+			readBySort.Round(time.Microsecond),
 			flush.Round(time.Microsecond), record.Round(time.Nanosecond))
 	}
 	fmt.Println()

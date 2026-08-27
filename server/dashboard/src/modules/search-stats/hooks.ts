@@ -154,6 +154,22 @@ export const searchStatsKeys = {
   series: (query: string) => ['search-stats', 'series', query] as const,
 };
 
+// Sorting or filtering by a file column is the one request the server cannot
+// answer from the page alone — it has to aggregate every visible project's files
+// before it can decide which projects the page even holds. On a large database
+// that is around a second against ~200 ms for the default view.
+//
+// One second is a fine price for a click. It is not a fine price every thirty
+// seconds for a tab somebody left open on that sort, so the poll backs off to
+// match. The refresh exists to keep a watched table honest, not to re-run the
+// most expensive query the endpoint has while nobody is looking.
+function refreshIntervalFor(f: StatsFilters): number {
+  const sortsByFile =
+    f.sort === 'top_file_hits' || f.sort === 'file_hits' || f.sort === 'distinct_files';
+  const filtersByFile = f.minTopFileHits !== '' || f.maxTopFileHits !== '';
+  return sortsByFile || filtersByFile ? 120_000 : 30_000;
+}
+
 export function useSearchStats(filters: StatsFilters) {
   const query = toQuery(filters);
   return useQuery({
@@ -163,7 +179,7 @@ export function useSearchStats(filters: StatsFilters) {
     // Counters are flushed in batches every few seconds, so a page held open
     // goes stale quietly. Thirty seconds is far longer than the flush interval
     // and short enough that the table is not lying by the time anyone reads it.
-    refetchInterval: 30_000,
+    refetchInterval: refreshIntervalFor(filters),
     // Filtering should not blank the table while the next page loads —
     // the previous rows stay until the new ones arrive.
     placeholderData: (prev) => prev,

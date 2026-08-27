@@ -2,6 +2,8 @@ package searchstats
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,8 +25,14 @@ const (
 // A map rather than string concatenation because the sort key arrives from a
 // query string. Anything not in this map is rejected by the caller; nothing
 // user-supplied ever reaches the statement text.
+//
+// Every value is an OUTPUT column name of the page query, never a
+// table-qualified one. The ordering is applied twice — once inside the
+// subquery and once on the statement that wraps it — and only the inner scope
+// can see the source tables, so a qualified name would work in one place and
+// fail to resolve in the other.
 var sortColumns = map[string]string{
-	SortProject:       "s.project_path",
+	SortProject:       "project_path",
 	SortQueries:       "queries",
 	SortResults:       "results",
 	SortFileHits:      "file_hits",
@@ -125,12 +133,46 @@ type Page struct {
 // the server, that is the difference between a page that keeps up and one that
 // does not.
 func (q Query) needsFileAggregate() bool {
-	switch q.Sort {
-	case SortFileHits, SortTopFileHits, SortDistinctFiles:
+	if _, ok := fileDerivedSorts[q.Sort]; ok {
 		return true
 	}
-	return q.MinFileHits != nil || q.MaxFileHits != nil ||
-		q.MinTopFile != nil || q.MaxTopFile != nil
+	for _, f := range q.rangeFilters() {
+		if f.fromFiles && (f.min != nil || f.max != nil) {
+			return true
+		}
+	}
+	return false
+}
+
+// rangeFilter is one min/max bound on a column of the assembled row.
+type rangeFilter struct {
+	expr     string
+	min, max *int64
+	// fromFiles marks a column the per-file aggregate produces. This flag is
+	// the ONLY thing needsFileAggregate reads about filters, so a new
+	// file-derived bound cannot be added without the predicate seeing it —
+	// which matters because the failure mode of missing one is not an error but
+	// a page of quietly wrong numbers.
+	fromFiles bool
+}
+
+// rangeFilters is the single list both the WHERE clause and
+// needsFileAggregate are built from.
+func (q Query) rangeFilters() []rangeFilter {
+	return []rangeFilter{
+		{expr: "queries", min: q.MinQueries, max: q.MaxQueries},
+		{expr: "file_hits", min: q.MinFileHits, max: q.MaxFileHits, fromFiles: true},
+		{expr: "top_file_hits", min: q.MinTopFile, max: q.MaxTopFile, fromFiles: true},
+	}
+}
+
+// fileDerivedSorts are the sort keys whose values come from the per-file
+// aggregate. Kept beside sortColumns, and a test asserts the two agree — the
+// same drift hazard as the filters above.
+var fileDerivedSorts = map[string]struct{}{
+	SortFileHits:      {},
+	SortTopFileHits:   {},
+	SortDistinctFiles: {},
 }
 
 // tier names the pair of tables a query reads.
@@ -277,15 +319,7 @@ func (s *Store) ProjectStatsPage(ctx context.Context, q Query, now time.Time) (P
 	// totals tier every project in projects_seen has counters by construction,
 	// so this changes nothing there.
 	where := []string{"counters.project_id IS NOT NULL"}
-	rangeFilters := []struct {
-		expr     string
-		min, max *int64
-	}{
-		{"queries", q.MinQueries, q.MaxQueries},
-		{"file_hits", q.MinFileHits, q.MaxFileHits},
-		{"top_file_hits", q.MinTopFile, q.MaxTopFile},
-	}
-	for _, f := range rangeFilters {
+	for _, f := range q.rangeFilters() {
 		if f.min != nil {
 			where = append(where, f.expr+" >= ?")
 			args = append(args, *f.min)
@@ -323,11 +357,21 @@ func (s *Store) ProjectStatsPage(ctx context.Context, q Query, now time.Time) (P
 	// project_path is the tie-break on every sort. Without it, two projects with
 	// equal counters could swap places between the page-1 and page-2 queries and
 	// a row would be shown twice or not at all.
+	// The ORDER BY is repeated on the OUTER statement, not only inside the
+	// subquery. SQL does not guarantee that a subquery's ordering survives into
+	// its consumer; SQLite happens to preserve it here because the window
+	// functions block flattening, and that was verified across every sort key
+	// and direction. But it is a property of today's planner rather than of the
+	// query, and the insurance costs nothing — the planner collapses the
+	// duplicate. project_path is the tie-break: without it two projects with
+	// equal counters could swap places between the page-1 and page-2 queries,
+	// and a row would be shown twice or not at all.
+	ordering := fmt.Sprintf("\n ORDER BY %s %s, project_path ASC", sortExpr, dir)
 	listSQL := `SELECT *,
 	                   COUNT(*)       OVER () AS total_rows,
 	                   SUM(queries)   OVER () AS total_queries,
 	                   SUM(results)   OVER () AS total_results
-	              FROM (` + base + fmt.Sprintf("\n ORDER BY %s %s, s.project_path ASC)", sortExpr, dir) +
+	              FROM (` + base + ordering + ")" + ordering +
 		"\n LIMIT ? OFFSET ?"
 	listArgs := append(append([]any{}, args...), limit, offset)
 
@@ -353,10 +397,24 @@ func (s *Store) ProjectStatsPage(ctx context.Context, q Query, now time.Time) (P
 		return Page{}, fmt.Errorf("searchstats: iterate project stats: %w", err)
 	}
 	if len(out) == 0 {
-		// No rows means nothing matched, or the offset is past the end. The
-		// window functions produced no row to read the totals from, and zero is
-		// the right answer for the first case; for the second the caller is
-		// paging past a set it has already seen the size of.
+		// No rows means either nothing matched or the offset is past the end,
+		// and the two need different answers. The window functions had no row to
+		// attach the totals to, so they are lost either way — and reporting zero
+		// contradicts what `total` is documented to be: how many projects matched
+		// BEFORE limit and offset.
+		//
+		// It is not a hypothetical. The dashboard polls every thirty seconds; sit
+		// on page four, have the set shrink underneath you, and the next poll
+		// would report total=0, collapse the pager and render "nothing recorded"
+		// over a set that still has projects in it. Any caller that constructs a
+		// URL with an offset — a script, a bookmark, a retry — hits the same
+		// thing, and cannot tell "past the end" from "no matches".
+		//
+		// So re-read the window values from the first row. This costs a second
+		// query only on a page that came back empty, never on the hot path.
+		if offset > 0 {
+			return s.totalsOnly(ctx, listSQL, args)
+		}
 		return Page{}, nil
 	}
 
@@ -376,6 +434,34 @@ func (s *Store) ProjectStatsPage(ctx context.Context, q Query, now time.Time) (P
 		TotalQueries: totalQueries,
 		TotalResults: totalResults,
 	}, nil
+}
+
+// totalsOnly re-runs the page query at offset 0 for a single row, purely to
+// recover the window-function totals that an empty page could not carry.
+//
+// Deliberately the same statement with different bounds rather than a second
+// count query: two statements could disagree about what matched, which is the
+// exact property the single-pass rewrite was meant to preserve.
+func (s *Store) totalsOnly(ctx context.Context, listSQL string, args []any) (Page, error) {
+	probeArgs := append(append([]any{}, args...), 1, 0)
+	row := s.db.QueryRowContext(ctx, listSQL, probeArgs...)
+
+	var p ProjectStats
+	var total int
+	var totalQueries, totalResults int64
+	err := row.Scan(&p.ProjectPath, &p.Queries, &p.Results,
+		&p.FileHits, &p.DistinctFiles, &p.TopFileHits, &p.LastSeen,
+		&total, &totalQueries, &totalResults)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing matched after all — the offset was not the reason.
+		return Page{}, nil
+	}
+	if err != nil {
+		return Page{}, fmt.Errorf("searchstats: recover page totals: %w", err)
+	}
+	// No Rows: the caller asked for a page that does not exist, and the answer
+	// is an empty page that still knows how large the set is.
+	return Page{Total: total, TotalQueries: totalQueries, TotalResults: totalResults}, nil
 }
 
 // fillFileAggregates computes file_hits, distinct_files and top_file_hits for

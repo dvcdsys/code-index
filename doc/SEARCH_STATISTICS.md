@@ -225,12 +225,12 @@ The statistics *page* is a different story, and the first measurement of it was
 bad: the admin view aggregates every visible project, and an admin's scope is
 every project on the server.
 
-| rows | before | after |
-|---|---|---|
-| 3.7 k | 5.1 ms | 3.4 ms |
-| 90 k | 109 ms | 36 ms |
-| 450 k | 542 ms | 105 ms |
-| 1.8 M | **2,267 ms** | **211 ms** |
+| rows | before | default sort | sorted by a file column |
+|---|---|---|---|
+| 3.7 k | 5.1 ms | 3.4 ms | 3.4 ms |
+| 90 k | 109 ms | 36 ms | 63 ms |
+| 450 k | 542 ms | 105 ms | 295 ms |
+| 1.8 M | **2,267 ms** | **211 ms** | **1,176 ms** |
 
 Two changes, both from reading the query plans rather than guessing:
 
@@ -245,9 +245,23 @@ Two changes, both from reading the query plans rather than guessing:
   file columns are computed for the ~25 projects on the page instead, in one
   statement. Sorting by a file column still pays the full cost, correctly.
 
-What remains scales with *projects on the page × files per project*, not with
-the size of the database. A test asserts the two query shapes return identical
-numbers, so the fast path cannot quietly drift from the slow one.
+The default view now scales with *projects on the page × files per project*
+rather than with the size of the database.
+
+**Sorting by a file column still pays the full cost**, and the third column
+above is what that costs rather than an extrapolation: ~1.2 s at 1.8 M rows.
+That is a reasonable price for a click — and it is *not* a reasonable price
+every thirty seconds for a tab left open on that sort, so the dashboard's
+auto-refresh backs off to two minutes whenever the sort or a filter is
+file-derived. Poll frequency follows query cost.
+
+Two tests keep this honest. One asserts the two query shapes return identical
+numbers — across both tiers, with and without a kind filter, on a window that
+actually excludes rows, and on a page that is a strict subset of the matched
+set — so the fast path cannot drift from the slow one. The other pins
+`fileDerivedSorts` against `sortColumns`, because the failure mode of adding a
+file-derived sort key without declaring it is not an error but a page of
+silently wrong numbers.
 
 ---
 
