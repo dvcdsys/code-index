@@ -3,6 +3,7 @@ package searchstats
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1166,5 +1167,107 @@ func TestFileDerivedFiltersSelectTheRightProjects(t *testing.T) {
 		if page.Total != len(c.want) {
 			t.Errorf("%s: total = %d, want %d", c.name, page.Total, len(c.want))
 		}
+	}
+}
+
+// The maintenance task resolves the store and then works with it, so a Disable
+// landing in between used to turn a routine prune into
+// `sql: database is closed` and a red row in the scheduled-tasks list. Skipping
+// while off is what the task always meant to do.
+func TestMaintenanceTaskSurvivesADisableMidRun(t *testing.T) {
+	dir := t.TempDir()
+	h := NewHolder(context.Background(), filepath.Join(dir, DBFileName), nil)
+	if err := h.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	live := func(context.Context) ([]string, error) { return []string{"p1"}, nil }
+	tasks := HolderTasks(h, nil, live)
+	if len(tasks) != 1 {
+		t.Fatalf("HolderTasks returned %d tasks, want 1", len(tasks))
+	}
+	run := tasks[0].Handler
+
+	// Racing the two is the only way to reach the window; the loop makes it
+	// likely rather than relying on one lucky interleaving.
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := h.Set(false); err != nil {
+				t.Errorf("Set(false): %v", err)
+				return
+			}
+			if _, err := h.Set(true); err != nil {
+				t.Errorf("Set(true): %v", err)
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		if err := run(context.Background()); err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("maintenance run %d failed against a toggling holder: %v", i, err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// The dashboard has to know whether there is anything to look at or discard
+// while collection is off. Deriving that from the SETTING misses a server
+// enabled by the environment that redeployed with the variable flipped: nobody
+// touched the toggle, so the provenance still says "environment", and the file
+// is full.
+func TestHasStoredCountersFollowsTheFileNotTheSetting(t *testing.T) {
+	h := NewHolder(context.Background(), filepath.Join(t.TempDir(), DBFileName), nil)
+	t.Cleanup(func() { _ = h.Close() })
+
+	if h.HasStoredCounters() {
+		t.Error("a holder that has never been enabled reports stored counters")
+	}
+	if err := h.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if !h.HasStoredCounters() {
+		t.Error("an enabled holder reports no stored counters")
+	}
+	if err := h.Disable(); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	if !h.HasStoredCounters() {
+		t.Error("counters collected before a disable are gone from the report — " +
+			"this is what hides the button that discards them")
+	}
+}
+
+// Reset while collection is off must not bring the file into existence on a
+// server that never collected anything.
+func TestResetOnANeverEnabledHolderCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	h := NewHolder(context.Background(), filepath.Join(dir, DBFileName), nil)
+	if err := h.Reset(context.Background()); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("Reset created %v, want an empty directory", names)
 	}
 }

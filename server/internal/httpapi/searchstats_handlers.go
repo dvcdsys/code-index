@@ -384,10 +384,11 @@ func (s *Server) ResetSearchStats(w http.ResponseWriter, r *http.Request) {
 // is when they were last administering this server; neither answers "why is
 // this page empty", and handing both to every authenticated user is a
 // directory of the administrators nobody asked for.
-func searchStatsSettingsPayload(s searchstats.Settings, isAdmin bool) openapi.SearchStatsSettings {
+func searchStatsSettingsPayload(s searchstats.Settings, isAdmin bool, hasCounters bool) openapi.SearchStatsSettings {
 	out := openapi.SearchStatsSettings{
-		Enabled: s.Enabled,
-		Source:  openapi.SearchStatsSettingsSource(s.Source),
+		Enabled:           s.Enabled,
+		HasStoredCounters: &hasCounters,
+		Source:            openapi.SearchStatsSettingsSource(s.Source),
 	}
 	if !isAdmin {
 		return out
@@ -407,8 +408,11 @@ func (s *Server) GetSearchStatsSettings(w http.ResponseWriter, r *http.Request) 
 		// No settings store means the feature was never wired into this router
 		// (tests, and any embedding that leaves it out). Reporting it as off
 		// with no decision behind it is exactly true.
+		none := false
 		writeJSON(w, http.StatusOK, openapi.SearchStatsSettings{
-			Enabled: false, Source: openapi.SearchStatsSettingsSource(searchstats.SourceDefault),
+			Enabled:           false,
+			HasStoredCounters: &none,
+			Source:            openapi.SearchStatsSettingsSource(searchstats.SourceDefault),
 		})
 		return
 	}
@@ -424,7 +428,8 @@ func (s *Server) GetSearchStatsSettings(w http.ResponseWriter, r *http.Request) 
 		cur.Enabled = s.Deps.SearchStats.Enabled()
 	}
 	_, isAdmin := s.callerIdentity(r)
-	writeJSON(w, http.StatusOK, searchStatsSettingsPayload(cur, isAdmin))
+	writeJSON(w, http.StatusOK,
+		searchStatsSettingsPayload(cur, isAdmin, s.Deps.SearchStats.HasStoredCounters()))
 }
 
 // SetSearchStatsSettings — PUT /api/v1/admin/search-stats/settings.
@@ -476,5 +481,6 @@ func (s *Server) SetSearchStatsSettings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cur.Enabled = s.Deps.SearchStats.Enabled()
-	writeJSON(w, http.StatusOK, searchStatsSettingsPayload(cur, true))
+	writeJSON(w, http.StatusOK,
+		searchStatsSettingsPayload(cur, true, s.Deps.SearchStats.HasStoredCounters()))
 }

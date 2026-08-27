@@ -45,12 +45,15 @@ func HolderTasks(h *Holder, logger *slog.Logger, live LiveProjects) []schedule.T
 		logger = slog.Default()
 	}
 	t := pruneTaskMeta()
+	// WithOpenStore rather than Store(): resolving the store and then using it
+	// leaves a window for a Disable to close the pool mid-run, which turns a
+	// routine prune into `sql: database is closed` and a red row in the
+	// scheduled-tasks list. Skipping while off is what the task always meant to
+	// do; this just makes the check cover the work as well as the decision.
 	t.Handler = func(ctx context.Context) error {
-		store := h.Store()
-		if store == nil {
-			return nil // switched off; nothing to maintain
-		}
-		return store.maintain(ctx, logger, live)
+		return h.WithOpenStore(func(store *Store) error {
+			return store.maintain(ctx, logger, live)
+		})
 	}
 	// Asked afresh at every resolution rather than captured once, for the same
 	// reason dbmaint asks whether its reclaim still makes sense: the answer

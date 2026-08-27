@@ -3945,6 +3945,14 @@ components:
       properties:
         enabled:
           type: boolean
+        has_stored_counters:
+          type: boolean
+          description: |
+            Whether a statistics database exists on this server — so whether
+            there is anything to read or discard. True whenever collection is
+            on; when it is off, true means counters were collected earlier and
+            are still on disk, readable again by switching collection back on
+            and discardable at any time via the reset endpoint.
         source:
           type: string
           enum: [database, environment, default]

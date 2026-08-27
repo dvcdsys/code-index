@@ -354,9 +354,15 @@ Switching collection off **keeps** what was already collected — the counters a
 still there if it is switched back on. The table does not read them while
 collection is off, because off closes the database; but
 `POST /admin/search-stats/reset` works either way, and the dashboard keeps its
-**Clear counters** button visible while off. Disposal must not require switching
-collection back on: that would make "stop recording" and "delete what you
-recorded" the same lever.
+**Clear counters** button visible whenever a database exists. Disposal must not
+require switching collection back on: that would make "stop recording" and
+"delete what you recorded" the same lever.
+
+The settings endpoint reports `has_stored_counters` for exactly this — whether
+there is anything on disk to read or discard. The dashboard keys the button on
+that rather than on who last changed the setting, because a server that
+collected under `CIX_SEARCH_STATS_ENABLED` and then redeployed with the variable
+flipped has a full database and a setting nobody ever touched.
 
 A server that never turns the feature on never creates `searchstats.db`. A
 failure to open it is **not** fatal: the server logs a warning, runs without the

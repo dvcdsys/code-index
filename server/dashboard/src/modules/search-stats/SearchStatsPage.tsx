@@ -66,9 +66,14 @@ export default function SearchStatsPage() {
         // Shown while collection is OFF too. Discarding what was collected is
         // the one action that must not require switching collection back on —
         // that would mean resuming the thing you stopped in order to clear it.
-        // Hidden only on a server nobody has ever turned this on for, where
-        // there is nothing to discard.
-        user?.role === 'admin' && (collecting || settings.data?.source === 'database') ? (
+        //
+        // Keyed on whether a database EXISTS, not on where the current setting
+        // came from. Deriving it from the provenance ("an admin turned it off,
+        // so there is probably a file") misses a server that collected under
+        // CIX_SEARCH_STATS_ENABLED and then redeployed with the variable
+        // flipped: nobody touched the toggle, the source still reads
+        // `environment`, and the file is full.
+        user?.role === 'admin' && settings.data?.has_stored_counters ? (
           <Button
             variant="quietDanger"
             size="sm"
@@ -98,9 +103,11 @@ export default function SearchStatsPage() {
         <SkeletonRows rows={3} />
       ) : disabled ? (
         <Empty title="Not collecting search statistics">
-          {user?.role === 'admin'
-            ? 'Turn collection on above to start counting. Counters already collected are kept, but the table only reads them while collection is on — “Clear counters” works either way.'
-            : 'An admin has not turned collection on for this server, so there is nothing to show.'}
+          {user?.role !== 'admin'
+            ? 'An admin has not turned collection on for this server, so there is nothing to show.'
+            : settings.data?.has_stored_counters
+              ? 'Counters collected earlier are still on disk. The table only reads them while collection is on — turn it back on above to look, or use “Clear counters” to discard them without resuming.'
+              : 'Turn collection on above to start counting. Nothing has been recorded on this server yet.'}
         </Empty>
       ) : (
         <>

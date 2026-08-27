@@ -169,6 +169,53 @@ func (h *Holder) Set(enabled bool) (changed bool, err error) {
 	return true, h.Disable()
 }
 
+// WithOpenStore runs fn against the live store, holding the toggle mutex for the
+// duration so the store cannot be closed underneath it. Does nothing when
+// collection is off.
+//
+// This exists for the maintenance task, which is the one caller that used to
+// resolve the store and then work with it — a window in which a Disable could
+// land and turn the run into `sql: database is closed`, surfacing as a red row
+// in the scheduled-tasks list. The task already meant to skip when the feature
+// is off; it just decided half a line too early.
+//
+// Holding the mutex across the work is the right trade here and not laziness: a
+// prune is milliseconds once a day, and an admin's toggle waiting for it is a
+// better outcome than a failed task. Do not reach for this on anything that
+// takes real time — it blocks Enable and Disable outright.
+func (h *Holder) WithOpenStore(fn func(*Store) error) error {
+	if h == nil || fn == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	store := h.store.Load()
+	if store == nil {
+		return nil // switched off; nothing to do
+	}
+	return fn(store)
+}
+
+// HasStoredCounters reports whether a statistics database exists on disk.
+//
+// It answers a question the dashboard cannot ask any other way: whether there is
+// anything to look at or discard while collection is off. Deciding that from the
+// SETTING instead — "an admin turned it off, so a file probably exists" — misses
+// a server enabled purely by the environment that then redeployed with the
+// variable flipped, where nobody ever touched the toggle and the file is full.
+// The file's existence is the fact; the setting's provenance is a proxy for it,
+// and a leaky one.
+func (h *Holder) HasStoredCounters() bool {
+	if h == nil || h.path == "" || h.path == ":memory:" {
+		return false
+	}
+	if h.Enabled() {
+		return true
+	}
+	_, err := os.Stat(h.path)
+	return err == nil
+}
+
 // Reset discards every counter, whether or not collection is currently on.
 //
 // Disposal must not be reachable only through re-enabling. An admin who has
