@@ -463,6 +463,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 -- here and are edited from the dashboard. encrypted_token is the
 -- AES-GCM-encrypted Cloudflare named-tunnel connector token (NULL for
 -- quick mode). CHECK(id=1) enforces a single row; UPSERT on id=1.
+-- Search statistics: whether per-project search counters are recorded at all.
+--
+-- A single row, and it may be absent — absence is meaningful. It means nobody
+-- has decided, so the server falls back to CIX_SEARCH_STATS_ENABLED, and then
+-- to off. That is what lets an operator set the environment variable at deploy
+-- time and have it hold, while an admin flipping the switch in the dashboard
+-- takes precedence from then on: a saved decision outranks a boot-time default,
+-- and a redeploy must not silently undo it.
+CREATE TABLE IF NOT EXISTS search_stats_config (
+    id         INTEGER PRIMARY KEY CHECK(id=1),
+    enabled    INTEGER NOT NULL,
+    updated_at TEXT    NOT NULL,
+    updated_by TEXT
+);
+
 CREATE TABLE IF NOT EXISTS tunnel_config (
     id              INTEGER PRIMARY KEY CHECK(id=1),
     enabled         INTEGER NOT NULL DEFAULT 0,
@@ -538,6 +553,7 @@ var ExpectedTables = []string{
 	"chunks_meta",
 	"chunks_fts",
 	"tunnel_config",
+	"search_stats_config",
 	"scheduled_tasks",
 	"schema_migrations",
 }

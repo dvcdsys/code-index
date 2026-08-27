@@ -72,6 +72,18 @@ tags:
     description: Symbol, definition, reference, file, and semantic search
   - name: indexing
     description: Three-phase indexing protocol
+  - name: search-stats
+    description: |
+      Per-project search counters: how often each project is searched and
+      which of its files keep coming back in the results. Counters only —
+      no query text and no per-request log is kept anywhere.
+
+      Two tiers are served from the same endpoints. `window=all` reads
+      cumulative totals that are never pruned; the other windows read a
+      rolling 7-day series bucketed at 30 minutes. The numbers live in
+      their own SQLite file so that recording them can never contend with
+      indexing or with a database compaction — search has to keep serving
+      through both.
   - name: docs
     description: API documentation
   - name: auth
@@ -1533,6 +1545,262 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /api/v1/search-stats:
+    get:
+      operationId: getSearchStats
+      tags: [search-stats]
+      summary: Per-project search counters, filtered and sorted server-side
+      description: |
+        One row per project that has been searched at least once, carrying the
+        query count, how many files came back in total, and that project's
+        most-returned files.
+
+        Every filter, the sort and the pagination are applied in SQL before the
+        page is built, so `limit` bounds what is computed, not merely what is
+        transmitted.
+
+        Access: a regular user sees only the projects they can already search —
+        their own, plus external projects shared to a view-group they belong
+        to. An admin sees every project. Projects that have never been searched
+        are absent from `projects` and counted in `projects_without_activity`.
+
+        A file's hit count is the number of SEARCHES it appeared in, not the
+        number of matching chunks, so it can never exceed the project's query
+        count: "this file came back in 42 of the project's 128 searches".
+      parameters:
+        - name: window
+          in: query
+          required: false
+          description: |
+            `all` reads the cumulative totals — every search ever recorded.
+            The others read the rolling 30-minute-bucket tier, which retains
+            seven days; nothing older than that is kept, so a longer window
+            would silently be the same as `7d`.
+          schema:
+            type: string
+            enum: [all, 1h, 24h, 7d]
+            default: all
+        - name: kinds
+          in: query
+          required: false
+          description: |
+            Comma-separated list of search kinds to include. Omit for all of
+            them. `workspace` is one project's slice of a workspace fan-out:
+            every project a workspace query actually scanned records one,
+            whether or not it made the answer.
+          schema:
+            type: string
+            example: semantic,workspace
+        - name: project
+          in: query
+          required: false
+          description: |
+            Case-insensitive substring, matched against the project's display
+            name and its host path. Applied before pagination.
+          schema:
+            type: string
+        - name: min_queries
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: max_queries
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: min_file_hits
+          in: query
+          required: false
+          description: Bounds on the project's TOTAL file appearances.
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: max_file_hits
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: min_top_file_hits
+          in: query
+          required: false
+          description: |
+            Bounds on the hit count of the project's single most-returned
+            file — the number shown against the first entry of `top_files`.
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: max_top_file_hits
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: top_files
+          in: query
+          required: false
+          description: How many of each project's most-returned files to attach.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 20
+            default: 5
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [project, queries, results, file_hits, top_file_hits, distinct_files, last_seen]
+            default: queries
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: One page of the statistics table
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchStatsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Search statistics are disabled on this server
+
+  /api/v1/search-stats/series:
+    get:
+      operationId: getSearchStatsSeries
+      tags: [search-stats]
+      summary: Query counts over the retained window, one point per bucket
+      description: |
+        Summed over every project the caller can see, or over one project when
+        `project_hash` is given. Buckets with no activity are omitted rather
+        than sent as zeroes — `bucket_seconds` is enough to reconstruct the
+        gaps, and a quiet week would otherwise be 336 empty points.
+
+        Access is the same as `GET /search-stats`.
+      parameters:
+        - name: window
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [1h, 24h, 7d]
+            default: 7d
+        - name: kinds
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: project_hash
+          in: query
+          required: false
+          description: Restrict to one project, by its 16-hex path hash.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The windowed series
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchStatsSeriesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Search statistics are disabled on this server
+
+  /api/v1/search-stats/settings:
+    get:
+      operationId: getSearchStatsSettings
+      tags: [search-stats]
+      summary: Whether search counters are being recorded
+      description: |
+        Readable by any authenticated user, because the statistics page has to
+        explain why it is empty. Changing it is admin-only.
+
+        `source` says what decided the current state: `database` — an admin used
+        the toggle, and that outranks the environment from then on;
+        `environment` — nobody has decided, and `CIX_SEARCH_STATS_ENABLED` is
+        speaking; `default` — nobody has decided and the variable is unset, so
+        the feature is off.
+      responses:
+        "200":
+          description: The resolved setting
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchStatsSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/admin/search-stats/settings:
+    put:
+      operationId: setSearchStatsSettings
+      tags: [search-stats]
+      summary: Switch search counters on or off (admin only)
+      description: |
+        Takes effect immediately — no restart. Enabling opens the statistics
+        database, creating it on first use; disabling flushes whatever is
+        buffered and closes it, keeping the counters already collected.
+
+        The decision is persisted and outranks `CIX_SEARCH_STATS_ENABLED` from
+        then on, so a redeploy carrying the old environment cannot silently undo
+        it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetSearchStatsSettingsRequest"
+      responses:
+        "200":
+          description: The resolved setting after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchStatsSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/admin/search-stats/reset:
+    post:
+      operationId: resetSearchStats
+      tags: [search-stats]
+      summary: Discard every recorded search counter (admin only)
+      description: |
+        Empties both tiers. There is nothing to recover afterwards and nothing
+        else depends on the numbers — they are derived from traffic that has
+        already been served.
+
+        Works whether or not collection is currently on. Discarding what was
+        collected must not require switching collection back on, or stopping and
+        disposing become the same lever. A server that never enabled the feature
+        has nothing to discard and gets a 204 without a database being created.
+      responses:
+        "204":
+          description: Counters cleared
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Search statistics are disabled on this server
 
   /api/v1/projects/{path}/search:
     parameters:
@@ -3670,6 +3938,193 @@ components:
       properties:
         detail:
           type: string
+
+    SearchStatsSettings:
+      type: object
+      required: [enabled, source]
+      properties:
+        enabled:
+          type: boolean
+        has_stored_counters:
+          type: boolean
+          description: |
+            Whether a statistics database exists on this server — so whether
+            there is anything to read or discard. True whenever collection is
+            on; when it is off, true means counters were collected earlier and
+            are still on disk, readable again by switching collection back on
+            and discardable at any time via the reset endpoint.
+
+            Sent to admins only. `enabled` and `source` are the whole of why a
+            page is empty, which is why this endpoint is readable by everyone;
+            whether there is a file to dispose of is operator information, and
+            no control a regular user has acts on it.
+        source:
+          type: string
+          enum: [database, environment, default]
+          description: What decided the current state.
+        updated_at:
+          type: string
+          description: |
+            When an admin last changed it. Sent to admins only — when this
+            server was last administered is not part of explaining why the
+            page is empty. Also absent unless `source` is `database`.
+        updated_by:
+          type: string
+          description: |
+            Which admin last changed it. Sent to admins only: it is an email
+            address, and a regular user reading this endpoint is asking why
+            their page is empty, not who runs the server.
+
+    SetSearchStatsSettingsRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+
+    SearchStatsFile:
+      type: object
+      required: [file_path, hits]
+      properties:
+        file_path:
+          type: string
+        hits:
+          type: integer
+          format: int64
+          description: |
+            How many searches this file appeared in. One per search, however
+            many chunks of the file matched — so it is directly comparable to
+            the project's `queries`.
+
+    SearchStatsProject:
+      type: object
+      required:
+        [project_path, path_hash, name, queries, results, file_hits,
+         distinct_files, top_file_hits, last_seen, top_files]
+      properties:
+        project_path:
+          type: string
+          description: The project's host_path — the key the counters are stored under.
+        path_hash:
+          type: string
+          description: |
+            16-hex identifier, the same one the project and search endpoints
+            take in their URLs. Present so the dashboard can link a row
+            straight to the project without re-deriving it.
+        name:
+          type: string
+          description: |
+            Display name, resolved from the projects table at request time.
+        kind:
+          type: string
+          enum: [local, external]
+        queries:
+          type: integer
+          format: int64
+        results:
+          type: integer
+          format: int64
+          description: Total files returned across every recorded search.
+        file_hits:
+          type: integer
+          format: int64
+          description: |
+            Total file appearances counted on the per-file tier. Normally equal
+            to `results`, which is counted on the project tier — but not an
+            integrity check, because two documented behaviours separate them by
+            design: the server drops per-file detail (never query counts) when
+            its pending buffer is full, and empty paths are excluded from the
+            file tier while still counting toward `results`.
+        distinct_files:
+          type: integer
+          format: int64
+        top_file_hits:
+          type: integer
+          format: int64
+          description: Hit count of the single most-returned file.
+        last_seen:
+          type: integer
+          format: int64
+          description: |
+            Unix seconds of the most recent recorded search, from the
+            cumulative tier — an exact instant, not a bucket floor. Zero when
+            nothing has been recorded. Unaffected by `window`.
+        top_files:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchStatsFile"
+
+    SearchStatsResponse:
+      type: object
+      required: [projects, total, window, bucket_seconds, retention_seconds]
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchStatsProject"
+        total:
+          type: integer
+          description: |
+            How many projects matched the filters before `limit`/`offset` —
+            what the pagination control needs.
+        window:
+          type: string
+          description: The window that was applied, echoed back.
+        bucket_seconds:
+          type: integer
+          description: Resolution of the windowed tier.
+        retention_seconds:
+          type: integer
+          description: |
+            How far back the windowed tier keeps data. A `window` longer than
+            this is silently clamped, because nothing older exists.
+        projects_without_activity:
+          type: integer
+          description: |
+            Accessible projects that have never been searched, and so have no
+            row above. Reported rather than padded in as zero rows: they would
+            otherwise dominate the first page of any ascending sort.
+        totals:
+          $ref: "#/components/schemas/SearchStatsTotals"
+
+    SearchStatsTotals:
+      type: object
+      required: [queries, results]
+      description: |
+        Sums across every project the caller can see and the current filters —
+        not just the page.
+      properties:
+        queries:
+          type: integer
+          format: int64
+        results:
+          type: integer
+          format: int64
+
+    SearchStatsSeriesPoint:
+      type: object
+      required: [bucket, queries]
+      properties:
+        bucket:
+          type: integer
+          format: int64
+          description: Unix seconds of the bucket's start.
+        queries:
+          type: integer
+          format: int64
+
+    SearchStatsSeriesResponse:
+      type: object
+      required: [points, bucket_seconds, window_seconds]
+      properties:
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchStatsSeriesPoint"
+        bucket_seconds:
+          type: integer
+        window_seconds:
+          type: integer
 
     BootstrapStatusResponse:
       type: object

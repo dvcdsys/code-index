@@ -24,6 +24,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/schedule"
+	"github.com/dvcdsys/code-index/server/internal/searchstats"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
@@ -160,6 +161,17 @@ type Deps struct {
 	// TunnelConfig persists the dashboard-managed tunnel settings. Nil in
 	// tests; the config handlers return 503 when absent.
 	TunnelConfig *tunnelcfg.Service
+
+	// SearchStats owns the per-project search counters, and can be switched on
+	// and off while the server runs. Nil in tests and in any router built
+	// without the feature; every call site tolerates that, and the endpoints
+	// answer 503 when the holder is absent or currently disabled.
+	SearchStats *searchstats.Holder
+	// SearchStatsSettings persists the admin's on/off decision. It lives in the
+	// system database rather than in searchstats.db, because it has to be
+	// readable while the statistics database is closed — which is exactly the
+	// state it describes.
+	SearchStatsSettings *searchstats.SettingsStore
 }
 
 // NewRouter builds the chi router with middleware and the generated

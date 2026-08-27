@@ -76,6 +76,7 @@ var registeredMigrations = []migration{
 	{19, "maintenance_settings", func(db *sql.DB, _ OpenOptions) error { return migrateMaintenanceSettings(db) }},
 	{20, "scheduled_tasks", func(db *sql.DB, _ OpenOptions) error { return migrateScheduledTasks(db) }},
 	{21, "drop_maintenance_settings", func(db *sql.DB, _ OpenOptions) error { return migrateDropMaintenanceSettings(db) }},
+	{22, "search_stats_config", func(db *sql.DB, _ OpenOptions) error { return migrateSearchStatsConfig(db) }},
 }
 
 // DriverName is the registered database/sql driver name for modernc.org/sqlite.
@@ -310,6 +311,27 @@ func applyMigrations(db *sql.DB, opts OpenOptions) error {
 // migrateTunnelConfig creates the single-row tunnel_config table on
 // existing DBs. Idempotent — CREATE TABLE IF NOT EXISTS matches the shape
 // in schema.go, so a fresh DB that already has the table is a no-op.
+// migrateSearchStatsConfig creates the single-row table holding the admin's
+// decision about whether search counters are recorded.
+//
+// No row is inserted. An absent row is the "nobody has decided" state that lets
+// the environment variable still speak; seeding a default here would silently
+// pin every existing install to it and make CIX_SEARCH_STATS_ENABLED dead on
+// arrival.
+func migrateSearchStatsConfig(db *sql.DB) error {
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS search_stats_config (
+    id         INTEGER PRIMARY KEY CHECK(id=1),
+    enabled    INTEGER NOT NULL,
+    updated_at TEXT    NOT NULL,
+    updated_by TEXT
+)`)
+	if err != nil {
+		return fmt.Errorf("create search_stats_config: %w", err)
+	}
+	return nil
+}
+
 func migrateTunnelConfig(db *sql.DB) error {
 	_, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS tunnel_config (
