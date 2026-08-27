@@ -805,3 +805,132 @@ func TestForgetAllExceptSweepsOrphans(t *testing.T) {
 		t.Errorf("projects_seen holds %d rows after an empty sweep, want 2", n)
 	}
 }
+
+// The page query has two shapes: one that aggregates every scoped project's
+// files up front (needed when the ORDER or a filter depends on those columns)
+// and one that computes them for the page's rows afterwards. They must produce
+// identical numbers, or the same table would report different figures depending
+// on which column the user happened to click.
+func TestFileAggregateShapesAgree(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Spread across two buckets and two kinds, so both the per-file regroup and
+	// the kind filter are actually exercised rather than degenerate.
+	early := recorderAt(t, s, fixedNow.Add(-2*time.Hour))
+	early.Record("proj-a", KindSemantic, []string{"hot.go", "warm.go"})
+	early.Record("proj-b", KindSemantic, []string{"other.go"})
+	if err := early.Flush(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	late := recorderAt(t, s, fixedNow)
+	for i := 0; i < 3; i++ {
+		late.Record("proj-a", KindSemantic, []string{"hot.go"})
+	}
+	late.Record("proj-a", KindSymbols, []string{"sym.go"})
+	late.Record("proj-b", KindSemantic, []string{"other.go", "extra.go"})
+	late.Record("proj-c", KindSemantic, nil) // searched, nothing returned
+	if err := late.Flush(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	scope := []string{"proj-a", "proj-b", "proj-c"}
+	for _, window := range []time.Duration{0, WindowRetention} {
+		for _, kinds := range [][]string{nil, {KindSemantic}} {
+			base := Query{
+				ProjectPaths: scope, Kinds: kinds, Window: window, TopFiles: 0, Limit: 50,
+			}
+			// Sorting by queries takes the cheap path; sorting by a file column
+			// forces the full aggregate. Same rows either way.
+			cheap := base
+			cheap.Sort = SortQueries
+			full := base
+			full.Sort = SortFileHits
+
+			if cheap.needsFileAggregate() {
+				t.Fatal("sorting by queries should not need the full file aggregate")
+			}
+			if !full.needsFileAggregate() {
+				t.Fatal("sorting by file_hits must need the full file aggregate")
+			}
+
+			cheapPage, err := s.ProjectStatsPage(ctx, cheap, fixedNow)
+			if err != nil {
+				t.Fatalf("cheap page: %v", err)
+			}
+			fullPage, err := s.ProjectStatsPage(ctx, full, fixedNow)
+			if err != nil {
+				t.Fatalf("full page: %v", err)
+			}
+
+			label := fmt.Sprintf("window=%v kinds=%v", window, kinds)
+			if cheapPage.Total != fullPage.Total {
+				t.Fatalf("%s: totals differ, %d vs %d", label, cheapPage.Total, fullPage.Total)
+			}
+			byPath := map[string]ProjectStats{}
+			for _, r := range fullPage.Rows {
+				byPath[r.ProjectPath] = r
+			}
+			for _, got := range cheapPage.Rows {
+				want, ok := byPath[got.ProjectPath]
+				if !ok {
+					t.Fatalf("%s: %s missing from the full-aggregate page", label, got.ProjectPath)
+				}
+				if got.FileHits != want.FileHits ||
+					got.DistinctFiles != want.DistinctFiles ||
+					got.TopFileHits != want.TopFileHits {
+					t.Errorf("%s: %s file columns differ — cheap(%d,%d,%d) full(%d,%d,%d)",
+						label, got.ProjectPath,
+						got.FileHits, got.DistinctFiles, got.TopFileHits,
+						want.FileHits, want.DistinctFiles, want.TopFileHits)
+				}
+			}
+		}
+	}
+}
+
+// The footer sums and the row count come from window functions over the page's
+// own result set now, so they must still describe the whole filtered set rather
+// than the visible page.
+func TestFooterTotalsSpanTheFilteredSetNotThePage(t *testing.T) {
+	s := newTestStore(t)
+	r := recorderAt(t, s, fixedNow)
+	ctx := context.Background()
+
+	scope := []string{"p1", "p2", "p3", "p4"}
+	for i, p := range scope {
+		for q := 0; q <= i; q++ { // 1, 2, 3, 4 queries
+			r.Record(p, KindSemantic, []string{"a.go"})
+		}
+	}
+	if err := r.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	page, err := s.ProjectStatsPage(ctx, Query{
+		ProjectPaths: scope, Sort: SortQueries, Desc: true, Limit: 2,
+	}, fixedNow)
+	if err != nil {
+		t.Fatalf("ProjectStatsPage: %v", err)
+	}
+	if len(page.Rows) != 2 {
+		t.Fatalf("page holds %d rows, want 2", len(page.Rows))
+	}
+	if page.Total != 4 {
+		t.Errorf("total = %d, want 4", page.Total)
+	}
+	if page.TotalQueries != 10 {
+		t.Errorf("footer queries = %d, want 10 (1+2+3+4), not the page's 7", page.TotalQueries)
+	}
+
+	// Paging past the end returns nothing rather than an error.
+	empty, err := s.ProjectStatsPage(ctx, Query{
+		ProjectPaths: scope, Sort: SortQueries, Limit: 2, Offset: 99,
+	}, fixedNow)
+	if err != nil {
+		t.Fatalf("offset past the end: %v", err)
+	}
+	if len(empty.Rows) != 0 {
+		t.Errorf("offset past the end returned %d rows", len(empty.Rows))
+	}
+}

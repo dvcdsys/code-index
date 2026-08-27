@@ -55,7 +55,17 @@ const linearDedupeMax = 32
 // calling, so writing in place would work today and would be a trap for the next
 // one to add a call site.
 func dedupePaths(files []string) []string {
-	if len(files) < 2 {
+	if len(files) == 0 {
+		return files
+	}
+	if len(files) == 1 {
+		// Not just `return files`: a lone empty path would survive a shortcut
+		// that skips the loop, and the recorder would count a file that is not
+		// one. The single-element case is the only one where the fast path and
+		// the loop could disagree, so it is the only one worth spelling out.
+		if files[0] == "" {
+			return nil
+		}
 		return files
 	}
 	out := make([]string, 0, len(files))

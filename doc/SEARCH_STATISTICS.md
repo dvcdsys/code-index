@@ -137,54 +137,117 @@ analytics is never allowed to be the reason the server runs out of memory.
 ## What it costs a search
 
 The counters sit on the critical path of the operation this server exists to
-perform, and every search on the box takes the same mutex — so "does it slow
-search down" and "does it collapse under concurrency" are separate questions.
-Both are measured, and the benchmarks are committed:
+perform, and every search on the box takes the same mutex. Three separate
+questions follow, and each has a measurement rather than an argument. The
+benchmarks are committed:
 
 ```
 go test -run XXX -bench . ./internal/searchstats/
 go test -run XXX -bench . ./internal/httpapi/ -benchtime=4000x
+CIX_SCALE_TEST=1 go test -run TestScaling -v -timeout 30m ./internal/searchstats/
 ```
 
-Measured on a 14-core Mac (Go 1.26, `-cpu=8`, medians of 3):
+Figures below are medians of 3 on a 14-core machine, Go 1.26, `-cpu=8`.
+
+### 1. Does recording slow a search down?
 
 | | recording off | recording on | delta |
 |---|---|---|---|
 | file search, sequential | 74.6 µs | 77.2 µs | **+2.6 µs (+3.5%)** |
 | file search, 8 concurrent | 93.3 µs | 96.4 µs | **+3.1 µs (+3.3%)** |
 
-The relative cost is the same sequential and 8-way parallel, which is the
-result that matters: the overhead is a constant per call, not contention that
-grows with load. The micro-benchmark says the same thing from the other side —
-`Record` is 582 ns uncontended and 761 ns with every core hammering a single
-project, and stays at 761 ns with a flusher running every 2 ms (200× more often
-than production's 10 s). It allocates nothing.
-
-`+3.3%` is measured against **the cheapest endpoint there is**. File search is
+`+3.3%` is measured against **the cheapest endpoint there is** — file search is
 ~75 µs, so a fixed few microseconds is a visible fraction of it. Against the
-searches people actually wait for, measured on the 45-repo / 1.9M-chunk
-load-test fixture (`loadtests/SEARCH_PERF_CONTEXT.md`):
-
-| Search | Latency | Recording | Share |
-|---|---|---|---|
-| single-project semantic | 1,422 ms | ~3 µs | 0.0002% |
-| workspace, 45 repos | 10,544 ms | 26 µs | 0.0002% |
+searches people actually wait for, on a 45-repo / 1.9M-chunk corpus where a
+single-project semantic search takes ~1.4 s and a workspace search ~10.5 s, the
+same few microseconds are **0.0002%**.
 
 Workspace search is the case with the most recording to do — one `Record` per
 project the fan-out scanned — so its cost scales with the *workspace*, not with
 the repositories in it: 4 µs at 8 projects, 26 µs at 45, 57 µs at 100. Nothing
-here scales with repository size, because recording is driven by the result set,
+scales with repository size, because recording is driven by the result set,
 which the caller's `limit` bounds.
 
-The background flush costs ~12 ms for a batch of 200 projects × 10 files — far
-larger than a 10-second window produces — and it holds no lock a search needs:
-the pending maps are swapped under the mutex and written outside it. That is
-what the flat "during flush" number above is showing.
+### 2. Does it degrade when many searches run at once?
 
-The one deliberate optimisation: deduplication scans instead of hashing below
-`linearDedupeMax` (32) paths. Building a map for twenty strings allocated ~1.5 kB
-per search for nothing; dropping it took the overhead from +8 allocations and
-+1,910 B per request to **+1 allocation and +333 B**.
+No. The relative overhead is the same sequential (+3.5%) and 8-way parallel
+(+3.3%) — a constant per call, not contention that grows with load. From the
+other side, `Record` itself:
+
+| | ns/op | allocations |
+|---|---|---|
+| uncontended | 582 | 0 |
+| 8 goroutines, one shared project | 748 | 0 |
+| 8 goroutines, eight projects | 771 | 0 |
+| 8 goroutines, flusher running every 2 ms | 755 | 0 |
+
+Contention costs about 1.3×, and then stops — the one-project and eight-project
+cases are within noise of each other, and a flusher running 200× more often than
+production changes nothing.
+
+### 3. Does a large statistics database reach the search response?
+
+No, and this is the one worth being explicit about, because the intuition that
+it *should* is reasonable: a bigger database means slower writes, and slower
+writes usually mean slower responses.
+
+They are decoupled here. `Record` writes to a map and returns; the database
+write happens on a background goroutine, which takes the shared mutex only long
+enough to swap two map pointers and does its I/O outside the lock. Measured
+directly — a flush of 40,000 upserts into a 37 MB database, taking **284 ms**,
+with 621,108 `Record` calls sampled entirely inside that window:
+
+| | p50 | p99 | max |
+|---|---|---|---|
+| idle database | 458 ns | 87.6 µs | 331 µs |
+| **during the 284 ms flush** | **375 ns** | **81.5 µs** | 600 µs |
+
+Unchanged. The tail is mutex hand-off between eight goroutines, present with or
+without a flush in flight.
+
+The same holds across database sizes — `Record` is flat at 292 ns from 3,700
+rows to 1.8 million, and a flush stays around 1 ms because an upsert into a
+b-tree grows with its logarithm, not its size:
+
+| rows | file size | `Record` | flush |
+|---|---|---|---|
+| 3.7 k | 0.3 MB | 292 ns | 0.5 ms |
+| 90 k | 7.7 MB | 292 ns | 1.0 ms |
+| 450 k | 37.5 MB | 292 ns | 0.9 ms |
+| 1.8 M | 144.4 MB | 292 ns | 1.3 ms |
+
+With a 10-second flush interval against a ~1 ms flush, there are four orders of
+magnitude of headroom before the writer could fall behind its own schedule.
+
+### 4. What the database size DOES affect: the dashboard
+
+The statistics *page* is a different story, and the first measurement of it was
+bad: the admin view aggregates every visible project, and an admin's scope is
+every project on the server.
+
+| rows | before | after |
+|---|---|---|
+| 3.7 k | 5.1 ms | 3.4 ms |
+| 90 k | 109 ms | 36 ms |
+| 450 k | 542 ms | 105 ms |
+| 1.8 M | **2,267 ms** | **211 ms** |
+
+Two changes, both from reading the query plans rather than guessing:
+
+- **The aggregate ran twice.** The row count and footer sums were a second
+  statement wrapping the identical CTE chain. They are now window functions over
+  the page's own result set — one pass, and the three figures still cannot
+  disagree about what matched, because they are one query.
+- **The per-file aggregate is now conditional.** Computing `file_hits`,
+  `distinct_files` and `top_file_hits` for *every* scoped project is only
+  necessary when the ORDER or a filter depends on them. The default view sorts
+  by query count, which lives in `search_totals` at one row per project — so the
+  file columns are computed for the ~25 projects on the page instead, in one
+  statement. Sorting by a file column still pays the full cost, correctly.
+
+What remains scales with *projects on the page × files per project*, not with
+the size of the database. A test asserts the two query shapes return identical
+numbers, so the fast path cannot quietly drift from the slow one.
 
 ---
 

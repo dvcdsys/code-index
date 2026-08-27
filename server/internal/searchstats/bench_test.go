@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -54,10 +55,15 @@ func BenchmarkRecordParallel(b *testing.B) {
 			files := benchFiles(10)
 			b.ReportAllocs()
 			b.ResetTimer()
-			var n int
+			// Atomic, not a plain int: RunParallel calls this body from every
+			// worker goroutine at once. A raced counter is not only a race — it
+			// defeats the sub-benchmark, whose whole point is to spread the load
+			// over distinct keys and show the mutex is not serialising. Several
+			// workers reading the same value would pile onto one project and
+			// measure the contended case twice.
+			var n atomic.Int64
 			b.RunParallel(func(pb *testing.PB) {
-				n++
-				project := fmt.Sprintf("proj-%d", n%projects)
+				project := fmt.Sprintf("proj-%d", int(n.Add(1))%projects)
 				for pb.Next() {
 					r.Record(project, KindSemantic, files)
 				}

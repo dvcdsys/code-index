@@ -21,14 +21,15 @@ import (
 // So the question is not only "what does one call cost" but "what does the Nth
 // concurrent call cost".
 //
-// The two figures these numbers are measured against, both taken on this
-// machine against the 45-repo / 1.9M-chunk load-test fixture and recorded in
-// loadtests/SEARCH_PERF_CONTEXT.md:
+// The figures these numbers have to be read against, measured on a 45-repo /
+// 1.9M-chunk corpus:
 //
-//	single-project semantic search   1,422 ms p50
-//	workspace search (45 repos)     10,544 ms p50
+//	single-project semantic search   ~1.4 s p50
+//	workspace search (45 repos)     ~10.5 s p50
 //
-// Those are the latencies the overhead below has to be read against.
+// Against those, a few microseconds per search is 0.0002%. The percentages this
+// file reports are against file search, which is microseconds — the pessimistic
+// end, not the typical one.
 
 // heavyProject seeds a project with `files` indexed files, so the file-search
 // handler does a real LIKE scan rather than returning from an empty table. It
