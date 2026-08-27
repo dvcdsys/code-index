@@ -44,46 +44,55 @@ func HolderTasks(h *Holder, logger *slog.Logger, live LiveProjects) []schedule.T
 	if logger == nil {
 		logger = slog.Default()
 	}
-	tasks := (&Store{}).Tasks(logger, live)
-	for i := range tasks {
-		tasks[i].Handler = func(ctx context.Context) error {
-			store := h.Store()
-			if store == nil {
-				return nil // switched off; nothing to maintain
-			}
-			return store.maintain(ctx, logger, live)
+	t := pruneTaskMeta()
+	t.Handler = func(ctx context.Context) error {
+		store := h.Store()
+		if store == nil {
+			return nil // switched off; nothing to maintain
 		}
-		// Asked afresh at every resolution rather than captured once, for the
-		// same reason dbmaint asks whether its reclaim still makes sense: the
-		// answer changes under a running server.
-		tasks[i].DefaultEnabled = func() bool { return h.Enabled() }
+		return store.maintain(ctx, logger, live)
 	}
-	return tasks
+	// Asked afresh at every resolution rather than captured once, for the same
+	// reason dbmaint asks whether its reclaim still makes sense: the answer
+	// changes under a running server.
+	t.DefaultEnabled = func() bool { return h.Enabled() }
+	return []schedule.Task{t}
+}
+
+// pruneTaskMeta is the task's description without a handler, so both
+// constructors can supply their own.
+//
+// It exists so neither of them has to build a throwaway Store to harvest the
+// metadata. That worked only because nothing outside the handler read the
+// receiver — and the day somebody puts the database path into the Description,
+// it becomes a nil-pointer panic at boot with nothing in the type system to
+// warn them.
+func pruneTaskMeta() schedule.Task {
+	return schedule.Task{
+		Name:  TaskPrune,
+		Title: "Prune search statistics",
+		Description: "Drops search counters older than the retained window. " +
+			"Milliseconds; the all-time totals are not touched.",
+		// 03:20 rather than on the hour: the reclaim task already owns 03:00,
+		// and two SQLite maintenance statements starting together is a needless
+		// overlap even across different files.
+		DefaultCron:    "20 3 * * *",
+		DefaultEnabled: func() bool { return true },
+		// Cheap and interruption-free, so a machine asleep at 03:20 runs it on
+		// waking rather than never running it at all.
+		CatchUp: true,
+	}
 }
 
 func (s *Store) Tasks(logger *slog.Logger, live LiveProjects) []schedule.Task {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return []schedule.Task{
-		{
-			Name:  TaskPrune,
-			Title: "Prune search statistics",
-			Description: "Drops search counters older than the retained window. " +
-				"Milliseconds; the all-time totals are not touched.",
-			// 03:20 rather than on the hour: the reclaim task already owns
-			// 03:00, and two SQLite maintenance statements starting together
-			// is a needless overlap even across different files.
-			DefaultCron:    "20 3 * * *",
-			DefaultEnabled: func() bool { return true },
-			// Cheap and interruption-free, so a machine asleep at 03:20 runs it
-			// on waking rather than never running it at all.
-			CatchUp: true,
-			Handler: func(ctx context.Context) error {
-				return s.maintain(ctx, logger, live)
-			},
-		},
+	t := pruneTaskMeta()
+	t.Handler = func(ctx context.Context) error {
+		return s.maintain(ctx, logger, live)
 	}
+	return []schedule.Task{t}
 }
 
 // maintain is one maintenance run: prune the window tier, then sweep counters

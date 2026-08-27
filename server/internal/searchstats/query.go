@@ -158,11 +158,21 @@ type rangeFilter struct {
 
 // rangeFilters is the single list both the WHERE clause and
 // needsFileAggregate are built from.
+//
+// Each expr is the COALESCE, not the bare output alias, and that is load-bearing
+// rather than verbose. SQLite resolves an identifier in WHERE against the source
+// relations before it considers the SELECT list's aliases — so a bare
+// `file_hits` binds to `files.file_hits`, the un-coalesced column of a LEFT
+// JOIN, and is NULL for any project that was searched and returned nothing.
+// `NULL <= 2` is NULL, not true, so `max_file_hits` silently dropped exactly the
+// projects whose indexes have stopped answering: the ones most worth finding.
+// ORDER BY is the opposite — it prefers the alias — which is why sorting looked
+// right while filtering did not.
 func (q Query) rangeFilters() []rangeFilter {
 	return []rangeFilter{
-		{expr: "queries", min: q.MinQueries, max: q.MaxQueries},
-		{expr: "file_hits", min: q.MinFileHits, max: q.MaxFileHits, fromFiles: true},
-		{expr: "top_file_hits", min: q.MinTopFile, max: q.MaxTopFile, fromFiles: true},
+		{expr: "COALESCE(counters.queries, 0)", min: q.MinQueries, max: q.MaxQueries},
+		{expr: "COALESCE(files.file_hits, 0)", min: q.MinFileHits, max: q.MaxFileHits, fromFiles: true},
+		{expr: "COALESCE(files.top_file_hits, 0)", min: q.MinTopFile, max: q.MaxTopFile, fromFiles: true},
 	}
 }
 

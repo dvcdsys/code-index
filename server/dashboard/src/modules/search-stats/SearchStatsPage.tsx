@@ -63,7 +63,12 @@ export default function SearchStatsPage() {
       title="Search statistics"
       subtitle="How often each project is searched, and which of its files keep coming back in the results. Counters only — no query text is recorded anywhere."
       action={
-        user?.role === 'admin' && collecting ? (
+        // Shown while collection is OFF too. Discarding what was collected is
+        // the one action that must not require switching collection back on —
+        // that would mean resuming the thing you stopped in order to clear it.
+        // Hidden only on a server nobody has ever turned this on for, where
+        // there is nothing to discard.
+        user?.role === 'admin' && (collecting || settings.data?.source === 'database') ? (
           <Button
             variant="quietDanger"
             size="sm"
@@ -94,7 +99,7 @@ export default function SearchStatsPage() {
       ) : disabled ? (
         <Empty title="Not collecting search statistics">
           {user?.role === 'admin'
-            ? 'Turn collection on above to start counting. Nothing is recorded until you do, and counters already collected are kept while it is off.'
+            ? 'Turn collection on above to start counting. Counters already collected are kept, but the table only reads them while collection is on — “Clear counters” works either way.'
             : 'An admin has not turned collection on for this server, so there is nothing to show.'}
         </Empty>
       ) : (

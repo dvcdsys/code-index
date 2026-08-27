@@ -2,8 +2,10 @@ package searchstats
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 )
@@ -23,6 +25,14 @@ import (
 // clicking a toggle, and an RWMutex read lock — cheap as it is — is still a
 // contended cache line on every search. The mutex serialises only the
 // transitions, which are rare and slow.
+//
+// THE INVARIANT THAT MAKES THAT SAFE IS NOT THE NIL CHECK. A search that loads
+// the recorder pointer an instant before Disable swaps it away will still call
+// Record after Close has returned — and that is fine only because Record
+// touches no database: it takes a mutex and writes to a map, so the worst
+// outcome is a handful of counters dropped on the floor. If Record ever grew a
+// database call, the atomic pointer would not save it, and this would be a
+// use-after-close. Keep Record off the database.
 type Holder struct {
 	path   string
 	logger *slog.Logger
@@ -114,6 +124,11 @@ func (h *Holder) Enable() error {
 // what it already collected, and the counters that survive are what the
 // dashboard will show if it is switched back on.
 //
+// One exception, and it is narrow: once the background context is cancelled the
+// flush loop has already exited and drained on its own way out, so Stop returns
+// without a second drain. That window is between shutdown starting and the
+// process leaving, where there is nothing left to collect anyway.
+//
 // The recorder is retired before the store, the reverse of Enable, so nothing
 // can be recording into a store that is about to close.
 func (h *Holder) Disable() error {
@@ -152,6 +167,41 @@ func (h *Holder) Set(enabled bool) (changed bool, err error) {
 		return true, h.Enable()
 	}
 	return true, h.Disable()
+}
+
+// Reset discards every counter, whether or not collection is currently on.
+//
+// Disposal must not be reachable only through re-enabling. An admin who has
+// switched collection off and wants the file's contents gone would otherwise
+// have to switch it back on — resuming the very collection they stopped — to
+// clear it, which makes "stop" and "delete what was collected" the same lever.
+//
+// A database that does not exist is not an error: a server that never enabled
+// the feature has nothing to discard, and opening one here purely to empty it
+// would create the file this design is careful not to create.
+func (h *Holder) Reset(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if live := h.store.Load(); live != nil {
+		return live.Reset(ctx)
+	}
+	if _, err := os.Stat(h.path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("searchstats: stat %s: %w", h.path, err)
+	}
+	// Opened under the same mutex that guards Enable, so this cannot race a
+	// toggle into two writers on one file.
+	store, err := Open(h.path)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.Reset(ctx)
 }
 
 // Close shuts the feature down for good, draining anything buffered.

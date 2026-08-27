@@ -1048,3 +1048,123 @@ func TestEverySortKeyRunsAtBothOrderingLevels(t *testing.T) {
 		}
 	}
 }
+
+// The `fromFiles` flag is the seam between the range filters and the decision
+// to run the expensive aggregate, and dropping it from either entry used to
+// pass the entire suite — while making every file-column filter report "nothing
+// matches" over data that does, because the filters were then evaluated against
+// the stub aggregate's zeros. Wrong numbers, no error.
+//
+// So the flag is asserted directly, from the same list the WHERE clause is
+// built from.
+func TestFileDerivedFiltersRequireTheAggregate(t *testing.T) {
+	one := int64(1)
+	// Each entry: a Query setting exactly one bound, and whether that bound is
+	// answered by the per-file aggregate.
+	cases := []struct {
+		name      string
+		q         Query
+		fromFiles bool
+	}{
+		{"min_queries", Query{MinQueries: &one}, false},
+		{"max_queries", Query{MaxQueries: &one}, false},
+		{"min_file_hits", Query{MinFileHits: &one}, true},
+		{"max_file_hits", Query{MaxFileHits: &one}, true},
+		{"min_top_file_hits", Query{MinTopFile: &one}, true},
+		{"max_top_file_hits", Query{MaxTopFile: &one}, true},
+	}
+	for _, c := range cases {
+		if got := c.q.needsFileAggregate(); got != c.fromFiles {
+			t.Errorf("%s: needsFileAggregate() = %v, want %v — a file-derived bound evaluated "+
+				"against the stub aggregate reports zero matches over data that matches",
+				c.name, got, c.fromFiles)
+		}
+	}
+
+	// And every entry in the list must be one of the two, so a newly added
+	// filter cannot sit in neither camp unnoticed.
+	seen := map[string]bool{}
+	for _, f := range (Query{}).rangeFilters() {
+		seen[f.expr] = f.fromFiles
+	}
+	for _, want := range []struct {
+		expr      string
+		fromFiles bool
+	}{
+		{"COALESCE(counters.queries, 0)", false},
+		{"COALESCE(files.file_hits, 0)", true},
+		{"COALESCE(files.top_file_hits, 0)", true},
+	} {
+		got, ok := seen[want.expr]
+		if !ok {
+			t.Errorf("rangeFilters() no longer carries %q", want.expr)
+			continue
+		}
+		if got != want.fromFiles {
+			t.Errorf("rangeFilters()[%q].fromFiles = %v, want %v", want.expr, got, want.fromFiles)
+		}
+		delete(seen, want.expr)
+	}
+	for expr := range seen {
+		t.Errorf("rangeFilters() gained %q — declare whether it is file-derived and extend this test",
+			expr)
+	}
+}
+
+// The same equivalence TestFileAggregateShapesAgree checks for sorts, driven by
+// a FILTER instead: a file-derived bound must select the same projects it would
+// if the full aggregate had been computed for everything.
+func TestFileDerivedFiltersSelectTheRightProjects(t *testing.T) {
+	s := newTestStore(t)
+	r := recorderAt(t, s, fixedNow)
+	ctx := context.Background()
+
+	// busy: one file seen 3 times. quiet: two files seen once each.
+	for i := 0; i < 3; i++ {
+		r.Record("busy", KindSemantic, []string{"hot.go"})
+	}
+	r.Record("quiet", KindSemantic, []string{"a.go", "b.go"})
+	r.Record("silent", KindSemantic, nil) // searched, nothing returned
+	if err := r.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	scope := []string{"busy", "quiet", "silent"}
+
+	three, two := int64(3), int64(2)
+	for _, c := range []struct {
+		name string
+		q    Query
+		want []string
+	}{
+		{"min_file_hits=3", Query{MinFileHits: &three}, []string{"busy"}},
+		{"max_file_hits=2", Query{MaxFileHits: &two}, []string{"quiet", "silent"}},
+		{"min_top_file_hits=3", Query{MinTopFile: &three}, []string{"busy"}},
+		{"max_top_file_hits=2", Query{MaxTopFile: &two}, []string{"quiet", "silent"}},
+	} {
+		q := c.q
+		q.ProjectPaths = scope
+		q.Sort = SortProject
+		q.Limit = 50
+		page, err := s.ProjectStatsPage(ctx, q, fixedNow)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		var got []string
+		for _, row := range page.Rows {
+			got = append(got, row.ProjectPath)
+		}
+		if len(got) != len(c.want) {
+			t.Errorf("%s selected %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Errorf("%s selected %v, want %v", c.name, got, c.want)
+				break
+			}
+		}
+		if page.Total != len(c.want) {
+			t.Errorf("%s: total = %d, want %d", c.name, page.Total, len(c.want))
+		}
+	}
+}

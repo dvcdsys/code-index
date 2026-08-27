@@ -1787,6 +1787,11 @@ paths:
         Empties both tiers. There is nothing to recover afterwards and nothing
         else depends on the numbers — they are derived from traffic that has
         already been served.
+
+        Works whether or not collection is currently on. Discarding what was
+        collected must not require switching collection back on, or stopping and
+        disposing become the same lever. A server that never enabled the feature
+        has nothing to discard and gets a 204 without a database being created.
       responses:
         "204":
           description: Counters cleared
@@ -3946,10 +3951,16 @@ components:
           description: What decided the current state.
         updated_at:
           type: string
-          description: When an admin last changed it. Absent unless source is `database`.
+          description: |
+            When an admin last changed it. Sent to admins only — when this
+            server was last administered is not part of explaining why the
+            page is empty. Also absent unless `source` is `database`.
         updated_by:
           type: string
-          description: Who last changed it. Absent unless source is `database`.
+          description: |
+            Which admin last changed it. Sent to admins only: it is an email
+            address, and a regular user reading this endpoint is asking why
+            their page is empty, not who runs the server.
 
     SetSearchStatsSettingsRequest:
       type: object

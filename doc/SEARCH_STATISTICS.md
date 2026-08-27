@@ -350,9 +350,13 @@ The page reports which of the three is speaking — `database` (an admin decided
 and when), `environment` (the variable is set and nobody has overridden it), or
 `default` (nobody has asked, so it is off).
 
-Switching collection off **keeps** what was already collected. The counters are
-still there if it is switched back on; `POST /admin/search-stats/reset` is the
-way to discard them.
+Switching collection off **keeps** what was already collected — the counters are
+still there if it is switched back on. The table does not read them while
+collection is off, because off closes the database; but
+`POST /admin/search-stats/reset` works either way, and the dashboard keeps its
+**Clear counters** button visible while off. Disposal must not require switching
+collection back on: that would make "stop recording" and "delete what you
+recorded" the same lever.
 
 A server that never turns the feature on never creates `searchstats.db`. A
 failure to open it is **not** fatal: the server logs a warning, runs without the

@@ -352,13 +352,15 @@ func (s *Server) ResetSearchStats(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.mustBeAdmin(w, r); !ok {
 		return
 	}
-	store := s.Deps.SearchStats.Store()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable,
-			"search statistics are switched off on this server")
+	// Deliberately NOT gated on collection being on. Discarding what was
+	// collected has to be reachable without switching collection back on, or
+	// "stop recording" and "delete what you recorded" become the same lever and
+	// an admin has to resume the thing they stopped in order to clear it.
+	if s.Deps.SearchStats == nil {
+		writeError(w, http.StatusServiceUnavailable, "search statistics are not configured on this server")
 		return
 	}
-	if err := store.Reset(r.Context()); err != nil {
+	if err := s.Deps.SearchStats.Reset(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -373,10 +375,22 @@ func (s *Server) ResetSearchStats(w http.ResponseWriter, r *http.Request) {
 // it is a server-wide decision about what the server collects.
 // ---------------------------------------------------------------------------
 
-func searchStatsSettingsPayload(s searchstats.Settings) openapi.SearchStatsSettings {
+// searchStatsSettingsPayload renders the setting, revealing WHO changed it and
+// WHEN only to admins.
+//
+// The endpoint is readable by everyone because the statistics page has to be
+// able to explain why it is empty — and `enabled` plus `source` is the whole of
+// that explanation. `updated_by` is an admin's email address, and `updated_at`
+// is when they were last administering this server; neither answers "why is
+// this page empty", and handing both to every authenticated user is a
+// directory of the administrators nobody asked for.
+func searchStatsSettingsPayload(s searchstats.Settings, isAdmin bool) openapi.SearchStatsSettings {
 	out := openapi.SearchStatsSettings{
 		Enabled: s.Enabled,
 		Source:  openapi.SearchStatsSettingsSource(s.Source),
+	}
+	if !isAdmin {
+		return out
 	}
 	if s.UpdatedAt != "" {
 		out.UpdatedAt = &s.UpdatedAt
@@ -409,7 +423,8 @@ func (s *Server) GetSearchStatsSettings(w http.ResponseWriter, r *http.Request) 
 	if s.Deps.SearchStats != nil {
 		cur.Enabled = s.Deps.SearchStats.Enabled()
 	}
-	writeJSON(w, http.StatusOK, searchStatsSettingsPayload(cur))
+	_, isAdmin := s.callerIdentity(r)
+	writeJSON(w, http.StatusOK, searchStatsSettingsPayload(cur, isAdmin))
 }
 
 // SetSearchStatsSettings — PUT /api/v1/admin/search-stats/settings.
@@ -442,6 +457,15 @@ func (s *Server) SetSearchStatsSettings(w http.ResponseWriter, r *http.Request) 
 		by = ac.User.Email
 	}
 	if err := s.Deps.SearchStatsSettings.Set(r.Context(), body.Enabled, by); err != nil {
+		// The runtime already moved and the store did not, so the answer we are
+		// about to give would be a lie in the worst direction: an admin who
+		// clicked ON, saw a 500 and concluded nothing happened would be wrong,
+		// and the server would keep collecting until the next restart quietly
+		// reverted it. Put the runtime back so the error tells the truth.
+		if _, rerr := s.Deps.SearchStats.Set(!body.Enabled); rerr != nil {
+			s.Deps.Logger.Error("search statistics: could not roll back after a failed save",
+				"wanted", body.Enabled, "err", rerr)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -452,5 +476,5 @@ func (s *Server) SetSearchStatsSettings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cur.Enabled = s.Deps.SearchStats.Enabled()
-	writeJSON(w, http.StatusOK, searchStatsSettingsPayload(cur))
+	writeJSON(w, http.StatusOK, searchStatsSettingsPayload(cur, true))
 }

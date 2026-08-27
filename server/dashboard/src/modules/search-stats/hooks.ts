@@ -230,6 +230,11 @@ export function useSearchStatsSettings() {
     queryKey: ['search-stats', 'settings'] as const,
     queryFn: ({ signal }) =>
       api.get<SearchStatsSettings>('/search-stats/settings', { signal }),
+    // Polled, because this is server-wide state that somebody else can change.
+    // Without it a second admin sits on "not collecting" over a server that has
+    // been collecting for an hour, until they happen to refocus the tab. Cheap:
+    // one row of the system database, and it gates the two expensive queries.
+    refetchInterval: 30_000,
   });
 }
 

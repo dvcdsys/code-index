@@ -727,3 +727,65 @@ func TestSearchStatsSettings_DisableDrainsPendingCounters(t *testing.T) {
 		t.Errorf("after off/on: %+v, want the buffered counter to have been written on the way out", p.Projects)
 	}
 }
+
+// The settings endpoint is readable by everyone so the page can explain why it
+// is empty. `enabled` and `source` are that explanation; who administers this
+// server and when they last did is not, and used to be handed to every
+// authenticated user.
+func TestSearchStatsSettings_DoesNotLeakTheAdminToRegularUsers(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	userCookie := seedUser(t, f.authTestFixture, adminCookie, "bob@example.com", "bobpass1234")
+
+	// Make sure there IS something to leak.
+	if rr, body := doReq(t, f.authTestFixture, adminCookie, http.MethodPut,
+		"/api/v1/admin/search-stats/settings", map[string]any{"enabled": true}); rr.Code != http.StatusOK {
+		t.Fatalf("PUT = %d (%s)", rr.Code, body)
+	}
+
+	asAdmin := getSettings(t, f, adminCookie)
+	if asAdmin.UpdatedBy != "admin@example.com" || asAdmin.UpdatedAt == "" {
+		t.Errorf("admin sees updated_by=%q updated_at=%q, want both populated",
+			asAdmin.UpdatedBy, asAdmin.UpdatedAt)
+	}
+
+	asUser := getSettings(t, f, userCookie)
+	if !asUser.Enabled || asUser.Source != "database" {
+		t.Errorf("user sees enabled=%v source=%q, want the state and its provenance",
+			asUser.Enabled, asUser.Source)
+	}
+	if asUser.UpdatedBy != "" {
+		t.Errorf("user sees updated_by=%q — that is an admin's email address", asUser.UpdatedBy)
+	}
+	if asUser.UpdatedAt != "" {
+		t.Errorf("user sees updated_at=%q — when an admin last administered this server",
+			asUser.UpdatedAt)
+	}
+}
+
+// Discarding what was collected must not require switching collection back on.
+// Otherwise "stop recording" and "delete what you recorded" are the same lever,
+// and an admin has to resume the thing they stopped in order to clear it.
+func TestSearchStats_ResetWorksWhileCollectionIsOff(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	seedLocalProject(t, f, "/tmp/proj", f.UserID, 3, "a.go")
+
+	if rr, body := doReq(t, f.authTestFixture, adminCookie, http.MethodPut,
+		"/api/v1/admin/search-stats/settings", map[string]any{"enabled": false}); rr.Code != http.StatusOK {
+		t.Fatalf("switch off = %d (%s)", rr.Code, body)
+	}
+	if rr, body := doReq(t, f.authTestFixture, adminCookie,
+		http.MethodPost, "/api/v1/admin/search-stats/reset", nil); rr.Code != http.StatusNoContent {
+		t.Fatalf("reset while off = %d (%s)", rr.Code, body)
+	}
+
+	// Back on: the counters really are gone, not merely hidden by the switch.
+	if rr, body := doReq(t, f.authTestFixture, adminCookie, http.MethodPut,
+		"/api/v1/admin/search-stats/settings", map[string]any{"enabled": true}); rr.Code != http.StatusOK {
+		t.Fatalf("switch on = %d (%s)", rr.Code, body)
+	}
+	if p := getStats(t, f, adminCookie, ""); len(p.Projects) != 0 {
+		t.Errorf("after a reset performed while off: %+v, want nothing", p.Projects)
+	}
+}
