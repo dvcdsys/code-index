@@ -113,20 +113,11 @@ export function StatsTable({
                 <span className="min-w-0 truncate font-semibold" title={row.project_path}>
                   {row.name || row.project_path}
                 </span>
-                {row.exists ? (
-                  row.kind === 'external' ? (
-                    <Badge variant="outline" title="Cloned from GitHub by the server">
-                      external
-                    </Badge>
-                  ) : null
-                ) : (
-                  <Badge
-                    variant="warn"
-                    title="This project has been deleted but its counters were not discarded — the cleanup on delete did not run."
-                  >
-                    deleted
+                {row.kind === 'external' ? (
+                  <Badge variant="outline" title="Cloned from GitHub by the server">
+                    external
                   </Badge>
-                )}
+                ) : null}
               </span>
             </TD>
             <TD mono align="right" className="tabular-nums">

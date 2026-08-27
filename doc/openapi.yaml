@@ -3896,7 +3896,7 @@ components:
     SearchStatsProject:
       type: object
       required:
-        [project_path, path_hash, name, exists, queries, results, file_hits,
+        [project_path, path_hash, name, queries, results, file_hits,
          distinct_files, top_file_hits, last_seen, top_files]
       properties:
         project_path:
@@ -3912,20 +3912,9 @@ components:
           type: string
           description: |
             Display name, resolved from the projects table at request time.
-            Empty when the project has since been deleted but its counters
-            have not been discarded yet.
         kind:
           type: string
           enum: [local, external]
-          description: |
-            Absent when `exists` is false — the project is gone and there is
-            nothing left to classify it by.
-        exists:
-          type: boolean
-          description: |
-            False for counters belonging to a project that has been removed.
-            Such rows are normally cleaned up when the project is deleted;
-            one appearing here means that cleanup did not run.
         queries:
           type: integer
           format: int64
@@ -3937,9 +3926,12 @@ components:
           type: integer
           format: int64
           description: |
-            Total file appearances counted on the per-file tier. Equal to
-            `results` in the ordinary case; it is computed from a different
-            table, so a divergence means one tier lost writes.
+            Total file appearances counted on the per-file tier. Normally equal
+            to `results`, which is counted on the project tier — but not an
+            integrity check, because two documented behaviours separate them by
+            design: the server drops per-file detail (never query counts) when
+            its pending buffer is full, and empty paths are excluded from the
+            file tier while still counting toward `results`.
         distinct_files:
           type: integer
           format: int64

@@ -17,10 +17,25 @@ export function ActivityChart({ data }: { data: SearchStatsSeriesResponse }) {
     const byBucket = new Map<number, number>();
     for (const p of points) byBucket.set(p.bucket, p.queries);
 
-    // Anchored to the newest bucket that exists rather than to `now`, so the
-    // right edge is real data. Anchoring to the clock leaves a partial bucket
-    // at the end that always reads as a drop-off.
-    const last = points.length > 0 ? points[points.length - 1].bucket : Math.floor(Date.now() / 1000 / width) * width;
+    // The axis is the server's window, anchored to the clock: the right edge is
+    // the current bucket and the axis runs back exactly `span`.
+    //
+    // Anchoring to the newest bucket that HAS data is the tempting alternative,
+    // and it is wrong. When the newest activity is old relative to the window,
+    // the axis slides left with it and the leading buckets fall before the
+    // cutoff the server filtered on — so the chart draws zeroes for intervals
+    // the server never reported on, which is an invented claim rather than a
+    // gap. The cost of anchoring to the clock is that the last bar covers a
+    // bucket still in progress; at this density that is one bar in several
+    // hundred.
+    //
+    // `last` still yields to a newer data point, which only happens when this
+    // browser's clock is behind the server's. Dropping real data off the right
+    // edge would be worse than a slightly long axis.
+    const nowBucket = Math.floor(Date.now() / 1000 / width) * width;
+    const newest = points.length > 0 ? points[points.length - 1].bucket : nowBucket;
+    const last = Math.max(nowBucket, newest);
+
     const count = Math.max(1, Math.round(span / width));
     const out: Array<{ bucket: number; queries: number }> = [];
     for (let i = count - 1; i >= 0; i--) {

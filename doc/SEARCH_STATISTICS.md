@@ -59,6 +59,14 @@ of how the caller configured their request.
 
 ---
 
+### `file_hits` and `results` are counted on different tiers
+
+`results` is summed on the project tier, `file_hits` on the per-file tier, and
+they normally agree. They are **not** a cross-check on each other, because two
+deliberate behaviours separate them: the recorder drops per-file detail (never
+query counts) when its pending buffer hits its cap, and an empty path is skipped
+on the file tier while still counting toward `results`.
+
 ## Two tiers, two retention policies
 
 | Table | Retained | Answers |
@@ -126,6 +134,60 @@ analytics is never allowed to be the reason the server runs out of memory.
 
 ---
 
+## What it costs a search
+
+The counters sit on the critical path of the operation this server exists to
+perform, and every search on the box takes the same mutex — so "does it slow
+search down" and "does it collapse under concurrency" are separate questions.
+Both are measured, and the benchmarks are committed:
+
+```
+go test -run XXX -bench . ./internal/searchstats/
+go test -run XXX -bench . ./internal/httpapi/ -benchtime=4000x
+```
+
+Measured on a 14-core Mac (Go 1.26, `-cpu=8`, medians of 3):
+
+| | recording off | recording on | delta |
+|---|---|---|---|
+| file search, sequential | 74.6 µs | 77.2 µs | **+2.6 µs (+3.5%)** |
+| file search, 8 concurrent | 93.3 µs | 96.4 µs | **+3.1 µs (+3.3%)** |
+
+The relative cost is the same sequential and 8-way parallel, which is the
+result that matters: the overhead is a constant per call, not contention that
+grows with load. The micro-benchmark says the same thing from the other side —
+`Record` is 582 ns uncontended and 761 ns with every core hammering a single
+project, and stays at 761 ns with a flusher running every 2 ms (200× more often
+than production's 10 s). It allocates nothing.
+
+`+3.3%` is measured against **the cheapest endpoint there is**. File search is
+~75 µs, so a fixed few microseconds is a visible fraction of it. Against the
+searches people actually wait for, measured on the 45-repo / 1.9M-chunk
+load-test fixture (`loadtests/SEARCH_PERF_CONTEXT.md`):
+
+| Search | Latency | Recording | Share |
+|---|---|---|---|
+| single-project semantic | 1,422 ms | ~3 µs | 0.0002% |
+| workspace, 45 repos | 10,544 ms | 26 µs | 0.0002% |
+
+Workspace search is the case with the most recording to do — one `Record` per
+project the fan-out scanned — so its cost scales with the *workspace*, not with
+the repositories in it: 4 µs at 8 projects, 26 µs at 45, 57 µs at 100. Nothing
+here scales with repository size, because recording is driven by the result set,
+which the caller's `limit` bounds.
+
+The background flush costs ~12 ms for a batch of 200 projects × 10 files — far
+larger than a 10-second window produces — and it holds no lock a search needs:
+the pending maps are swapped under the mutex and written outside it. That is
+what the flat "during flush" number above is showing.
+
+The one deliberate optimisation: deduplication scans instead of hashing below
+`linearDedupeMax` (32) paths. Building a map for twenty strings allocated ~1.5 kB
+per search for nothing; dropping it took the overhead from +8 allocations and
++1,910 B per request to **+1 allocation and +333 B**.
+
+---
+
 ## Access
 
 Both read endpoints are **GroupRead**. A regular user sees only the projects
@@ -140,25 +202,50 @@ directory structure of repositories the caller cannot open. See
 `POST /api/v1/admin/search-stats/reset` is admin-only and empties both tiers.
 
 Deleting a project discards its counters. Because the two databases have no
-foreign key between them this is an explicit best-effort call after the delete
-has already succeeded — failing the delete over a chart would leave the project
-half-removed. A row whose project has gone is rendered with `exists: false`
-rather than dropped, so a cleanup that did not run is visible.
+foreign key between them this is an explicit best-effort call made *after* the
+delete has already succeeded — failing the delete over a chart would leave the
+project half-removed.
+
+That leaves a hole, and the prune task closes it. If the call fails, or the
+process dies between the two, the counters outlive their project: no API read
+can surface them (every read is scoped to projects the caller can see, and a
+deleted project is in nobody's set) and the totals tier is never pruned, so they
+would sit there forever. The nightly sweep drops counters for any project that
+no longer exists, and logs when it finds some — reaching that line means a
+delete did not clean up at the time, which is worth knowing even though the
+sweep handled it.
+
+An **empty** live-project list is treated as "don't know" and sweeps nothing. A
+server with genuinely zero projects exists, but so does a failed query that
+returns nothing, and keeping orphans one more day beats wiping every counter.
 
 ---
 
 ## Maintenance
 
 `searchstats.prune` is a registered recurring task (default `20 3 * * *`,
-adjustable at `/dashboard/server`) that drops window rows past the retention
-horizon. It is scheduled rather than run on every flush, which would issue a
+adjustable at `/dashboard/server`). It drops window rows past the retention
+horizon, reclaims the pages they freed, and sweeps counters whose project is
+gone. It is scheduled rather than run on every flush, which would issue a
 `DELETE` matching nothing several times a minute.
 
 The database is **not** covered by `/dashboard/server` → Resources, and the
-compaction and reclaim tasks act on `projects.db` only. It needs no maintenance:
-`bucket` leads the primary key of both window tables, so pruning is a contiguous
-range at the front of the b-tree, and the file is created with
-`auto_vacuum=INCREMENTAL`.
+compaction and reclaim tasks act on `projects.db` only. It does not need them:
+the file is created with `auto_vacuum=INCREMENTAL` (set on a dedicated
+connection before the schema exists, because the mode can only be chosen while
+the header is unwritten), and the prune runs `PRAGMA incremental_vacuum` after
+deleting, so the space actually returns to the filesystem. `bucket` leads the
+primary key of both window tables, so the delete itself is a contiguous range at
+the front of the b-tree.
+
+### What does not shrink on its own
+
+`search_file_totals` is bounded by *(distinct files ever returned × kinds ×
+projects)* and is never pruned — that is what makes the all-time numbers
+all-time. It is small in practice, because only files that have actually
+appeared in a result exist as rows, but it grows monotonically with how much of
+each repository has ever been searched. If it ever matters, the remedies are
+`POST /admin/search-stats/reset` or deleting the file.
 
 To start over, `POST /admin/search-stats/reset`, or stop the server and delete
 `searchstats.db` — nothing else refers to it.

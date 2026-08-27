@@ -365,6 +365,11 @@ DELETE           /api/v1/workspaces/{id}/projects/{hash}
 GET              /api/v1/workspaces/{id}/search      hybrid BM25 + dense
 GET/POST         /api/v1/workspaces/{id}/shares      DELETE …/shares/{groupId}`}</CodeBlock>
 
+            <h3>Search statistics <Tag t="GroupRead" /></h3>
+            <CodeBlock>{`GET  /api/v1/search-stats              per-project counters, filtered + sorted server-side
+GET  /api/v1/search-stats/series       query counts per 30-minute bucket
+POST /api/v1/admin/search-stats/reset  discard every counter (admin)`}</CodeBlock>
+
             <h3>Webhooks <Tag t="HMAC" /></h3>
             <CodeBlock>{`POST /api/v1/webhooks/github/{hash}   per-repo HMAC-SHA256 (X-Hub-Signature-256)`}</CodeBlock>
 
