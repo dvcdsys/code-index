@@ -383,13 +383,32 @@ func (s *Server) DeleteProject(w http.ResponseWriter, r *http.Request, path open
 		// there would tell the operator the delete failed when it did not.
 		if errors.Is(err, projects.ErrArtifactCleanup) {
 			s.Deps.Logger.Warn("delete project: cleanup left residue", "project", p.HostPath, "err", err)
+			s.forgetSearchStats(r, p.HostPath)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.forgetSearchStats(r, p.HostPath)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// forgetSearchStats discards a deleted project's counters.
+//
+// Best effort, and after the delete has already succeeded: the counters live in
+// a different database with no foreign key reaching across, so failing the
+// delete over them would leave the project half-removed to protect a chart.
+// What survives a failure here is a row the statistics endpoint renders with
+// exists=false, which is visible and recoverable rather than silent.
+func (s *Server) forgetSearchStats(r *http.Request, hostPath string) {
+	if s.Deps.SearchStats == nil {
+		return
+	}
+	if err := s.Deps.SearchStats.Forget(r.Context(), hostPath); err != nil {
+		s.Deps.Logger.Warn("delete project: discard search statistics",
+			"project", hostPath, "err", err)
+	}
 }
 
 // projectArtifacts wires the off-database cleanup for a project delete: the
@@ -476,6 +495,9 @@ func (s *Server) SearchSymbols(w http.ResponseWriter, r *http.Request, path open
 			ParentName: sym.ParentName,
 		})
 	}
+	s.recordSearch(p.HostPath, searchKindSymbols, resultFilePaths(results,
+		func(it openapi.SymbolResultItem) string { return it.FilePath }))
+
 	writeJSON(w, http.StatusOK, openapi.SymbolSearchResponse{
 		Results: results,
 		Total:   len(results),
@@ -519,6 +541,9 @@ func (s *Server) SearchDefinitions(w http.ResponseWriter, r *http.Request, path 
 			ParentName: sym.ParentName,
 		})
 	}
+	s.recordSearch(p.HostPath, searchKindDefinitions, resultFilePaths(results,
+		func(it openapi.DefinitionItem) string { return it.FilePath }))
+
 	writeJSON(w, http.StatusOK, openapi.DefinitionResponse{
 		Results: results,
 		Total:   len(results),
@@ -560,6 +585,9 @@ func (s *Server) SearchReferences(w http.ResponseWriter, r *http.Request, path o
 			Language:   ref.Language,
 		})
 	}
+	s.recordSearch(p.HostPath, searchKindReferences, resultFilePaths(results,
+		func(it openapi.ReferenceItem) string { return it.FilePath }))
+
 	writeJSON(w, http.StatusOK, openapi.ReferenceResponse{
 		Results: results,
 		Total:   len(results),
@@ -615,6 +643,10 @@ func (s *Server) SearchFiles(w http.ResponseWriter, r *http.Request, path openap
 		return
 	}
 	rows.Close()
+
+	s.recordSearch(p.HostPath, searchKindFiles, resultFilePaths(results,
+		func(it openapi.FileResultItem) string { return it.FilePath }))
+
 	writeJSON(w, http.StatusOK, openapi.FileSearchResponse{
 		Results: results,
 		Total:   len(results),
@@ -814,6 +846,14 @@ func (s *Server) SemanticSearch(w http.ResponseWriter, r *http.Request, path ope
 
 	elapsedMS := float64(time.Since(start).Microseconds()) / 1000.0
 	elapsedMS = float64(int(elapsedMS*10+0.5)) / 10
+
+	// Results are already one entry per file at this point — groupByFile saw
+	// to that — so this is the deduplicated set recordSearch expects.
+	hitPaths := make([]string, 0, len(fileGroups))
+	for _, g := range fileGroups {
+		hitPaths = append(hitPaths, g.FilePath)
+	}
+	s.recordSearch(p.HostPath, searchKindSemantic, hitPaths)
 
 	writeJSON(w, http.StatusOK, openapi.SemanticSearchResponse{
 		Results:     fileGroupsToOpenAPI(fileGroups),

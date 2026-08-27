@@ -41,6 +41,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/schedule"
+	"github.com/dvcdsys/code-index/server/internal/searchstats"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/storage"
@@ -466,6 +467,45 @@ func run() (restart bool, err error) {
 	// leak for up to 1h past shutdown. m8 fix.
 	defer idx.Shutdown()
 
+	// Search statistics — counters in a database of their own.
+	//
+	// Its own file because search must keep serving while the system database
+	// is frozen for a compaction (httpapi.readOnlyPostSuffixes says so
+	// explicitly) and because a counter has no business queueing behind the
+	// indexer's write lock. See internal/searchstats for the full argument.
+	//
+	// A failure to open it is NOT fatal. These are derived numbers about
+	// traffic that has already been served; refusing to start the server
+	// because a statistics file is unreadable would trade a working index for
+	// a chart. The feature reports itself as unavailable instead.
+	var (
+		statsStore    *searchstats.Store
+		statsRecorder *searchstats.Recorder
+	)
+	if cfg.SearchStatsEnabled {
+		statsPath := searchstats.PathBeside(cfg.SQLitePath)
+		st, serr := searchstats.Open(statsPath)
+		if serr != nil {
+			logger.Warn("search statistics unavailable — continuing without them",
+				"path", statsPath, "err", serr)
+		} else {
+			statsStore = st
+			statsRecorder = searchstats.NewRecorder(st, logger)
+			defer func() {
+				// Stop before Close: Stop drains whatever is still buffered,
+				// and draining into a closed pool would silently discard the
+				// last interval on every clean shutdown.
+				statsRecorder.Stop()
+				if cerr := statsStore.Close(); cerr != nil {
+					logger.Error("search statistics close", "err", cerr)
+				}
+			}()
+			logger.Info("search statistics enabled", "path", statsPath)
+		}
+	} else {
+		logger.Info("search statistics disabled (CIX_SEARCH_STATS_ENABLED=false)")
+	}
+
 	// Dashboard auth services. Built once and shared with the router.
 	usrSvc := users.New(database)
 	sessSvc := sessions.New(database)
@@ -728,6 +768,15 @@ func run() (restart bool, err error) {
 		}
 		schedReg.Register(t, envCron)
 	}
+	if statsStore != nil {
+		// Started here rather than at Open so the flush loop's lifetime is the
+		// background context's, like every other periodic goroutine.
+		statsRecorder.Start(bgCtx)
+		for _, t := range statsStore.Tasks(logger) {
+			schedReg.Register(t, nil)
+		}
+	}
+
 	go schedReg.Run(bgCtx)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
@@ -767,6 +816,8 @@ func run() (restart bool, err error) {
 		Tunnel:            tunnelMgr,
 		WebhookReconciler: webhookReconciler,
 		TunnelConfig:      tunnelCfgSvc,
+		SearchStats:       statsStore,
+		SearchStatsWrite:  statsRecorder,
 	})
 
 	srv := &http.Server{

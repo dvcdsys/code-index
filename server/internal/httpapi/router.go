@@ -24,6 +24,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/repolocks"
 	"github.com/dvcdsys/code-index/server/internal/runtimecfg"
 	"github.com/dvcdsys/code-index/server/internal/schedule"
+	"github.com/dvcdsys/code-index/server/internal/searchstats"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
 	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
@@ -160,6 +161,17 @@ type Deps struct {
 	// TunnelConfig persists the dashboard-managed tunnel settings. Nil in
 	// tests; the config handlers return 503 when absent.
 	TunnelConfig *tunnelcfg.Service
+
+	// SearchStats records and serves per-project search counters. Both may be
+	// nil — in tests, and in any deployment that has switched the feature off —
+	// and every call site is written to tolerate that: Recorder's methods are
+	// nil-safe, and the stats endpoints answer 503 when Store is absent.
+	//
+	// They are separate fields rather than one service because they are used
+	// from opposite directions. The recorder is touched by the search handlers,
+	// which must never block; the store is read by the dashboard, which may.
+	SearchStats      *searchstats.Store
+	SearchStatsWrite *searchstats.Recorder
 }
 
 // NewRouter builds the chi router with middleware and the generated

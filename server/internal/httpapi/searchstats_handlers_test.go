@@ -1,0 +1,523 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"path/filepath"
+	"testing"
+
+	"github.com/dvcdsys/code-index/server/internal/apikeys"
+	apidb "github.com/dvcdsys/code-index/server/internal/db"
+	"github.com/dvcdsys/code-index/server/internal/groups"
+	"github.com/dvcdsys/code-index/server/internal/projects"
+	"github.com/dvcdsys/code-index/server/internal/searchstats"
+	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/users"
+	"github.com/dvcdsys/code-index/server/internal/workspaces"
+)
+
+// statsFixture is newAuthFixture plus a wired search-statistics store. It is a
+// separate constructor rather than a flag on the shared one so that every other
+// test keeps running with the feature absent — which is also the shape a
+// deployment with CIX_SEARCH_STATS_ENABLED=false has, and therefore worth
+// leaving as the default the rest of the suite exercises.
+type statsFixture struct {
+	*authTestFixture
+	Store    *searchstats.Store
+	Recorder *searchstats.Recorder
+}
+
+func newStatsFixture(t *testing.T) *statsFixture {
+	t.Helper()
+	database, err := apidb.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	usrSvc := users.New(database)
+	sessSvc := sessions.New(database)
+	akSvc := apikeys.New(database)
+
+	u, err := usrSvc.Create(context.Background(), "admin@example.com", "secret-password", users.RoleAdmin, false)
+	if err != nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+	full, _, err := akSvc.Generate(context.Background(), u.ID, "test-key")
+	if err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+
+	store, err := searchstats.Open(filepath.Join(t.TempDir(), searchstats.DBFileName))
+	if err != nil {
+		t.Fatalf("open search stats: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	rec := searchstats.NewRecorder(store, nil)
+
+	deps := Deps{
+		DB:               database,
+		ServerVersion:    "0.0.0-test",
+		APIVersion:       "v1",
+		EmbeddingModel:   "test-model",
+		Users:            usrSvc,
+		Sessions:         sessSvc,
+		APIKeys:          akSvc,
+		Groups:           groups.New(database),
+		Workspaces:       workspaces.New(database),
+		SearchStats:      store,
+		SearchStatsWrite: rec,
+	}
+	return &statsFixture{
+		authTestFixture: &authTestFixture{
+			Router: NewRouter(deps), Deps: deps, UserID: u.ID, FullKey: full,
+		},
+		Store:    store,
+		Recorder: rec,
+	}
+}
+
+// seedLocalProject creates an owned local project and records `queries`
+// searches against it, each returning the given files.
+func seedLocalProject(t *testing.T, f *statsFixture, hostPath, ownerID string, queries int, files ...string) string {
+	t.Helper()
+	if _, err := projects.Create(t.Context(), f.Deps.DB, projects.CreateRequest{
+		HostPath: hostPath, OwnerUserID: ownerID,
+	}); err != nil {
+		t.Fatalf("create project %s: %v", hostPath, err)
+	}
+	for i := 0; i < queries; i++ {
+		f.Recorder.Record(hostPath, searchstats.KindSemantic, files)
+	}
+	if err := f.Recorder.Flush(t.Context()); err != nil {
+		t.Fatalf("flush recorder: %v", err)
+	}
+	return projects.HashPath(hostPath)
+}
+
+type statsPayload struct {
+	Projects []struct {
+		ProjectPath   string `json:"project_path"`
+		PathHash      string `json:"path_hash"`
+		Name          string `json:"name"`
+		Kind          string `json:"kind"`
+		Exists        bool   `json:"exists"`
+		Queries       int64  `json:"queries"`
+		Results       int64  `json:"results"`
+		FileHits      int64  `json:"file_hits"`
+		DistinctFiles int64  `json:"distinct_files"`
+		TopFileHits   int64  `json:"top_file_hits"`
+		LastSeen      int64  `json:"last_seen"`
+		TopFiles      []struct {
+			FilePath string `json:"file_path"`
+			Hits     int64  `json:"hits"`
+		} `json:"top_files"`
+	} `json:"projects"`
+	Total                   int    `json:"total"`
+	Window                  string `json:"window"`
+	BucketSeconds           int    `json:"bucket_seconds"`
+	RetentionSeconds        int    `json:"retention_seconds"`
+	ProjectsWithoutActivity int    `json:"projects_without_activity"`
+	Totals                  struct {
+		Queries int64 `json:"queries"`
+		Results int64 `json:"results"`
+	} `json:"totals"`
+}
+
+func getStats(t *testing.T, f *statsFixture, cookie, query string) statsPayload {
+	t.Helper()
+	rr, body := doReq(t, f.authTestFixture, cookie, http.MethodGet, "/api/v1/search-stats"+query, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /search-stats%s = %d (%s)", query, rr.Code, body)
+	}
+	var p statsPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, body)
+	}
+	return p
+}
+
+// ---------------------------------------------------------------------------
+// Access gating — the matrix in docs/AUTH_REVIEW.md.
+// ---------------------------------------------------------------------------
+
+func TestSearchStats_RequiresAuthentication(t *testing.T) {
+	f := newStatsFixture(t)
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/search-stats"},
+		{http.MethodGet, "/api/v1/search-stats/series"},
+		{http.MethodPost, "/api/v1/admin/search-stats/reset"},
+	} {
+		rr, body := doReq(t, f.authTestFixture, "", c.method, c.path, nil)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s unauthenticated = %d, want 401 (%s)", c.method, c.path, rr.Code, body)
+		}
+	}
+}
+
+func TestSearchStats_ResetIsAdminOnly(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	userCookie := seedUser(t, f.authTestFixture, adminCookie, "bob@example.com", "bobpass1234")
+
+	if rr, body := doReq(t, f.authTestFixture, userCookie,
+		http.MethodPost, "/api/v1/admin/search-stats/reset", nil); rr.Code != http.StatusForbidden {
+		t.Errorf("reset as a regular user = %d, want 403 (%s)", rr.Code, body)
+	}
+	if rr, body := doReq(t, f.authTestFixture, adminCookie,
+		http.MethodPost, "/api/v1/admin/search-stats/reset", nil); rr.Code != http.StatusNoContent {
+		t.Errorf("reset as admin = %d, want 204 (%s)", rr.Code, body)
+	}
+}
+
+// A regular user's table is scoped to the projects they can already search.
+// This is the finding the endpoint would be a data leak without: the counters
+// carry file paths out of every project on the server.
+func TestSearchStats_ScopedToAccessibleProjects(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	bobCookie := seedUser(t, f.authTestFixture, adminCookie, "bob@example.com", "bobpass1234")
+	bobID := userIDByEmail(t, f.authTestFixture, adminCookie, "bob@example.com")
+
+	seedLocalProject(t, f, "/tmp/admin-only", f.UserID, 5, "secret.go")
+	seedLocalProject(t, f, "/tmp/bob-project", bobID, 3, "bob.go")
+
+	bob := getStats(t, f, bobCookie, "")
+	if len(bob.Projects) != 1 {
+		t.Fatalf("bob sees %d projects, want 1: %+v", len(bob.Projects), bob.Projects)
+	}
+	if bob.Projects[0].ProjectPath != "/tmp/bob-project" {
+		t.Errorf("bob sees %q, want only his own project", bob.Projects[0].ProjectPath)
+	}
+	if bob.Total != 1 {
+		t.Errorf("bob's total = %d, want 1 — the count must be scoped too", bob.Total)
+	}
+	if bob.Totals.Queries != 3 {
+		t.Errorf("bob's footer total = %d, want 3 — it must not sum the admin's project",
+			bob.Totals.Queries)
+	}
+
+	admin := getStats(t, f, adminCookie, "")
+	if len(admin.Projects) != 2 {
+		t.Fatalf("admin sees %d projects, want 2", len(admin.Projects))
+	}
+	if admin.Totals.Queries != 8 {
+		t.Errorf("admin's footer total = %d, want 8", admin.Totals.Queries)
+	}
+}
+
+func TestSearchStats_UnavailableWhenDisabled(t *testing.T) {
+	// The ordinary fixture leaves SearchStats nil — the shape of a server with
+	// CIX_SEARCH_STATS_ENABLED=false.
+	f := newAuthFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/search-stats"},
+		{http.MethodGet, "/api/v1/search-stats/series"},
+		{http.MethodPost, "/api/v1/admin/search-stats/reset"},
+	} {
+		rr, body := doReq(t, f, adminCookie, c.method, c.path, nil)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s %s with statistics off = %d, want 503 (%s)", c.method, c.path, rr.Code, body)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The table itself.
+// ---------------------------------------------------------------------------
+
+func TestSearchStats_RowCarriesProjectIdentityAndTopFiles(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	hash := seedLocalProject(t, f, "/tmp/proj", f.UserID, 4, "hot.go", "cold.go")
+	// One extra search that only returns hot.go, so the two files differ.
+	f.Recorder.Record("/tmp/proj", searchstats.KindSemantic, []string{"hot.go"})
+	if err := f.Recorder.Flush(t.Context()); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	p := getStats(t, f, adminCookie, "?top_files=5")
+	if len(p.Projects) != 1 {
+		t.Fatalf("projects = %+v, want 1", p.Projects)
+	}
+	row := p.Projects[0]
+	if !row.Exists || row.PathHash != hash {
+		t.Errorf("row identity = exists:%v hash:%q, want true and %q", row.Exists, row.PathHash, hash)
+	}
+	if row.Kind != "local" {
+		t.Errorf("kind = %q, want local", row.Kind)
+	}
+	if row.Queries != 5 {
+		t.Errorf("queries = %d, want 5", row.Queries)
+	}
+	if row.DistinctFiles != 2 {
+		t.Errorf("distinct_files = %d, want 2", row.DistinctFiles)
+	}
+	if row.TopFileHits != 5 {
+		t.Errorf("top_file_hits = %d, want 5 (hot.go in every search)", row.TopFileHits)
+	}
+	if row.LastSeen == 0 {
+		t.Error("last_seen = 0, want the recorded timestamp")
+	}
+	if len(row.TopFiles) != 2 || row.TopFiles[0].FilePath != "hot.go" || row.TopFiles[0].Hits != 5 {
+		t.Errorf("top_files = %+v, want hot.go first with 5 hits", row.TopFiles)
+	}
+	// The stated invariant: a file cannot appear in more searches than there
+	// were searches.
+	if row.TopFileHits > row.Queries {
+		t.Errorf("top_file_hits %d exceeds queries %d — the dedupe is not holding",
+			row.TopFileHits, row.Queries)
+	}
+	if p.BucketSeconds != searchstats.BucketSeconds {
+		t.Errorf("bucket_seconds = %d, want %d", p.BucketSeconds, searchstats.BucketSeconds)
+	}
+}
+
+func TestSearchStats_ServerSideFiltersAndSort(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	seedLocalProject(t, f, "/tmp/busy", f.UserID, 10, "a.go")
+	seedLocalProject(t, f, "/tmp/quiet", f.UserID, 2, "b.go")
+
+	if p := getStats(t, f, adminCookie, "?min_queries=5"); len(p.Projects) != 1 ||
+		p.Projects[0].ProjectPath != "/tmp/busy" {
+		t.Errorf("min_queries=5 gave %+v, want only busy", p.Projects)
+	}
+	if p := getStats(t, f, adminCookie, "?max_queries=5"); len(p.Projects) != 1 ||
+		p.Projects[0].ProjectPath != "/tmp/quiet" {
+		t.Errorf("max_queries=5 gave %+v, want only quiet", p.Projects)
+	}
+	if p := getStats(t, f, adminCookie, "?min_top_file_hits=5"); len(p.Projects) != 1 ||
+		p.Projects[0].ProjectPath != "/tmp/busy" {
+		t.Errorf("min_top_file_hits=5 gave %+v, want only busy", p.Projects)
+	}
+
+	// Default order is descending on queries.
+	if p := getStats(t, f, adminCookie, ""); p.Projects[0].ProjectPath != "/tmp/busy" {
+		t.Errorf("default sort put %q first, want busy", p.Projects[0].ProjectPath)
+	}
+	if p := getStats(t, f, adminCookie, "?sort=queries&order=asc"); p.Projects[0].ProjectPath != "/tmp/quiet" {
+		t.Errorf("ascending sort put %q first, want quiet", p.Projects[0].ProjectPath)
+	}
+	if p := getStats(t, f, adminCookie, "?sort=project&order=asc"); p.Projects[0].ProjectPath != "/tmp/busy" {
+		t.Errorf("sort by project put %q first, want alphabetical", p.Projects[0].ProjectPath)
+	}
+
+	// The name filter matches the display path, not the storage key.
+	p := getStats(t, f, adminCookie, "?project=QUIET")
+	if len(p.Projects) != 1 || p.Projects[0].ProjectPath != "/tmp/quiet" {
+		t.Errorf("project=QUIET gave %+v, want a case-insensitive match on quiet", p.Projects)
+	}
+	if p.Total != 1 {
+		t.Errorf("total under the name filter = %d, want 1", p.Total)
+	}
+}
+
+func TestSearchStats_PaginationReportsTheFullTotal(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	seedLocalProject(t, f, "/tmp/p1", f.UserID, 3, "a.go")
+	seedLocalProject(t, f, "/tmp/p2", f.UserID, 2, "b.go")
+	seedLocalProject(t, f, "/tmp/p3", f.UserID, 1, "c.go")
+
+	p := getStats(t, f, adminCookie, "?limit=1&offset=1&sort=queries&order=desc")
+	if len(p.Projects) != 1 {
+		t.Fatalf("page holds %d rows, want 1", len(p.Projects))
+	}
+	if p.Projects[0].ProjectPath != "/tmp/p2" {
+		t.Errorf("offset=1 gave %q, want p2", p.Projects[0].ProjectPath)
+	}
+	if p.Total != 3 {
+		t.Errorf("total = %d, want 3 — the count must ignore limit/offset", p.Total)
+	}
+	if p.Totals.Queries != 6 {
+		t.Errorf("footer queries = %d, want 6 — the footer must sum the filtered set, not the page",
+			p.Totals.Queries)
+	}
+}
+
+// projects_without_activity must be a property of the projects, not of the
+// current filters. A project excluded by min_queries has been searched.
+func TestSearchStats_IdleCountIgnoresFilters(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	seedLocalProject(t, f, "/tmp/searched", f.UserID, 2, "a.go")
+	// Never searched.
+	if _, err := projects.Create(t.Context(), f.Deps.DB, projects.CreateRequest{
+		HostPath: "/tmp/untouched", OwnerUserID: f.UserID,
+	}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	if p := getStats(t, f, adminCookie, ""); p.ProjectsWithoutActivity != 1 {
+		t.Errorf("projects_without_activity = %d, want 1", p.ProjectsWithoutActivity)
+	}
+	// Filtering the searched project out of the page must not turn it into an
+	// idle project.
+	if p := getStats(t, f, adminCookie, "?min_queries=100"); p.ProjectsWithoutActivity != 1 {
+		t.Errorf("projects_without_activity under a filter = %d, want 1 — it must not count filtered rows",
+			p.ProjectsWithoutActivity)
+	}
+}
+
+func TestSearchStats_KindFilter(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	seedLocalProject(t, f, "/tmp/proj", f.UserID, 2, "sem.go")
+	f.Recorder.Record("/tmp/proj", searchstats.KindSymbols, []string{"sym.go"})
+	if err := f.Recorder.Flush(t.Context()); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	if p := getStats(t, f, adminCookie, ""); p.Projects[0].Queries != 3 {
+		t.Errorf("unfiltered queries = %d, want 3", p.Projects[0].Queries)
+	}
+	if p := getStats(t, f, adminCookie, "?kinds=symbols"); p.Projects[0].Queries != 1 {
+		t.Errorf("kinds=symbols queries = %d, want 1", p.Projects[0].Queries)
+	}
+	// An unknown kind is dropped, not rejected — the request still narrows to
+	// the recognisable part rather than 422-ing on a typo.
+	if p := getStats(t, f, adminCookie, "?kinds=symbols,not-a-kind"); p.Projects[0].Queries != 1 {
+		t.Errorf("kinds with an unknown entry gave %d, want 1", p.Projects[0].Queries)
+	}
+	if p := getStats(t, f, adminCookie, "?kinds=not-a-kind"); p.Projects[0].Queries != 3 {
+		t.Errorf("kinds with only unknown entries gave %d, want the unfiltered 3", p.Projects[0].Queries)
+	}
+}
+
+func TestSearchStats_RejectsUnknownWindow(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	rr, body := doReq(t, f.authTestFixture, adminCookie,
+		http.MethodGet, "/api/v1/search-stats?window=30d", nil)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("window=30d = %d, want 422 (%s)", rr.Code, body)
+	}
+}
+
+func TestSearchStatsSeries_ScopedAndBucketed(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	bobCookie := seedUser(t, f.authTestFixture, adminCookie, "bob@example.com", "bobpass1234")
+	bobID := userIDByEmail(t, f.authTestFixture, adminCookie, "bob@example.com")
+
+	adminHash := seedLocalProject(t, f, "/tmp/admin-only", f.UserID, 4, "a.go")
+	seedLocalProject(t, f, "/tmp/bob-project", bobID, 1, "b.go")
+
+	type series struct {
+		Points []struct {
+			Bucket  int64 `json:"bucket"`
+			Queries int64 `json:"queries"`
+		} `json:"points"`
+		BucketSeconds int `json:"bucket_seconds"`
+		WindowSeconds int `json:"window_seconds"`
+	}
+	read := func(cookie, query string) series {
+		t.Helper()
+		rr, body := doReq(t, f.authTestFixture, cookie, http.MethodGet,
+			"/api/v1/search-stats/series"+query, nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("series%s = %d (%s)", query, rr.Code, body)
+		}
+		var s series
+		if err := json.Unmarshal(body, &s); err != nil {
+			t.Fatalf("decode: %v (%s)", err, body)
+		}
+		return s
+	}
+
+	adminSeries := read(adminCookie, "")
+	var adminTotal int64
+	for _, pt := range adminSeries.Points {
+		adminTotal += pt.Queries
+	}
+	if adminTotal != 5 {
+		t.Errorf("admin series total = %d, want 5", adminTotal)
+	}
+	if adminSeries.BucketSeconds != searchstats.BucketSeconds {
+		t.Errorf("bucket_seconds = %d, want %d", adminSeries.BucketSeconds, searchstats.BucketSeconds)
+	}
+
+	bobSeries := read(bobCookie, "")
+	var bobTotal int64
+	for _, pt := range bobSeries.Points {
+		bobTotal += pt.Queries
+	}
+	if bobTotal != 1 {
+		t.Errorf("bob's series total = %d, want 1 — the series must be access-scoped", bobTotal)
+	}
+
+	// A hash bob cannot see is a 404, indistinguishable from one that does not
+	// exist, so the endpoint does not confirm the project is there.
+	if rr, _ := doReq(t, f.authTestFixture, bobCookie, http.MethodGet,
+		"/api/v1/search-stats/series?project_hash="+adminHash, nil); rr.Code != http.StatusNotFound {
+		t.Errorf("bob asking for the admin's project = %d, want 404", rr.Code)
+	}
+	// The admin gets that project's own series.
+	scoped := read(adminCookie, "?project_hash="+adminHash)
+	var scopedTotal int64
+	for _, pt := range scoped.Points {
+		scopedTotal += pt.Queries
+	}
+	if scopedTotal != 4 {
+		t.Errorf("project-scoped series = %d, want 4", scopedTotal)
+	}
+}
+
+// Deleting a project must take its counters with it — otherwise the file paths
+// of a removed repo stay readable in the statistics table.
+func TestSearchStats_ProjectDeleteDiscardsCounters(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+
+	hash := seedLocalProject(t, f, "/tmp/doomed", f.UserID, 3, "a.go")
+	if p := getStats(t, f, adminCookie, ""); len(p.Projects) != 1 {
+		t.Fatalf("before delete: %+v, want one row", p.Projects)
+	}
+
+	if rr, body := doReq(t, f.authTestFixture, adminCookie,
+		http.MethodDelete, "/api/v1/projects/"+hash, nil); rr.Code != http.StatusNoContent {
+		t.Fatalf("delete project = %d (%s)", rr.Code, body)
+	}
+	if p := getStats(t, f, adminCookie, ""); len(p.Projects) != 0 {
+		t.Errorf("after delete: %+v, want no rows", p.Projects)
+	}
+}
+
+func TestSearchStats_ResetEmptiesTheTable(t *testing.T) {
+	f := newStatsFixture(t)
+	adminCookie := sessionCookie(loginRR(t, f.Router, "admin@example.com", "secret-password"))
+	seedLocalProject(t, f, "/tmp/proj", f.UserID, 3, "a.go")
+
+	if rr, body := doReq(t, f.authTestFixture, adminCookie,
+		http.MethodPost, "/api/v1/admin/search-stats/reset", nil); rr.Code != http.StatusNoContent {
+		t.Fatalf("reset = %d (%s)", rr.Code, body)
+	}
+	p := getStats(t, f, adminCookie, "")
+	if len(p.Projects) != 0 || p.Total != 0 {
+		t.Errorf("after reset: %d rows / total %d, want nothing", len(p.Projects), p.Total)
+	}
+	if p.ProjectsWithoutActivity != 1 {
+		t.Errorf("projects_without_activity after reset = %d, want 1", p.ProjectsWithoutActivity)
+	}
+}
+
+func TestDedupePaths(t *testing.T) {
+	got := dedupePaths([]string{"a.go", "b.go", "a.go", "", "b.go", "c.go"})
+	want := []string{"a.go", "b.go", "c.go"}
+	if len(got) != len(want) {
+		t.Fatalf("dedupePaths = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("dedupePaths = %v, want %v", got, want)
+		}
+	}
+}

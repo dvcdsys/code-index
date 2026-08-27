@@ -100,6 +100,11 @@ type Config struct {
 	LlamaCacheRAMMiB  int    // CIX_LLAMA_CACHE_RAM; llama-server host prompt-cache cap in MiB (--cache-ram). 0 = disabled (embeddings get zero prompt reuse; upstream default 8192 caused OOM kills), -1 = unlimited.
 	LlamaStartupSec   int    // CIX_LLAMA_STARTUP_TIMEOUT; readiness probe ceiling in seconds.
 	EmbeddingsEnabled bool   // CIX_EMBEDDINGS_ENABLED; test hook to bypass sidecar entirely.
+	// SearchStatsEnabled turns per-project search counters on. CIX_SEARCH_STATS_ENABLED,
+	// default true. Off means the counters are neither recorded nor served —
+	// the dashboard page reports the feature as disabled rather than showing
+	// zeroes, and the searchstats.db file is never created.
+	SearchStatsEnabled bool
 
 	// BootstrapGGUFPath, when set, points at a .gguf file outside the cix
 	// cache that should be imported on first boot — atomically copied into
@@ -451,6 +456,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.EmbeddingsEnabled = enabled
+
+	statsEnabled, err := getenvBool("CIX_SEARCH_STATS_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
+	c.SearchStatsEnabled = statsEnabled
 
 	c.BootstrapGGUFPath = getenv("CIX_BOOTSTRAP_GGUF_PATH", "")
 
