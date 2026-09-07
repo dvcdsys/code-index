@@ -1,0 +1,6 @@
+interface:
+  display_name: "cix Workspace Research"
+  short_description: "Map changes across indexed repositories"
+  default_prompt: "Use $cix-workspace to map this task across repositories."
+policy:
+  allow_implicit_invocation: false

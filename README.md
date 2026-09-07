@@ -204,6 +204,82 @@ is required — vectors aren't comparable across providers.
 
 `cix` is designed to be called by AI agents (Claude, GPT, Cursor, custom agents) as a shell tool — they run `cix search` instead of Grep/Glob and get ranked snippets rather than raw file dumps.
 
+### Codex / ChatGPT desktop (CLI-first, no MCP)
+
+The Codex plugin reuses the same `cix` and `cix-workspace` skill instructions
+as the Claude Code plugin. The skill does not contain the search engine and does
+not connect through MCP: it teaches Codex to run the locally installed `cix`
+command-line client.
+
+#### 1. Install and connect the `cix` client
+
+First complete the [Quick Start](#quick-start): run a cix server, create an API
+key in the dashboard, and install the client. If the server is already running,
+the minimum client setup is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dvcdsys/code-index/main/install.sh | bash
+cix config set server.local.url http://localhost:21847
+cix config set server.local.key cix_<key-from-dashboard>
+cix status
+```
+
+Use the real server URL instead of `http://localhost:21847` when cix runs on
+another machine. The URL and API key stay in the user's cix configuration; they
+are not stored in the Codex plugin.
+
+#### 2. Add the marketplace and install the plugin
+
+Run this once in a terminal:
+
+```bash
+codex plugin marketplace add dvcdsys/code-index
+```
+
+Then open Codex CLI or the Codex area in the ChatGPT desktop app:
+
+1. Open `/plugins`.
+2. Select the **Code Index** marketplace.
+3. Install **cix — Code Search**.
+4. Start a new conversation so Codex loads the newly installed skills.
+
+The marketplace downloads the plugin and its skill files. It does not install
+the cix server or CLI, which is why step 1 is required.
+
+#### 3. Index a repository and verify the skill
+
+From the repository you want Codex to work with:
+
+```bash
+cd /path/to/repository
+cix status
+cix init       # only when the project has not been indexed yet
+```
+
+Ask Codex a normal code-navigation question, or invoke the skill explicitly:
+
+```text
+$cix Explain how authentication requests are validated in this project.
+```
+
+`$cix` may also activate automatically for semantic code discovery, symbol
+navigation, definitions, and references. For research spanning several indexed
+repositories, invoke the manual-only workspace skill:
+
+```text
+$cix-workspace Find where the API contract is produced and consumed.
+```
+
+To receive plugin updates later, run:
+
+```bash
+codex plugin marketplace upgrade code-index
+```
+
+Then update or reinstall **cix — Code Search** from `/plugins` and start a new
+conversation. Full setup, behavior, and compatibility notes:
+[`doc/CODEX_PLUGIN.md`](doc/CODEX_PLUGIN.md).
+
 **Claude Code (plugin, recommended).** Bundles the `cix` + `cix-workspace` skills, the `cix-workspace-investigator` sub-agent, CLI auto-install hooks, and a grep-nudge:
 
 ```bash
@@ -302,6 +378,7 @@ docker compose down -v          # stop AND wipe data + models (destructive)
 | [`doc/WEBHOOKS.md`](doc/WEBHOOKS.md) | GitHub webhook lifecycle, modes, HMAC validation |
 | [`doc/POLLING.md`](doc/POLLING.md) | Git polling sync, for repos where a webhook is not an option |
 | [`doc/COWORK_MCP.md`](doc/COWORK_MCP.md) | Using cix from Claude Desktop / Cowork over MCP (`cix mcp install`, multi-server) |
+| [`doc/CODEX_PLUGIN.md`](doc/CODEX_PLUGIN.md) | CLI-first Codex/ChatGPT desktop plugin and marketplace setup |
 | [`doc/UPDATES.md`](doc/UPDATES.md) | Release-poll banner + stable vs develop install channels |
 | [`doc/CONFIG_REFERENCE.md`](doc/CONFIG_REFERENCE.md) | Complete env-var reference |
 | [`doc/RELEASES.md`](doc/RELEASES.md) | Cutting CLI + server + app releases, CVE scans, make targets |
@@ -317,6 +394,7 @@ docker compose down -v          # stop AND wipe data + models (destructive)
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contributor workflow |
 | [`plugins/cix/README.md`](plugins/cix/README.md) | Claude Code plugin reference |
 | [`plugins/cix-cowork/README.md`](plugins/cix-cowork/README.md) | Cowork skills plugin (MCP-based) reference |
+| [`plugins/cix-openai/README.md`](plugins/cix-openai/README.md) | Codex plugin package (same CLI skills, OpenAI manifest) |
 
 ---
 
