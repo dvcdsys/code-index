@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# sync-skills.sh — keep plugin-bundled skill files byte-identical with
-# the canonical sources under skills/.
+# sync-skills.sh — keep Claude Code plugin bundles byte-identical with their
+# canonical sources, and keep Codex skill bodies synchronized with native
+# Codex frontmatter.
 #
 # Fix #19 acceptance: the plugin ships byte-identical copies of files
 # that have a single source of truth elsewhere in the repo. Without
@@ -15,6 +16,13 @@
 #
 #   skills/cix-workspace/agents/cix-workspace-investigator.md
 #     → plugins/cix/agents/cix-workspace-investigator.md
+#     → plugins/cix-openai/agents/cix-workspace-investigator.md
+#
+#   plugins/cix/skills/cix/SKILL.md (body + name/description)
+#     → plugins/cix-openai/skills/cix/SKILL.md (Codex frontmatter)
+#
+#   skills/cix-workspace/SKILL.md (body + name/description)
+#     → plugins/cix-openai/skills/cix-workspace/SKILL.md (Codex frontmatter)
 #
 # Out of scope: skills/cix/SKILL.md vs plugins/cix/skills/cix/SKILL.md —
 # those are INTENTIONALLY different. The plugin version carries extra
@@ -37,10 +45,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SRC=(
     "skills/cix-workspace/SKILL.md"
     "skills/cix-workspace/agents/cix-workspace-investigator.md"
+    "skills/cix-workspace/agents/cix-workspace-investigator.md"
 )
 DST=(
     "plugins/cix/skills/cix-workspace/SKILL.md"
     "plugins/cix/agents/cix-workspace-investigator.md"
+    "plugins/cix-openai/agents/cix-workspace-investigator.md"
+)
+
+CODEX_SRC=(
+    "plugins/cix/skills/cix/SKILL.md"
+    "skills/cix-workspace/SKILL.md"
+)
+CODEX_DST=(
+    "plugins/cix-openai/skills/cix/SKILL.md"
+    "plugins/cix-openai/skills/cix-workspace/SKILL.md"
 )
 
 MODE="copy"
@@ -84,6 +103,54 @@ for i in "${!SRC[@]}"; do
         cp "$src" "$dst"
         echo "synced: ${SRC[$i]} → ${DST[$i]}"
     fi
+done
+
+# Codex requires only name and description in SKILL.md frontmatter. Preserve
+# the canonical body verbatim while dropping Claude-only routing/tool fields;
+# Codex invocation policy and UI metadata live in agents/openai.yaml.
+render_codex_skill() {
+    awk '
+        BEGIN { fence = 0; skill_name = ""; skill_description = "" }
+        /^---$/ {
+            fence++
+            if (fence == 2) {
+                print "---"
+                print "name: " skill_name
+                print "description: " skill_description
+                print "---"
+            }
+            next
+        }
+        fence == 1 {
+            if ($0 ~ /^name: /) {
+                skill_name = substr($0, 7)
+            } else if ($0 ~ /^description: /) {
+                skill_description = substr($0, 14)
+            }
+            next
+        }
+        fence >= 2 { print }
+    ' "$1"
+}
+
+for i in "${!CODEX_SRC[@]}"; do
+    src="$REPO_ROOT/${CODEX_SRC[$i]}"
+    dst="$REPO_ROOT/${CODEX_DST[$i]}"
+    tmp="$(mktemp "${TMPDIR:-/tmp}/cix-codex-skill.XXXXXX")"
+    render_codex_skill "$src" >"$tmp"
+
+    if [[ "$MODE" == "check" ]]; then
+        if ! diff -q "$tmp" "$dst" >/dev/null 2>&1; then
+            echo "drift: ${CODEX_SRC[$i]} != ${CODEX_DST[$i]} (Codex projection)" >&2
+            drift=1
+        fi
+    elif ! cmp -s "$tmp" "$dst"; then
+        mkdir -p "$(dirname "$dst")"
+        cp "$tmp" "$dst"
+        echo "synced: ${CODEX_SRC[$i]} → ${CODEX_DST[$i]} (Codex projection)"
+    fi
+
+    rm -f "$tmp"
 done
 
 if [[ "$MODE" == "check" && $drift -ne 0 ]]; then
