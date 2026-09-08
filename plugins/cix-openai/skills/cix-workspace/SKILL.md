@@ -1,8 +1,6 @@
 ---
 name: cix-workspace
 description: Cross-project research workflow for cix workspaces. Load the `cix-workspace` skill explicitly when a request spans multiple repos and you want the full workflow guidance (which repos? what code? what changes?) plus the trust rules for interpreting workspace search responses. Bundles the cix-workspace-investigator sub-agent for parallel per-repo fan-out. Do not auto-trigger.
-user-invocable: true
-allowed-tools: Bash(cix *), Agent
 ---
 
 # `cix workspace` — Cross-Project Research Workflow
@@ -36,7 +34,6 @@ to implementation before you can answer all three with evidence.
 > clone new GitHub repos in via the dashboard. `cix ws` lists what's
 > available; the main `cix` skill has the full management verb reference.
 
----
 
 ## First: which server hosts the workspace?
 
@@ -66,7 +63,6 @@ Once you know the alias, thread it through the whole workflow. The
 examples below omit `--server` for readability; add it to **every** command
 when the target workspace is on a non-default server.
 
----
 
 ## When to reach for workspace search
 
@@ -85,7 +81,6 @@ If you're not sure, run `cix ws` once to see whether the primary
 project is even part of a workspace. If it isn't, this skill doesn't
 apply.
 
----
 
 ## The workflow
 
@@ -236,7 +231,6 @@ Don't ask if the answer is obvious from the chunks. The bar is "I
 have two plausible interpretations and the wrong one costs the user
 real time."
 
----
 
 ## Reading the projects panel — what the numbers mean
 
@@ -261,7 +255,6 @@ project-c@main   0.288   3 hits   bm25 0.155   dense 0.362
 - If both are near zero: you're seeing the project because nothing
   else cleared the gate either. Treat with skepticism.
 
----
 
 ## Trust rules — making sense of the response
 
@@ -373,7 +366,6 @@ land in the **environment-platform manifests repo** at rank #4. If
 you stopped at top-1 you'd edit the wrong file. Rules 7 and 10
 remind you to scan further.
 
----
 
 ## Primary project nuance
 
@@ -397,7 +389,6 @@ Patterns:
 
 Workspace search tells you which pattern you're in. Don't assume.
 
----
 
 ## Sub-agent fan-out pattern
 
@@ -535,7 +526,6 @@ main session. You don't need to pass `model:` on Agent calls. If you do
 pass it, you'll override inheritance — only do that intentionally (e.g.
 forcing a smaller/faster model for a trivially-bounded look-up).
 
----
 
 ## Worked example — why this skill exists
 
@@ -580,7 +570,6 @@ unrelated repos.
   the chunks as starting points.
 - Step 3: never assume "in search results" == "in scope". Verify.
 
----
 
 ## Troubleshooting
 
@@ -668,7 +657,6 @@ unrelated repos.
 the 2-word query as-is, scan the top-1 project's path patterns and
 language to see what stack it actually uses, then refine.
 
----
 
 ## Quick command reference
 
@@ -710,7 +698,6 @@ Flags:
   values (0.5+) for queries you want laser-focused.
 - `--json` — raw machine-readable response.
 
----
 
 ## TL;DR
 

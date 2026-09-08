@@ -1,0 +1,37 @@
+{
+  "name": "cix-openai",
+  "version": "0.1.0",
+  "description": "Semantic code search and cross-repository navigation for Codex, powered by the local cix CLI.",
+  "author": {
+    "name": "dvcdsys",
+    "url": "https://github.com/dvcdsys"
+  },
+  "homepage": "https://codeindex.app",
+  "repository": "https://github.com/dvcdsys/code-index",
+  "license": "MIT",
+  "keywords": [
+    "code-search",
+    "semantic-search",
+    "navigation",
+    "indexing",
+    "workspace"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "cix — Code Search",
+    "shortDescription": "Semantic code search through the cix CLI",
+    "longDescription": "Teach Codex when and how to use the local cix command-line client for semantic search, symbol navigation, and cross-repository workspace research.",
+    "developerName": "dvcdsys",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://codeindex.app",
+    "defaultPrompt": [
+      "Use cix to find how authentication works in this repository.",
+      "Trace this symbol from its definition to every caller.",
+      "Use a cix workspace to map this change across repositories."
+    ],
+    "brandColor": "#6D5EF5"
+  }
+}

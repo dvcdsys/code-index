@@ -1,23 +1,6 @@
 ---
 name: cix
 description: Semantic code search and navigation via the cix index. Use this when finding code by meaning rather than exact strings — cross-file lookups, symbol navigation, "where is X used", "how does Y work", "find authentication middleware", or exploring an unfamiliar codebase. Covers search, definitions, references, symbol search, file lookup, and indexing.
-when_to_use: |
-  Trigger this skill when the user asks anything that requires semantic understanding of the codebase:
-  - "find authentication middleware" / "find the auth code"
-  - "where is X defined?" / "show me the definition of Y"
-  - "how does Z work in this codebase?"
-  - "what calls this function?" / "find references to ..."
-  - "search the codebase for ..." / "find by meaning"
-  - "explore this repo" / "give me an overview"
-  - Any time you would otherwise reach for Grep on a non-literal query
-
-  Skip this skill (use Grep / Read instead) when:
-  - A stack trace or error already names file:line — just Read it
-  - Searching for an exact literal (specific error string, config key name, import path)
-  - Inside dependencies (node_modules, vendor, .venv) — they aren't indexed
-  - Editing a non-code file (Dockerfile, yaml, lockfile)
-user-invocable: true
-allowed-tools: Bash(cix *)
 ---
 
 # Code Index (`cix`) — Semantic Code Search & Navigation
@@ -56,7 +39,6 @@ instructions for the current integration rather than substituting MCP.
 If `cix` returns nothing relevant after one well-formed query, fall
 back to grep — don't loop on cix.
 
----
 
 ## Pick the cheapest tool that answers the question
 
@@ -80,7 +62,6 @@ same target. Rule of thumb:
 - Only escalate to `cix search` for a *known* symbol when you actually need
   to read the surrounding implementation, not merely locate it.
 
----
 
 ## Commands Reference
 
@@ -245,7 +226,6 @@ to read the hybrid bm25/dense scores — use the dedicated **`cix-workspace`**
 skill through the explicit skill-invocation syntax supported by the current
 harness.
 
----
 
 ## Search quality — what scores mean
 
@@ -263,7 +243,6 @@ model (CodeRankEmbed-Q8 with path-aware preamble). Rough landscape:
 `--min-score 0.2` for very specific or long-tail queries. Don't drop
 below 0.2 — results below that are noise.
 
----
 
 ## Writing better queries — leverage path-aware embedding
 
@@ -283,7 +262,6 @@ cix search "ValidateToken" --kind function
 Natural-language queries that name the *kind of thing* and *where it
 lives* outperform single-word queries.
 
----
 
 ## Usage Patterns
 
@@ -318,7 +296,6 @@ cix search "config" --in ./cmd/ --exclude legacy
 cix refs Config --file ./internal/server.go
 ```
 
----
 
 ## Tips
 

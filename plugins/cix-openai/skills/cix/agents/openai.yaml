@@ -1,0 +1,6 @@
+interface:
+  display_name: "cix Code Search"
+  short_description: "Semantic code navigation with the cix CLI"
+  default_prompt: "Use $cix to find the implementation behind this behavior."
+policy:
+  allow_implicit_invocation: true
