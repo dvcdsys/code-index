@@ -6,11 +6,11 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/go-playground/validator/v10 v10.30.4
+	github.com/go-playground/validator/v10 v10.30.6
 	github.com/knadh/koanf/parsers/yaml v1.1.1
 	github.com/knadh/koanf/providers/confmap v1.0.1
 	github.com/knadh/koanf/providers/rawbytes v1.0.1
-	github.com/knadh/koanf/v2 v2.3.6
+	github.com/knadh/koanf/v2 v2.4.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/rjeczalik/notify v0.9.3
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
@@ -29,9 +29,9 @@ require (
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.5.0 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
-	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
-	github.com/go-playground/locales v0.14.1 // indirect
-	github.com/go-playground/universal-translator v0.18.1 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
+	github.com/go-playground/locales v0.14.2 // indirect
+	github.com/go-playground/universal-translator v0.18.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
