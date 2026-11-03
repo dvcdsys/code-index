@@ -125,3 +125,17 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    ignore:
+      # codeql-action is referenced as the floating major tag `@v4` on
+      # purpose, which is how GitHub documents consuming it: they cut
+      # releases continuously, and a frozen minor silently goes stale.
+      # Dependabot reads `@v4` as "pin me to an exact minor", so it keeps
+      # proposing a downgrade -- its last such PR offered v4.37.4 while
+      # `@v4` already resolved to v4.39.2, twelve releases newer. An exact
+      # minor tag is mutable too, so the pin would buy no supply-chain
+      # integrity either; only a SHA would, and that is a separate decision.
+      # Majors are NOT ignored: v3 -> v4 changes the runner contract and
+      # must stay visible.
+      - dependency-name: "github/codeql-action"
+        update-types:
+          ["version-update:semver-minor", "version-update:semver-patch"]
