@@ -63,6 +63,28 @@ updates:
       - "dependencies"
       - "javascript"
 
+  # npm — marketing site (site/). Build-time toolchain only (Astro, wrangler,
+  # sharp) — nothing here is served to visitors, but the lockfile still
+  # accumulates HIGH advisories that previously only ever surfaced as alerts
+  # because this directory had no Dependabot entry at all.
+  - package-ecosystem: "npm"
+    directory: "/site"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - "dependencies"
+      - "javascript"
+
   # Docker — server images (server/Dockerfile + server/Dockerfile.cuda)
   - package-ecosystem: "docker"
     directory: "/server"

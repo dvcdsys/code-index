@@ -13,7 +13,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
   schedule:
     - cron: "0 6 * * 1"  # Mondays at 06:00 UTC, mirrors security.yml
 
