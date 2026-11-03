@@ -83,7 +83,7 @@ RUN curl -fsSL \
     tar -xzf /tmp/ngrok.tgz -C /usr/local/bin ngrok && \
     chmod 0755 /usr/local/bin/ngrok
 
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 ARG VERSION
 # Patch Alpine base packages before building to avoid CVEs in the builder layer.
 RUN apk upgrade --no-cache
