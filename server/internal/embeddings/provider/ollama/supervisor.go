@@ -13,15 +13,27 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
+	"github.com/dvcdsys/code-index/server/internal/procgroup"
 )
 
 // darwinSunPathMax is the platform limit for unix socket paths on macOS.
 // Including the terminating NUL byte the kernel accepts 104 characters.
 const darwinSunPathMax = 104
+
+// llamaServerBinary is the sidecar executable's file name under BinDir.
+const llamaServerBinary = "llama-server" + exeSuffix
+
+// defaultTransport is what a config with no explicit transport gets: a unix
+// socket everywhere it works, loopback TCP on Windows.
+func defaultTransport() string {
+	if runtime.GOOS == "windows" {
+		return "tcp"
+	}
+	return "unix"
+}
 
 // restartBudget bounds how many consecutive crash-restart cycles we allow
 // before declaring the supervisor dead. Matches the plan (max 3 retries).
@@ -126,7 +138,7 @@ func newSupervisor(ctx context.Context, cfg supervisorConfig, logger *slog.Logge
 // the macOS socket-path length; on violation we fall back to TCP rather than
 // letting the child fail with an opaque bind error.
 func validateSupervisorConfig(cfg *supervisorConfig, logger *slog.Logger) error {
-	binPath := filepath.Join(cfg.BinDir, "llama-server")
+	binPath := filepath.Join(cfg.BinDir, llamaServerBinary)
 	if _, err := os.Stat(binPath); err != nil {
 		return fmt.Errorf("llama-server not found at %s (run `make fetch-llama` or `make bundle`): %w", binPath, err)
 	}
@@ -137,6 +149,13 @@ func validateSupervisorConfig(cfg *supervisorConfig, logger *slog.Logger) error 
 		return fmt.Errorf("gguf not found at %s: %w", cfg.GGUFPath, err)
 	}
 
+	// A config blob persisted by another platform (or an operator override)
+	// may still say "unix"; Windows cannot honour it, so degrade to TCP rather
+	// than failing every spawn.
+	if cfg.Transport == "unix" && runtime.GOOS == "windows" {
+		logger.Warn("unix socket transport is not available on Windows; using TCP")
+		cfg.Transport = "tcp"
+	}
 	if cfg.Transport == "unix" && runtime.GOOS == "darwin" && len(cfg.SocketPath) > darwinSunPathMax {
 		logger.Warn("unix socket path exceeds darwin sun_path limit; falling back to TCP",
 			"socket_path_len", len(cfg.SocketPath),
@@ -171,7 +190,7 @@ func pickFreePort() (int, error) {
 // On readiness-probe failure it tears the child process down so the caller
 // does not leak a zombie.
 func (s *supervisor) spawn(ctx context.Context) error {
-	binPath := filepath.Join(s.cfg.BinDir, "llama-server")
+	binPath := filepath.Join(s.cfg.BinDir, llamaServerBinary)
 
 	argv := []string{
 		"-m", s.cfg.GGUFPath,
@@ -253,11 +272,15 @@ func (s *supervisor) spawn(ctx context.Context) error {
 	// macOS builds already use @loader_path rpath so this is belt-and-braces.
 	cmd.Env = append(os.Environ(), "DYLD_LIBRARY_PATH="+s.cfg.BinDir)
 	// Put the child in its own process group so Stop() can SIGTERM the whole
-	// group — llama-server may fork helper threads/processes.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// group — llama-server may fork helper threads/processes. On Windows this
+	// is a hidden window plus (after Start) membership in a kill-on-close job.
+	procgroup.Prepare(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start llama-server: %w", err)
+	}
+	if err := procgroup.Adopt(cmd); err != nil {
+		s.logger.Warn("could not bind llama-server to the kill-on-close job; it may outlive cix-server if that is killed hard", "err", err)
 	}
 
 	s.mu.Lock()
@@ -424,12 +447,8 @@ func (s *supervisor) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		pgid = cmd.Process.Pid // fall back to single-pid signal
-	}
-	s.logger.Info("sending SIGTERM to llama-server", "pgid", pgid)
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	pgid := procgroup.Terminate(cmd)
+	s.logger.Info("sent SIGTERM to llama-server", "pgid", pgid)
 
 	select {
 	case <-waiterDone:
@@ -440,7 +459,7 @@ func (s *supervisor) Stop(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		s.logger.Warn("SIGTERM timed out, sending SIGKILL", "pgid", pgid)
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		procgroup.Kill(cmd)
 		<-waiterDone
 		if s.cfg.Transport == "unix" {
 			_ = os.Remove(s.cfg.SocketPath)
@@ -471,12 +490,8 @@ func (s *supervisor) killGroup() {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		pgid = cmd.Process.Pid
-	}
 	s.stopping.Store(true)
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	procgroup.Kill(cmd)
 	if s.cfg.Transport == "unix" {
 		_ = os.Remove(s.cfg.SocketPath)
 	}

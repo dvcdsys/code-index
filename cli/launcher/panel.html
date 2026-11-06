@@ -71,14 +71,14 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { background: transparent; }
   body {
-    font-family: 'Helvetica Neue', Helvetica, system-ui, sans-serif;
+    font-family: 'Helvetica Neue', Helvetica, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
     color: var(--text);
     -webkit-user-select: none;
     user-select: none;
     cursor: default;
     overflow: hidden;
   }
-  .mono { font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace; }
+  .mono { font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace; }
 
   #panel {
     width: 392px;
@@ -95,17 +95,17 @@
   #hd .statusline { display: flex; align-items: center; gap: 10px; }
   #hd .dot { width: 9px; height: 9px; flex: none; }
   #hd .word {
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 12px; font-weight: 700; letter-spacing: 0.14em;
   }
   #hd .fact {
     margin-left: auto;
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 11px; color: var(--muted);
   }
   #hd .heroline { display: flex; align-items: baseline; gap: 10px; }
   #hd .hero {
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 30px; font-weight: 700; letter-spacing: -0.02em;
   }
   #hd .caption { font-size: 13px; color: var(--text2); }
@@ -124,7 +124,7 @@
   #table {
     padding: 12px 18px;
     display: grid; grid-template-columns: auto 1fr; gap: 7px 16px;
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 12px;
   }
   #table .k { color: var(--muted); }
@@ -141,7 +141,7 @@
     all: unset; box-sizing: border-box; cursor: pointer;
     height: 38px; display: flex; align-items: center; justify-content: center; gap: 8px;
     border: 1.5px solid var(--ghost-border);
-    font-family: 'Helvetica Neue', Helvetica, system-ui, sans-serif;
+    font-family: 'Helvetica Neue', Helvetica, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
     font-size: 14px; font-weight: 600; letter-spacing: 0.01em;
     color: var(--text); background: transparent;
   }
@@ -152,7 +152,7 @@
   .btn.destructive:hover { background: var(--accent-hover); }
   .btn.disabled { opacity: 0.45; pointer-events: none; }
   .btn .ext {
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 12px; color: var(--muted);
   }
   .btn.destructive .ext { color: #F7EEDC; }
@@ -190,7 +190,7 @@
   .toggle .lbl { display: flex; flex-direction: column; gap: 2px; }
   .toggle .name { font-size: 13.5px; font-weight: 600; }
   .toggle .hint {
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 11px; color: var(--muted);
   }
 
@@ -198,13 +198,13 @@
   #ft { padding: 10px 18px 12px; display: flex; align-items: center; gap: 8px; }
   .link {
     all: unset; cursor: pointer; font-size: 13px; color: var(--text2);
-    font-family: 'Helvetica Neue', Helvetica, system-ui, sans-serif;
+    font-family: 'Helvetica Neue', Helvetica, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
     white-space: nowrap;
   }
   .link:hover { color: var(--text); }
   .link.disabled { opacity: 0.45; pointer-events: none; }
   #ft .note {
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 11px; color: var(--faint); white-space: nowrap;
   }
   #ft .spacer { flex: 1; min-width: 8px; }
@@ -237,18 +237,18 @@
   #dialog .dtitle { font-size: 15px; font-weight: 700; }
   #dialog .dmsg { font-size: 13px; line-height: 1.5; color: var(--text2); white-space: pre-wrap; }
   #dialog .dsecret {
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 13px; padding: 10px 12px;
     border: 1.5px solid var(--border); background: var(--sunken);
     -webkit-user-select: text; user-select: text; word-break: break-all;
   }
   #dialog .dnote {
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 11px; color: var(--muted);
   }
   #dialog input {
     all: unset; box-sizing: border-box; width: 100%;
-    font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
     font-size: 13px; color: var(--text);
     padding: 9px 12px; border: 1.5px solid var(--border); background: var(--surface);
     -webkit-user-select: text; user-select: text; cursor: text;
@@ -259,6 +259,11 @@
   #dialog .dbusy { display: flex; justify-content: center; padding: 8px 0 4px; color: var(--muted); }
 
   /* state-flip crossfade — the spec's 120 ms */
+  /* Windows: the host window is an opaque DWM-rounded popup with its own 1px
+     border, so the page fills it edge to edge instead of drawing a rounded
+     card on a transparent window. */
+  .win html, .win body { background: var(--surface); }
+  .win #panel { border: 0; border-radius: 0; }
   #panel.fade { animation: fade 120ms ease-out; }
   @keyframes fade { from { opacity: 0.4; } to { opacity: 1; } }
 </style>
@@ -276,8 +281,17 @@
 <script>
 'use strict';
 
+// One page, two shells: WKWebView on macOS, WebView2 on Windows. The Windows
+// shell injects window.cixPlatform before the page runs.
+var isWindows = window.cixPlatform === 'windows';
+if (isWindows) { document.documentElement.classList.add('win'); }
+
 function post(msg) {
-  window.webkit.messageHandlers.cix.postMessage(msg);
+  if (isWindows) {
+    window.chrome.webview.postMessage(JSON.stringify(msg));
+  } else {
+    window.webkit.messageHandlers.cix.postMessage(msg);
+  }
 }
 
 function esc(s) {
@@ -471,7 +485,7 @@ function renderToggles(s) {
   var dis = settling ? ' disabled' : '';
 
   var netHint = s.localOnly
-    ? '127.0.0.1:' + esc(s.port) + ' · this Mac only'
+    ? '127.0.0.1:' + esc(s.port) + ' · ' + esc(s.machine || 'this Mac') + ' only'
     : esc(s.lanAddr || 'all interfaces');
 
   t.innerHTML =

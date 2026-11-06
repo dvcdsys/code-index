@@ -1,3 +1,5 @@
+//go:build darwin || windows
+
 package main
 
 import (
@@ -134,8 +136,8 @@ func runFirstRun(u *updater) error {
 	// it left unanswered was the one everybody asks: where is my address going.
 	// Nowhere. Saying so is worth more than the explanation it replaced.
 	intro := "Enter an email address for the administrator account.\n\n" +
-		"It is the login for the cix dashboard on this Mac — nothing is sent anywhere. " +
-		"A password is generated for you, and setup then downloads the server (about 40 MB)."
+		"It is the login for the cix dashboard on " + thisMachine + " — nothing is sent anywhere. " +
+		"A password is generated for you, and setup then downloads the server (" + runtimeSizeHint + ")."
 
 	// On a re-run the previous admin's address is still in server.env, and the
 	// most likely answer is the same one — so offer it, editable.
@@ -227,7 +229,7 @@ func runFirstRun(u *updater) error {
 		return fmt.Errorf("write server.env: %w", err)
 	}
 
-	if err := writeLaunchdFiles(false); err != nil {
+	if err := writeServiceFiles(false); err != nil {
 		return fmt.Errorf("write launchd files: %w", err)
 	}
 	if err := startServer(); err != nil {
@@ -248,7 +250,7 @@ func runFirstRun(u *updater) error {
 		// Not an error: a cold start loads an embedding model and can take
 		// minutes, in silence. Saying so beats a spinner that gives up.
 		waitNote = "\n\nThe server is still starting. First boot downloads and loads the embedding " +
-			"model, which can take a few minutes; the menu bar will show it as running when it is ready."
+			"model, which can take a few minutes; the " + trayName + " will show it as running when it is ready."
 	} else {
 		// The account exists — bootstrap runs before the listener opens — so the
 		// password that seeded it has done its job and stops being kept.

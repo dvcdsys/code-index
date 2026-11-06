@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -26,6 +27,17 @@ import (
 // suffix for GitHub URLs that don't already have it; the test URL we
 // pass in (`file://<dir>`) goes through the same normalisation, so
 // matching the on-disk path saves us from special-casing the test.
+// fileURL renders a local path as a file:// URL go-git accepts on every OS.
+// Windows paths need a leading slash before the drive ("file:///C:/…"); naive
+// concatenation yields "file://C:\…", whose "host" is "C" with an invalid port.
+func fileURL(path string) string {
+	p := filepath.ToSlash(path)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return "file://" + p
+}
+
 func makeBareUpstream(t *testing.T, branch string) (string, *commitWriter) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "upstream.git")
@@ -64,7 +76,7 @@ func (w *commitWriter) ensureWorktree(t *testing.T) {
 	}
 	w.worktree = t.TempDir()
 	_, err := git.PlainClone(w.worktree, false, &git.CloneOptions{
-		URL: "file://" + w.upstream,
+		URL: fileURL(w.upstream),
 	})
 	// Empty upstream → CloneOptions can't resolve HEAD. Init the worktree
 	// in place and wire a remote manually so the first push creates the
@@ -76,7 +88,7 @@ func (w *commitWriter) ensureWorktree(t *testing.T) {
 		}
 		if _, rerr := repo.CreateRemote(&config.RemoteConfig{
 			Name: "origin",
-			URLs: []string{"file://" + w.upstream},
+			URLs: []string{fileURL(w.upstream)},
 		}); rerr != nil {
 			t.Fatalf("create remote: %v", rerr)
 		}
@@ -180,7 +192,7 @@ func (w *commitWriter) Tag(t *testing.T, name string) {
 func legacyClone(t *testing.T, upstream, dir, branch string) {
 	t.Helper()
 	_, err := git.PlainClone(dir, false, &git.CloneOptions{
-		URL:           "file://" + upstream,
+		URL:           fileURL(upstream),
 		ReferenceName: plumbing.NewBranchReferenceName(branch),
 		SingleBranch:  true,
 		Depth:         1,
@@ -246,7 +258,7 @@ func tagRefCount(t *testing.T, dir string) int {
 func initialCloneFor(t *testing.T, upstream, localDir, branch string) Result {
 	t.Helper()
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL: "file://" + upstream,
+		GitHubURL: fileURL(upstream),
 		Branch:    branch,
 		LocalDir:  localDir,
 	})
@@ -272,7 +284,7 @@ func TestCloneOrFetch_FirstClone_ChangesNil(t *testing.T) {
 
 	local := filepath.Join(t.TempDir(), "clone")
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL:      "file://" + upstream,
+		GitHubURL:      fileURL(upstream),
 		Branch:         "main",
 		LocalDir:       local,
 		PrevIndexedSHA: "",
@@ -301,7 +313,7 @@ func TestCloneOrFetch_NoChanges_WhenHeadUnmoved(t *testing.T) {
 	initialCloneFor(t, upstream, local, "main")
 
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL:      "file://" + upstream,
+		GitHubURL:      fileURL(upstream),
 		Branch:         "main",
 		LocalDir:       local,
 		PrevIndexedSHA: headSHA,
@@ -338,7 +350,7 @@ func TestCloneOrFetch_DiffSet_ModifyAddDelete(t *testing.T) {
 	})
 
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL:      "file://" + upstream,
+		GitHubURL:      fileURL(upstream),
 		Branch:         "main",
 		LocalDir:       local,
 		PrevIndexedSHA: firstSHA,
@@ -388,7 +400,7 @@ func TestCloneOrFetch_PrevSHA_Unreachable_ReturnsNilChangeSet(t *testing.T) {
 	// force-push orphaned the indexed commit. The cloner must not blow
 	// up — return Changes=nil so the caller falls back to full reindex.
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL:      "file://" + upstream,
+		GitHubURL:      fileURL(upstream),
 		Branch:         "main",
 		LocalDir:       local,
 		PrevIndexedSHA: "0000000000000000000000000000000000000001",
@@ -420,7 +432,7 @@ func TestCloneOrFetch_EmptyPrevSHA_ReturnsNilChangeSet(t *testing.T) {
 	// Empty PrevIndexedSHA → we have nothing to diff against. Caller
 	// should land in the full-reindex branch. Confirmed by Changes=nil.
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL:      "file://" + upstream,
+		GitHubURL:      fileURL(upstream),
 		Branch:         "main",
 		LocalDir:       local,
 		PrevIndexedSHA: "",
@@ -450,7 +462,7 @@ func TestCloneOrFetch_HalfWrittenClone_SelfHeals(t *testing.T) {
 	}
 
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL: "file://" + upstream,
+		GitHubURL: fileURL(upstream),
 		Branch:    "main",
 		LocalDir:  local,
 	})
@@ -476,7 +488,7 @@ func TestCloneOrFetch_RemoteURLChanged_Reclones(t *testing.T) {
 	headB := wb.CommitFiles(t, "init B", map[string]string{"b.go": "package b\n"})
 
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL: "file://" + upstreamB,
+		GitHubURL: fileURL(upstreamB),
 		Branch:    "main",
 		LocalDir:  local,
 	})
@@ -512,7 +524,7 @@ func TestCloneOrFetch_FreshClone_HasNoTags(t *testing.T) {
 func updateAndCompact(t *testing.T, upstream, local, indexedSHA string) (Result, *CompactStats) {
 	t.Helper()
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL:      "file://" + upstream,
+		GitHubURL:      fileURL(upstream),
 		Branch:         "main",
 		LocalDir:       local,
 		PrevIndexedSHA: indexedSHA,
@@ -628,7 +640,7 @@ func TestMaybeCompact_ProtectsPendingIndexTarget(t *testing.T) {
 
 	pendingSHA := w.CommitFiles(t, "v2", map[string]string{"a.go": "package a // v2\n"})
 	resA, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL: "file://" + upstream, Branch: "main", LocalDir: local,
+		GitHubURL: fileURL(upstream), Branch: "main", LocalDir: local,
 	})
 	if err != nil {
 		t.Fatalf("cycle A: %v", err)
@@ -639,7 +651,7 @@ func TestMaybeCompact_ProtectsPendingIndexTarget(t *testing.T) {
 
 	w.CommitFiles(t, "v3", map[string]string{"b.go": "package b\n"})
 	resB, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL: "file://" + upstream, Branch: "main", LocalDir: local,
+		GitHubURL: fileURL(upstream), Branch: "main", LocalDir: local,
 	})
 	if err != nil {
 		t.Fatalf("cycle B: %v", err)
@@ -656,7 +668,7 @@ func TestMaybeCompact_ProtectsPendingIndexTarget(t *testing.T) {
 	// The pending index job's diff base (v2) must still be usable.
 	finalSHA := w.CommitFiles(t, "v4", map[string]string{"c.go": "package c\n"})
 	resC, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL: "file://" + upstream, Branch: "main", LocalDir: local,
+		GitHubURL: fileURL(upstream), Branch: "main", LocalDir: local,
 		PrevIndexedSHA: pendingSHA,
 	})
 	if err != nil {
@@ -687,7 +699,7 @@ func TestCloneOrFetch_NoChangesStillRepairsWorktree(t *testing.T) {
 	}
 
 	res, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL: "file://" + upstream, Branch: "main", LocalDir: local,
+		GitHubURL: fileURL(upstream), Branch: "main", LocalDir: local,
 		PrevIndexedSHA: headSHA,
 	})
 	if err != nil {
@@ -711,6 +723,9 @@ func TestCloneOrFetch_NoChangesStillRepairsWorktree(t *testing.T) {
 func TestMaybeCompact_ErrorKeepsCheckout(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root ignores directory permissions")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not make a directory read-only on Windows (ACLs, not mode bits)")
 	}
 	upstream, w := makeBareUpstream(t, "main")
 	headSHA := w.CommitFiles(t, "v1", map[string]string{"a.go": "package a\n"})
@@ -871,7 +886,7 @@ func TestCloneOrFetch_FetchFailure_KeepsClone(t *testing.T) {
 	}
 
 	_, err := CloneOrFetch(context.Background(), CloneOptions{
-		GitHubURL: "file://" + upstream,
+		GitHubURL: fileURL(upstream),
 		Branch:    "main",
 		LocalDir:  local,
 	})

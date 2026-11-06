@@ -51,14 +51,6 @@ func wrapperPath() (string, error) {
 	return filepath.Join(dir, "launchd", "run-cix-server.sh"), nil
 }
 
-func logDir() (string, error) {
-	dir, err := cixHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "logs"), nil
-}
-
 // runLaunchctl runs one launchctl subcommand with a deadline. launchctl is
 // normally instantaneous, so the timeout is a guard against a wedged domain
 // rather than an expected wait.
@@ -69,16 +61,16 @@ func runLaunchctl(args ...string) (string, error) {
 	return string(out), err
 }
 
-// launchdLoaded reports whether the agent is present in the user domain.
+// serviceLoaded reports whether the agent is present in the user domain.
 // `launchctl print` is the only trustworthy check available.
-func launchdLoaded() bool {
+func serviceLoaded() bool {
 	_, err := runLaunchctl("print", launchdTarget())
 	return err == nil
 }
 
-// launchdPID returns the pid of the running job, or 0 when the job is
+// servicePID returns the pid of the running job, or 0 when the job is
 // registered but has no process — never started, crashed, or on its way out.
-func launchdPID() int {
+func servicePID() int {
 	out, err := runLaunchctl("print", launchdTarget())
 	if err != nil {
 		return 0
@@ -94,13 +86,13 @@ func launchdPID() int {
 	return 0
 }
 
-// launchdBootout removes the job and waits for it to actually leave the domain.
+// serviceBootout removes the job and waits for it to actually leave the domain.
 // Bootstrapping the same label inside the drain window fails with an
 // "Input/output error" that reads like a permissions problem.
-func launchdBootout() error {
+func serviceBootout() error {
 	_, _ = runLaunchctl("bootout", launchdTarget())
 	for range 50 {
-		if !launchdLoaded() {
+		if !serviceLoaded() {
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -108,22 +100,22 @@ func launchdBootout() error {
 	return fmt.Errorf("launchd job %s did not leave the domain", launchdLabel)
 }
 
-// launchdBootstrap loads the agent, draining any previous instance first. The
+// serviceBootstrap loads the agent, draining any previous instance first. The
 // whole cycle is retried: a domain that was busy on the first attempt is
 // usually ready on the second.
-func launchdBootstrap() error {
+func serviceBootstrap() error {
 	path, err := plistPath()
 	if err != nil {
 		return err
 	}
 	var lastOut string
 	for range 3 {
-		if err := launchdBootout(); err != nil {
+		if err := serviceBootout(); err != nil {
 			return err
 		}
 		out, err := runLaunchctl("bootstrap", launchdDomain(), path)
 		lastOut = out
-		if err == nil && launchdLoaded() {
+		if err == nil && serviceLoaded() {
 			return nil
 		}
 		time.Sleep(time.Second)
@@ -138,8 +130,8 @@ func launchdBootstrap() error {
 // on an already-running job is a no-op restart, which is the right behaviour
 // for a menu item that means "make it run".
 func startServer() error {
-	if !launchdLoaded() {
-		if err := launchdBootstrap(); err != nil {
+	if !serviceLoaded() {
+		if err := serviceBootstrap(); err != nil {
 			return err
 		}
 	}
@@ -155,14 +147,14 @@ func startServer() error {
 // out would put every subsequent Start through the drain race for no gain. The
 // job staying loaded-but-idle is exactly what KeepAlive=false is for.
 func stopServer() error {
-	if !launchdLoaded() {
+	if !serviceLoaded() {
 		return nil
 	}
 	out, err := runLaunchctl("kill", "SIGTERM", launchdTarget())
 	if err != nil {
 		// "No such process" is success from the user's point of view: the job
 		// is loaded, nothing is running, which is what they asked for.
-		if strings.Contains(out, "No such process") || launchdPID() == 0 {
+		if strings.Contains(out, "No such process") || servicePID() == 0 {
 			return nil
 		}
 		return fmt.Errorf("kill: %s", strings.TrimSpace(out))
@@ -170,13 +162,13 @@ func stopServer() error {
 	return nil
 }
 
-// writeLaunchdFiles regenerates the wrapper and the plist.
+// writeServiceFiles regenerates the wrapper and the plist.
 //
 // Called on every launch. It no longer has to chase a moving bundle — the
 // wrapper execs ~/.cix/runtime/current/cix-server, a path that survives both an
 // app that was moved and a runtime that was updated — but it is still what puts
 // the files back if something else overwrote them.
-func writeLaunchdFiles(runAtLoad bool) error {
+func writeServiceFiles(runAtLoad bool) error {
 	server, err := runtimeServerPath()
 	if err != nil {
 		return err
@@ -299,10 +291,10 @@ func autostartEnabled() bool {
 // Rebootstrapping restarts a running server. That is why the caller restores
 // the process afterwards rather than this function pretending the cost is zero.
 func setAutostart(enabled bool) error {
-	if err := writeLaunchdFiles(enabled); err != nil {
+	if err := writeServiceFiles(enabled); err != nil {
 		return err
 	}
-	return launchdBootstrap()
+	return serviceBootstrap()
 }
 
 // foreignAgent reports whether a launchd agent under our label exists but was
@@ -330,65 +322,4 @@ func foreignAgent() bool {
 		return true
 	}
 	return !strings.Contains(string(data), managedByMarker)
-}
-
-// serverDiedOnStart reports why the server is already gone after a Start we
-// asked for, or "" when it is still alive.
-//
-// launchctl answers for having spawned the process, not for the process
-// surviving it. A server that rejects its own configuration exits in
-// milliseconds and leaves the menu reading "Stopped" with no explanation —
-// indistinguishable from a Start button that does nothing.
-//
-// The wait is two-sided on purpose: a pid takes a moment to appear, and a
-// process that is going to die does it almost at once. Neither half is a
-// deadline for anything the user waits on — a healthy server returns from here
-// as soon as it has a pid.
-func serverDiedOnStart() string {
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && launchdPID() == 0 {
-		time.Sleep(200 * time.Millisecond)
-	}
-	time.Sleep(2 * time.Second)
-	if launchdPID() != 0 {
-		return ""
-	}
-	return lastServerError()
-}
-
-// lastServerError pulls the tail of cix-server.err, for a dialog.
-//
-// The server writes its refusals there as plain prose across several lines, so
-// the last few non-empty ones are the message. Capped: an unbounded log tail in
-// a modal dialog is its own failure.
-func lastServerError() string {
-	dir, err := logDir()
-	if err != nil {
-		return "The server exited immediately."
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "cix-server.err"))
-	if err != nil {
-		return "The server exited immediately."
-	}
-
-	var lines []string
-	for line := range strings.SplitSeq(string(data), "\n") {
-		if strings.TrimSpace(line) != "" {
-			lines = append(lines, strings.TrimRight(line, " \t"))
-		}
-	}
-	if len(lines) == 0 {
-		return "The server exited immediately, without logging anything."
-	}
-	const keep = 8
-	if len(lines) > keep {
-		lines = lines[len(lines)-keep:]
-	}
-
-	out := strings.Join(lines, "\n")
-	const maxRunes = 900
-	if r := []rune(out); len(r) > maxRunes {
-		out = "…" + string(r[len(r)-maxRunes:])
-	}
-	return out
 }

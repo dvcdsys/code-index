@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !windows
 
 package main
 
@@ -14,6 +14,6 @@ import (
 // "build constraints exclude all Go files" — which reads like a broken repo
 // rather than a deliberate platform restriction.
 func main() {
-	fmt.Fprintf(os.Stderr, "cix-launcher %s: macOS only — use `cix` and `cix-server` directly on this platform.\n", displayVersion())
+	fmt.Fprintf(os.Stderr, "cix-launcher %s: macOS and Windows only — use `cix` and `cix-server` directly on this platform.\n", displayVersion())
 	os.Exit(1)
 }

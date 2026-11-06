@@ -759,9 +759,7 @@ func (s *Service) ProcessFilesStreaming(
 		// per file and reused for all its chunks.
 		relPath := fp.Path
 		if s.embedIncludePath {
-			if rp, rerr := filepath.Rel(projectPath, fp.Path); rerr == nil {
-				relPath = rp
-			}
+			relPath = relativeToProject(projectPath, fp.Path)
 		}
 
 		// Build embed texts + vector-store payloads in a single pass over the
@@ -1499,4 +1497,24 @@ func deleteChunksFTSByFile(ctx context.Context, db *sql.DB, projectPath, filePat
 		return err
 	}
 	return tx.Commit()
+}
+
+// relativeToProject renders a file path relative to its project for the
+// embedding preamble. Both paths are client paths and are only ever compared as
+// strings, so the match is done on slash-normalised text: that keeps the
+// preamble ("File: cmd/hello/main.go") identical whichever OS the server runs
+// on and whichever the client does (a Windows client sends C:\proj\cmd\x.go to
+// a Linux server, and a POSIX client sends /proj/cmd/x.go to a Windows one —
+// filepath.Rel handles neither). Falls back to filepath.Rel, then to the path
+// as given.
+func relativeToProject(project, file string) string {
+	p := strings.TrimRight(strings.ReplaceAll(project, `\`, "/"), "/")
+	f := strings.ReplaceAll(file, `\`, "/")
+	if p != "" && strings.HasPrefix(f, p+"/") {
+		return f[len(p)+1:]
+	}
+	if rp, err := filepath.Rel(project, file); err == nil {
+		return filepath.ToSlash(rp)
+	}
+	return file
 }

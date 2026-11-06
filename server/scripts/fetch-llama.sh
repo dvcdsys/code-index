@@ -63,6 +63,12 @@ set -euo pipefail
 
 STAMP_FILE="$DEST_DIR/.llama-version"
 
+# Windows ships as two zip archives of DLLs, not one tarball of dylibs, and the
+# sanity checks are different enough that it has its own script.
+if [[ "$LLAMA_OS" == "windows" ]]; then
+    exec "$(dirname "${BASH_SOURCE[0]}")/fetch-llama-windows.sh"
+fi
+
 if [[ "$LLAMA_OS" != "darwin" || "$LLAMA_ARCH" != "arm64" ]]; then
     echo "fetch-llama.sh: only darwin-arm64 is supported in Phase 3 (got $LLAMA_OS-$LLAMA_ARCH)" >&2
     exit 1

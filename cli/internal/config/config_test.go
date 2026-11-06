@@ -18,7 +18,7 @@ func resetState() {
 func isolateHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHome(t, dir)
 	t.Setenv("XDG_CONFIG_HOME", "") // prevent XDG override on some systems
 	t.Cleanup(resetState)
 	return dir

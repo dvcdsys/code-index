@@ -3,6 +3,7 @@ package client
 import (
 	"crypto/sha1"
 	"fmt"
+	"runtime"
 	"testing"
 )
 
@@ -32,6 +33,9 @@ func TestEncodeProjectPath_ExternalIsBare(t *testing.T) {
 // MachineID != "" (absolute filesystem paths only).
 func TestEncodeProjectPath_LocalIsNamespaced(t *testing.T) {
 	abs := "/Users/dev/go/src/example"
+	if runtime.GOOS == "windows" {
+		abs = `C:\Users\dev\go\src\example` // a POSIX path is not absolute there
+	}
 	want := sha1Hex16("local:" + machineID() + ":" + abs)
 	if got := encodeProjectPath(abs); got != want {
 		t.Errorf("encodeProjectPath(%q) = %q, want %q (local must be namespaced)", abs, got, want)

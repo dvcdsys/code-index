@@ -143,6 +143,7 @@ func TestRunSearch_APIError(t *testing.T) {
 }
 
 func TestRunSearch_OutputUsesRelativePath(t *testing.T) {
+	skipOnWindows(t, "models POSIX absolute paths (/repo/…), which are not absolute on Windows")
 	// Verifies the cosmetic-but-impactful path-shortening: output should
 	// show paths relative to the project root, not the full /Users/.../foo
 	// absolute path. Saves ~50 chars per result line in agent context.

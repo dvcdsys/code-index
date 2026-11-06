@@ -403,7 +403,7 @@ func Load() (*Config, error) {
 	c.GGUFCacheDir = getenv("CIX_GGUF_CACHE_DIR", defaultGGUFCacheDir())
 	c.LlamaBinDir = getenv("CIX_LLAMA_BIN_DIR", defaultLlamaBinDir())
 	c.LlamaSocketPath = getenv("CIX_LLAMA_SOCKET", defaultLlamaSocketPath())
-	c.LlamaTransport = strings.ToLower(getenv("CIX_LLAMA_TRANSPORT", "unix"))
+	c.LlamaTransport = strings.ToLower(getenv("CIX_LLAMA_TRANSPORT", defaultLlamaTransport()))
 
 	// Default to the model's full context window (2048 for CodeRankEmbed-Q8_0).
 	// Using maxChunk+128 was too tight — code chunks can tokenize to more tokens
@@ -414,8 +414,12 @@ func Load() (*Config, error) {
 	}
 	c.LlamaCtxSize = llamaCtx
 
+	// -1 = offload every layer. macOS has Metal; the Windows runtime is the
+	// CUDA build of llama.cpp, and with no CUDA device it simply stays on the
+	// CPU, so full offload is the right default there too. Linux/containers
+	// keep 0 and opt in through CIX_N_GPU_LAYERS (the CUDA image sets it).
 	defaultGpu := 0
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		defaultGpu = -1
 	}
 	gpuLayers, err := getenvInt("CIX_N_GPU_LAYERS", defaultGpu)
@@ -725,6 +729,11 @@ func defaultGGUFCacheDir() string {
 	if runtime.GOOS == "darwin" {
 		return filepath.Join(home, "Library", "Caches", "cix", "models")
 	}
+	if runtime.GOOS == "windows" {
+		if local := os.Getenv("LOCALAPPDATA"); local != "" {
+			return filepath.Join(local, "cix", "models")
+		}
+	}
 	return filepath.Join(home, ".cache", "cix", "models")
 }
 
@@ -755,6 +764,18 @@ func defaultLlamaBinDir() string {
 // short. PID-based naming avoids collisions across concurrent test runs.
 func defaultLlamaSocketPath() string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("cix-llama-%d.sock", os.Getpid()))
+}
+
+// defaultLlamaTransport is the IPC channel to the llama-server sidecar:
+// a unix socket where the platform has them reliably, loopback TCP on Windows.
+// llama-server's `--host <path>` socket mode is a POSIX feature; the Windows
+// build has no AF_UNIX listener, so there TCP on 127.0.0.1 is the only option
+// (an auto-picked free port, see ollama.pickFreePort).
+func defaultLlamaTransport() string {
+	if runtime.GOOS == "windows" {
+		return "tcp"
+	}
+	return "unix"
 }
 
 func getenv(key, def string) string {

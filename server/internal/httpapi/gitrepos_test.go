@@ -47,6 +47,9 @@ func reposRouterWithIndexer(t *testing.T) (http.Handler, *sql.DB, *indexer.Servi
 	if err != nil {
 		t.Fatalf("vectorstore open: %v", err)
 	}
+	// Windows cannot delete an open SQLite file, so TempDir cleanup needs the store
+	// closed first (cleanups run last-registered-first).
+	t.Cleanup(func() { _ = vs.Close() })
 	emb := &fakeEmbedder{dim: 16}
 	idx := indexer.New(d, vs, emb, nil)
 	router := NewRouter(Deps{

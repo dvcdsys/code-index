@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
 )
 
 // Info stores daemon metadata persisted to disk.
@@ -96,9 +95,7 @@ func Start(projectPath string) (int, error) {
 	cmd := exec.Command(exe, "watch", "--daemon-mode", projectPath)
 	cmd.Stdout = lf
 	cmd.Stderr = lf
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true,
-	}
+	detach(cmd)
 
 	if err := cmd.Start(); err != nil {
 		lf.Close()
@@ -126,13 +123,7 @@ func Stop(projectPath string) error {
 		return fmt.Errorf("no watcher running for %s", projectPath)
 	}
 
-	process, err := os.FindProcess(status.PID)
-	if err != nil {
-		removeInfo(projectPath)
-		return fmt.Errorf("find process: %w", err)
-	}
-
-	if err := process.Signal(syscall.SIGTERM); err != nil {
+	if err := terminate(status.PID); err != nil {
 		removeInfo(projectPath)
 		return fmt.Errorf("send signal: %w", err)
 	}
@@ -255,12 +246,4 @@ func removeInfo(projectPath string) {
 	if err == nil {
 		os.Remove(file)
 	}
-}
-
-func isProcessRunning(pid int) bool {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return process.Signal(syscall.Signal(0)) == nil
 }

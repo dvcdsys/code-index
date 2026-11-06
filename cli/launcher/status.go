@@ -1,3 +1,5 @@
+//go:build darwin || windows
+
 package main
 
 import (
@@ -185,10 +187,10 @@ func (p *poller) pollHealth() {
 	port := serverPort(vars)
 	managed := !foreignAgent()
 
-	loaded := launchdLoaded()
+	loaded := serviceLoaded()
 	pid := 0
 	if loaded {
-		pid = launchdPID()
+		pid = servicePID()
 	}
 
 	healthy := client.New(localBaseURL(vars), "").Health() == nil

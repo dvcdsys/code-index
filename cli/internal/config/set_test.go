@@ -13,7 +13,7 @@ import (
 // because that helper is in the cmd package and import would be cyclic.
 func withIsolatedHome(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 	ResetForTesting()
 	t.Cleanup(ResetForTesting)

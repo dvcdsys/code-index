@@ -167,6 +167,9 @@ func openTestVectorStore(t *testing.T) *vectorstore.Store {
 	if err != nil {
 		t.Fatalf("vectorstore: %v", err)
 	}
+	// Windows cannot delete an open SQLite file, so TempDir cleanup needs the store
+	// closed first (cleanups run last-registered-first).
+	t.Cleanup(func() { _ = vs.Close() })
 	return vs
 }
 

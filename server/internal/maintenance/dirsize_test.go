@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -35,6 +36,9 @@ func TestDirSizeBytes_MissingRoot_ReportsNotOK(t *testing.T) {
 func TestDirSizeBytes_UnreadableSubtree_ReturnsPartial(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root ignores directory permissions")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 000 does not make a directory unreadable on Windows (ACLs, not mode bits)")
 	}
 	dir := t.TempDir()
 	writeFileOfSize(t, filepath.Join(dir, "a"), 100)

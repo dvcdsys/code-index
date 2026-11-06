@@ -44,3 +44,35 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+  test-windows:
+    # The CLI ships inside the Windows runtime (win/scripts/build-runtime.sh),
+    # so it has to build and pass on a real Windows filesystem.
+    #
+    # That includes cli/launcher, the Windows tray app: its tests cover the zip
+    # runtime, the junction swap and the scheduled-task definition. No -race: it
+    # needs cgo, and the release build is CGO-free.
+    name: Test (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: go build ./...

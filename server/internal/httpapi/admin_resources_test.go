@@ -246,6 +246,9 @@ func newResourceFixture(t *testing.T) *resourceFixture {
 	if err != nil {
 		t.Fatalf("open vector store: %v", err)
 	}
+	// Windows cannot delete an open SQLite file, so TempDir cleanup needs the store
+	// closed first (cleanups run last-registered-first).
+	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
 	for _, p := range []string{"/live/project", "/dead/project"} {
 		if err := store.UpsertChunks(ctx, p,

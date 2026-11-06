@@ -1,3 +1,5 @@
+//go:build darwin || windows
+
 package main
 
 import (
@@ -45,7 +47,7 @@ func (m *menu) resetPasswordFlow() {
 	if !runtimeReady() {
 		ok, err := confirm("Download the cix server?",
 			"Resetting a password runs cix-server against the database directly, and it is not "+
-				"installed on this Mac yet.\n\nDownloading it is about 40 MB and changes nothing "+
+				"installed on "+thisMachine+" yet.\n\nDownloading it is "+runtimeSizeHint+" and changes nothing "+
 				"about the installation you already have.",
 			"Download")
 		if err != nil || !ok {
@@ -60,7 +62,7 @@ func (m *menu) resetPasswordFlow() {
 		clearPanelBusy()
 	}
 
-	server, err := runtimeServerPath()
+	server, err := runtimeLiveServerPath()
 	if err != nil {
 		_ = alert("cix", fmt.Sprintf("Could not locate the cix server.\n\n%v", err))
 		return

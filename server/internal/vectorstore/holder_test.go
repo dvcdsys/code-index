@@ -12,6 +12,8 @@ func storeWithOneChunk(t *testing.T, project string) *Store {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	// Windows cannot delete an open SQLite file; close before TempDir cleanup.
+	t.Cleanup(func() { _ = s.Close() })
 	chunks := []Chunk{{
 		Content: "hello", FilePath: "a.go", StartLine: 1, EndLine: 2, Language: "go",
 	}}
@@ -28,6 +30,8 @@ func emptyStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	// Windows cannot delete an open SQLite file; close before TempDir cleanup.
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

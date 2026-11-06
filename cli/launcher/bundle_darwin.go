@@ -1,13 +1,10 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // bundle describes the .app this launcher is running from.
@@ -68,29 +65,4 @@ func locateBundle() (bundle, error) {
 // translocated copy is reaped. Detect it and say so, rather than half-working.
 func isTranslocated(b bundle) bool {
 	return strings.Contains(b.Root, "/AppTranslocation/")
-}
-
-// binaryVersion runs `<bin> <flag>` and returns its first line of output.
-//
-// Both bundled binaries answer a version flag and exit immediately
-// (cix-server -v, cix --version), so the timeout is a guard against a wedged
-// exec rather than an expected wait.
-func binaryVersion(bin, flag string) string {
-	if _, err := os.Stat(bin); err != nil {
-		return "missing"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	out, err := exec.CommandContext(ctx, bin, flag).Output()
-	if err != nil {
-		return "unknown"
-	}
-
-	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	if line == "" {
-		return "unknown"
-	}
-	return line
 }

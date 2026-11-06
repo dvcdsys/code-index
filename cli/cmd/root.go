@@ -118,10 +118,10 @@ func findProjectRoot(candidatePath string, apiClient *client.Client) string {
 	best := ""
 	for _, p := range projects {
 		root := p.HostPath
-		if candidatePath == root {
+		if samePath(candidatePath, root) {
 			return root
 		}
-		if strings.HasPrefix(candidatePath, root+"/") && len(root) > len(best) {
+		if isUnderRoot(candidatePath, root) && len(root) > len(best) {
 			best = root
 		}
 	}

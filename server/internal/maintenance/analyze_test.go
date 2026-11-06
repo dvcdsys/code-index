@@ -501,7 +501,7 @@ func TestScanLegacyChromem_OffersAFullyMigratedNamespace(t *testing.T) {
 	if it.Key != f.legacyNS {
 		t.Errorf("item key = %q, want the legacy namespace directory %q", it.Key, f.legacyNS)
 	}
-	if it.Label != filepath.Join("chroma", "ollama", "test-model") {
+	if it.Label != "chroma/ollama/test-model" { // labels are slash-separated on every OS
 		t.Errorf("item label = %q, want it relative to the data directory", it.Label)
 	}
 	if !strings.Contains(it.Detail, "2 collections") || !strings.Contains(it.Detail, "5 documents") {

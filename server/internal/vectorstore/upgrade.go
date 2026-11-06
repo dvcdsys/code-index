@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -283,8 +284,21 @@ func removeDBFiles(path string) error {
 }
 
 // fsyncPath flushes a file or directory to stable storage.
+//
+// Windows differs in two ways. FlushFileBuffers needs a handle opened for
+// writing, so a read-only open fails with "Access is denied"; and a directory
+// cannot be opened for flushing at all — NTFS journals the metadata change
+// (the rename itself) as part of the operation, so there is nothing further to
+// ask for and the directory case is a no-op.
 func fsyncPath(p string) error {
-	f, err := os.Open(p)
+	flag := os.O_RDONLY
+	if runtime.GOOS == "windows" {
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			return nil
+		}
+		flag = os.O_RDWR
+	}
+	f, err := os.OpenFile(p, flag, 0)
 	if err != nil {
 		return err
 	}

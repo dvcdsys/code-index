@@ -80,11 +80,6 @@ func stripQuarantine(b bundle) {
 	_ = exec.Command("xattr", "-dr", "com.apple.quarantine", b.Root).Run()
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // bundleReport prints what this installation actually consists of: the app, and
 // whichever runtime it is pointing at.
 //
@@ -105,7 +100,7 @@ func bundleReport(b bundle) string {
 		return sb.String()
 	}
 
-	dir, _ := runtimeCurrentDir()
+	dir, _ := runtimeLiveDir()
 	fmt.Fprintf(&sb, "Runtime:    %s (%s)\n", currentRuntimeVersion(), dir)
 	fmt.Fprintf(&sb, "Server:     %s\n", binaryVersion(filepath.Join(dir, "cix-server"), "-v"))
 	fmt.Fprintf(&sb, "CLI:        %s\n", binaryVersion(filepath.Join(dir, "cix"), "--version"))

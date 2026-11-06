@@ -29,6 +29,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/embeddings"
 	"github.com/dvcdsys/code-index/server/internal/embeddings/provider"
 	"github.com/dvcdsys/code-index/server/internal/embeddingscfg"
+	"github.com/dvcdsys/code-index/server/internal/envfile"
 	"github.com/dvcdsys/code-index/server/internal/githubapi"
 	"github.com/dvcdsys/code-index/server/internal/githubtokens"
 	"github.com/dvcdsys/code-index/server/internal/gitrepos"
@@ -44,6 +45,7 @@ import (
 	"github.com/dvcdsys/code-index/server/internal/searchstats"
 	"github.com/dvcdsys/code-index/server/internal/secrets"
 	"github.com/dvcdsys/code-index/server/internal/sessions"
+	"github.com/dvcdsys/code-index/server/internal/stdio"
 	"github.com/dvcdsys/code-index/server/internal/storage"
 	"github.com/dvcdsys/code-index/server/internal/tunnelcfg"
 	"github.com/dvcdsys/code-index/server/internal/tunnels"
@@ -76,10 +78,29 @@ func main() {
 	doHealthcheck := flag.Bool("healthcheck", false, "run health probe and exit")
 	resetPasswordEmail := flag.String("reset-password", "",
 		"offline password recovery: reset the given user's password and exit (reads the new password from piped stdin, or generates one)")
+	envFile := flag.String("env-file", "",
+		"load KEY='value' lines from this file into the environment before configuration is read; variables already set in the real environment win")
+	logDir := flag.String("log-dir", "",
+		"append stdout to <dir>/cix-server.log and stderr to <dir>/cix-server.err (for supervisors that cannot redirect output themselves, e.g. Windows Task Scheduler)")
 	flag.Parse()
 	if *printVersion {
 		fmt.Printf("cix-server %s (%s, api %s)\n", version, backend, apiVersion)
 		return
+	}
+	// First, before anything can log: slog and log bind os.Stderr on first use.
+	if *logDir != "" {
+		if _, err := stdio.Redirect(*logDir); err != nil {
+			fmt.Fprintln(os.Stderr, "cix-server:", err)
+			os.Exit(1)
+		}
+	}
+	// Before anything reads configuration — including the one-shot flags below,
+	// so `-reset-password` finds the same database the server uses.
+	if *envFile != "" {
+		if _, err := envfile.Load(*envFile); err != nil {
+			fmt.Fprintln(os.Stderr, "cix-server:", err)
+			os.Exit(1)
+		}
 	}
 	if *doHealthcheck {
 		runHealthcheck()
@@ -98,39 +119,6 @@ func main() {
 	}
 	if restart {
 		reexec()
-	}
-}
-
-// reexec replaces this process image with a fresh one, which is how a
-// compacted database is adopted: the swap happens at boot, before anything
-// opens the file, and the only way to get there is to start over.
-//
-// It must run from main(), after run() has returned and every deferred
-// cleanup has unwound. That ordering is not stylistic. The listener has to be
-// closed or the new image fails to bind; the embeddings sidecar has to be
-// reaped or the new image collides with it on its port and leaves a zombie it
-// has no handle for; the tunnel binary is the same. syscall.Exec replaces the
-// image outright, so no deferred function runs after it — everything that
-// needs to happen must already have happened.
-//
-// Exec rather than exit: the process keeps its pid, so a container keeps its
-// PID 1 and no restart policy or supervisor is involved.
-func reexec() {
-	bin, err := os.Executable()
-	if err != nil {
-		bin = os.Args[0]
-	}
-	// The one-shot flags (-v, -healthcheck, -reset-password) all return from
-	// main before run() is reached, so a process that got here provably was
-	// not started with one and re-running this argv cannot land in one.
-	if err := syscall.Exec(bin, os.Args, os.Environ()); err != nil {
-		// Exec only returns on failure, and by now the listener, the database
-		// and both sidecars are gone. There is nothing left to continue with.
-		// The compacted copy and its journal are on disk, so whatever starts
-		// this server next completes the swap.
-		fmt.Fprintln(os.Stderr, "cix-server: could not restart to adopt the compacted database:", err)
-		fmt.Fprintln(os.Stderr, "cix-server: start the server again to finish the operation")
-		os.Exit(1)
 	}
 }
 

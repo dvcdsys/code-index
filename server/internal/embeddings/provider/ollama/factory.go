@@ -88,7 +88,7 @@ func (factory) Build(cfg []byte, _ provider.SecretLookup, logger *slog.Logger) (
 		return nil, fmt.Errorf("ollama: model is required")
 	}
 	if c.Transport == "" {
-		c.Transport = "unix"
+		c.Transport = defaultTransport()
 	}
 	if c.CtxSize == 0 {
 		c.CtxSize = 2048

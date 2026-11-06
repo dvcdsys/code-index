@@ -239,7 +239,7 @@ func TestGetClient_NoAPIKey_ReturnsError(t *testing.T) {
 	// When neither --api-key nor a config file key is present, getClient must
 	// return a descriptive error rather than silently creating a keyless client.
 	// Isolate HOME so config.Load() reads an empty config with no key.
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	config.ResetForTesting()
 	t.Cleanup(config.ResetForTesting)
 

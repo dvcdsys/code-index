@@ -1,0 +1,155 @@
+name: "Release: Windows app"
+
+# Triggered by Windows-app tags (e.g. `win/v0.1.0`) — the fourth independent tag
+# stream next to `server/v*`, `cli/v*` and `mac/v*`. It releases exactly one
+# thing: the tray app's installer, ~5 MB, holding a single executable.
+#
+# The server it manages is NOT built here. It ships from the server/v* tag
+# stream — the same tag and the same workflow run that publishes the Docker
+# images (see release-server.yml's windows-runtime job) — so a Windows install
+# and a container on the same version are the same server. The app downloads it
+# into ~\.cix\runtime and updates it independently of itself.
+on:
+  push:
+    tags:
+      - "win/v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to build (branch, tag, or SHA)"
+        required: true
+      version:
+        description: "App version, without the win/v prefix (e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build installer
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            WIN_VERSION="${{ github.event.inputs.version }}"
+          else
+            WIN_VERSION="${GITHUB_REF_NAME#win/v}"
+          fi
+          echo "win=$WIN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "app=$WIN_VERSION"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Only the CLI module is built here — the launcher lives in it.
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Install Inno Setup
+        run: |
+          if ! command -v ISCC.exe >/dev/null 2>&1 && [ ! -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" ]; then
+            choco install innosetup --no-progress -y
+          fi
+
+      - name: Test the launcher
+        working-directory: cli
+        run: go test ./launcher/
+
+      - name: Build installer
+        env:
+          WIN_VERSION: ${{ steps.ver.outputs.win }}
+        run: win/scripts/build-app.sh
+
+      - name: Verify the build
+        run: |
+          set -euo pipefail
+          SETUP="win/dist/cix-${{ steps.ver.outputs.win }}-x64-setup.exe"
+          test -f "$SETUP"
+
+          # Reports the launcher's own version, and that no runtime is installed
+          # — correct on a build machine, where the two halves have not met yet.
+          win/dist/stage/cix-launcher.exe -report
+
+          # The stage holds exactly the two files the installer packages. A
+          # leftover cix-server.exe from an experiment would ship ~40 MB of
+          # something nobody manages.
+          found="$(find win/dist/stage -type f | wc -l | tr -d ' ')"
+          if [ "$found" != "2" ]; then
+            echo "::error title=Unexpected stage contents::win/dist/stage holds $found files, expected cix-launcher.exe and cix.ico"
+            find win/dist/stage -type f
+            exit 1
+          fi
+
+      - name: Compute checksums
+        working-directory: win/dist
+        # The updater verifies the download against this file. Without a code
+        # signing certificate it is the only integrity check there is.
+        run: sha256sum ./*-setup.exe > checksums.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cix-windows-x64
+          path: |
+            win/dist/*-setup.exe
+            win/dist/checksums.txt
+
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          name: "Windows app ${{ steps.ver.outputs.win }}"
+          files: |
+            win/dist/*-setup.exe
+            win/dist/checksums.txt
+          generate_release_notes: true
+          # Server releases own the "latest" pointer — the Docker image is the
+          # primary deliverable of this project. Windows installs filter by the
+          # `win/` tag prefix.
+          make_latest: "false"
+          body: |
+            ## cix for Windows 11 — x64, NVIDIA GPU
+
+            A system tray app for a local cix server: start and stop it, see
+            what its embedding provider is doing, and open the dashboard.
+            Everything runs on your machine.
+
+            ### Install
+
+            Run `cix-<version>-x64-setup.exe`. It installs for your user only and
+            never asks for an administrator password.
+
+            Windows SmartScreen will warn that the publisher is unknown ("Windows
+            protected your PC"): cix is open source and is **not** signed with a
+            paid code-signing certificate. Choose **More info → Run anyway**.
+            Nothing is wrong with the file; integrity is covered by the checksum.
+
+            On first launch the app downloads the server itself — `cix-server`,
+            the `cix` CLI and a CUDA `llama-server`, about 500 MB — from the
+            newest [server release](https://github.com/dvcdsys/code-index/releases?q=server%2Fv).
+            That is the same build the Docker images are cut from, and it updates
+            on its own schedule: a new server does not need a new app.
+
+            ### Verify the download
+
+            ```powershell
+            (Get-FileHash .\cix-*-x64-setup.exe -Algorithm SHA256).Hash
+            ```
+
+            and compare with `checksums.txt`.
+
+            Requires Windows 11 (x64), the WebView2 Runtime (included with
+            Windows 11) and an NVIDIA GPU with a driver that supports CUDA 13
+            (R580 or newer).

@@ -1,9 +1,10 @@
+//go:build darwin || windows
+
 package main
 
 import (
 	"fmt"
 	"net"
-	"os/exec"
 	"strings"
 )
 
@@ -23,6 +24,8 @@ type panelState struct {
 	LocalOnly bool   `json:"localOnly"`
 	LanAddr   string `json:"lanAddr,omitempty"`
 	Autostart bool   `json:"autostart"`
+	// Machine is what the panel calls this computer ("this Mac" / "this PC").
+	Machine string `json:"machine"`
 
 	Engine        string `json:"engine,omitempty"`
 	EngineReady   bool   `json:"engineReady"`
@@ -48,6 +51,7 @@ func buildPanelState(s snapshot, busy bool, busyLabel string) panelState {
 		PID:        s.PID,
 		LocalOnly:  s.LocalOnly,
 		Autostart:  s.Autostart,
+		Machine:    thisMachine,
 		Runtime:    currentRuntimeVersion(),
 		AppVersion: displayVersion(),
 	}
@@ -76,20 +80,6 @@ func buildPanelState(s snapshot, busy bool, busyLabel string) panelState {
 	}
 
 	return ps
-}
-
-// processUptime asks ps for the elapsed time of a pid and renders it the way
-// the design's header expects ("4h 12m"). Empty when anything goes wrong —
-// an uptime is decoration, never worth an error dialog.
-func processUptime(pid int) string {
-	if pid == 0 {
-		return ""
-	}
-	out, err := exec.Command("ps", "-o", "etime=", "-p", fmt.Sprint(pid)).Output()
-	if err != nil {
-		return ""
-	}
-	return formatEtime(strings.TrimSpace(string(out)))
 }
 
 // formatEtime converts ps's [[dd-]hh:]mm:ss into a two-unit human string.

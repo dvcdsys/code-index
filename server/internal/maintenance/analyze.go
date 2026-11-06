@@ -394,7 +394,7 @@ scan:
 			}
 			c.Items = append(c.Items, Item{
 				Key:       dir,
-				Label:     strings.TrimPrefix(dir, filepath.Dir(base.root)+string(os.PathSeparator)),
+				Label:     filepath.ToSlash(strings.TrimPrefix(dir, filepath.Dir(base.root)+string(os.PathSeparator))),
 				Detail:    base.detail,
 				SizeBytes: dirSizeOrZero(ctx, dir),
 				path:      dir,
@@ -580,7 +580,7 @@ func (s *Service) legacyLabel(dir string) string {
 	if !isAncestor(root, dir) {
 		return dir
 	}
-	return strings.TrimPrefix(dir, filepath.Dir(root)+string(os.PathSeparator))
+	return filepath.ToSlash(strings.TrimPrefix(dir, filepath.Dir(root)+string(os.PathSeparator)))
 }
 
 // namespaceBase is one tree that holds per-embedding-identity namespaces.
