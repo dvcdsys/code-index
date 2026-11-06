@@ -148,6 +148,22 @@ func parseLogLevel(s string) slog.Level {
 	}
 }
 
+// newShutdownBudget builds the single shared shutdown context and parks its
+// cancel in *store instead of deferring it here.
+//
+// Deferring the cancel at the call site is what this exists to prevent: defers
+// run last-registered-first, so a cancel deferred next to the WithTimeout
+// fires before the subsystem stops that were deferred earlier in run(), and
+// every one of them then gets an already-cancelled context. Parking it lets
+// run() release the budget from a defer it registered before those stops,
+// which therefore runs after them. This also keeps `go vet`'s lostcancel
+// check happy, since it cannot see through that ordering.
+func newShutdownBudget(store *context.CancelFunc, d time.Duration) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	*store = cancel
+	return ctx
+}
+
 // run boots the server and blocks until it is asked to stop. The bool reports
 // whether the process should re-execute itself rather than exit — the way a
 // compacted database is adopted.
@@ -342,7 +358,23 @@ func run() (restart bool, err error) {
 	}
 	// Shared shutdown context — see M7 below. We build it lazily (in the
 	// signal handler) so startup doesn't carry a dangling deadline.
-	var shutdownCtx context.Context
+	//
+	// Its cancel is registered HERE, before any subsystem's stop defer, and
+	// deliberately not at the creation site. Defers run last-registered-first,
+	// so a `defer cancel()` next to the WithTimeout would fire before the
+	// stops below and hand each of them a dead context: the shared budget
+	// would be spent before anyone could use it, every clean shutdown would
+	// SIGKILL the llama-server sidecar with no grace, and the stop errors
+	// would be logged as failures. Registered first, it runs last instead.
+	var (
+		shutdownCtx    context.Context
+		shutdownCancel context.CancelFunc
+	)
+	defer func() {
+		if shutdownCancel != nil {
+			shutdownCancel()
+		}
+	}()
 	defer func() {
 		// Fallback for the path where shutdownCtx was never assigned (e.g.
 		// startup-error branch): bound embeddings stop independently.
@@ -889,9 +921,10 @@ func run() (restart bool, err error) {
 	// M7 — single shared shutdown budget for HTTP drain + embeddings supervisor.
 	// Previously each subsystem had its own 10s context, producing up to 20s
 	// of total grace — which blows past Docker's default SIGKILL deadline.
-	var cancel context.CancelFunc
-	shutdownCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// The cancel is held in shutdownCancel and released by the defer
+	// registered alongside the declaration, so this one budget covers the
+	// HTTP drain here AND the subsystem stops that run on the way out.
+	shutdownCtx = newShutdownBudget(&shutdownCancel, 10*time.Second)
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		if restart {
 			// A compacted copy is verified and journalled, and nothing brings
