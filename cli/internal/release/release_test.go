@@ -160,3 +160,33 @@ func TestLatestRateLimit(t *testing.T) {
 		t.Fatal("a 403 should be reported as an error")
 	}
 }
+
+// A shared stream can hold a newer release that lacks this platform's artifact
+// (published before the platform existed, or before its job attached the file).
+// With AssetSuffix set, "latest" means "latest I can install".
+func TestLatestSkipsReleasesWithoutThePlatformAsset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[
+  {"tag_name":"server/v1.2.0","draft":false,"prerelease":false,"assets":[]},
+  {"tag_name":"server/v1.1.0","draft":false,"prerelease":false,
+   "assets":[{"name":"cix-runtime-1.1.0-windows-amd64.zip","browser_download_url":"https://example.test/w.zip","size":1}]},
+  {"tag_name":"server/v1.0.0","draft":false,"prerelease":false,
+   "assets":[{"name":"cix-runtime-1.0.0-darwin-arm64.tar.gz","browser_download_url":"https://example.test/m.tgz","size":1}]}
+]`))
+	}))
+	defer srv.Close()
+
+	c := New(DefaultRepo, "server/v")
+	c.BaseURL = srv.URL
+
+	got, err := c.Latest(context.Background())
+	if err != nil || got.Version != "1.2.0" {
+		t.Fatalf("without a filter the newest release wins: got %q, %v", got.Version, err)
+	}
+
+	c.AssetSuffix = "-windows-amd64.zip"
+	got, err = c.Latest(context.Background())
+	if err != nil || got.Version != "1.1.0" {
+		t.Fatalf("with the Windows filter got %q, %v; want 1.1.0", got.Version, err)
+	}
+}

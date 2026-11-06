@@ -67,6 +67,13 @@ type Client struct {
 	// TagPrefix selects the stream, e.g. "mac/v".
 	TagPrefix string
 
+	// AssetSuffix, when set, keeps only releases that carry an asset with this
+	// suffix. A stream shared by several platforms (server/v* feeds Docker, macOS
+	// and Windows) can publish a release before one platform's artifact is
+	// attached — or never, for releases that predate the platform — and a client
+	// must not treat "newest release" as "newest release I can install".
+	AssetSuffix string
+
 	// ETag is sent as If-None-Match and updated from each 200 response. Callers
 	// persist it between runs.
 	ETag string
@@ -170,6 +177,11 @@ func (c *Client) list(ctx context.Context) ([]Release, error) {
 		rel := Release{Version: version, TagName: r.TagName, HTMLURL: r.HTMLURL}
 		for _, a := range r.Assets {
 			rel.Assets = append(rel.Assets, Asset{Name: a.Name, URL: a.URL, Size: a.Size})
+		}
+		if c.AssetSuffix != "" {
+			if _, ok := rel.AssetBySuffix(c.AssetSuffix); !ok {
+				continue
+			}
 		}
 		out = append(out, rel)
 	}

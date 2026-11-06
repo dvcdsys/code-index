@@ -98,7 +98,7 @@ func TestMergeItems_EmptyInputs(t *testing.T) {
 func isolateHomeDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHome(t, dir)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	config.ResetForTesting()
 	t.Cleanup(config.ResetForTesting)

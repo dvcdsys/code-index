@@ -48,6 +48,7 @@ Grep and fuzzy file search work fine for small projects. At scale they break dow
 - **`cix-server`** — Go HTTP API with embedded llama.cpp sidecar for embeddings, SQLite for symbols, metadata **and vectors**, FTS5 BM25 mirror for hybrid ranking. Vectors are read from disk per query rather than held in RAM, so an idle server sits at tens of megabytes regardless of index size ([`doc/VECTORSTORE.md`](doc/VECTORSTORE.md)). Ships as a single distroless container.
 - **Web dashboard** at `/dashboard` — projects, search, users + API keys, runtime settings, resource + database maintenance, drift indicator. Embedded in the server binary. See [`doc/DASHBOARD.md`](doc/DASHBOARD.md).
 - **macOS menu bar app** — `cix.app`, a drag-to-install launcher that runs and self-updates a local server on Apple Silicon. See [`doc/MACOS_APP.md`](doc/MACOS_APP.md).
+- **Windows 11 tray app (experimental)** — `cix-launcher`, an installer-based launcher that runs and self-updates a local server with a CUDA `llama-server` on x64 + NVIDIA. **Not yet tested enough** — expect rough edges, and please report them. See [`doc/WINDOWS_APP.md`](doc/WINDOWS_APP.md).
 - **`cix` CLI** — `cix search`/`symbols`/`files`/`workspace …` for terminal + agent use. See [`doc/CLI_REFERENCE.md`](doc/CLI_REFERENCE.md).
 - **File watcher** — `cix watch` keeps the index fresh as you edit.
 - **Workspaces** — group multiple repos into one named corpus; cix clones them server-side, indexes them, and runs hybrid BM25 + dense search across the union. GitHub webhooks auto-reindex on `push`. See [`workspaces.md`](workspaces.md).
@@ -367,6 +368,7 @@ docker compose down -v          # stop AND wipe data + models (destructive)
 | [`doc/CLI_CONFIG.md`](doc/CLI_CONFIG.md) | Everything the CLI lets you configure (servers, defaults, output) |
 | [`doc/DASHBOARD.md`](doc/DASHBOARD.md) | Dashboard pages, authentication, authorization model, drift indicator |
 | [`doc/MACOS_APP.md`](doc/MACOS_APP.md) | The macOS menu bar app — install, first run, updates, uninstall |
+| [`doc/WINDOWS_APP.md`](doc/WINDOWS_APP.md) | The Windows 11 tray app (experimental) — install, first run, updates, uninstall |
 | [`doc/TEAM_DEPLOYMENT.md`](doc/TEAM_DEPLOYMENT.md) | Self-hosting cix for a team — production / shared-infrastructure deployment for DevOps |
 | [`doc/TROUBLESHOOTING.md`](doc/TROUBLESHOOTING.md) | Common issues + search-quality tuning (`--min-score`) |
 | [`workspaces.md`](workspaces.md) | User-facing workspace guide (when to use, agent trust rules, query patterns) |
@@ -385,6 +387,7 @@ docker compose down -v          # stop AND wipe data + models (destructive)
 | [`doc/DEPRECATION_POLICY.md`](doc/DEPRECATION_POLICY.md) | How long a removed feature is announced before it goes |
 | [`doc/SETUP_MACOS_NATIVE.md`](doc/SETUP_MACOS_NATIVE.md) | Building the macOS server from a checkout (the app is the normal path) |
 | [`mac/README.md`](mac/README.md) | How the macOS app and its runtime are built and signed |
+| [`win/README.md`](win/README.md) | How the Windows app, installer and runtime are built |
 | [`doc/SECURITY_DEPLOYMENT.md`](doc/SECURITY_DEPLOYMENT.md) | Production hardening |
 | [`doc/DOCKER_TAGS.md`](doc/DOCKER_TAGS.md) | Docker Hub tag lifecycle |
 | [`doc/LANGUAGES.md`](doc/LANGUAGES.md) | Supported chunker languages |

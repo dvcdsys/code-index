@@ -337,7 +337,7 @@ func mcpResolveProject(apiClient *client.Client, project string) (string, error)
 	if filepath.IsAbs(project) {
 		best := ""
 		for _, p := range projects {
-			if strings.HasPrefix(project, p.HostPath+"/") && len(p.HostPath) > len(best) {
+			if isUnderRoot(project, p.HostPath) && len(p.HostPath) > len(best) {
 				best = p.HostPath
 			}
 		}

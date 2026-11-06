@@ -13,7 +13,7 @@ import (
 // failures — tests that need env overrides set them explicitly.
 func isolateConfig(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("CIX_SERVER", "")
 	t.Setenv("CIX_API_URL", "")

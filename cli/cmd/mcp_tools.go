@@ -411,7 +411,9 @@ func mcpErr(err error) *mcp.CallToolResult {
 // so the model reads shorter paths and we don't leak the full layout.
 func relPath(root, file string) string {
 	if rel, err := filepath.Rel(root, file); err == nil && !strings.HasPrefix(rel, "..") {
-		return rel
+		// Slash-separated on every OS: this text is read by a model, and the
+		// same repo should render the same paths from a Windows or a Mac client.
+		return filepath.ToSlash(rel)
 	}
 	return file
 }

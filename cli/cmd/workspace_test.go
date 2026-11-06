@@ -656,6 +656,7 @@ func TestResolveProjectHash(t *testing.T) {
 // server's key derivation), not by matching the bare path against host_path.
 // This is the exact regression the E2E run surfaced.
 func TestResolveProjectHash_LocalDerived(t *testing.T) {
+	skipOnWindows(t, "models POSIX absolute paths (/repo/…), which are not absolute on Windows")
 	absPath := "/Users/me/some/local/project"
 	derived := client.EncodeProjectPath(absPath) // sha1("local:<machine_id>:<abs>")
 	projects := []client.Project{

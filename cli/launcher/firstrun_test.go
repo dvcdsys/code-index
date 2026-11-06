@@ -1,9 +1,12 @@
+//go:build darwin || windows
+
 package main
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -53,7 +56,7 @@ func touch(t *testing.T, path string) {
 func TestNeedsFirstRun(t *testing.T) {
 	t.Run("no server.env", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHome(t, home)
 		if !needsFirstRun() {
 			t.Error("needsFirstRun() = false with no server.env")
 		}
@@ -61,7 +64,7 @@ func TestNeedsFirstRun(t *testing.T) {
 
 	t.Run("server.env but no database", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHome(t, home)
 		writeTestEnv(t, home, filepath.Join(home, ".cix", "data", "cix.db"), nil)
 		if !needsFirstRun() {
 			t.Error("needsFirstRun() = false with a configured database that does not exist")
@@ -70,7 +73,7 @@ func TestNeedsFirstRun(t *testing.T) {
 
 	t.Run("both present", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHome(t, home)
 		db := filepath.Join(home, ".cix", "data", "cix.db")
 		writeTestEnv(t, home, db, nil)
 		touch(t, db)
@@ -81,7 +84,7 @@ func TestNeedsFirstRun(t *testing.T) {
 
 	t.Run("hand-edited env with no database path", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHome(t, home)
 		writeTestEnv(t, home, "", map[string]string{"CIX_SQLITE_PATH": ""})
 		// Nothing to check against, so nothing to conclude. Running the wizard
 		// here would overwrite a file somebody edited on purpose.
@@ -123,7 +126,7 @@ func TestIsBootstrapRefusal(t *testing.T) {
 
 func TestRetireBootstrapPassword(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	db := filepath.Join(home, ".cix", "data", "cix.db")
 	writeTestEnv(t, home, db, map[string]string{"CIX_BIND_ADDR": bindAllInterfaces})
 	touch(t, db)
@@ -157,7 +160,9 @@ func TestRetireBootstrapPassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != envFileMode {
+	// Windows has no unix mode bits; the file is protected by the profile
+	// directory's ACL instead, which only the user, SYSTEM and administrators can read.
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != envFileMode {
 		t.Errorf("server.env mode = %v, want %v", perm, os.FileMode(envFileMode))
 	}
 
@@ -196,7 +201,7 @@ func TestSetDefaultKeepsExistingChoices(t *testing.T) {
 // nothing more, which is how a deleted database looked like a broken button.
 func TestLastServerError(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	logs := filepath.Join(home, ".cix", "logs")
 	if err := os.MkdirAll(logs, 0o700); err != nil {
 		t.Fatal(err)
@@ -243,4 +248,13 @@ func TestLastServerError(t *testing.T) {
 			t.Error("lastServerError() = \"\", want something to show the user")
 		}
 	})
+}
+
+// setHome points os.UserHomeDir at dir on every platform: it reads $HOME on
+// unix and %USERPROFILE% on Windows.
+func setHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Cleanup(closeLog)
 }

@@ -3,6 +3,8 @@ package main
 /*
 #cgo LDFLAGS: -framework Cocoa -framework WebKit
 #include <stdlib.h>
+void panel_set_dialog(const char *json);
+void panel_open(void);
 
 void panel_run(const char *iconPath, const char *html);
 void panel_set_state(const char *json);
@@ -12,7 +14,6 @@ void panel_quit(void);
 import "C"
 
 import (
-	_ "embed"
 	"encoding/json"
 	"runtime"
 	"unsafe"
@@ -29,25 +30,6 @@ func init() {
 // The cgo bridge to panel_darwin.m. Three exported callbacks come back from
 // the Objective-C side; all of them arrive on the AppKit main thread, so each
 // hands off to Go-land immediately and returns.
-
-//go:embed panel.html
-var panelHTML string
-
-// panelHooks is set once, before panelRun, by the menu layer. Not guarded by a
-// lock: writes happen strictly before [NSApp run] starts delivering callbacks.
-var panelHooks struct {
-	onReady  func()
-	onExit   func()
-	onAction func(action panelAction)
-}
-
-// panelAction is one user gesture inside the panel, as posted by panel.html.
-// OK and Text carry a dialog's answer and are meaningless for other actions.
-type panelAction struct {
-	Action string `json:"action"`
-	OK     bool   `json:"ok"`
-	Text   string `json:"text"`
-}
 
 //export goPanelReady
 func goPanelReady() {
@@ -119,4 +101,16 @@ func panelSetTitle(title string) {
 // panelQuit terminates the application; goPanelExit fires on the way out.
 func panelQuit() {
 	C.panel_quit()
+}
+
+// pushDialogJSON hands a dialog request (or "null" to clear) to the webview.
+func pushDialogJSON(s string) {
+	cs := C.CString(s)
+	defer C.free(unsafe.Pointer(cs))
+	C.panel_set_dialog(cs)
+}
+
+// panelOpen fronts the panel so a dialog is actually seen.
+func panelOpen() {
+	C.panel_open()
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -34,8 +35,8 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestReposDirPrecedence(t *testing.T) {
-	const sqlite = "/srv/cix/sqlite/projects.db"
-	defaultDir := "/srv/cix/sqlite/repos"
+	sqlite := filepath.FromSlash("/srv/cix/sqlite/projects.db")
+	defaultDir := filepath.FromSlash("/srv/cix/sqlite/repos")
 
 	t.Run("default", func(t *testing.T) {
 		unsetAll(t)
@@ -131,12 +132,12 @@ func TestLoadOverrides(t *testing.T) {
 // must still land its vector databases on the same persistent volume.
 func TestVectorsDirDefaultsBesideChroma(t *testing.T) {
 	unsetAll(t)
-	t.Setenv("CIX_CHROMA_PERSIST_DIR", "/data/chroma")
+	t.Setenv("CIX_CHROMA_PERSIST_DIR", filepath.FromSlash("/data/chroma"))
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got, want := c.VectorsDir, "/data/vectors"; got != want {
+	if got, want := c.VectorsDir, filepath.FromSlash("/data/vectors"); got != want {
 		t.Errorf("VectorsDir = %q, want %q", got, want)
 	}
 	if c.VectorMMapSize != 0 {
@@ -163,8 +164,14 @@ func TestLoadPhase3Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.LlamaTransport != "unix" {
-		t.Errorf("LlamaTransport default = %q, want unix", c.LlamaTransport)
+	// unix sockets everywhere they work; Windows has no AF_UNIX llama-server
+	// listener, so its default is loopback TCP.
+	wantTransport := "unix"
+	if runtime.GOOS == "windows" {
+		wantTransport = "tcp"
+	}
+	if c.LlamaTransport != wantTransport {
+		t.Errorf("LlamaTransport default = %q, want %s", c.LlamaTransport, wantTransport)
 	}
 	if c.LlamaCtxSize != 2048 {
 		t.Errorf("LlamaCtxSize default = %d, want 2048", c.LlamaCtxSize)

@@ -31,6 +31,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -295,7 +296,14 @@ func Clear(dbPath string) error {
 // SyncDir fsyncs a directory so that renames and unlinks within it are
 // durable. Exported because the swap performs its own renames and needs the
 // same guarantee.
+//
+// A no-op on Windows: a directory handle cannot be flushed there (Sync returns
+// "Access is denied"), and NTFS journals the rename/unlink metadata as part of
+// the operation, so there is no separate durability step to take.
 func SyncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	d, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("open dir for sync: %w", err)

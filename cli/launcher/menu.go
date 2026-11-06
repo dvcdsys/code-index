@@ -1,11 +1,11 @@
+//go:build darwin || windows
+
 package main
 
 import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -87,7 +87,7 @@ func runMenu(b bundle, u *updater) {
 	panelHooks.onAction = m.onAction
 
 	// Never returns until quit; must own the main thread (see main_darwin.go).
-	panelRun(filepath.Join(b.Resources, "cixTemplate.png"))
+	panelRun(b.trayIcon())
 }
 
 // setProgress puts a word next to the menu bar icon while something slow is
@@ -175,17 +175,25 @@ func (m *menu) startupFlow() {
 		if !runtimeReady() && os.Getenv("CIX_RUNTIME_TARBALL") == "" {
 			_ = alert("cix needs to finish updating",
 				"cix now keeps its server outside the application, so it updates without restarting.\n\n"+
-					"It will download that part now — around 40 MB, once.")
+					"It will download that part now — "+runtimeSizeHint+", once.")
 		}
-		showPanelBusy("Downloading the cix server…")
+		// The card is for a download. With the runtime already in place
+		// ensureRuntime returns at once, and showing it anyway opened the panel
+		// at every launch — at every sign-in, for an app that starts with the PC.
+		downloading := !runtimeReady()
+		if downloading {
+			showPanelBusy("Downloading the cix server…")
+		}
 		if err := ensureRuntime(m.updater, m.setProgress); err != nil {
 			logf("could not install the runtime: %v", err)
 			_ = alert("cix could not install its server",
-				fmt.Sprintf("%v\n\nThe menu bar app still works, but the server cannot start until this succeeds.", err))
+				fmt.Sprintf("%v\n\nThe "+trayName+" app still works, but the server cannot start until this succeeds.", err))
 			return
 		}
 		m.setProgress("")
-		clearPanelBusy()
+		if downloading {
+			clearPanelBusy()
+		}
 		// Only after the runtime exists: pointing the launchd wrapper at a
 		// binary that is not there would break a working install rather than
 		// leave it alone.
@@ -194,7 +202,7 @@ func (m *menu) startupFlow() {
 		// the bundle holds none of what it runs — so there is no interrupted
 		// state to resume, and starting a server the user had deliberately
 		// stopped would be the app overriding them.
-		if err := writeLaunchdFiles(autostartEnabled()); err != nil {
+		if err := writeServiceFiles(autostartEnabled()); err != nil {
 			logf("could not refresh launchd files: %v", err)
 		}
 	}
@@ -435,7 +443,7 @@ func (m *menu) toggleServer() {
 
 	// Rewrite the wrapper before starting. It is generated, not edited, and
 	// something else may have replaced it — install-server.sh most obviously.
-	err := writeLaunchdFiles(autostartEnabled())
+	err := writeServiceFiles(autostartEnabled())
 	if err == nil {
 		err = startServer()
 	}
@@ -509,8 +517,8 @@ func (m *menu) toggleNetworkAccess() {
 
 	if local {
 		ok, err := confirm("Allow access from your network?",
-			fmt.Sprintf("cix will accept connections from any machine that can reach this Mac on port %d, "+
-				"instead of only from this Mac.\n\n"+
+			fmt.Sprintf("cix will accept connections from any machine that can reach "+thisMachine+" on port %d, "+
+				"instead of only from "+thisMachine+".\n\n"+
 				"Accounts and API keys still apply — this does not disable authentication — but the login page "+
 				"and the API become reachable from your network.\n\n"+
 				"The server will restart.", serverPort(vars)),
@@ -552,7 +560,7 @@ func restartServer() error {
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if launchdPID() == 0 {
+		if servicePID() == 0 {
 			break
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -566,7 +574,7 @@ func (m *menu) openDashboard() {
 		_ = alert("cix", "cix is not set up yet.")
 		return
 	}
-	if err := exec.Command("open", dashboardURL(vars)).Run(); err != nil {
+	if err := openURL(dashboardURL(vars)); err != nil {
 		_ = alert("cix", fmt.Sprintf("Could not open the dashboard.\n\n%v", err))
 	}
 }

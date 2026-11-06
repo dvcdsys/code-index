@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -305,7 +306,7 @@ func (s *Server) externalCheckoutDir(w http.ResponseWriter, r *http.Request, p *
 // (the caller's stat/open then produces 404); only escapes are rejected.
 func safeJoin(root, rel string) (string, error) {
 	rel = strings.TrimSpace(rel)
-	if filepath.IsAbs(rel) {
+	if filepath.IsAbs(rel) || unsafeWindowsRel(rel) {
 		return "", errUnsafePath
 	}
 	clean := filepath.Clean(rel)
@@ -320,7 +321,7 @@ func safeJoin(root, rel string) (string, error) {
 	// nested ".git" component would be a committed path git itself refuses to
 	// create, so checking the first segment is both precise and sufficient.
 	first, _, _ := strings.Cut(filepath.ToSlash(clean), "/")
-	if first == ".git" {
+	if strings.EqualFold(first, ".git") || isGitShortName(first) {
 		return "", errUnsafePath
 	}
 	full := filepath.Join(root, clean)
@@ -353,6 +354,43 @@ func safeJoin(root, rel string) (string, error) {
 		return "", errUnsafePath
 	}
 	return absFull, nil
+}
+
+// unsafeWindowsRel rejects the path shapes that Windows treats as something
+// other than "relative to root" although filepath.IsAbs says otherwise:
+//
+//   - a rooted path with no drive ("/etc/passwd", `\x`), which resolves against
+//     the current drive's root rather than being rejected as absolute;
+//   - a drive-relative path ("C:foo") and anything with a volume name;
+//   - a colon anywhere: NTFS alternate data streams ("x.txt:hidden") and
+//     ".git::$INDEX_ALLOCATION" both reach content a plain name does not.
+//
+// Always false off Windows, where none of these mean anything special.
+func unsafeWindowsRel(rel string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	return strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, `\`) ||
+		filepath.VolumeName(rel) != "" || strings.Contains(rel, ":")
+}
+
+// isGitShortName reports whether a first path segment is an 8.3 short alias of
+// the clone's ".git" directory ("GIT~1"), which NTFS resolves to it. Windows
+// only; elsewhere that is just an ordinary file name.
+func isGitShortName(seg string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	seg = strings.ToLower(seg)
+	if !strings.HasPrefix(seg, "git~") || len(seg) == len("git~") {
+		return false
+	}
+	for _, r := range seg[len("git~"):] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // withinRoot reports whether target is root itself or lives under it.

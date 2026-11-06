@@ -103,13 +103,13 @@ func adoptForeignAgent(u *updater) error {
 		return fmt.Errorf("could not back up the existing agent: %w", err)
 	}
 
-	if err := launchdBootout(); err != nil {
+	if err := serviceBootout(); err != nil {
 		return fmt.Errorf("could not unload the existing agent: %w", err)
 	}
-	if err := writeLaunchdFiles(autostartEnabled()); err != nil {
+	if err := writeServiceFiles(autostartEnabled()); err != nil {
 		return err
 	}
-	if err := launchdBootstrap(); err != nil {
+	if err := serviceBootstrap(); err != nil {
 		return err
 	}
 	logf("took over the launchd agent previously managed by install-server.sh")

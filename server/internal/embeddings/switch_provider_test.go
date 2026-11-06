@@ -94,6 +94,7 @@ func TestSwitchProvider_RollbackOnReopenFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	holder := vectorstore.NewHolder(initial)
+	t.Cleanup(func() { _ = holder.Close() }) // Windows cannot delete an open SQLite file
 
 	oldProv := fakeProv{id: "ollama:m"}
 	s := &Service{logger: quiet(), queue: NewQueue(2, time.Second), current: oldProv}
@@ -139,6 +140,7 @@ func TestSwitchProvider_SuccessSwapsProviderAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	holder := vectorstore.NewHolder(initial)
+	t.Cleanup(func() { _ = holder.Close() }) // Windows cannot delete an open SQLite file
 
 	s := &Service{logger: quiet(), queue: NewQueue(2, time.Second), current: fakeProv{id: "ollama:m"}}
 	s.AttachVectorStore(holder, nestedOpener(base), nil)
@@ -197,6 +199,7 @@ func TestReopenVectorStore_SwapsToNewNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	holder := vectorstore.NewHolder(initial)
+	t.Cleanup(func() { _ = holder.Close() }) // Windows cannot delete an open SQLite file
 	if holder.Count(project) != 1 {
 		t.Fatalf("precondition: initial holder count != 1")
 	}
@@ -234,6 +237,7 @@ func TestReopenVectorStore_OpenerFailureKeepsOldStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	holder := vectorstore.NewHolder(initial)
+	t.Cleanup(func() { _ = holder.Close() }) // Windows cannot delete an open SQLite file
 
 	s := &Service{logger: quiet()}
 	s.AttachVectorStore(holder, failingOpener, nil)

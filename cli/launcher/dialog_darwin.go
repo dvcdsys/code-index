@@ -76,10 +76,12 @@ func copyToClipboard(s string) error {
 	return cmd.Run()
 }
 
-// errCancelled is returned when the user dismissed a dialog instead of
-// answering it. osascript reports this as exit status 1 — the same status as a
-// real failure — so it has to be told apart from the error text.
-var errCancelled = errors.New("cancelled by user")
+// The platform-neutral names paneldialog.go calls before the panel exists.
+func nativeAlert(title, message string) error { return osaAlert(title, message) }
+func nativePrompt(title, message, defaultAnswer string) (string, error) {
+	return osaPrompt(title, message, defaultAnswer)
+}
+func nativeAsk(title, message, yes, no string) (bool, error) { return osaAsk(title, message, yes, no) }
 
 // isUserCancelled recognises AppleScript's user-cancelled error.
 //

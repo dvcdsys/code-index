@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -103,6 +104,9 @@ func TestEnvKeyHex(t *testing.T) {
 }
 
 func TestKeyFileBadPerms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no group/other mode bits; key file access is governed by ACLs")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "key")
 	key := bytes.Repeat([]byte{0xCD}, KeySize)

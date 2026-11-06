@@ -103,7 +103,7 @@ projects:
 func runLoaderInTempHome(t *testing.T, file string, useKoanf bool) *Config {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	cixDir := filepath.Join(home, ".cix")
 	if err := os.MkdirAll(cixDir, 0755); err != nil {

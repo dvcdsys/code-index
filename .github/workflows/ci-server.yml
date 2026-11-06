@@ -5,11 +5,13 @@ on:
     branches: [main, develop]
     paths:
       - "server/**"
+      - "win/scripts/**"
       - ".github/workflows/ci-server.yml"
   pull_request:
     branches: [main, develop]
     paths:
       - "server/**"
+      - "win/scripts/**"
       - ".github/workflows/ci-server.yml"
 
 # Read-only: vet/test/build only. CodeQL flagged the implicit block as
@@ -38,6 +40,39 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+      - name: Build
+        run: go build ./...
+
+  test-windows:
+    # The Windows runtime (win/scripts/build-runtime.sh) is this same server
+    # cross-compiled, so it has to keep building AND passing on a real Windows
+    # filesystem: no directory fsync, no deleting open files, backslash paths,
+    # mode bits that mean nothing. Linux CI cannot see any of that.
+    #
+    # No -race: the race detector needs cgo, and the server is built CGO-free
+    # for release.
+    name: Test (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
 
       - name: Build
         run: go build ./...

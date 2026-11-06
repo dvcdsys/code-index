@@ -6,50 +6,50 @@ import "github.com/charmbracelet/lipgloss"
 // light terminal themes. We avoid pure white/black and stick to mid-tones
 // that get auto-adapted by lipgloss's terminal-color detection.
 var (
-	colAccent      = lipgloss.AdaptiveColor{Light: "#005577", Dark: "#7dd3fc"}
-	colMuted       = lipgloss.AdaptiveColor{Light: "#666666", Dark: "#888888"}
-	colBorder      = lipgloss.AdaptiveColor{Light: "#cccccc", Dark: "#444444"}
-	colActiveBdr   = lipgloss.AdaptiveColor{Light: "#005577", Dark: "#7dd3fc"}
-	colSel         = lipgloss.AdaptiveColor{Light: "#000000", Dark: "#ffffff"}
-	colSelBg       = lipgloss.AdaptiveColor{Light: "#cce5f0", Dark: "#1e3a8a"}
-	colOK          = lipgloss.AdaptiveColor{Light: "#15803d", Dark: "#86efac"}
-	colWarn        = lipgloss.AdaptiveColor{Light: "#a16207", Dark: "#fcd34d"}
-	colErr         = lipgloss.AdaptiveColor{Light: "#b91c1c", Dark: "#fca5a5"}
-	colSensitive   = lipgloss.AdaptiveColor{Light: "#7c3aed", Dark: "#c4b5fd"}
+	colAccent    = lipgloss.AdaptiveColor{Light: "#005577", Dark: "#7dd3fc"}
+	colMuted     = lipgloss.AdaptiveColor{Light: "#666666", Dark: "#888888"}
+	colBorder    = lipgloss.AdaptiveColor{Light: "#cccccc", Dark: "#444444"}
+	colActiveBdr = lipgloss.AdaptiveColor{Light: "#005577", Dark: "#7dd3fc"}
+	colSel       = lipgloss.AdaptiveColor{Light: "#000000", Dark: "#ffffff"}
+	colSelBg     = lipgloss.AdaptiveColor{Light: "#cce5f0", Dark: "#1e3a8a"}
+	colOK        = lipgloss.AdaptiveColor{Light: "#15803d", Dark: "#86efac"}
+	colWarn      = lipgloss.AdaptiveColor{Light: "#a16207", Dark: "#fcd34d"}
+	colErr       = lipgloss.AdaptiveColor{Light: "#b91c1c", Dark: "#fca5a5"}
+	colSensitive = lipgloss.AdaptiveColor{Light: "#7c3aed", Dark: "#c4b5fd"}
 )
 
 // styles is a flat bundle of every reusable lipgloss.Style. Built once in
 // New() and stored on the Model so each View() call does no allocation.
 type styles struct {
-	leftPanel       lipgloss.Style
-	leftPanelActive lipgloss.Style
-	rightPanel      lipgloss.Style
+	leftPanel        lipgloss.Style
+	leftPanelActive  lipgloss.Style
+	rightPanel       lipgloss.Style
 	rightPanelActive lipgloss.Style
 
-	sectionRow      lipgloss.Style
-	sectionRowSel   lipgloss.Style
-	sectionCount    lipgloss.Style
+	sectionRow    lipgloss.Style
+	sectionRowSel lipgloss.Style
+	sectionCount  lipgloss.Style
 
-	rowKey     lipgloss.Style
-	rowValue   lipgloss.Style
-	rowKeySel  lipgloss.Style
-	rowValSel  lipgloss.Style
-	rowMuted   lipgloss.Style
+	rowKey    lipgloss.Style
+	rowValue  lipgloss.Style
+	rowKeySel lipgloss.Style
+	rowValSel lipgloss.Style
+	rowMuted  lipgloss.Style
 
-	statusBar     lipgloss.Style
-	statusOK      lipgloss.Style
-	statusErr     lipgloss.Style
-	statusKey     lipgloss.Style
+	statusBar lipgloss.Style
+	statusOK  lipgloss.Style
+	statusErr lipgloss.Style
+	statusKey lipgloss.Style
 
-	header        lipgloss.Style
-	headerActive  lipgloss.Style
+	header       lipgloss.Style
+	headerActive lipgloss.Style
 
-	editLabel  lipgloss.Style
-	editError  lipgloss.Style
+	editLabel lipgloss.Style
+	editError lipgloss.Style
 
-	dot           lipgloss.Style
-	dotDimmed     lipgloss.Style
-	sensitiveTag  lipgloss.Style
+	dot          lipgloss.Style
+	dotDimmed    lipgloss.Style
+	sensitiveTag lipgloss.Style
 }
 
 func newStyles() styles {

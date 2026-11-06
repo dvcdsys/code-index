@@ -14,12 +14,17 @@ LLAMA_REPO    ?= ggml-org/llama.cpp
 LLAMA_CACHE_DIR ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/cix/llama
 
 # `make bundle OS=... ARCH=...` supports only darwin-arm64 in Phase 3.
+# `make fetch-llama OS=windows ARCH=amd64` stages the Windows CUDA set (see
+# scripts/fetch-llama-windows.sh); the Windows runtime itself is assembled by
+# win/scripts/build-runtime.sh.
 OS   ?= darwin
 ARCH ?= arm64
 
 ROOT        := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 DIST_DIR    := $(ROOT)/dist
-LLAMA_DIR   := $(DIST_DIR)/llama
+# darwin keeps the historical dist/llama (make run / bundle read it); other
+# targets stage beside it so fetching one never wipes the other.
+LLAMA_DIR   := $(DIST_DIR)/$(if $(filter darwin,$(OS)),llama,llama-$(OS)-$(ARCH))
 BUNDLE_NAME := cix-$(OS)-$(ARCH)
 BUNDLE_DIR  := $(DIST_DIR)/$(BUNDLE_NAME)
 

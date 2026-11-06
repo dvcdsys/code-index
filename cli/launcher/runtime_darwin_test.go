@@ -483,7 +483,9 @@ func serveStreamListing(t *testing.T, version, etag string) (base string, full *
 		}
 		served++
 		w.Header().Set("ETag", etag)
-		_, _ = io.WriteString(w, `[{"tag_name":"`+serverTagPrefix+version+`","html_url":"https://example.invalid","assets":[]}]`)
+		_, _ = io.WriteString(w, `[{"tag_name":"`+serverTagPrefix+version+`","html_url":"https://example.invalid",`+
+			// A release only counts when it carries this platform's runtime.
+			`"assets":[{"name":"`+runtimeAssetName(version)+`","browser_download_url":"https://example.invalid/r","size":1}]}]`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

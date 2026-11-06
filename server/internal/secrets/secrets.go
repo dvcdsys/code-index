@@ -112,9 +112,9 @@ func Open(opts OpenOptions) (*Service, error) {
 	}
 
 	var (
-		key        []byte
-		source     string
-		autogen    bool
+		key     []byte
+		source  string
+		autogen bool
 	)
 
 	// 1. Direct env var.
@@ -187,7 +187,7 @@ func Open(opts OpenOptions) (*Service, error) {
 
 	return &Service{
 		aead:       aead,
-		source:    source,
+		source:     source,
 		autogenKey: autogen,
 	}, nil
 }
@@ -297,7 +297,12 @@ func readKeyFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if info.Mode().Perm()&minKeyFilePerm != 0 {
+	// Windows has no group/other permission bits: Go reports every file as
+	// 0666 there, so this check would reject every key file the server itself
+	// just wrote. Access is governed by the ACL the file inherits from its
+	// directory (under a user profile: that user, SYSTEM and administrators),
+	// which is the equivalent of the 0600 the Unix branch insists on.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&minKeyFilePerm != 0 {
 		return nil, fmt.Errorf("keyfile %s has insecure permissions %o, expected 0600", path, info.Mode().Perm())
 	}
 	raw, err := os.ReadFile(path)

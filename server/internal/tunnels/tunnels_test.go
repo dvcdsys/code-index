@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -97,7 +98,13 @@ func TestManagerApplyNgrokMissingBinaryFails(t *testing.T) {
 }
 
 func TestNgrokConstructionRequiresToken(t *testing.T) {
-	_, err := newNgrokProvider(NgrokConfig{Mode: ngrokModeQuick, BinPath: "sh"}, 8080, nil)
+	// Any binary that exists will do — construction fails on the missing token
+	// before it ever runs it. The test binary itself is portable; "sh" is not.
+	self, exeErr := os.Executable()
+	if exeErr != nil {
+		t.Fatal(exeErr)
+	}
+	_, err := newNgrokProvider(NgrokConfig{Mode: ngrokModeQuick, BinPath: self}, 8080, nil)
 	if err == nil || !contains(err.Error(), "authtoken") {
 		t.Fatalf("expected authtoken-required error, got %v", err)
 	}

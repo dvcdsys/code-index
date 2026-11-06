@@ -12,8 +12,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
+
+	"github.com/dvcdsys/code-index/server/internal/procgroup"
 )
 
 // Cloudflare tunnel modes.
@@ -149,11 +150,14 @@ func (p *cloudflareProvider) spawn(ctx context.Context) error {
 	stderrLog := newLineLogWriter(p.logger, "cloudflared.stderr", p.scanLine)
 	cmd.Stdout = stdoutLog
 	cmd.Stderr = stderrLog
-	// Own process group so Stop() can SIGTERM the whole tree.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Own process group (Unix) / kill-on-close job (Windows), so Stop() reaches the whole tree.
+	procgroup.Prepare(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start cloudflared: %w", err)
+	}
+	if err := procgroup.Adopt(cmd); err != nil {
+		p.logger.Warn("could not bind cloudflared to the kill-on-close job", "err", err)
 	}
 
 	p.mu.Lock()
@@ -337,18 +341,14 @@ func (p *cloudflareProvider) Stop(ctx context.Context) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		pgid = cmd.Process.Pid
-	}
-	p.logger.Info("sending SIGTERM to cloudflared", "pgid", pgid)
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	pgid := procgroup.Terminate(cmd)
+	p.logger.Info("sent SIGTERM to cloudflared", "pgid", pgid)
 	select {
 	case <-waiter:
 		return nil
 	case <-ctx.Done():
 		p.logger.Warn("cloudflared SIGTERM timed out, sending SIGKILL", "pgid", pgid)
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		procgroup.Kill(cmd)
 		<-waiter
 		return ctx.Err()
 	}
@@ -364,12 +364,8 @@ func (p *cloudflareProvider) killGroup() {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		pgid = cmd.Process.Pid
-	}
 	p.stopping.Store(true)
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	procgroup.Kill(cmd)
 }
 
 func (p *cloudflareProvider) URL() string {

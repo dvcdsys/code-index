@@ -556,7 +556,7 @@ func TestFlushIsIdempotentWhenNothingPending(t *testing.T) {
 }
 
 func TestPathBeside(t *testing.T) {
-	if got := PathBeside("/data/sqlite/projects.db"); got != "/data/sqlite/"+DBFileName {
+	if got := PathBeside(filepath.FromSlash("/data/sqlite/projects.db")); got != filepath.FromSlash("/data/sqlite/")+DBFileName {
 		t.Errorf("PathBeside = %q, want the stats file next to the system database", got)
 	}
 	// A throwaway system database must not leave a stats file behind.

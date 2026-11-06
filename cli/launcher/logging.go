@@ -1,3 +1,5 @@
+//go:build darwin || windows
+
 package main
 
 import (
@@ -63,3 +65,15 @@ func logf(format string, args ...any) {
 // paths that run before the menu exists, or that never got a menu reference.
 // The log is where anyone investigating a slow first launch looks anyway.
 func logProgress(msg string) { logf("%s", msg) }
+
+// closeLog releases the log file so the directory holding it can be removed.
+// Windows will not delete an open file; tests that point the home directory at
+// a temp dir call this on cleanup, and the next logf reopens under the new home.
+func closeLog() {
+	logMu.Lock()
+	defer logMu.Unlock()
+	if logFile != nil {
+		logFile.Close()
+		logFile = nil
+	}
+}

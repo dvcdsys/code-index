@@ -1,11 +1,6 @@
-package main
+//go:build darwin || windows
 
-/*
-#include <stdlib.h>
-void panel_set_dialog(const char *json);
-void panel_open(void);
-*/
-import "C"
+package main
 
 import (
 	"encoding/json"
@@ -14,7 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 )
 
 // In-panel dialogs.
@@ -31,13 +25,18 @@ import (
 // Dialogs serialise on a mutex — two questions at once is a UI bug, not a
 // feature.
 //
-// The osascript versions in dialog_darwin.go remain as the fallback for the
+// The native versions (dialog_darwin.go: osascript, dialog_windows.go: Win32
+// message boxes) remain as the fallback for the
 // narrow window before the webview has loaded, and for anything that must be
 // said when the panel cannot exist (a translocated bundle refusing to run).
 
 // panelUIUp flips once the AppKit side has called goPanelReady; before that
 // there is no webview to draw a dialog in.
 var panelUIUp atomic.Bool
+
+// errCancelled is returned when the user dismissed a dialog instead of
+// answering it (closed the panel, pressed Cancel, or declined a native prompt).
+var errCancelled = errors.New("cancelled by user")
 
 type panelDialogSpec struct {
 	Kind          string `json:"kind"` // "alert" | "confirm" | "prompt" | "secret"
@@ -63,8 +62,10 @@ var dialogState struct {
 
 // showPanelDialog runs one dialog to completion and returns the answer.
 func showPanelDialog(spec panelDialogSpec) (panelDialogResult, error) {
+	logf("dialog %q (%s): waiting its turn", spec.Title, spec.Kind)
 	dialogState.mu.Lock()
 	defer dialogState.mu.Unlock()
+	logf("dialog %q (%s): shown", spec.Title, spec.Kind)
 
 	ch := make(chan panelDialogResult, 1)
 	dialogState.pmu.Lock()
@@ -92,6 +93,7 @@ func showPanelDialog(spec panelDialogSpec) (panelDialogResult, error) {
 	// holding the busy claim forever.
 	select {
 	case r := <-ch:
+		logf("dialog %q: answered ok=%v", spec.Title, r.OK)
 		return r, nil
 	case <-time.After(10 * time.Minute):
 		return panelDialogResult{}, errors.New("the dialog was not answered")
@@ -128,6 +130,7 @@ func resolvePanelDialog(r panelDialogResult) {
 	dialogState.pmu.Lock()
 	defer dialogState.pmu.Unlock()
 	if dialogState.pending == nil {
+		logf("dialog answer (ok=%v) arrived with no dialog waiting", r.OK)
 		return
 	}
 	select {
@@ -137,16 +140,8 @@ func resolvePanelDialog(r panelDialogResult) {
 	dialogState.pending = nil
 }
 
-func pushDialogJSON(s string) {
-	cs := C.CString(s)
-	defer C.free(unsafe.Pointer(cs))
-	C.panel_set_dialog(cs)
-}
-
-// panelOpen fronts the panel so a dialog is actually seen.
-func panelOpen() {
-	C.panel_open()
-}
+// pushDialogJSON and panelOpen are the shell's half of the dialog protocol and
+// are implemented per platform (panel_darwin.go, shell_windows.go).
 
 // --- The user-facing dialog API. Same names and contracts as the osascript
 // layer so every caller works unchanged; each routes to the panel once it is
@@ -154,7 +149,7 @@ func panelOpen() {
 
 func alert(title, message string) error {
 	if !panelUIUp.Load() {
-		return osaAlert(title, message)
+		return nativeAlert(title, message)
 	}
 	_, err := showPanelDialog(panelDialogSpec{
 		Kind: "alert", Title: title, Message: message,
@@ -175,7 +170,7 @@ func alertWithSecret(title, message, secret, secretName string) error {
 		note = fmt.Sprintf("The %s could not be copied to your clipboard — select it above.", secretName)
 	}
 	if !panelUIUp.Load() {
-		return osaAlert(title, message+"\n\n"+secret+"\n\n"+note)
+		return nativeAlert(title, message+"\n\n"+secret+"\n\n"+note)
 	}
 	_, err := showPanelDialog(panelDialogSpec{
 		Kind: "secret", Title: title, Message: message,
@@ -188,7 +183,7 @@ func alertWithSecret(title, message, secret, secretName string) error {
 // or closes the panel.
 func prompt(title, message, defaultAnswer string) (string, error) {
 	if !panelUIUp.Load() {
-		return osaPrompt(title, message, defaultAnswer)
+		return nativePrompt(title, message, defaultAnswer)
 	}
 	r, err := showPanelDialog(panelDialogSpec{
 		Kind: "prompt", Title: title, Message: message,
@@ -212,7 +207,7 @@ func confirm(title, message, okLabel string) (bool, error) {
 // the highlighted button; dismissing the dialog counts as no.
 func ask(title, message, yesLabel, noLabel string) (bool, error) {
 	if !panelUIUp.Load() {
-		return osaAsk(title, message, yesLabel, noLabel)
+		return nativeAsk(title, message, yesLabel, noLabel)
 	}
 	r, err := showPanelDialog(panelDialogSpec{
 		Kind: "confirm", Title: title, Message: message,

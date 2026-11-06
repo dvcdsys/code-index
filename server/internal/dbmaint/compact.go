@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/dvcdsys/code-index/server/internal/db"
@@ -463,7 +464,13 @@ func (s *Service) record(st *State, lvl Level, msg string) {
 }
 
 func fsyncFile(path string) error {
-	f, err := os.Open(path)
+	// FlushFileBuffers needs a handle opened for writing; on Windows a
+	// read-only open makes Sync fail with "Access is denied".
+	flag := os.O_RDONLY
+	if runtime.GOOS == "windows" {
+		flag = os.O_RDWR
+	}
+	f, err := os.OpenFile(path, flag, 0)
 	if err != nil {
 		return err
 	}

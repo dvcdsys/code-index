@@ -157,6 +157,7 @@ func TestFormatProjects(t *testing.T) {
 // resolves only against the server's registered projects and never consults the
 // working directory.
 func TestMcpResolveProject(t *testing.T) {
+	skipOnWindows(t, "models POSIX absolute paths (/repo/…), which are not absolute on Windows")
 	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects" {
 			listProjectsHandler([]string{"/repo/a", "/repo/b", "github.com/owner/repo@main"})(w, r)
@@ -222,6 +223,7 @@ func TestMcpResolveWorkspace(t *testing.T) {
 }
 
 func TestMcpResolveScopePaths(t *testing.T) {
+	skipOnWindows(t, "models POSIX absolute paths (/repo/…), which are not absolute on Windows")
 	got := mcpResolveScopePaths("/repo/a", []string{"internal/auth", "/abs/path"})
 	want := []string{"/repo/a/internal/auth", "/abs/path"}
 	if len(got) != len(want) {

@@ -16,12 +16,12 @@ func TestRunSummary(t *testing.T) {
 			writeJSON(w, 200, map[string]any{"projects": []any{}, "total": 0})
 		case strings.Contains(r.URL.Path, hash+"/summary"):
 			writeJSON(w, 200, map[string]any{
-				"host_path":      proj,
-				"status":         "indexed",
-				"languages":      []string{"go", "python"},
-				"total_files":    72,
-				"total_chunks":   155,
-				"total_symbols":  0,
+				"host_path":     proj,
+				"status":        "indexed",
+				"languages":     []string{"go", "python"},
+				"total_files":   72,
+				"total_chunks":  155,
+				"total_symbols": 0,
 				"top_directories": []map[string]any{
 					{"path": proj + "/api", "file_count": 30.0},
 					{"path": proj + "/cli", "file_count": 20.0},
