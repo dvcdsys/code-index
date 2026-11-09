@@ -3,8 +3,8 @@ module github.com/dvcdsys/code-index/server
 go 1.26.10
 
 require (
-	github.com/adhocore/gronx v1.20.5
-	github.com/andybalholm/brotli v1.2.7
+	github.com/adhocore/gronx v1.20.6
+	github.com/andybalholm/brotli v1.2.8
 	github.com/getkin/kin-openapi v0.152.0
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-git/go-git/v5 v5.19.3
@@ -13,7 +13,7 @@ require (
 	github.com/philippgille/chromem-go v0.7.0
 	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/crypto v0.58.0
-	golang.org/x/sync v0.24.0
+	golang.org/x/sync v0.25.0
 	golang.org/x/text v0.43.0
 	golang.org/x/time v0.16.0
 	modernc.org/sqlite v1.61.1
